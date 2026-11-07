@@ -169,7 +169,7 @@ impl<'a> Batch<'a> {
 /// bytes on a 128-byte boundary (Apple silicon's line; two of x86-64's,
 /// which its prefetchers fetch as a pair).
 #[cfg(feature = "std")]
-#[repr(C, align(128))]
+#[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct Line([u8; 128]);
 
@@ -519,7 +519,7 @@ mod packed_test {
     fn packed_storage_is_aligned_and_chains_into_a_tree() {
         crate::initialize();
         let leaves = packed::<32>(1000, 7);
-        assert_eq!(leaves.as_ptr() as usize % 128, 0);
+        assert_eq!(leaves.as_ptr() as usize % 64, 0);
         assert_eq!(leaves.len(), 1000);
         assert_eq!(Prepared::bytes(&leaves).len(), 32_000);
         assert_eq!(Prepared::bytes(&leaves)[32..64], leaves[1]);
