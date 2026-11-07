@@ -165,6 +165,121 @@ impl<'a> Batch<'a> {
     }
 }
 
+/// A line of the cache, the unit [`Packed`] storage is allocated in: 128
+/// bytes on a 128-byte boundary (Apple silicon's line; two of x86-64's,
+/// which its prefetchers fetch as a pair).
+#[cfg(feature = "std")]
+#[repr(C, align(128))]
+#[derive(Clone, Copy)]
+struct Line([u8; 128]);
+
+/// `count` messages of `N` bytes each, packed end to end with nothing
+/// between them, on a 128-byte boundary: the prepared input for many
+/// short messages of one length (a Merkle layer's leaves or digests), as
+/// the program holds them, with no copy into blocks and no padding in
+/// memory. `N` is 16 or 32. It reads and writes as a `[[u8; N]]`
+/// (`leaves[i] = digest`), and the batch calls take it as they take a
+/// [`Batch`]; a layer's digests written into one are the next layer's
+/// input. The alignment is the type's: only this constructor makes one,
+/// so a call checks nothing.
+#[cfg(feature = "std")]
+pub struct Packed<const N: usize> {
+    lines: std::vec::Vec<Line>,
+    count: usize,
+}
+
+#[cfg(feature = "std")]
+impl<const N: usize> Packed<N> {
+    const FITS: () = assert!(N == 16 || N == 32, "Packed holds messages of 16 or 32 bytes");
+
+    /// `count` messages of zeros, resident from the making.
+    pub fn new(count: usize) -> Self {
+        let () = Self::FITS;
+        let lines = (count * N).div_ceil(128);
+        Packed { lines: std::vec![Line([0; 128]); lines], count }
+    }
+
+    /// Its bytes: the messages end to end.
+    #[inline]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        // Sound: the lines hold count * N bytes, u8 needs no alignment.
+        unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count * N) }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<const N: usize> core::ops::Deref for Packed<N> {
+    type Target = [[u8; N]];
+    #[inline]
+    fn deref(&self) -> &[[u8; N]] {
+        // Sound: count messages of N bytes, [u8; N] with alignment 1.
+        unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count) }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<const N: usize> core::ops::DerefMut for Packed<N> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [[u8; N]] {
+        // Sound: as in deref, and the borrow is exclusive.
+        unsafe { core::slice::from_raw_parts_mut(self.lines.as_mut_ptr().cast(), self.count) }
+    }
+}
+
+/// The batch calls' input: messages of one length, prepared so that a
+/// call reads them as they are. [`Batch`] holds them in blocks, any
+/// length; [`Packed`] holds 16- or 32-byte messages end to end. Sealed:
+/// the crate's types alone.
+pub trait Prepared: sealed::Sealed {
+    /// The messages' bytes, one every `slot` bytes.
+    #[doc(hidden)]
+    fn bytes(&self) -> &[u8];
+    /// Each message's length.
+    #[doc(hidden)]
+    fn message_len(&self) -> usize;
+    /// The stride from one message to the next.
+    #[doc(hidden)]
+    fn slot(&self) -> usize;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Batch<'_> {}
+    #[cfg(feature = "std")]
+    impl<const N: usize> Sealed for super::Packed<N> {}
+}
+
+impl Prepared for Batch<'_> {
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        Block::bytes(self.blocks())
+    }
+    #[inline]
+    fn message_len(&self) -> usize {
+        self.message_len
+    }
+    #[inline]
+    fn slot(&self) -> usize {
+        blocks_per(self.message_len) * BLOCK_LEN
+    }
+}
+
+#[cfg(feature = "std")]
+impl<const N: usize> Prepared for Packed<N> {
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        Packed::bytes(self)
+    }
+    #[inline]
+    fn message_len(&self) -> usize {
+        N
+    }
+    #[inline]
+    fn slot(&self) -> usize {
+        N
+    }
+}
+
 #[cfg(feature = "std")]
 impl Batch<'_> {
     /// Message `i`'s bytes, for writing: `message_len` of them, no more (a
@@ -332,5 +447,82 @@ mod test {
         assert_eq!(&parents.blocks()[2].0[32..], &[7u8; 32][..], "the sixth digest is block 2's second half");
         assert_eq!(&parents.blocks()[2].0[..32], &[0u8; 32][..]);
         assert!(std::format!("{:?}", Block::ZERO).starts_with("Block([00, 00"));
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod packed_test {
+    use super::*;
+    use crate::Mode;
+    use crate::throughput::{hash_many, hash_many_multithreaded};
+
+    fn packed<const N: usize>(count: usize, seed: u8) -> Packed<N> {
+        let mut leaves = Packed::<N>::new(count);
+        for (i, leaf) in leaves.iter_mut().enumerate() {
+            for (j, b) in leaf.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(31).wrapping_add(j as u8).wrapping_add(seed);
+            }
+        }
+        leaves
+    }
+
+    /// A packed batch's digests are each message's hash, in every mode,
+    /// at counts around the kernels' group of sixteen and beyond the
+    /// pool's split, 16 and 32 bytes a message, serial and multithreaded.
+    #[test]
+    fn packed_messages_hash_as_each_message_alone() {
+        crate::initialize_multithreaded(None);
+        let key = [9u8; 32];
+        for (name, mode) in [("plain", Mode::Plain), ("keyed", Mode::Keyed(&key)), ("derive", Mode::DeriveKey("packed test"))] {
+            for count in [0, 1, 2, 15, 16, 17, 31, 33, 100, 1000, 40_000] {
+                let leaves = packed::<32>(count, 3);
+                let mut out = vec![[0u8; 32]; count];
+                hash_many(mode, &leaves, &mut out);
+                let mut out_mt = vec![[0u8; 32]; count];
+                hash_many_multithreaded(mode, &leaves, &mut out_mt);
+                for (i, leaf) in leaves.iter().enumerate() {
+                    let want = *crate::convenience::hash_with(mode, leaf).as_bytes();
+                    assert_eq!(out[i], want, "32 B, {count} messages, message {i}, {name}");
+                    assert_eq!(out_mt[i], want, "32 B multithreaded, {count} messages, message {i}, {name}");
+                }
+                let short = packed::<16>(count, 5);
+                let mut out = vec![[0u8; 32]; count];
+                hash_many(mode, &short, &mut out);
+                hash_many_multithreaded(mode, &short, &mut out_mt);
+                for (i, leaf) in short.iter().enumerate() {
+                    let want = *crate::convenience::hash_with(mode, leaf).as_bytes();
+                    assert_eq!(out[i], want, "16 B, {count} messages, message {i}, {name}");
+                    assert_eq!(out_mt[i], want, "16 B multithreaded, {count} messages, message {i}, {name}");
+                }
+            }
+        }
+    }
+
+    /// Packed storage starts on a 128-byte boundary, holds exactly its
+    /// messages end to end, and a layer's digests written into one are the
+    /// next layer's packed input (a Merkle tree of 32-byte leaves).
+    #[test]
+    fn packed_storage_is_aligned_and_chains_into_a_tree() {
+        crate::initialize();
+        let leaves = packed::<32>(1000, 7);
+        assert_eq!(leaves.as_ptr() as usize % 128, 0);
+        assert_eq!(leaves.len(), 1000);
+        assert_eq!(Prepared::bytes(&leaves).len(), 32_000);
+        assert_eq!(Prepared::bytes(&leaves)[32..64], leaves[1]);
+        // Leaves to parents: each parent is the hash of two digests, a
+        // 64-byte message, which Batch holds; parents' digests go into the
+        // next Packed layer.
+        let mut digests = Packed::<32>::new(1000);
+        hash_many(Mode::Plain, &leaves, &mut digests);
+        let mut parents = Batch::new(64, 500);
+        parents.digests_mut().copy_from_slice(&digests);
+        let mut next = Packed::<32>::new(500);
+        hash_many(Mode::Plain, &parents, &mut next);
+        for i in 0..500 {
+            let mut pair = [0u8; 64];
+            pair[..32].copy_from_slice(crate::convenience::hash(&leaves[2 * i]).as_bytes());
+            pair[32..].copy_from_slice(crate::convenience::hash(&leaves[2 * i + 1]).as_bytes());
+            assert_eq!(next[i], *crate::convenience::hash(&pair).as_bytes(), "parent {i}");
+        }
     }
 }

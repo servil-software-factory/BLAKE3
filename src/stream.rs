@@ -669,7 +669,7 @@ impl<'env, D: FnMut(&'env mut [Hash])> Stream<'env, D> {
         let batch = crate::throughput::Block::bytes(batch.blocks());
         let slot = crate::many::slot_len(message_len);
         assert_eq!(Some(batch.len()), slot.checked_mul(out.len()), "a batch's digest space holds one digest per message");
-        crate::many::assert_slots(batch, message_len, out.len());
+        crate::many::assert_slots(batch, message_len, slot, out.len());
         let whole = (out.as_mut_ptr(), out.len());
         let per_part = (TASK_LEN / slot).max(1);
         let parts = out.len().div_ceil(per_part).max(1);

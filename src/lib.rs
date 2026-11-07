@@ -80,6 +80,7 @@
 //! | One message in memory | [`convenience::hash`], or for speed [`throughput::hash_multithreaded`] |
 //! | One message arriving in pieces | [`convenience::Hasher`], or for speed [`throughput::update_multithreaded`] |
 //! | Many messages of one length, in one buffer | [`throughput::hash_many_multithreaded`] |
+//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Packed`] |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::update_each`] |
 //! | A stream of messages read, made, or arriving | [`throughput::stream`] |
@@ -1292,16 +1293,16 @@ fn hash_serial_on(input: &[u8], key: &CVWords, flags: u8, platform: Platform) ->
 
 /// [`hash_many`] in the mode of `key` and `flags`, on the calling thread.
 #[inline]
-pub(crate) fn hash_many_serial(input: &[u8], message_len: usize, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]]) {
-    hash_many_serial_from(Platform::detect(), input, message_len, key, flags, out);
+pub(crate) fn hash_many_serial(input: &[u8], message_len: usize, slot: usize, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]]) {
+    hash_many_serial_from(Platform::detect(), input, message_len, slot, key, flags, out);
 }
 
 /// [`hash_many_serial`] from `platform` (the self-test's way in, as
 /// [`hash_serial_from`]).
 #[inline]
-fn hash_many_serial_from(platform: Platform, input: &[u8], message_len: usize, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]]) {
+fn hash_many_serial_from(platform: Platform, input: &[u8], message_len: usize, slot: usize, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]]) {
     let turn = platform::Sme2Turn::take(platform, many::sme2_sized(message_len, out.len()));
-    many::hash_many_on(input, message_len, key, flags, out, turn.platform());
+    many::hash_many_on(input, message_len, slot, key, flags, out, turn.platform());
 }
 
 mod hasher;

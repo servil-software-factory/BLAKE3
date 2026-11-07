@@ -365,7 +365,7 @@ fn many(platform: Platform, messages: &[u8], offset: usize, len: usize, out: &mu
         message[..len].copy_from_slice(&bytes[..len]);
     }
     let mut digests = [[0u8; crate::OUT_LEN]; BATCH_COUNT];
-    crate::hash_many_serial_from(platform, batch, len, crate::IV, 0, &mut digests[..count]);
+    crate::hash_many_serial_from(platform, batch, len, slot, crate::IV, 0, &mut digests[..count]);
     for (to, digest) in out.chunks_mut(crate::OUT_LEN).zip(&digests) {
         to.copy_from_slice(digest);
     }

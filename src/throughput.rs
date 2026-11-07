@@ -23,7 +23,9 @@
 //! For one call per hash, any slice, the result returned, see the
 //! [`convenience`](crate::convenience) API.
 
-pub use crate::block::{Batch, Block};
+#[cfg(feature = "std")]
+pub use crate::block::Packed;
+pub use crate::block::{Batch, Block, Prepared};
 #[cfg(feature = "std")]
 pub use crate::each::{finalize_each, hash_each, hash_each_multithreaded, update_each, update_each_multithreaded};
 #[cfg(feature = "std")]
@@ -170,13 +172,28 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// 20 ns each in batches of 16 or more, against about 50 for one [`hash`]
 /// each. Messages longer than 15 KiB cost what [`hash`] costs. For the
 /// same hashes over several cores, see [`hash_many_multithreaded`].
+///
+/// A [`Packed`] of 16- or 32-byte messages is a batch too, as the program
+/// holds them, with no copy into blocks:
+///
+/// ```
+/// # blake3_servil::initialize();
+/// use blake3_servil::{Mode, convenience, throughput::{self, Packed}};
+/// let mut leaves = Packed::<32>::new(1000);
+/// for (i, leaf) in leaves.iter_mut().enumerate() {
+///     leaf[0] = i as u8;
+/// }
+/// let mut digests = Packed::<32>::new(1000); // the next layer's input
+/// throughput::hash_many(Mode::Plain, &leaves, &mut digests);
+/// assert_eq!(digests[3], *convenience::hash(&leaves[3]).as_bytes());
+/// ```
 // Inlined, so a constant mode folds to its constants (as
 // convenience::hash is: no mode stored for the call to read).
 #[inline(always)]
-pub fn hash_many(mode: Mode, batch: &Batch, out: &mut [[u8; OUT_LEN]]) {
+pub fn hash_many<P: Prepared>(mode: Mode, batch: &P, out: &mut [[u8; OUT_LEN]]) {
     let mut room = core::mem::MaybeUninit::uninit();
     let (key, flags) = mode.key(&mut room);
-    crate::hash_many_serial(Block::bytes(batch.blocks()), batch.message_len(), key, flags, out);
+    crate::hash_many_serial(batch.bytes(), batch.message_len(), batch.slot(), key, flags, out);
 }
 
 /// [`hash_many`], using other CPU cores where that is faster: the same
@@ -200,14 +217,14 @@ pub fn hash_many(mode: Mode, batch: &Batch, out: &mut [[u8; OUT_LEN]]) {
 // Inlined, so a constant mode folds to its constants (as
 // convenience::hash is: no mode stored for the call to read).
 #[inline(always)]
-pub fn hash_many_multithreaded(mode: Mode, batch: &Batch, out: &mut [[u8; OUT_LEN]]) {
+pub fn hash_many_multithreaded<P: Prepared>(mode: Mode, batch: &P, out: &mut [[u8; OUT_LEN]]) {
     crate::lanes::require();
     let mut room = core::mem::MaybeUninit::uninit();
     let (key, flags) = mode.key(&mut room);
     // Its length against the digests here, on the caller's thread, as
     // hash_many's kernels check it: a multiplication.
-    crate::many::assert_slots(Block::bytes(batch.blocks()), batch.message_len(), out.len());
-    crate::lanes::hash_many(Block::bytes(batch.blocks()), batch.message_len(), key, flags, out);
+    crate::many::assert_slots(batch.bytes(), batch.message_len(), batch.slot(), out.len());
+    crate::lanes::hash_many(batch.bytes(), batch.message_len(), batch.slot(), key, flags, out);
 }
 
 /// [`hash`], using other CPU cores where that is faster: the same

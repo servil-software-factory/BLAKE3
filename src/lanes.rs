@@ -293,24 +293,23 @@ pub(crate) fn subtree_children(input: &[u8], key: &crate::CVWords, counter: u64,
 /// [`crate::hash_many`] over the machine's threads: below MIN_SPLIT_LEN
 /// of input, or with one message, on this thread.
 #[inline]
-pub(crate) fn hash_many(input: &[u8], message_len: usize, key: &crate::CVWords, flags: u8, outputs: &mut [[u8; crate::OUT_LEN]]) {
+pub(crate) fn hash_many(input: &[u8], message_len: usize, slot: usize, key: &crate::CVWords, flags: u8, outputs: &mut [[u8; crate::OUT_LEN]]) {
     // The short path first and inline, so a small batch costs what
     // crate::hash_many costs; everything the pool needs is behind the call.
     if outputs.len() < 2 || input.len() < MIN_SPLIT_LEN {
-        return crate::hash_many_serial(input, message_len, key, flags, outputs);
+        return crate::hash_many_serial(input, message_len, slot, key, flags, outputs);
     }
-    hash_many_over_pool(input, message_len, key, flags, outputs)
+    hash_many_over_pool(input, message_len, slot, key, flags, outputs)
 }
 
 #[inline(never)]
-fn hash_many_over_pool(input: &[u8], message_len: usize, key: &crate::CVWords, flags: u8, outputs: &mut [[u8; crate::OUT_LEN]]) {
-    let slot = crate::many::slot_len(message_len);
-    assert_eq!(Some(input.len()), slot.checked_mul(outputs.len()), "input holds one slot of whole blocks per output");
+fn hash_many_over_pool(input: &[u8], message_len: usize, slot: usize, key: &crate::CVWords, flags: u8, outputs: &mut [[u8; crate::OUT_LEN]]) {
+    assert_eq!(Some(input.len()), slot.checked_mul(outputs.len()), "input holds one slot per output");
     let Some((pool, _caller)) = spare_pool() else {
-        return crate::hash_many_serial(input, message_len, key, flags, outputs);
+        return crate::hash_many_serial(input, message_len, slot, key, flags, outputs);
     };
     let pieces = cut_messages(outputs.len(), slot, pool.threads);
-    let work = Work::Messages { input, message_len, key: *key, flags, pieces: &pieces, outputs: outputs.as_mut_ptr() };
+    let work = Work::Messages { input, message_len, slot, key: *key, flags, pieces: &pieces, outputs: outputs.as_mut_ptr() };
     pool.run_job(work, pieces.len(), 0, pool_platform());
 }
 
@@ -413,7 +412,7 @@ enum Work<'a> {
     /// Ranges of a batch of messages of one length, each in its slot of
     /// whole blocks in `input` (`offset` and `len` count messages); one
     /// digest each.
-    Messages { input: &'a [u8], message_len: usize, key: crate::CVWords, flags: u8, pieces: &'a [Piece], outputs: *mut [u8; crate::OUT_LEN] },
+    Messages { input: &'a [u8], message_len: usize, slot: usize, key: crate::CVWords, flags: u8, pieces: &'a [Piece], outputs: *mut [u8; crate::OUT_LEN] },
     /// Ranges of a collection's items (`offset` and `len` count items),
     /// each under MIN_SPLIT_LEN; one digest each.
     Each { items: &'a [&'a [u8]], key: crate::CVWords, flags: u8, pieces: &'a [Piece], outputs: *mut [u8; crate::OUT_LEN] },
@@ -442,13 +441,12 @@ impl Job<'_> {
                 let cv = crate::hash_all_at_once(bytes, key, counter, *flags, platform).chaining_value();
                 unsafe { *cvs.add(index) = cv };
             }
-            Work::Messages { input, message_len, key, flags, pieces, outputs } => {
+            Work::Messages { input, message_len, slot, key, flags, pieces, outputs } => {
                 let piece = pieces[index];
-                let slot = crate::many::slot_len(*message_len);
                 let messages = &input[piece.offset * slot..][..piece.len * slot];
                 // Sound: this range of outputs belongs to piece `index` alone.
                 let digests = unsafe { core::slice::from_raw_parts_mut(outputs.add(piece.offset), piece.len) };
-                crate::many::hash_many_on(messages, *message_len, key, *flags, digests, platform);
+                crate::many::hash_many_on(messages, *message_len, *slot, key, *flags, digests, platform);
             }
             Work::Each { items, key, flags, pieces, outputs } => {
                 let piece = pieces[index];
@@ -1578,9 +1576,10 @@ impl Task {
                 // Sound: the stream keeps each batch's bytes and digest
                 // space in place until the task's `left` is zero.
                 let bytes = unsafe { core::slice::from_raw_parts(m.input, m.len) };
-                let count = m.len / crate::many::slot_len(message_len);
+                let slot = crate::many::slot_len(message_len);
+                let count = m.len / slot;
                 let digests = unsafe { core::slice::from_raw_parts_mut(m.out as *mut [u8; crate::OUT_LEN], count) };
-                crate::many::hash_many_on(bytes, message_len, &self.key, self.flags, digests, platform);
+                crate::many::hash_many_on(bytes, message_len, slot, &self.key, self.flags, digests, platform);
             }
             return;
         }
@@ -2101,9 +2100,9 @@ mod test {
         // Two messages in slots of MIN_SPLIT_LEN / 2 (whole blocks), or a
         // block less each.
         let slot = MIN_SPLIT_LEN / 2;
-        assert!(!went_to_pool(&mut || hash_many(&input[..MIN_SPLIT_LEN - 128], slot - 64, crate::IV, 0, &mut out)), "under MIN_SPLIT_LEN: serial");
-        assert!(went_to_pool(&mut || hash_many(&input[..MIN_SPLIT_LEN], slot, crate::IV, 0, &mut out)), "at MIN_SPLIT_LEN: the pool");
-        assert!(!went_to_pool(&mut || hash_many(&input[..MIN_SPLIT_LEN], MIN_SPLIT_LEN, crate::IV, 0, &mut out[..1])), "one output: serial");
+        assert!(!went_to_pool(&mut || hash_many(&input[..MIN_SPLIT_LEN - 128], slot - 64, slot - 64, crate::IV, 0, &mut out)), "under MIN_SPLIT_LEN: serial");
+        assert!(went_to_pool(&mut || hash_many(&input[..MIN_SPLIT_LEN], slot, slot, crate::IV, 0, &mut out)), "at MIN_SPLIT_LEN: the pool");
+        assert!(!went_to_pool(&mut || hash_many(&input[..MIN_SPLIT_LEN], MIN_SPLIT_LEN, MIN_SPLIT_LEN, crate::IV, 0, &mut out[..1])), "one output: serial");
         assert!(
             !went_to_pool(&mut || {
                 hash_with_key(&input[..MIN_SPLIT_LEN - 1], crate::IV, 0);
@@ -2369,13 +2368,13 @@ mod test {
         // under a message is one message).
         let input = std::vec![0x5Au8; 1 << 20];
         let mut out = [[0u8; crate::OUT_LEN]; 1000];
-        hash_many(&input[..MIN_SPLIT_LEN], MIN_SPLIT_LEN / 2, crate::IV, 0, &mut out[..2]);
+        hash_many(&input[..MIN_SPLIT_LEN], MIN_SPLIT_LEN / 2, MIN_SPLIT_LEN / 2, crate::IV, 0, &mut out[..2]);
         assert_eq!(wanted(), Some(1), "two pieces: one worker");
         // Eight messages in slots of 64 KiB: a share of 512 KiB / threads
         // is under a message, so a message a piece, eight pieces, seven to
         // wake for.
         assert_eq!(cut_messages(8, 64 * 1024, pool.threads).len(), 8);
-        hash_many(&input[..512 * 1024], 64 * 1024, crate::IV, 0, &mut out[..8]);
+        hash_many(&input[..512 * 1024], 64 * 1024, 64 * 1024, crate::IV, 0, &mut out[..8]);
         assert_eq!(wanted(), Some(7), "eight pieces: seven workers");
         // A 1 MiB tree: dozens of pieces, so every other thread of the
         // pool, within the wide kernel's budget where the kernel is wide.
@@ -2566,7 +2565,7 @@ mod test {
                 assert_eq!(*digest, *crate::convenience::hash(&input[i * slot..][..message_len]).as_bytes(), "message {i}");
             }
             let mut got = vec![[0u8; crate::OUT_LEN]; count];
-            hash_many(input, message_len, crate::IV, 0, &mut got);
+            hash_many(input, message_len, slot, crate::IV, 0, &mut got);
             assert_eq!(want, got, "{message_len}-byte messages");
         }
     }
@@ -2590,7 +2589,7 @@ mod test {
                     let mut got = vec![[0u8; crate::OUT_LEN]; count];
                     for _ in 0..10 {
                         if i % 2 == 0 {
-                            hash_many(buffer, crate::BLOCK_LEN, crate::IV, 0, &mut got);
+                            hash_many(buffer, crate::BLOCK_LEN, crate::BLOCK_LEN, crate::IV, 0, &mut got);
                             assert_eq!(want, &got[..]);
                         } else {
                             assert_eq!(tree_want, hash_with_key(buffer, crate::IV, 0));
