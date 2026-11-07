@@ -129,13 +129,20 @@ unsafe fn finalize_groups<const W: usize>(hashers: &mut [Hasher], which: &[usize
     for (which, out) in which.chunks(W).zip(out.chunks_mut(W)) {
         if which.len() == W {
             let hashed = {
-                let inputs: Option<arrayvec::ArrayVec<_, W>> = which.iter().map(|&i| crate::ffi_output::input(&hashers[i])).collect();
-                match inputs {
-                    Some(inputs) => {
-                        unsafe { crate::ffi_output::hash_group::<W>(inputs.as_slice().try_into().unwrap(), out) };
-                        true
+                let mut inputs = arrayvec::ArrayVec::<_, W>::new();
+                for &i in which {
+                    if let Some(input) = crate::ffi_output::input(&hashers[i]) {
+                        inputs.push(input);
+                    } else {
+                        break;
                     }
-                    None => unsafe { crate::ffi_output::staged_group::<W>(hashers, which.try_into().unwrap(), out) },
+                }
+                if inputs.len() == W {
+                    unsafe { crate::ffi_output::hash_group::<W>(inputs.as_slice().try_into().unwrap(), out) };
+                    true
+                } else {
+                    drop(inputs);
+                    unsafe { crate::ffi_output::staged_group::<W>(hashers, which.try_into().unwrap(), out) }
                 }
             };
             if hashed {
