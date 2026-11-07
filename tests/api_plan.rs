@@ -84,9 +84,9 @@ fn message(data: &[u8]) -> Batch<'static> {
     batch.set(0, data);
     batch
 }
-const HASH_MANY_WITH: [(&str, fn(Mode, &Batch, &mut [[u8; 32]])); 2] = [
-    ("throughput::hash_many", blake3_servil::throughput::hash_many),
-    ("throughput::hash_many_multithreaded", blake3_servil::throughput::hash_many_multithreaded),
+const HASH_MANY_WITH: [(&str, fn(Mode, &Batch<'static>, &mut [[u8; 32]])); 2] = [
+    ("throughput::hash_many", blake3_servil::throughput::hash_many::<Batch<'static>>),
+    ("throughput::hash_many_multithreaded", blake3_servil::throughput::hash_many_multithreaded::<Batch<'static>>),
 ];
 
 /// Lengths past the official vectors, around the multithreaded split (512 KiB) and a subtree edge.
