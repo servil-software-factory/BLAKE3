@@ -26,7 +26,7 @@ pub struct Limits {
 
 /// A completion, delivered to the pipeline's handler with the tag its work
 /// was given.
-pub enum Event<T> {
+pub enum Event<'a, T> {
     /// The message ended; its digest.
     Hashed {
         /// The message's tag.
@@ -39,10 +39,15 @@ pub enum Event<T> {
         /// The message's tag.
         tag: T,
     },
-    /// Every digest of the batch is in its places.
+    /// Every digest of the batch is in its places, which come back with
+    /// the batch for the producer to refill and submit again.
     Batch {
         /// The batch's tag.
         tag: T,
+        /// The batch submitted, the producer's again to refill.
+        batch: Batch<'a>,
+        /// Its digests, one per message of the batch.
+        places: &'a mut [[u8; OUT_LEN]],
     },
 }
 
@@ -50,7 +55,8 @@ pub enum Event<T> {
 /// its waker is registered before `ready` can wait on it.
 enum Pending<'a, T> {
     Message(T, Pin<Box<Completion>>),
-    Batch(T, Pin<Box<BatchCompletion<'a>>>),
+    /// The batch and places, held until the completion returns them.
+    Batch(T, Pin<Box<BatchCompletion>>, Option<Batch<'a>>, &'a mut [[u8; OUT_LEN]]),
 }
 
 /// Completions wake the producer through this; `ready` waits on it.
@@ -88,7 +94,7 @@ impl std::task::Wake for NotifyWake {
 ///
 /// [`collect`]: Stream::collect
 /// [`finish`]: Stream::finish
-pub struct Stream<'a, T, F: FnMut(Event<T>)> {
+pub struct Stream<'a, T, F: FnMut(Event<'a, T>)> {
     receiver: Receiver,
     on_completion: RefCell<F>,
     pending: RefCell<Vec<Pending<'a, T>>>,
@@ -98,13 +104,13 @@ pub struct Stream<'a, T, F: FnMut(Event<T>)> {
 
 /// A message begun on a pipeline: fed through [`input`](Message::input),
 /// then [`end`](Message::end)ed or [`abort`](Message::abort)ed.
-pub struct Message<'s, 'a, T, F: FnMut(Event<T>)> {
+pub struct Message<'s, 'a, T, F: FnMut(Event<'a, T>)> {
     stream: &'s Stream<'a, T, F>,
     pub(super) inner: receiver::Message,
     tag: T,
 }
 
-impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
+impl<'a, T: Copy, F: FnMut(Event<'a, T>)> Stream<'a, T, F> {
     /// A pipeline hashing in `mode`, within `limits`, delivering each
     /// completion to `on_completion`.
     pub fn new(mode: Mode<'_>, limits: Limits, on_completion: F) -> Self {
@@ -128,10 +134,14 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
 
     /// Submit a prepared batch once admitted (delivering completions as
     /// `message` does while it waits); its digests land in `places`, one
-    /// per message of the batch, when its [`Event::Batch`] is delivered.
-    pub async fn submit_batch(&self, batch: &'a Batch<'a>, places: &'a mut [[u8; OUT_LEN]], tag: T) {
-        let completion = self.admit(self.receiver.submit_batch(batch, places)).await;
-        self.push(Pending::Batch(tag, Box::pin(completion)));
+    /// per message of the batch, and both come back with its
+    /// [`Event::Batch`].
+    pub async fn submit_batch(&self, batch: Batch<'a>, places: &'a mut [[u8; OUT_LEN]], tag: T) {
+        assert_eq!(batch.len(), places.len(), "one place per batch message");
+        // Sound: the batch and `places` are held here, untouched, until the
+        // completion resolves, then handed back with the event.
+        let completion = self.admit(unsafe { self.receiver.submit_batch(&batch, places.as_mut_ptr()) }).await;
+        self.push(Pending::Batch(tag, Box::pin(completion), Some(batch), places));
     }
 
     /// Await an admission, collecting while it is pending: a slot held by an
@@ -182,7 +192,7 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
 
     /// One poll of a pending completion with the stream's waker: its event
     /// once ready, its slot then retired.
-    fn poll_pending(&self, item: &mut Pending<'a, T>) -> Option<Event<T>> {
+    fn poll_pending(&self, item: &mut Pending<'a, T>) -> Option<Event<'a, T>> {
         let mut cx = Context::from_waker(&self.completion_waker);
         match item {
             Pending::Message(tag, completion) => match completion.as_mut().poll(&mut cx) {
@@ -196,10 +206,10 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
                 }
                 Poll::Pending => None,
             },
-            Pending::Batch(tag, completion) => match completion.as_mut().poll(&mut cx) {
+            Pending::Batch(tag, completion, batch, places) => match completion.as_mut().poll(&mut cx) {
                 Poll::Ready(finished) => {
                     finished.retire();
-                    Some(Event::Batch { tag: *tag })
+                    Some(Event::Batch { tag: *tag, batch: batch.take().expect("a batch completes once"), places: core::mem::take(places) })
                 }
                 Poll::Pending => None,
             },
@@ -239,15 +249,18 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
     }
 }
 
-impl<'a, T: Copy, F: FnMut(Event<T>)> Message<'_, 'a, T, F> {
+impl<'a, T: Copy, F: FnMut(Event<'a, T>)> Message<'_, 'a, T, F> {
     /// Room for the message's next bytes, once a buffer is reserved: write
     /// into [`Input::bytes_mut`], then [`Input::commit`] how many.
     pub async fn input(&mut self) -> Input<'_> {
         self.inner.input().await
     }
-    /// The message is complete: its digest comes as [`Event::Hashed`].
-    pub fn end(self) {
-        self.stream.push(Pending::Message(self.tag, Box::pin(self.inner.end())));
+    /// The message is complete, its last `written` bytes at the start of
+    /// the current room's free part (0 when none are new): the digest comes
+    /// as [`Event::Hashed`]. Where the producer learns the bytes and the
+    /// end together, `end(n)` publishes them as the last part at once.
+    pub fn end(self, written: usize) {
+        self.stream.push(Pending::Message(self.tag, Box::pin(self.inner.end(written))));
     }
     /// Give the message up: no digest, [`Event::Aborted`] instead.
     pub fn abort(self) {
@@ -262,7 +275,7 @@ mod tests {
     use crate::throughput::Block;
     use std::cell::RefCell;
 
-    fn stream<'a, T: Copy>(buffers: usize, messages: usize, events: &'a RefCell<Vec<Event<T>>>) -> Stream<'a, T, impl FnMut(Event<T>) + 'a> {
+    fn stream<'a, T: Copy>(buffers: usize, messages: usize, events: &'a RefCell<Vec<Event<'a, T>>>) -> Stream<'a, T, impl FnMut(Event<'a, T>) + 'a> {
         crate::initialize_multithreaded(core::num::NonZeroUsize::new(3));
         Stream::new(Mode::Plain, Limits { buffers, messages }, move |event| events.borrow_mut().push(event))
     }
@@ -289,23 +302,23 @@ mod tests {
     }
 
     /// The sketch's loop, verbatim but for `run` in place of `.await`.
-    fn receive<'s, 'a, T: Copy, F: FnMut(Event<T>)>(stream: &'s Stream<'a, T, F>, tag: T, reader: &mut Reader<'_>) -> Result<(), &'static str> {
+    fn receive<'s, 'a, T: Copy, F: FnMut(Event<'a, T>)>(stream: &'s Stream<'a, T, F>, tag: T, reader: &mut Reader<'_>) -> Result<(), &'static str> {
         let mut message = run(stream.message(tag, Some(reader.input.len() as u64)));
         loop {
             let mut input = run(message.input());
-            let ended = match reader.read_fragment(input.bytes_mut()) {
-                Ok((written, ended)) => {
-                    input.commit(written);
-                    ended
+            match reader.read_fragment(input.bytes_mut()) {
+                Ok((written, false)) => input.commit(written),
+                Ok((written, true)) => {
+                    // The read learned the bytes and the end together: the
+                    // last part is published as the last at once.
+                    drop(input);
+                    message.end(written);
+                    return Ok(());
                 }
                 Err(error) => {
                     message.abort();
                     return Err(error);
                 }
-            };
-            if ended {
-                message.end();
-                return Ok(());
             }
         }
     }
@@ -324,7 +337,7 @@ mod tests {
         let mut input = vec![0u8; (1 << 20) + 777];
         crate::test::paint_test_input(&mut input);
         assert_eq!(receive(&stream, "long", &mut Reader { input: &input, at: 0, turn: 0, fail_at: None }), Ok(()));
-        run(stream.submit_batch(&batch, &mut places, "batch"));
+        run(stream.submit_batch(batch, &mut places, "batch"));
         assert_eq!(receive(&stream, "reset", &mut Reader { input: &input, at: 0, turn: 0, fail_at: Some(5) }), Err("connection reset"));
         assert_eq!(receive(&stream, "short", &mut Reader { input: &input[..1000], at: 0, turn: 0, fail_at: None }), Ok(()));
         // The producer waits for completions as an event loop would.
@@ -339,7 +352,7 @@ mod tests {
             .map(|e| match e {
                 Event::Hashed { tag, hash } => format!("{tag}: {}", hex::encode(hash.as_bytes())),
                 Event::Aborted { tag } => format!("{tag}: aborted"),
-                Event::Batch { tag } => format!("{tag}: batch"),
+                Event::Batch { tag, .. } => format!("{tag}: batch"),
             })
             .collect();
         got.sort();
@@ -378,7 +391,7 @@ mod tests {
             room.bytes_mut()[..3].copy_from_slice(b"abc");
             room.commit(3);
         }
-        second.end();
+        second.end(0);
         // The completion may be delivered by end() itself when the worker
         // is quick; otherwise ready() waits for it.
         while events.borrow().is_empty() {
@@ -387,7 +400,7 @@ mod tests {
         }
         assert!(matches!(events.borrow()[0], Event::Hashed { tag: 2, .. }), "message 2 delivered while 1 is held");
         gate.release.wait();
-        first.end();
+        first.end(0);
         stream.finish();
         assert!(matches!(events.borrow()[1], Event::Hashed { tag: 1, hash } if hash.as_bytes() == &expected(Mode::Plain, &long)));
     }
@@ -423,7 +436,7 @@ mod tests {
             if *at == input.len() {
                 let (i, message, _) = open.swap_remove(k);
                 let _ = i;
-                message.end();
+                message.end(0);
                 stream.collect();
                 continue;
             }
@@ -450,6 +463,85 @@ mod tests {
         inputs.clear();
     }
 
+    /// `end(n)` carries a message's last bytes: at a room boundary, where
+    /// the room would otherwise go out as "more follows", in a partial
+    /// room, and with none (`end(0)` after a read that met the end).
+    #[test]
+    fn end_carries_the_last_bytes() {
+        let events = RefCell::new(Vec::new());
+        let stream = stream(2, 1, &events);
+        for (len, tail) in [(16384, 16384), (32768, 16384), (100, 100), (16384 + 5, 5), (16384, 0), (0, 0)] {
+            let mut input = vec![0u8; len];
+            crate::test::paint_test_input(&mut input);
+            let mut message = run(stream.message(len, None));
+            let (head, last) = input.split_at(len - tail);
+            for piece in head.chunks(16384) {
+                let mut room = run(message.input());
+                room.bytes_mut()[..piece.len()].copy_from_slice(piece);
+                room.commit(piece.len());
+            }
+            if tail > 0 {
+                let mut room = run(message.input());
+                room.bytes_mut()[..tail].copy_from_slice(last);
+            }
+            message.end(tail);
+            stream.collect();
+        }
+        stream.finish();
+        let events = events.borrow();
+        assert_eq!(events.len(), 6);
+        for event in events.iter() {
+            let Event::Hashed { tag: len, hash } = event else { panic!("hashed") };
+            let mut input = vec![0u8; *len];
+            crate::test::paint_test_input(&mut input);
+            assert_eq!(*hash.as_bytes(), expected(Mode::Plain, &input), "{len} bytes");
+        }
+    }
+
+    /// Sam's acceptance example (#275): two batches and their places cycle
+    /// through one pipeline (filled, submitted, completed, refilled,
+    /// submitted again), the producer regaining each through its event,
+    /// with no drain between cycles.
+    #[test]
+    fn batches_and_places_come_back_to_be_refilled() {
+        let mut places = [vec![[0u8; OUT_LEN]; 32], vec![[0u8; OUT_LEN]; 32]];
+        let returned: RefCell<Vec<(u8, Batch<'_>, &mut [[u8; OUT_LEN]])>> = RefCell::new(Vec::new());
+        let stream = Stream::new(Mode::Plain, Limits { buffers: 2, messages: 2 }, |event| match event {
+            Event::Batch { tag, batch, places } => returned.borrow_mut().push((tag, batch, places)),
+            _ => unreachable!(),
+        });
+        let fill = |batch: &mut Batch<'_>, round: u8| {
+            for i in 0..batch.len() {
+                batch.set(i, &[round.wrapping_mul(7).wrapping_add(i as u8); 64]);
+            }
+        };
+        let [pa, pb] = &mut places;
+        let (mut a, mut b) = (Batch::new(64, 32), Batch::new(64, 32));
+        fill(&mut a, 0);
+        fill(&mut b, 1);
+        run(stream.submit_batch(a, pa, 0));
+        run(stream.submit_batch(b, pb, 1));
+        // Each batch comes back with its places and goes round again, six
+        // times; the places hold the digests of the round just hashed.
+        let mut rounds = [0u8; 2];
+        for _ in 0..12 {
+            while returned.borrow().is_empty() {
+                run(stream.ready());
+                stream.collect();
+            }
+            let (tag, mut batch, places) = returned.borrow_mut().pop().unwrap();
+            let round = rounds[tag as usize] * 2 + tag;
+            for (i, place) in places.iter().enumerate() {
+                assert_eq!(*place, expected(Mode::Plain, &[round.wrapping_mul(7).wrapping_add(i as u8); 64]), "round {round}, message {i}");
+            }
+            rounds[tag as usize] += 1;
+            fill(&mut batch, rounds[tag as usize] * 2 + tag);
+            run(stream.submit_batch(batch, places, tag));
+        }
+        stream.finish();
+        assert_eq!(returned.borrow().len(), 2, "the last round of each came back at the finish");
+    }
+
     /// Whole-block storage is borrowed as a batch without a copy.
     #[test]
     fn a_borrowed_batch_fills_the_producers_places() {
@@ -459,7 +551,7 @@ mod tests {
         let mut places = [[0u8; OUT_LEN]; 4];
         let events = RefCell::new(Vec::new());
         let stream = stream(1, 1, &events);
-        run(stream.submit_batch(&borrowed, &mut places, ()));
+        run(stream.submit_batch(borrowed, &mut places, ()));
         stream.finish();
         assert_eq!(events.borrow().len(), 1);
         for (i, place) in places.iter().enumerate() {

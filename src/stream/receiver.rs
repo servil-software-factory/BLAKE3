@@ -218,10 +218,17 @@ impl Receiver {
     /// bounded batch job on the pool. Its result token resolves when workers
     /// have written every digest. Borrowing keeps the batch and places in
     /// place until then; the result's lifetime carries that borrow.
-    pub(super) fn submit_batch<'a>(&self, batch: &'a Batch<'a>, places: &'a mut [[u8; OUT_LEN]]) -> impl Future<Output = BatchCompletion<'a>> + 'a {
-        assert_eq!(batch.len(), places.len(), "one place per batch message");
+    /// Safety: the batch's blocks stay where they are, unwritten, and
+    /// `places` is valid for `batch.len()` writes that nothing else reads
+    /// or writes, until the completion resolves (the frontend holds the
+    /// batch and the caller's `&mut` meanwhile and hands them back with
+    /// the event).
+    pub(super) unsafe fn submit_batch(&self, batch: &Batch<'_>, places: *mut [u8; OUT_LEN]) -> impl Future<Output = BatchCompletion> + 'static {
         let core = self.core.clone();
         let (key, flags) = (self.key, self.flags);
+        let input = Block::bytes(batch.blocks()).as_ptr();
+        let input_len = Block::bytes(batch.blocks()).len();
+        let (message_len, count) = (batch.message_len(), batch.len());
         async move {
             let slot = core.message_slots.clone().acquire_owned().await;
             let index = *slot;
@@ -240,29 +247,13 @@ impl Receiver {
                 state.output = Some(output);
                 Id { index, generation: state.generation }
             };
-            let job = Box::new(BatchJob {
-                owner: core.clone(),
-                id,
-                key,
-                flags,
-                input: Block::bytes(batch.blocks()).as_ptr(),
-                input_len: Block::bytes(batch.blocks()).len(),
-                message_len: batch.message_len(),
-                out: places.as_mut_ptr(),
-                count: places.len(),
-            });
+            let job = Box::new(BatchJob { owner: core.clone(), id, key, flags, input, input_len, message_len, out: places, count });
             let context = Box::into_raw(job);
             let mut task = Task::of(&[], 0);
             task.action = Some((execute_batch, context.cast()));
             core.source.publish(task);
             core.source.wake_for_waiting();
-            BatchCompletion {
-                request: core.outputs[id.index].clone().acquire_owned(),
-                core,
-                id,
-                guard: Some(crate::lanes::AbortOnUnwind),
-                borrow: core::marker::PhantomData,
-            }
+            BatchCompletion { request: core.outputs[id.index].clone().acquire_owned(), core, id, guard: Some(crate::lanes::AbortOnUnwind) }
         }
     }
 
@@ -393,7 +384,14 @@ impl Message {
         owner.source.wake_for_waiting();
     }
 
-    pub(super) fn end(mut self) -> Completion {
+    /// The message's last `written` bytes are at the start of its current
+    /// room's free part (0 where none are new); the digest comes through
+    /// the completion.
+    pub(super) fn end(mut self, written: usize) -> Completion {
+        if written > 0 {
+            assert!(self.current.is_some() && written <= INPUT_BYTES - self.used, "the final write fits its granted room");
+            self.used += written;
+        }
         if self.current.is_some() && self.used > 0 {
             self.submit(true);
         } else {
@@ -442,14 +440,13 @@ struct BatchJob {
 /// receiver drains; a producer that unwinds first ends the process (a test
 /// that panicked before draining once let a worker write into a freed stack
 /// frame; the guard now aborts there).
-pub(super) struct BatchCompletion<'a> {
+pub(super) struct BatchCompletion {
     request: Acquire<Arc<Pool<Outcome>>, Outcome>,
     core: Arc<Core>,
     id: Id,
     guard: Option<crate::lanes::AbortOnUnwind>,
-    borrow: core::marker::PhantomData<&'a mut [u8]>,
 }
-impl Future for BatchCompletion<'_> {
+impl Future for BatchCompletion {
     type Output = BatchFinished;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<BatchFinished> {
         // Sound: request stays pinned; the other fields are Unpin and are
@@ -768,7 +765,7 @@ pub(super) mod tests {
                 crate::test::paint_test_input(&mut input);
                 let mut message = run(receiver.message(Some(len as u64)));
                 feed(&mut message, &input, 1448);
-                let finished = run(message.end());
+                let finished = run(message.end(0));
                 assert_eq!(finished.hash().as_bytes(), &expected(mode, &input), "{len} bytes");
                 receiver.drain();
                 finished.retire();
@@ -802,7 +799,7 @@ pub(super) mod tests {
             room.bytes_mut()[..100].copy_from_slice(&input[2 * INPUT_BYTES..]);
             room.commit(100);
         }
-        let finished = run(message.end());
+        let finished = run(message.end(0));
         assert_eq!(finished.hash().as_bytes(), &expected(Mode::Plain, &input));
         receiver.drain();
         finished.retire();
@@ -822,11 +819,11 @@ pub(super) mod tests {
         gate.started.wait();
         let mut second = run(receiver.message(Some(3)));
         feed(&mut second, b"abc", 3);
-        let finished = run(second.end());
+        let finished = run(second.end(0));
         assert_eq!(finished.hash().as_bytes(), &expected(Mode::Plain, b"abc"));
         finished.retire(); // Its own work retired with its result.
         gate.release.wait();
-        let first = run(first.end());
+        let first = run(first.end(0));
         assert_eq!(first.hash().as_bytes(), &expected(Mode::Plain, &long));
         receiver.drain();
         first.retire();
@@ -853,7 +850,7 @@ pub(super) mod tests {
         aborted.retire();
         let mut next = run(receiver.message(None));
         feed(&mut next, b"after abort", 11);
-        let finished = run(next.end());
+        let finished = run(next.end(0));
         assert_eq!(finished.hash().as_bytes(), &expected(Mode::Plain, b"after abort"));
         receiver.drain();
         finished.retire();
@@ -869,7 +866,7 @@ pub(super) mod tests {
         let core = Arc::as_ptr(&first.core);
         let mut message = run(first.message(None));
         feed(&mut message, b"first receiver", 14);
-        let finished = run(message.end());
+        let finished = run(message.end(0));
         assert_eq!(finished.hash().as_bytes(), &expected(Mode::Plain, b"first receiver"));
         first.drain();
         finished.retire();
@@ -878,7 +875,7 @@ pub(super) mod tests {
         assert_eq!(Arc::as_ptr(&second.core), core, "the kept core, not a new allocation");
         let mut message = run(second.message(None));
         feed(&mut message, b"second receiver", 15);
-        let finished = run(message.end());
+        let finished = run(message.end(0));
         assert_eq!(finished.hash().as_bytes(), &expected(Mode::Keyed(&key), b"second receiver"));
         second.drain();
         finished.retire();
@@ -905,11 +902,11 @@ pub(super) mod tests {
         let gate = Gate::new();
         message.hold_next(gate.clone());
         feed(&mut message, b"incremental", 11);
-        let completion = message.end();
+        let completion = message.end(0);
         gate.started.wait();
         // Admission first, then completion: every digest is written before
         // the result resolves.
-        let admitted = run(receiver.submit_batch(&batch, &mut places));
+        let admitted = run(unsafe { receiver.submit_batch(&batch, places.as_mut_ptr()) });
         let batch_finished = run(admitted);
         for (i, place) in places.iter().enumerate() {
             assert_eq!(place, &expected(Mode::Plain, &[i as u8; 100]), "message {i}");
@@ -929,14 +926,14 @@ pub(super) mod tests {
         let receiver = receiver(Mode::Plain, 1, 1);
         let empty = Batch::new(64, 0);
         let mut no_places: [[u8; OUT_LEN]; 0] = [];
-        let empty_done = run(run(receiver.submit_batch(&empty, &mut no_places)));
+        let empty_done = run(run(unsafe { receiver.submit_batch(&empty, no_places.as_mut_ptr()) }));
         receiver.drain();
         empty_done.retire();
         let mut blocks = vec![Block::ZERO; 8];
         crate::test::paint_test_input(Block::bytes_mut(&mut blocks));
         let borrowed = Batch::from_blocks(&blocks, 128);
         let mut places = [[0u8; OUT_LEN]; 4];
-        let borrowed_done = run(run(receiver.submit_batch(&borrowed, &mut places)));
+        let borrowed_done = run(run(unsafe { receiver.submit_batch(&borrowed, places.as_mut_ptr()) }));
         for (i, place) in places.iter().enumerate() {
             assert_eq!(place, &expected(Mode::Plain, &Block::bytes(&blocks)[i * 128..][..128]), "message {i}");
         }
@@ -1031,7 +1028,7 @@ mod sketch {
                 }
             };
             if ended {
-                let finished = run(message.end());
+                let finished = run(message.end(0));
                 let hash = *finished.hash();
                 receiver.drain();
                 finished.retire();
@@ -1080,13 +1077,13 @@ mod ring_bound {
         let mut places = vec![[0u8; OUT_LEN]; messages - 1];
         let mut done = Vec::new();
         for (batch, place) in batches.iter().zip(places.iter_mut()) {
-            done.push(tests::run(receiver.submit_batch(batch, core::slice::from_mut(place))));
+            done.push(tests::run(unsafe { receiver.submit_batch(batch, place) }));
         }
         gate.release.wait();
         for completion in done {
             tests::run(completion).retire();
         }
-        let finished = tests::run(held.end());
+        let finished = tests::run(held.end(0));
         receiver.drain();
         finished.retire();
         receiver.close();

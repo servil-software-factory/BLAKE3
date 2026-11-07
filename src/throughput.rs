@@ -83,7 +83,7 @@ pub use crate::stream::{Stream, stream};
 ///         input.commit(n);
 ///         rest = &rest[n..];
 ///     }
-///     message.end();
+///     message.end(0);
 /// }
 /// stream.finish();
 /// for (bytes, hash) in messages.iter().zip(hashes.borrow().iter()) {
