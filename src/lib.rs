@@ -813,6 +813,9 @@ fn lane_widths(platform: Platform) -> &'static [usize] {
                 &[4, 8, 16]
             }
         }
+        // The platforms with no many-lane widths here (AArch64's); on
+        // x86-64 with every kernel built, the arms above cover them all.
+        #[allow(unreachable_patterns)]
         _ => &[],
     }
 }
