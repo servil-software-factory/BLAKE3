@@ -92,11 +92,10 @@ let nodes = Batch::from_blocks(blocks, 64); // Complete 64-byte messages.
 The stream also accepts ready work in its prepared representation. The proposed async form waits for admission, then returns without waiting for hashing:
 
 ```rust
-stream.submit(blocks, logical_message_bytes, &mut place, tag).await;
-stream.submit_batch(&batch, &mut batch_places, batch_tag).await;
+stream.submit_batch(batch, &mut batch_places, batch_tag).await;
 ```
 
-Here `batch_places` is a slice of `Hash`, one per batch message. A producer can choose bounded groups independently of the million-message direct-call example. A whole batch retains its compact layout and group completion. The handler receives its output slice together, as the current stream does. A single message returns a slice of one.
+Here `batch` goes in by value (owned, or borrowing the producer's blocks) and `batch_places` is the producer's `&mut [[u8; 32]]`, one place per batch message. Both come back in the batch's completion, `Event::Batch { tag, batch, places }`, the producer's again to refill and submit (Sam's audit: a borrow for the stream's life would have locked them). A producer can choose bounded groups independently of the million-message direct-call example. A whole batch retains its compact layout and group completion.
 
 The exact accounting of batch admission against stream limits remains provisional. Preserving the efficient batch representation is a requirement. Input ownership and output lifetimes are part of the review below.
 
@@ -106,11 +105,10 @@ The exact accounting of batch admission against stream limits remains provisiona
 let mut hasher = convenience::Hasher::new(Mode::Plain, None);
 hasher.update(first_piece);
 hasher.update(second_piece);
-let digest = hasher.finalize();
-hasher.reset(Some(likely_next_message_bytes));
+let digest = hasher.finalize(); // takes the Hasher: a new one for the next message
 ```
 
-The optional hint estimates the whole message's length. Actual bytes determine the digest. `update` returns with its input incorporated. The caller can immediately reuse that input. `finalize` returns the digest synchronously. There is no parallel-update or background-submit variant here.
+The optional hint estimates the whole message's length. Actual bytes determine the digest. `update` returns with its input incorporated. The caller can immediately reuse that input. `finalize` consumes the Hasher and returns the digest synchronously, the state finished in place with no copy; a digest of a prefix with hashing going on after it is `hasher.clone().finalize()`, the copy paid where it shows. There is no parallel-update or background-submit variant here.
 
 One-shot hashing, keyed hashing, key derivation and extended output remain convenience operations. `Mode::Plain` means ordinary BLAKE3. A keyed or key-derivation mode uses the same incremental interface.
 
@@ -137,19 +135,19 @@ let mut message = stream.message(7u64, None).await;
 let read_result = loop {
     let mut input = message.input().await;
     let ended = match reader.read_fragment(input.bytes_mut()).await {
-        Ok((written, ended)) => {
-            input.commit(written);
-            ended
+        Ok((written, false)) => input.commit(written),
+        Ok((written, true)) => {
+            // The read learned the bytes and the end together: the last
+            // part goes to a worker tagged last, at once.
+            drop(input);
+            message.end(written);
+            break Ok(());
         }
         Err(error) => {
             // The borrow ends here; abort returns the room.
             message.abort();
             break Err(error);
         }
-    };
-    if ended {
-        message.end();
-        break Ok(());
     }
 };
 
@@ -161,11 +159,11 @@ The tag is caller data, returned unchanged with its completion. An incremental m
 
 `message.input().await` grants writable library-owned storage **and its submission capacity**. Available capacity completes immediately. Otherwise the operation registers once and the application handles other events. Space belongs to that request before its waker is notified.
 
-`input.commit(written)` consumes the writable guard. It records the written bytes, submits complete prepared portions and preserves a partial portion for the next callback. It returns without waiting for hashing. A zero-byte commit records no bytes. `end` alone declares the message complete. The `Input` guard owns nothing: dropped unused, its room stays with the message for the next callback.
+`input.commit(written)` consumes the writable guard. It records the written bytes, submits complete prepared portions and preserves a partial portion for the next callback. It returns without waiting for hashing. A zero-byte commit records no bytes. `end(written)` records the message's last `written` bytes (at the start of the current room's free part) and declares it complete, so that part reaches a worker tagged last; `end(0)` serves a read that meets the end on its own. The `Input` guard owns nothing: dropped unused, its room stays with the message for the next callback.
 
 `Input::bytes_mut` is a controlled writer into library-owned storage, not a hashing call accepting arbitrary byte slices. Its preparation helpers establish alignment, whole-unit boundaries and the final zero tail. Workers receive immutable prepared input. They hash it in place. A filesystem read or socket receive can fill that storage directly, with no intermediate input buffer.
 
-`message.end()` consumes the write handle and seals its final portion. `abort()` also consumes the handle, produces no digest and returns storage when active jobs release it. `finish().await` consumes the stream and requires all messages ended or aborted. It waits for accepted work and invokes remaining completion handlers on the caller's thread.
+`message.end(n)` consumes the write handle and seals its final portion. `abort()` also consumes the handle, produces no digest and returns storage when active jobs release it. `finish().await` consumes the stream and requires all messages ended or aborted. It waits for accepted work and invokes remaining completion handlers on the caller's thread.
 
 ### Crash-only lifecycle
 
@@ -183,8 +181,8 @@ let mut b = stream.message(2u64, Some(3)).await;
 
 let mut input = b.input().await;
 input.bytes_mut()[..3].copy_from_slice(b"abc");
-input.commit(3);
-b.end();
+drop(input);
+b.end(3);
 
 stream.ready().await;
 stream.collect(); // Can deliver message 2 while message 1 is unfinished.
@@ -202,17 +200,16 @@ These are Rust-style operation signatures. Private fields, exact lifetime parame
 ```text
 // Existing direct prepared-input calls remain as listed above.
 Stream::new(mode, limits, on_completion) -> Stream
-Stream::submit(&self, blocks: &[Block], len, output_place, tag)
-    -> Future<Output = ()>             // Admission, not hash completion.
-Stream::submit_batch(&self, batch: &Batch, output_places, tag)
-    -> Future<Output = ()>             // Preserves the batch representation.
+Stream::submit_batch(&self, batch: Batch, places: &mut [[u8; 32]], tag)
+    -> Future<Output = ()>             // Admission, not hash completion; both
+                                       // come back in Event::Batch.
 Stream::message(&self, tag, length_hint)
     -> Future<Output = Message>      // Its digest arrives with its completion.
 
 Message::input(&mut self) -> Future<Output = Input>
 Input::bytes_mut(&mut self) -> &mut [u8]
 Input::commit(self, written: usize)
-Message::end(self)
+Message::end(self, written: usize)
 Message::abort(self)
 
 Stream::ready(&self) -> Future<Output = ()>
@@ -226,7 +223,7 @@ The futures use Rust's standard polling/waker interface. BLAKE3-Servil chooses n
 
 The current `Stream::submit_reader`, `submit_with` and `submit_batch_with` already read or generate directly into library-owned storage. Direct-fill message and batch adapters stay in the design. The new capability is preserving one unfinished message across separate producer turns, with capacity waiting supplied by the library.
 
-The existing grouped incremental Hasher operations (`update_each`, `update_each_multithreaded`, `finalize_each`) also need an explicit migration path. Their final replacement in the per-message pipeline remains unsettled. The ready-bulk table above stays independently of that migration.
+The grouped incremental Hasher operations (`update_each`, `update_each_multithreaded`, `finalize_each`) already have this split's shape, throughput functions over convenience Hashers, and stay as they are; `finalize_each` finishes and resets the ended hashers.
 
 The public C API is convenience-only in this proposal. Prepared bulk inputs, the background pipeline and library-managed multithreading remain Rust interfaces.
 
