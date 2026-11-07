@@ -208,6 +208,20 @@ impl<const N: usize> Packed<N> {
 }
 
 #[cfg(feature = "std")]
+impl Packed<32> {
+    /// Its digests two by two as 64-byte blocks: a Merkle layer's parents,
+    /// each the pair of its children's digests, borrowed as a
+    /// [`Batch`] with [`Batch::from_blocks`]`(.., 64)`. Requires an even
+    /// count (a layer of an odd count pads or carries its last digest).
+    pub fn as_blocks(&self) -> &[Block] {
+        assert!(self.count % 2 == 0, "pairs of digests: an even count, not {}", self.count);
+        // Sound: count * 32 bytes on a 128-byte boundary, read as count / 2
+        // blocks of 64 on a 64-byte boundary.
+        unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count / 2) }
+    }
+}
+
+#[cfg(feature = "std")]
 impl<const N: usize> core::ops::Deref for Packed<N> {
     type Target = [[u8; N]];
     #[inline]
@@ -514,8 +528,7 @@ mod packed_test {
         // next Packed layer.
         let mut digests = Packed::<32>::new(1000);
         hash_many(Mode::Plain, &leaves, &mut digests);
-        let mut parents = Batch::new(64, 500);
-        parents.digests_mut().copy_from_slice(&digests);
+        let parents = Batch::from_blocks(digests.as_blocks(), 64);
         let mut next = Packed::<32>::new(500);
         hash_many(Mode::Plain, &parents, &mut next);
         for i in 0..500 {
