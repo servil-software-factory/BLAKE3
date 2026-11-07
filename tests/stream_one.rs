@@ -76,14 +76,14 @@ fn a_stream_on_one_thread_hands_everything_back() {
 fn a_long_message_in_pieces_on_one_thread() {
     pool_of_one();
     let message = input(3 * 1024 * 1024 + 17, 7);
-    let mut hasher = throughput::Hasher::new(Mode::Plain);
+    let mut hasher = convenience::Hasher::new(Mode::Plain, Some(message.len() as u64));
     let mut at = 0;
     for len in [1448usize, 4096, 16 * 1024, 64 * 1024].into_iter().cycle() {
         if at == message.len() {
             break;
         }
         let end = (at + len).min(message.len());
-        hasher.update_multithreaded(&message[at..end]);
+        throughput::update_multithreaded(&mut hasher, &message[at..end]);
         at = end;
     }
     assert_eq!(hasher.finalize(), convenience::hash(&message));
