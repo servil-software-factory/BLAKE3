@@ -31,21 +31,33 @@ pub(crate) fn slot_len(len: usize) -> usize {
     len.next_multiple_of(BLOCK_LEN).max(BLOCK_LEN)
 }
 
-/// hash_many's contract on its input: `count` slots of whole blocks for
+/// hash_many's contract on its input: `count` slots of `slot` bytes for
 /// messages of `len` bytes (checked in every build: the kernels read
 /// them), each slot's bytes past its message zero (checked in debug
-/// builds: a Batch keeps them so).
+/// builds: a Batch keeps them so). A slot is whole blocks ([`slot_len`]),
+/// or the message itself, packed ([`packed`]).
 #[inline]
-pub(crate) fn assert_slots(input: &[u8], len: usize, count: usize) {
-    let slot = slot_len(len);
+pub(crate) fn assert_slots(input: &[u8], len: usize, slot: usize, count: usize) {
+    debug_assert!(slot == slot_len(len) || packed(len, slot), "a slot is whole blocks or a packed message");
     // In every build: the kernels read `slot * count` bytes from `input`,
     // so a wrong length would be read past its end (AGENTS: a check of a
     // mistake that would mismanage memory, at the cost of a comparison).
-    assert_eq!(Some(input.len()), slot.checked_mul(count), "input holds one slot of whole blocks per output");
+    assert_eq!(Some(input.len()), slot.checked_mul(count), "input holds one slot per output");
     // Every caller's slots come from a Batch (throughput's calls, the
     // stream's batches) or from the crate's own buffers, which keep them
     // zero past each message (BLAKE3 #205): checked in debug builds.
-    debug_assert!(len % BLOCK_LEN == 0 || input.chunks_exact(slot).all(|s| s[len..].iter().all(|&b| b == 0)), "every slot's bytes past its message are zero");
+    debug_assert!(
+        len % BLOCK_LEN == 0 || slot == len || input.chunks_exact(slot).all(|s| s[len..].iter().all(|&b| b == 0)),
+        "every slot's bytes past its message are zero"
+    );
+}
+
+/// Whether messages of `len` bytes at a stride of `slot` are packed: the
+/// stride is the message, a divisor of a block (16 or 32 bytes), so the
+/// block's remaining bytes are not in memory ([`Packed`](crate::throughput::Packed)).
+#[inline]
+pub(crate) fn packed(len: usize, slot: usize) -> bool {
+    slot == len && len < BLOCK_LEN
 }
 
 /// `outputs[i] = hash(input[i * slot..][..len])` for every message, with
@@ -55,19 +67,21 @@ pub(crate) fn assert_slots(input: &[u8], len: usize, count: usize) {
 /// through the one-message path. Requires `input.len() == slot *
 /// outputs.len()` and every slot's bytes past `len` zero (a Batch's, or
 /// the crate's own).
-pub(crate) fn hash_many_on(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
+pub(crate) fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     // One-block messages first, on the path they took before slots (a
     // shared entry cost 64 B x 3 7% in the regression check).
     if len == BLOCK_LEN && outputs.len() >= 2 {
         crate::ran(crate::Ran::BlockRun);
-        assert_slots(input, len, outputs.len());
+        assert_slots(input, len, slot, outputs.len());
         for (messages, digests) in input.chunks(BLOCK_LEN * TABLE).zip(outputs.chunks_mut(TABLE)) {
             hash_run::<{ BLOCK_LEN }>(messages, key, flags, digests, platform);
         }
         return;
     }
-    let slot = slot_len(len);
-    assert_slots(input, len, outputs.len());
+    assert_slots(input, len, slot, outputs.len());
+    if packed(len, slot) {
+        return hash_packed(input, len, key, flags, outputs, platform);
+    }
     // Empty messages: the NEON plans take a last block of 1 to 64 bytes
     // (hash_many_in's contract), so without this arm a batch of them stops
     // there (#251: CI's Cortex-A72, and every NEON machine since the pair
@@ -118,6 +132,26 @@ pub(crate) fn hash_many_on(input: &[u8], len: usize, key: &CVWords, flags: u8, o
             16 => hash_blocks::<{ 16 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
             _ => unreachable!("messages of up to a chunk"),
         }
+    }
+}
+
+/// Packed messages (`len` bytes each, at a stride of `len`): sixteen at a
+/// time expanded into blocks on the stack, each message at the start of
+/// its block and the block's rest zero, then the one-block path for
+/// messages of 1 to 63 bytes. The expansion copies `len` bytes a message
+/// within L1; a kernel that reads the packed form itself (its padding
+/// words constants, never in memory) is the next step once the Merkle
+/// cells show what this copy costs (Zooko, November 7, 2026).
+#[inline(never)]
+fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
+    let plans = neon_plans();
+    let mut blocks = [crate::block::Block::ZERO; TABLE];
+    for (messages, digests) in input.chunks(len * TABLE).zip(outputs.chunks_mut(TABLE)) {
+        let bytes = crate::block::Block::bytes_mut(&mut blocks);
+        for (i, message) in messages.chunks_exact(len).enumerate() {
+            bytes[i * BLOCK_LEN..][..len].copy_from_slice(message);
+        }
+        hash_run_short::<{ BLOCK_LEN }>(&bytes[..digests.len() * BLOCK_LEN], key, flags, digests, platform, plans, len);
     }
 }
 
@@ -814,29 +848,29 @@ mod test {
         let has = |ran: u32, kind: Ran| ran & kind as u32 != 0;
         let mut out = vec![[0u8; OUT_LEN]; 16];
         let blocks = messages(BLOCK_LEN, 2);
-        let r = ran(&mut || hash_many_on(&blocks[..BLOCK_LEN], BLOCK_LEN, IV, 0, &mut out[..1], avx2));
+        let r = ran(&mut || hash_many_on(&blocks[..BLOCK_LEN], BLOCK_LEN, BLOCK_LEN, IV, 0, &mut out[..1], avx2));
         assert!(!has(r, Ran::BlockRun), "one block alone: the general way");
-        let r = ran(&mut || hash_many_on(&blocks, BLOCK_LEN, IV, 0, &mut out[..2], avx2));
+        let r = ran(&mut || hash_many_on(&blocks, BLOCK_LEN, BLOCK_LEN, IV, 0, &mut out[..2], avx2));
         assert!(has(r, Ran::BlockRun), "two blocks: the table");
         // Up to a chunk, two messages or more: the short runs; one alone,
         // or longer than a chunk, the one-message way.
         for len in [65, 500, CHUNK_LEN] {
             let two = messages(len, 2);
-            let r = ran(&mut || hash_many_on(&two[..slot_len(len)], len, IV, 0, &mut out[..1], avx2));
+            let r = ran(&mut || hash_many_on(&two[..slot_len(len)], len, slot_len(len), IV, 0, &mut out[..1], avx2));
             assert!(has(r, Ran::MessageAlone) && !has(r, Ran::ShortRun), "{len} B alone: one message");
-            let r = ran(&mut || hash_many_on(&two, len, IV, 0, &mut out[..2], avx2));
+            let r = ran(&mut || hash_many_on(&two, len, slot_len(len), IV, 0, &mut out[..2], avx2));
             assert!(has(r, Ran::ShortRun) && !has(r, Ran::MessageAlone), "two of {len} B: a short run");
         }
         let two = messages(CHUNK_LEN + 1, 2);
-        let r = ran(&mut || hash_many_on(&two, CHUNK_LEN + 1, IV, 0, &mut out[..2], avx2));
+        let r = ran(&mut || hash_many_on(&two, CHUNK_LEN + 1, slot_len(CHUNK_LEN + 1), IV, 0, &mut out[..2], avx2));
         assert!(!has(r, Ran::ShortRun), "two of a chunk and a byte: past the short runs");
         // Three whole chunks: across from eight messages on AVX2.
         let len = 3 * CHUNK_LEN;
         assert_eq!(across_from(len, avx2), Some(8));
         let eight = messages(len, 8);
-        let r = ran(&mut || hash_many_on(&eight[..7 * slot_len(len)], len, IV, 0, &mut out[..7], avx2));
+        let r = ran(&mut || hash_many_on(&eight[..7 * slot_len(len)], len, slot_len(len), IV, 0, &mut out[..7], avx2));
         assert!(has(r, Ran::MessageAlone) && !has(r, Ran::Across), "seven: one at a time");
-        let r = ran(&mut || hash_many_on(&eight, len, IV, 0, &mut out[..8], avx2));
+        let r = ran(&mut || hash_many_on(&eight, len, slot_len(len), IV, 0, &mut out[..8], avx2));
         assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "eight: across");
         for (i, o) in out[..8].iter().enumerate() {
             assert_eq!(*o, *crate::convenience::hash(message(&eight, len, i)).as_bytes());
@@ -948,7 +982,7 @@ mod test {
                     for ((key_words, flags), want) in modes.iter().zip(&wants) {
                         for &platform in &platforms {
                             let mut out = vec![[0xAA; OUT_LEN]; count + 1];
-                            hash_many_on(input, len, key_words, *flags, &mut out[..count], platform);
+                            hash_many_on(input, len, slot_len(len), key_words, *flags, &mut out[..count], platform);
                             assert_eq!(&out[..count], want, "{platform:?}, {count} x {len}, offset {offset}, flags {flags}");
                             assert_eq!(out[count], [0xAA; OUT_LEN]);
                         }
@@ -1137,7 +1171,7 @@ mod test {
                     let want: Vec<[u8; OUT_LEN]> = (0..count).map(|i| one(message(&input, len, i))).collect();
                     for &platform in &platforms {
                         let mut out = vec![[0u8; OUT_LEN]; count];
-                        hash_many_on(&input, len, key_words, *flags, &mut out, platform);
+                        hash_many_on(&input, len, slot_len(len), key_words, *flags, &mut out, platform);
                         assert_eq!(out, want, "{platform:?}, flags {flags}, {count} x {len} B");
                     }
                 }
@@ -1177,14 +1211,14 @@ mod test {
     /// stands before the kernels, which would read a short input past its
     /// end.
     #[test]
-    #[should_panic(expected = "input holds one slot of whole blocks per output")]
+    #[should_panic(expected = "input holds one slot per output")]
     fn test_a_short_input_is_refused_before_the_kernels() {
         crate::initialize();
-        hash_many_on(&[0u8; 64], 64, crate::IV, 0, &mut [[0u8; OUT_LEN]; 2], crate::platform::Platform::detect());
+        hash_many_on(&[0u8; 64], 64, 64, crate::IV, 0, &mut [[0u8; OUT_LEN]; 2], crate::platform::Platform::detect());
     }
 
     #[test]
-    #[should_panic(expected = "input holds one slot of whole blocks per output")]
+    #[should_panic(expected = "input holds one slot per output")]
     fn test_hash_many_needs_the_input_it_names() {
         crate::throughput::hash_many(
             crate::Mode::Plain,
