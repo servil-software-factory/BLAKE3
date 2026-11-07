@@ -1276,6 +1276,9 @@ pub(crate) mod sources {
         })
     }
 
+    /// EXPERIMENT: a wake is worth it from this many waiting items.
+    const EXPERIMENT_WORTH: usize = 16;
+
     /// Hash `item` of `source` on this thread, waking the next worker first
     /// when more items wait than workers are awake to take them (the
     /// chain). Waking at two waiting items, whoever was awake, woke the
@@ -1287,7 +1290,8 @@ pub(crate) mod sources {
     fn serve(source: &'static Source, item: Item) {
         let pool = pool();
         let waiting = source.waiting();
-        if waiting >= 2 && waiting > pool.workers() - pool.park.parked_count() {
+        let awake = pool.workers() - pool.park.parked_count();
+        if waiting >= 2 && waiting > awake && waiting >= EXPERIMENT_WORTH {
             noted(Noted::WakeTry);
             pool.park.wake_one();
         }
