@@ -826,7 +826,12 @@ impl Pool {
             if sources::run_one() {
                 continue;
             }
-            if sources::open() && spin_for_work() {
+            // Spin for more only while few are awake to take it: with two
+            // others awake, this one parks at once, and the chain wakes it
+            // again when the waiting items outnumber the awake workers. A
+            // trickle of small tasks otherwise kept every worker it had
+            // once woken awake, spinning between tasks (BLAKE3 #272).
+            if sources::open() && self.workers() - self.park.parked_count() <= 3 && spin_for_work() {
                 continue;
             }
             // Park unless work shows (crate::park's handshake); woken, pay
