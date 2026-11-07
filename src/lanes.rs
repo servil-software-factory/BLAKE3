@@ -1272,11 +1272,19 @@ pub(crate) mod sources {
     }
 
     /// Hash `item` of `source` on this thread, waking the next worker first
-    /// when two or more wait and one is parked.
+    /// when more items wait than workers are awake to take them (the
+    /// chain). Waking at two waiting items, whoever was awake, woke the
+    /// whole pool for a trickle of small tasks: each woken worker found
+    /// the queue drained, spun 5 us and parked, and the one producer
+    /// feeding them slowed by a third (the pipeline's receive cell, 0.146
+    /// ns/B on 16 threads against 0.098 on 4; BLAKE3 #272, November 7,
+    /// 2026). An awake worker takes the next item when its own is done.
     fn serve(source: &'static Source, item: Item) {
-        if source.waiting() >= 2 {
+        let pool = pool();
+        let waiting = source.waiting();
+        if waiting >= 2 && waiting > pool.workers() - pool.park.parked_count() {
             noted(Noted::WakeTry);
-            pool().park.wake_one();
+            pool.park.wake_one();
         }
         match item {
             Item::Task(task) => task.run(pool_platform()),
