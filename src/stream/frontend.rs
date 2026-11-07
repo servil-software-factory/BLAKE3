@@ -1,8 +1,9 @@
-//! The sketch's `Stream` over the receiver: messages and batches submitted
-//! by one producer, completions delivered to its handler on its own thread
-//! from `collect` and `finish`, and `ready` to wait for any of them.
-//! Test-only until it replaces the submission frontend in stream.rs.
+//! The pipeline over the receiver: messages and batches submitted by one
+//! producer, completions delivered to its handler on its own thread from
+//! `collect` and `finish`, and `ready` to wait for any of them. Public as
+//! [`crate::throughput::pipeline`].
 
+pub use super::receiver::Input;
 use super::receiver::{self, BatchCompletion, Completion, Receiver};
 use crate::{Hash, Mode, OUT_LEN, throughput::Batch};
 use core::cell::RefCell;
@@ -11,21 +12,36 @@ use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 use std::sync::{Arc, Mutex};
 
-pub(super) struct Limits {
-    pub(super) buffers: usize,
-    pub(super) messages: usize,
+/// What a pipeline holds at most, and so its memory: `buffers` input rooms
+/// of 16 KiB each (one holds a message's bytes from `input` until a worker
+/// has hashed them) and `messages` begun and not yet collected. A request
+/// beyond either waits, in the order asked, until a completion is
+/// collected or a worker frees a room.
+pub struct Limits {
+    /// Input rooms of 16 KiB: the bytes in flight.
+    pub buffers: usize,
+    /// Messages begun and not yet collected.
+    pub messages: usize,
 }
 
-pub(super) enum Event<T> {
+/// A completion, delivered to the pipeline's handler with the tag its work
+/// was given.
+pub enum Event<T> {
+    /// The message ended; its digest.
     Hashed {
+        /// The message's tag.
         tag: T,
+        /// Its digest.
         hash: Hash,
     },
+    /// The message was aborted: no digest.
     Aborted {
+        /// The message's tag.
         tag: T,
     },
     /// Every digest of the batch is in its places.
     Batch {
+        /// The batch's tag.
         tag: T,
     },
 }
@@ -60,7 +76,19 @@ impl std::task::Wake for NotifyWake {
     }
 }
 
-pub(super) struct Stream<'a, T, F: FnMut(Event<T>)> {
+/// One producer's messages and batches, hashed by the pool's workers (and
+/// the GPU where it is efficient) while the producer goes on; completions
+/// reach its handler on the producer's own thread, from [`collect`],
+/// [`finish`], and a wait for admission.
+///
+/// Crash-only: a [`Message`] is ended or aborted, never dropped; a
+/// pipeline is finished, never dropped, once it has accepted work. A
+/// pending `message` or `submit_batch` future holds nothing and drops as
+/// any future does.
+///
+/// [`collect`]: Stream::collect
+/// [`finish`]: Stream::finish
+pub struct Stream<'a, T, F: FnMut(Event<T>)> {
     receiver: Receiver,
     on_completion: RefCell<F>,
     pending: RefCell<Vec<Pending<'a, T>>>,
@@ -68,14 +96,18 @@ pub(super) struct Stream<'a, T, F: FnMut(Event<T>)> {
     completion_waker: Waker,
 }
 
-pub(super) struct Message<'s, 'a, T, F: FnMut(Event<T>)> {
+/// A message begun on a pipeline: fed through [`input`](Message::input),
+/// then [`end`](Message::end)ed or [`abort`](Message::abort)ed.
+pub struct Message<'s, 'a, T, F: FnMut(Event<T>)> {
     stream: &'s Stream<'a, T, F>,
     pub(super) inner: receiver::Message,
     tag: T,
 }
 
 impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
-    pub(super) fn new(mode: Mode<'_>, limits: Limits, on_completion: F) -> Self {
+    /// A pipeline hashing in `mode`, within `limits`, delivering each
+    /// completion to `on_completion`.
+    pub fn new(mode: Mode<'_>, limits: Limits, on_completion: F) -> Self {
         let notify = Arc::new(Mutex::new(Notify::default()));
         Self {
             receiver: Receiver::new(mode, limits.buffers, limits.messages),
@@ -86,16 +118,18 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
         }
     }
 
-    /// Begin a message once a message slot is reserved. While it waits, it
-    /// delivers completions that are ready (a slot returns through them), as
-    /// a stream's submission hands places back while it waits for room.
-    pub(super) async fn message(&self, tag: T, length_hint: Option<u64>) -> Message<'_, 'a, T, F> {
+    /// Begin a message once a message slot is reserved, delivering
+    /// completions that are ready while it waits (a slot returns through
+    /// them). `length_hint`, where the producer knows the message's
+    /// length, helps scheduling and never affects the digest.
+    pub async fn message(&self, tag: T, length_hint: Option<u64>) -> Message<'_, 'a, T, F> {
         Message { stream: self, inner: self.admit(self.receiver.message(length_hint)).await, tag }
     }
 
     /// Submit a prepared batch once admitted (delivering completions as
-    /// `message` does while it waits); its digests land in `places`.
-    pub(super) async fn submit_batch(&self, batch: &'a Batch<'a>, places: &'a mut [[u8; OUT_LEN]], tag: T) {
+    /// `message` does while it waits); its digests land in `places`, one
+    /// per message of the batch, when its [`Event::Batch`] is delivered.
+    pub async fn submit_batch(&self, batch: &'a Batch<'a>, places: &'a mut [[u8; OUT_LEN]], tag: T) {
         let completion = self.admit(self.receiver.submit_batch(batch, places)).await;
         self.push(Pending::Batch(tag, Box::pin(completion)));
     }
@@ -125,7 +159,7 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
     }
 
     /// Deliver every completion that is ready, without waiting: how many.
-    pub(super) fn collect(&self) -> usize {
+    pub fn collect(&self) -> usize {
         let mut delivered = 0;
         let mut i = 0;
         loop {
@@ -181,8 +215,8 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
         }
     }
 
-    /// Wait until some completion may be ready (then `collect`).
-    pub(super) async fn ready(&self) {
+    /// Wait until some completion may be ready (then [`collect`](Stream::collect)).
+    pub async fn ready(&self) {
         core::future::poll_fn(|cx| {
             let mut notify = self.notify.lock().unwrap();
             if core::mem::take(&mut notify.flagged) {
@@ -194,9 +228,9 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
         .await
     }
 
-    /// Wait for every accepted piece of work, deliver the rest, and close.
-    /// Every message has been ended or aborted.
-    pub(super) fn finish(self) {
+    /// Wait for every accepted piece of work, deliver every completion, and
+    /// close. Every message has been ended or aborted.
+    pub fn finish(self) {
         self.receiver.drain();
         while !self.pending.borrow().is_empty() {
             assert!(self.collect() > 0, "after the drain, every pending completion is ready");
@@ -206,13 +240,17 @@ impl<'a, T: Copy, F: FnMut(Event<T>)> Stream<'a, T, F> {
 }
 
 impl<'a, T: Copy, F: FnMut(Event<T>)> Message<'_, 'a, T, F> {
-    pub(super) async fn input(&mut self) -> receiver::Input<'_> {
+    /// Room for the message's next bytes, once a buffer is reserved: write
+    /// into [`Input::bytes_mut`], then [`Input::commit`] how many.
+    pub async fn input(&mut self) -> Input<'_> {
         self.inner.input().await
     }
-    pub(super) fn end(self) {
+    /// The message is complete: its digest comes as [`Event::Hashed`].
+    pub fn end(self) {
         self.stream.push(Pending::Message(self.tag, Box::pin(self.inner.end())));
     }
-    pub(super) fn abort(self) {
+    /// Give the message up: no digest, [`Event::Aborted`] instead.
+    pub fn abort(self) {
         self.stream.push(Pending::Message(self.tag, Box::pin(self.inner.abort())));
     }
 }

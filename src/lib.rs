@@ -80,6 +80,7 @@
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::update_each`] |
 //! | A stream of messages read, made, or arriving | [`throughput::stream`] |
+//! | Messages arriving in pieces, under a memory budget | [`throughput::pipeline`] (evolving) |
 //!
 //! Each call returns once its hash is done, and uses other CPU cores
 //! where that is faster (the forms without `multithreaded` stay on the
@@ -263,11 +264,9 @@ mod finish_sync {
     pub use std::thread;
 }
 #[cfg(feature = "std")]
-mod finish;
-// Reservation ownership is being vetted against real workers before the
-// incremental stream exposes it. The released paths retain their layout.
-#[cfg(all(test, feature = "std"))]
 mod admission;
+#[cfg(feature = "std")]
+mod finish;
 /// The primitives src/park.rs runs on: the standard library's here, and
 /// Shuttle's in tests/shuttle_park.rs, which compiles that file beside its
 /// own `park_sync`.

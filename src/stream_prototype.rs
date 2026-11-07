@@ -1,13 +1,7 @@
-//! Incremental stream prototypes on the existing task source, worker pool
-//! and kernels. This page stays test-only until the new frontend owns the
-//! complete lifecycle. It supplies no alternative production worker engine.
+//! Tests of the pipeline's worker handoff on the existing task source,
+//! worker pool and kernels.
 
 use super::*;
-
-#[path = "stream/frontend.rs"]
-mod frontend;
-#[path = "stream/receiver.rs"]
-mod receiver;
 
 struct ProducerWake(std::thread::Thread);
 impl std::task::Wake for ProducerWake {

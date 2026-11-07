@@ -1125,9 +1125,8 @@ pub(crate) mod sources {
             self.finish.finished(n);
         }
 
-        /// The prototype's scope boundary: all published actions finish
-        /// before their producer's borrowed contexts go away.
-        #[cfg(test)]
+        /// Wait for every published action to finish: the pipeline's scope
+        /// boundary, before its producer's borrowed contexts go away.
         pub(crate) fn drain_actions(&self) {
             self.finish.own();
             self.finish.wait(self.finish.published.load(Ordering::SeqCst), || false);
@@ -1434,7 +1433,8 @@ pub(crate) const TASK_LEN: usize = 64 * CHUNK_LEN;
 pub(crate) struct Task {
     // Prototype action owns its input lease and completes its handoff. It
     // runs on this same source/pool; no second worker engine is introduced.
-    #[cfg(test)]
+    /// A task the pipeline hands to a worker in place of a piece to hash:
+    /// the worker calls it once (the receiver's parts and batches).
     pub(crate) action: Option<(unsafe fn(*mut (), Platform), *mut ())>,
     pub(crate) input: *const u8,
     pub(crate) len: usize,
@@ -1475,7 +1475,6 @@ impl Task {
     /// destinations still to fill in.
     pub(crate) fn of(input: &[u8], counter: u64) -> Task {
         Task {
-            #[cfg(test)]
             action: None,
             input: input.as_ptr(),
             len: input.len(),
@@ -1501,7 +1500,6 @@ impl Task {
     /// values; for any other, its chaining value (first 32 bytes). Then
     /// count down.
     pub(crate) fn run(self, platform: Platform) {
-        #[cfg(test)]
         if let Some((run, context)) = self.action {
             // Sound: the producer holds the action's context through the
             // source's completion barrier, as it holds ordinary task data.

@@ -21,7 +21,9 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::collections::VecDeque;
-use std::sync::{Arc, Barrier, Mutex};
+#[cfg(test)]
+use std::sync::Barrier;
+use std::sync::{Arc, Mutex};
 
 const INPUT_BYTES: usize = STAGE_LEN;
 
@@ -36,16 +38,22 @@ struct Id {
     generation: u64,
 }
 
+/// The tests' controlled schedule for a part: a gate a worker waits at
+/// before it hashes, a barrier it meets after. Empty in a release build.
 #[derive(Default)]
 struct Hooks {
+    #[cfg(test)]
     before: Option<Arc<Gate>>,
+    #[cfg(test)]
     after: Option<Arc<Barrier>>,
 }
 
+#[cfg(test)]
 pub(super) struct Gate {
     pub(super) started: Barrier,
     pub(super) release: Barrier,
 }
+#[cfg(test)]
 impl Gate {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self { started: Barrier::new(2), release: Barrier::new(2) })
@@ -61,6 +69,7 @@ struct Job {
     counter: u64,
     len: usize,
     last: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
     hooks: Hooks,
 }
 
@@ -294,16 +303,19 @@ pub(super) struct Message {
 /// A borrow of the message's current room: it owns nothing, so it may be
 /// dropped like any borrow. The room stays with its message until the
 /// next `input`, `end` or `abort`.
-pub(super) struct Input<'a> {
+pub struct Input<'a> {
     message: &'a mut Message,
 }
 impl Input<'_> {
-    pub(super) fn bytes_mut(&mut self) -> &mut [u8] {
+    /// The room's free bytes, to write the message's next bytes into from
+    /// the start; at least one.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
         let message = &mut *self.message;
         &mut Block::bytes_mut(&mut message.current.as_mut().unwrap().blocks)[message.used..]
     }
-    /// written is the number of bytes the producer wrote at the room's start.
-    pub(super) fn commit(self, written: usize) {
+    /// The producer wrote `written` bytes at the room's start (at most
+    /// `bytes_mut().len()`): they are the message's next bytes.
+    pub fn commit(self, written: usize) {
         let message = &mut *self.message;
         assert!(written <= INPUT_BYTES - message.used, "the write fits its granted room");
         message.used += written;
@@ -322,9 +334,11 @@ impl Message {
     }
 
     /// The next submitted part uses these controlled-schedule test hooks.
+    #[cfg(test)]
     pub(super) fn hold_next(&mut self, gate: Arc<Gate>) {
         self.next_hooks.before = Some(gate);
     }
+    #[cfg(test)]
     pub(super) fn observe_next(&mut self, barrier: Arc<Barrier>) {
         self.next_hooks.after = Some(barrier);
     }
@@ -537,6 +551,7 @@ impl Finished {
             Outcome::Pending => unreachable!("a result token is released only once set"),
         }
     }
+    #[cfg(test)]
     pub(super) fn hash(&self) -> &Hash {
         self.outcome().expect("only successful completion yields a digest")
     }
@@ -645,7 +660,9 @@ unsafe fn execute(context: *mut (), platform: Platform) {
     };
     let owner = job.owner.clone();
     let id = job.id;
+    #[cfg(test)]
     let after = job.hooks.after.clone();
+    #[cfg(test)]
     if let Some(gate) = &job.hooks.before {
         gate.started.wait();
         gate.release.wait();
@@ -668,6 +685,7 @@ unsafe fn execute(context: *mut (), platform: Platform) {
     // A different callback can now retire/reuse this slot. Use only the
     // cached owner and id beyond this point, never context or slot again.
     owner.consume(id);
+    #[cfg(test)]
     if let Some(barrier) = after {
         barrier.wait();
     }
@@ -935,7 +953,7 @@ pub(super) mod tests {
     fn unwinding_with_accepted_work_aborts_the_process() {
         if std::env::var_os("RECEIVER_UNWIND").is_none() {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "stream::prototype::receiver::tests::unwinding_with_accepted_work_aborts_the_process", "--nocapture"])
+                .args(["--exact", "stream::receiver::tests::unwinding_with_accepted_work_aborts_the_process", "--nocapture"])
                 .env("RECEIVER_UNWIND", "1")
                 .env("NEXTEST", "1")
                 .output()

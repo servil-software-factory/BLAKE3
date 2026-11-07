@@ -48,6 +48,7 @@ pub(crate) struct Resource<P: Deref<Target = Pool<T>> + Unpin, T> {
     value: Option<T>,
 }
 
+#[cfg(test)]
 pub(crate) type Lease<'a, T> = Resource<&'a Pool<T>, T>;
 pub(crate) type OwnedLease<T> = Resource<Arc<Pool<T>>, T>;
 
@@ -67,6 +68,7 @@ impl<T> Pool<T> {
         Self { state: initialized_mutex(State { free: resources, waiters, next_ticket: 0 }) }
     }
 
+    #[cfg(test)]
     pub(crate) fn acquire(&self) -> Acquire<&Self, T> {
         Acquire { pool: Some(self), ticket: None }
     }

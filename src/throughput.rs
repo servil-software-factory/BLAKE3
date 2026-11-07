@@ -29,6 +29,72 @@ pub use crate::each::{finalize_each, hash_each, hash_each_multithreaded, update_
 #[cfg(feature = "std")]
 pub use crate::stream::{Stream, stream};
 
+/// The incremental background pipeline: messages fed piece by piece as
+/// their bytes arrive, prepared batches, and completions delivered on the
+/// producer's thread, with a fixed memory budget ([`pipeline::Limits`]).
+/// Evolving: bench-hashes measures it against [`Stream`], which it is to
+/// replace; its names may change before 1.0.
+///
+/// Its waits are futures, run by the caller's executor; a program with no
+/// executor polls them on its own thread, parking between polls:
+///
+/// ```
+/// use blake3_servil::throughput::pipeline::{Event, Limits, Stream};
+/// use blake3_servil::{Hash, Mode};
+/// use std::cell::RefCell;
+/// use std::future::Future;
+/// use std::task::{Context, Poll, Wake, Waker};
+///
+/// struct Unpark(std::thread::Thread);
+/// impl Wake for Unpark {
+///     fn wake(self: std::sync::Arc<Self>) {
+///         self.0.unpark();
+///     }
+/// }
+/// fn block_on<F: Future>(future: F) -> F::Output {
+///     let waker = Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+///     let mut cx = Context::from_waker(&waker);
+///     let mut future = std::pin::pin!(future);
+///     loop {
+///         match future.as_mut().poll(&mut cx) {
+///             Poll::Ready(value) => return value,
+///             Poll::Pending => std::thread::park(),
+///         }
+///     }
+/// }
+///
+/// blake3_servil::initialize_multithreaded(None);
+/// let messages: Vec<Vec<u8>> = (0..3).map(|i| vec![i as u8; 100_000 * (i + 1)]).collect();
+/// let hashes: RefCell<Vec<Option<Hash>>> = RefCell::new(vec![None; messages.len()]);
+/// let stream = Stream::new(Mode::Plain, Limits { buffers: 8, messages: 2 }, |event| {
+///     if let Event::Hashed { tag, hash } = event {
+///         hashes.borrow_mut()[tag] = Some(hash);
+///     }
+/// });
+/// for (tag, bytes) in messages.iter().enumerate() {
+///     // A message slot; while none is free, ended messages are delivered.
+///     let mut message = block_on(stream.message(tag, Some(bytes.len() as u64)));
+///     let mut rest = &bytes[..];
+///     while !rest.is_empty() {
+///         // Room for the next bytes, as they arrive (here, from a slice).
+///         let mut input = block_on(message.input());
+///         let n = input.bytes_mut().len().min(rest.len());
+///         input.bytes_mut()[..n].copy_from_slice(&rest[..n]);
+///         input.commit(n);
+///         rest = &rest[n..];
+///     }
+///     message.end();
+/// }
+/// stream.finish();
+/// for (bytes, hash) in messages.iter().zip(hashes.borrow().iter()) {
+///     assert_eq!(hash.unwrap(), blake3_servil::convenience::hash(bytes));
+/// }
+/// ```
+#[cfg(feature = "std")]
+pub mod pipeline {
+    pub use crate::stream::frontend::{Event, Input, Limits, Message, Stream};
+}
+
 use crate::{ContextKey, DERIVE_KEY_CONTEXT, Hash, IV, Mode, OUT_LEN};
 
 /// [`Hasher::update`](crate::convenience::Hasher::update), using other CPU
