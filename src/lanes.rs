@@ -963,6 +963,34 @@ pub(crate) mod sources {
         /// then the SME2 thread first, and with two or more waiting and a
         /// worker parked, a worker.
         pub(crate) fn publish(&self, task: Task) {
+            self.push(task);
+            if self.waiting() >= 2 {
+                noted(Noted::WakeTry);
+                pool().park.wake_one();
+            }
+        }
+
+        /// Publish a part of a steady trickle of them (the pipeline), with
+        /// a wake only when every worker is parked: an awake worker looks
+        /// for work before it parks, and one that takes a task wakes
+        /// another when two wait (`serve`), so the workers wake each other
+        /// and the producer makes no system call while any is awake. A
+        /// wake per part cost the producer a system call per 16 KiB and
+        /// woke workers that found the task taken: the pipeline's receive
+        /// took 0.32 ns/B on a 16-thread pool against 0.11 on a 4-thread
+        /// one (BLAKE3 #272, November 7, 2026).
+        pub(crate) fn publish_part(&self, task: Task) {
+            self.push(task);
+            let pool = pool();
+            if pool.park.parked_count() == pool.workers() {
+                noted(Noted::WakeTry);
+                pool.park.wake_one();
+            }
+        }
+
+        /// Write `task` to the ring and make it visible (the SME2 thread
+        /// woken for it where there is one).
+        fn push(&self, task: Task) {
             let p = self.finish.published.load(Ordering::Relaxed);
             // Every build: a task written over one not yet taken would be
             // run as garbage (memory mismanagement, at the cost of a load
@@ -973,13 +1001,8 @@ pub(crate) mod sources {
             unsafe { (*self.ring[p % self.ring.len()].get()).write(task) };
             self.finish.published.store(p + 1, Ordering::Release);
             core::sync::atomic::fence(Ordering::SeqCst);
-            let pool = pool();
-            if pool.sme2 {
+            if pool().sme2 {
                 wake_sme2();
-            }
-            if self.waiting() >= 2 {
-                noted(Noted::WakeTry);
-                pool.park.wake_one();
             }
         }
 

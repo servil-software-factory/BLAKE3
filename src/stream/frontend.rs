@@ -463,6 +463,80 @@ mod tests {
         inputs.clear();
     }
 
+    /// Diagnostic (#272): which threads hash a long message's parts, and
+    /// how fast the pipeline takes 64 MiB in 16 KiB rooms.
+    #[test]
+    fn parts_of_a_long_message_spread_over_the_workers() {
+        // The whole machine's pool (the other tests' three threads hide
+        // the cost of idle workers).
+        crate::initialize_multithreaded(None);
+        let events = RefCell::new(Vec::new());
+        let stream = Stream::new(Mode::Plain, Limits { buffers: 64, messages: 2 }, |event| events.borrow_mut().push(event));
+        let piece = vec![7u8; 16384];
+        super::super::receiver::EXECUTED_BY.lock().unwrap().clear();
+        let started = std::time::Instant::now();
+        let mut message = run(stream.message(0usize, None));
+        for _ in 0..4096 {
+            let mut room = run(message.input());
+            room.bytes_mut().copy_from_slice(&piece);
+            room.commit(16384);
+        }
+        message.end(0);
+        while events.borrow().is_empty() {
+            run(stream.ready());
+            stream.collect();
+        }
+        events.borrow_mut().clear();
+        let took = started.elapsed();
+        // The benchmark's receive trace: a 16 MiB source in memory, fragments
+        // of 1448, 4096, 16384 and 65536 bytes in a cycle, each written room
+        // by room.
+        let source = vec![3u8; 16 << 20];
+        for (label, fragments) in [("receive trace", &[1448usize, 4096, 16384, 65536][..]), ("64 KiB fragments", &[65536][..])] {
+            let t = std::time::Instant::now();
+            let mut message = run(stream.message(1usize, Some(source.len() as u64)));
+            let mut at = 0;
+            let mut k = 0;
+            while at < source.len() {
+                let len = fragments[k % fragments.len()].min(source.len() - at);
+                k += 1;
+                let mut bytes = &source[at..at + len];
+                while !bytes.is_empty() {
+                    let mut room = run(message.input());
+                    let n = room.bytes_mut().len().min(bytes.len());
+                    room.bytes_mut()[..n].copy_from_slice(&bytes[..n]);
+                    room.commit(n);
+                    bytes = &bytes[n..];
+                }
+                at += len;
+            }
+            message.end(0);
+            while events.borrow().is_empty() {
+                run(stream.ready());
+                stream.collect();
+            }
+            events.borrow_mut().clear();
+            eprintln!("{label}: 16 MiB in {:?} ({:.3} ns/B)", t.elapsed(), t.elapsed().as_nanos() as f64 / (16.0 * 1048576.0));
+        }
+        let t = std::time::Instant::now();
+        let mut hasher = crate::Hasher::new(Mode::Plain, None);
+        for chunk in source.chunks(65536) {
+            hasher.update(chunk);
+        }
+        core::hint::black_box(hasher.finalize());
+        eprintln!("Hasher, 64 KiB updates: 16 MiB in {:?} ({:.3} ns/B)", t.elapsed(), t.elapsed().as_nanos() as f64 / (16.0 * 1048576.0));
+        stream.finish();
+        let by = super::super::receiver::EXECUTED_BY.lock().unwrap().clone();
+        let me = std::thread::current().id();
+        eprintln!(
+            "64 MiB in {took:?} ({:.3} ns/B); parts by thread: {:?}; producer among them: {}",
+            took.as_nanos() as f64 / (64.0 * 1048576.0),
+            by.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+            by.iter().any(|(t, _)| *t == me)
+        );
+        assert!(by.len() > 1, "more than one thread hashed parts: {by:?}");
+    }
+
     /// `end(n)` carries a message's last bytes: at a room boundary, where
     /// the room would otherwise go out as "more follows", in a partial
     /// room, and with none (`end(0)` after a read that met the end).

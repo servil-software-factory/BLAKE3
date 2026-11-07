@@ -251,8 +251,7 @@ impl Receiver {
             let context = Box::into_raw(job);
             let mut task = Task::of(&[], 0);
             task.action = Some((execute_batch, context.cast()));
-            core.source.publish(task);
-            core.source.wake_for_waiting();
+            core.source.publish_part(task);
             BatchCompletion { request: core.outputs[id.index].clone().acquire_owned(), core, id, guard: Some(crate::lanes::AbortOnUnwind) }
         }
     }
@@ -380,8 +379,7 @@ impl Message {
         // uses the worker's turn, as the existing stream's piece does.
         task.members = usize::from(last);
         task.action = Some((execute, (&owner.slots[index] as *const Slot).cast_mut().cast()));
-        owner.source.publish(task);
-        owner.source.wake_for_waiting();
+        owner.source.publish_part(task);
     }
 
     /// The message's last `written` bytes are at the start of its current
@@ -645,7 +643,19 @@ impl Core {
     }
 }
 
+#[cfg(test)]
+pub(super) static EXECUTED_BY: Mutex<Vec<(std::thread::ThreadId, usize)>> = Mutex::new(Vec::new());
+
 unsafe fn execute(context: *mut (), platform: Platform) {
+    #[cfg(test)]
+    {
+        let mut by = EXECUTED_BY.lock().unwrap();
+        let me = std::thread::current().id();
+        match by.iter_mut().find(|(t, _)| *t == me) {
+            Some((_, n)) => *n += 1,
+            None => by.push((me, 1)),
+        }
+    }
     // Sound: the Queued Job owns the Core containing this stable slot.
     // Claiming the job transfers that ownership to this worker. No caller
     // can recover the buffer until the completed part has been retired.
