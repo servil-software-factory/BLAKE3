@@ -67,7 +67,7 @@ pub fn hash_each_multithreaded(mode: Mode, items: &[(&[Block], usize)], out: &mu
 /// let mut hashers = vec![Hasher::new(blake3_servil::Mode::Plain, None), Hasher::new(blake3_servil::Mode::Plain, None)];
 /// throughput::update_each(&mut hashers, &[(0, b"ab"), (1, b"xyz"), (0, b"c")]);
 /// let mut out = [[0u8; 32]; 2];
-/// throughput::finalize_each(&hashers, &[0, 1], &mut out);
+/// throughput::finalize_each(&mut hashers, &[0, 1], &mut out);
 /// let hash = blake3_servil::convenience::hash;
 /// assert_eq!((&out[0], &out[1]), (hash(b"abc").as_bytes(), hash(b"xyz").as_bytes()));
 /// ```
@@ -85,13 +85,15 @@ pub fn update_each_multithreaded(hashers: &mut [Hasher], pieces: &[(usize, &[u8]
     update_turn(hashers, pieces, true);
 }
 
-/// The hash of each message `which` names: `out[k]` is
-/// `hashers[which[k]].finalize()`. Requires `out.len() == which.len()`
-/// and each index `< hashers.len()`.
-pub fn finalize_each(hashers: &[Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
+/// The hash of each message `which` names: `out[k]` is what
+/// `hashers[which[k]].finalize()` would give, and that hasher is then
+/// reset for its next message (no length hint). Requires
+/// `out.len() == which.len()` and each index `< hashers.len()`.
+pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     assert_eq!(which.len(), out.len(), "one digest per message named");
     for (&i, out) in which.iter().zip(out) {
-        *out = *hashers[i].finalize().as_bytes();
+        *out = *hashers[i].take_output().root_hash().as_bytes();
+        hashers[i].reset(None);
     }
 }
 
@@ -724,7 +726,7 @@ mod test {
             assert_eq!(hashers[i].finalize_non_root(), one.finalize_non_root(), "subtree at {offset}, {len} bytes");
         }
         for (j, &len) in whole.iter().enumerate() {
-            assert_eq!(hashers[subtrees.len() + j].finalize(), crate::convenience::hash(&input[..len]), "whole message of {len} bytes");
+            assert_eq!(hashers[subtrees.len() + j].clone().finalize(), crate::convenience::hash(&input[..len]), "whole message of {len} bytes");
         }
     }
 
@@ -751,7 +753,7 @@ mod test {
         crate::throughput::update_each(&mut hashers, &turn);
         for (i, h) in hashers.iter().enumerate() {
             let message = &input[start(i)..start(i) + 2 * crate::STAGE_LEN + 7];
-            assert_eq!(h.finalize(), crate::convenience::hash_with(crate::Mode::Keyed(&keys[i % 2]), message), "hasher {i}, {platform:?}");
+            assert_eq!(h.clone().finalize(), crate::convenience::hash_with(crate::Mode::Keyed(&keys[i % 2]), message), "hasher {i}, {platform:?}");
         }
         // And each hasher's first group (chunk counter zero, which hands
         // its core the group's two halves), six at once: a first piece
@@ -762,7 +764,7 @@ mod test {
         crate::throughput::update_each(&mut fresh, &turn);
         for (i, h) in fresh.iter().enumerate() {
             assert_eq!(
-                h.finalize(),
+                h.clone().finalize(),
                 crate::convenience::hash_with(crate::Mode::Keyed(&keys[i % 2]), &input[start(i)..start(i) + group + 7]),
                 "fresh hasher {i}, {platform:?}"
             );
@@ -799,7 +801,7 @@ mod test {
             }
             let which: Vec<usize> = (0..lens.len()).rev().collect();
             let mut out = vec![[0u8; OUT_LEN]; lens.len()];
-            crate::throughput::finalize_each(&hashers, &which, &mut out);
+            crate::throughput::finalize_each(&mut hashers, &which, &mut out);
             for (k, &i) in which.iter().enumerate() {
                 let want = if i % 3 == 1 {
                     crate::convenience::hash_with(crate::Mode::Keyed(&key), &input[..lens[i]])

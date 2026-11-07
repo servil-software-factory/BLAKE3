@@ -71,7 +71,8 @@ fn single_threaded_calls_allocate_as_the_memory_section_says() {
         let mut hasher = Hasher::new(Mode::Plain, None);
         assert_eq!(
             allocated(|| {
-                std::hint::black_box(hasher.update(&bytes[..len]).finalize());
+                hasher.update(&bytes[..len]);
+                std::hint::black_box(hasher.clone().finalize());
             }),
             0,
             "Hasher of {len} B"

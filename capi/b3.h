@@ -102,12 +102,14 @@ void b3_hasher_new(b3_hasher *hasher, const b3_mode *mode, int has_length_hint, 
 /* Add the message's next `len` bytes. */
 void b3_hasher_update(b3_hasher *hasher, const void *input, size_t len);
 
-/* The digest of the bytes so far; the hasher can take more. */
-b3_digest b3_hasher_finalize(const b3_hasher *hasher);
+/* The digest of the message: the hasher is finished and holds no message;
+ * `b3_hasher_new` starts the next. */
+b3_digest b3_hasher_finalize(b3_hasher *hasher);
 
 /* Extended output: `len` bytes of the output from byte `offset` on, into
- * `out`. Its first 32 bytes are the digest. */
-void b3_hasher_finalize_xof(const b3_hasher *hasher, uint64_t offset, void *out, size_t len);
+ * `out`. Its first 32 bytes are the digest. The hasher is finished, as
+ * with `b3_hasher_finalize`. */
+void b3_hasher_finalize_xof(b3_hasher *hasher, uint64_t offset, void *out, size_t len);
 
 #ifdef __cplusplus
 }

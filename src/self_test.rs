@@ -346,7 +346,8 @@ fn incremental(platform: Platform, input: &[u8], piece: usize) -> crate::Hash {
 #[inline(never)]
 fn xof(platform: Platform, input: &[u8], skip: u64, out: &mut [u8]) -> usize {
     let mut hasher = crate::Hasher::from_core(crate::HasherCore::new_from(crate::IV, 0, platform));
-    let mut reader = hasher.update(input).finalize_xof();
+    hasher.update(input);
+    let mut reader = hasher.finalize_xof();
     reader.set_position(skip);
     reader.fill(out);
     out.len()

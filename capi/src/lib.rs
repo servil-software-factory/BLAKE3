@@ -94,11 +94,6 @@ unsafe fn mode<'a>(mode: *const B3Mode) -> &'a B3Mode {
     unsafe { &*mode }
 }
 
-unsafe fn hasher<'a>(hasher: *const B3Hasher) -> &'a Hasher {
-    check_hasher(hasher);
-    unsafe { &*(hasher as *const Hasher) }
-}
-
 unsafe fn hasher_mut<'a>(hasher: *mut B3Hasher) -> &'a mut Hasher {
     check_hasher(hasher);
     unsafe { &mut *(hasher as *mut Hasher) }
@@ -167,21 +162,33 @@ pub unsafe extern "C" fn b3_hasher_update(hasher: *mut B3Hasher, input: *const c
     hasher.update(unsafe { bytes(input, len, "the input") });
 }
 
+/// The Hasher moved out of the caller's memory, which then holds no
+/// message: `b3_hasher_new` starts the next.
+///
 /// # Safety
-/// `hasher` was initialized by `b3_hasher_new`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn b3_hasher_finalize(hasher: *const B3Hasher) -> Digest {
-    digest(unsafe { self::hasher(hasher) }.finalize())
+/// `hasher` was initialized by `b3_hasher_new` and not finalized since.
+unsafe fn take(hasher: *mut B3Hasher) -> Hasher {
+    check_hasher(hasher);
+    // Sound by the contract: a live Hasher, which owns nothing to drop, so
+    // the bytes left behind need no care.
+    unsafe { (hasher as *const Hasher).read() }
 }
 
 /// # Safety
-/// `hasher` was initialized by `b3_hasher_new`; `out` has room for `len`
-/// bytes (NULL only with `len` 0).
+/// `hasher` was initialized by `b3_hasher_new` and not finalized since.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn b3_hasher_finalize_xof(hasher: *const B3Hasher, offset: u64, out: *mut c_void, len: usize) {
+pub unsafe extern "C" fn b3_hasher_finalize(hasher: *mut B3Hasher) -> Digest {
+    digest(unsafe { take(hasher) }.finalize())
+}
+
+/// # Safety
+/// `hasher` was initialized by `b3_hasher_new` and not finalized since;
+/// `out` has room for `len` bytes (NULL only with `len` 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn b3_hasher_finalize_xof(hasher: *mut B3Hasher, offset: u64, out: *mut c_void, len: usize) {
     check_range(out, len, "the output");
     check_disjoint(hasher.cast(), size_of::<B3Hasher>(), out, len);
-    let hasher = unsafe { self::hasher(hasher) };
+    let hasher = unsafe { take(hasher) };
     if len == 0 {
         return;
     }

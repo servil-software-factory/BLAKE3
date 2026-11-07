@@ -50,11 +50,11 @@ unsafe fn bad_call(case: &str) {
             }
             "hasher-output-overlap" => {
                 b3_hasher_new(hasher.as_mut_ptr(), &mode, 0, 0);
-                b3_hasher_finalize_xof(hasher.as_ptr(), 0, hasher.as_mut_ptr().cast(), 32);
+                b3_hasher_finalize_xof(hasher.as_mut_ptr(), 0, hasher.as_mut_ptr().cast(), 32);
             }
             "output-length" => {
                 b3_hasher_new(hasher.as_mut_ptr(), &mode, 0, 0);
-                b3_hasher_finalize_xof(hasher.as_ptr(), 0, output.as_mut_ptr().cast(), isize::MAX as usize + 1);
+                b3_hasher_finalize_xof(hasher.as_mut_ptr(), 0, output.as_mut_ptr().cast(), isize::MAX as usize + 1);
             }
             _ => panic!("unknown guard case"),
         }
@@ -104,6 +104,6 @@ fn adjacent_ranges_and_empty_null_ranges_are_allowed() {
         let mut hasher = MaybeUninit::<B3Hasher>::uninit();
         b3_hasher_new(hasher.as_mut_ptr(), &mode, 0, 0);
         b3_hasher_update(hasher.as_mut_ptr(), core::ptr::null(), 0);
-        b3_hasher_finalize_xof(hasher.as_ptr(), 0, core::ptr::null_mut(), 0);
+        b3_hasher_finalize_xof(hasher.as_mut_ptr(), 0, core::ptr::null_mut(), 0);
     }
 }

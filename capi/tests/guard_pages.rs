@@ -83,8 +83,11 @@ fn every_call_inside_guard_pages() {
                     let mut plain: Box<B3Hasher> = Box::new(core::mem::zeroed());
                     b3_hasher_new(&mut *plain, mode, 0, 0);
                     b3_hasher_update(&mut *plain, message.as_ptr() as *const c_void, len);
-                    b3_hasher_finalize_xof(&*plain, 7, xof_want.as_mut_ptr() as *mut c_void, 100);
+                    b3_hasher_finalize_xof(&mut *plain, 7, xof_want.as_mut_ptr() as *mut c_void, 100);
                     let mut xof = Guarded::new(100, !at_end);
+                    // Finalized once already: a new message in the same memory.
+                    b3_hasher_new(hasher, mode, 0, 0);
+                    b3_hasher_update(hasher, flush.bytes().as_ptr() as *const c_void, len);
                     b3_hasher_finalize_xof(hasher, 7, xof.ptr() as *mut c_void, 100);
                     assert_eq!(xof.bytes(), &xof_want[..], "b3_hasher_finalize_xof, {what}");
                 }

@@ -459,7 +459,7 @@ fn test_xof_clone_and_empty_fill() {
     let mut whole = [0; 400];
     let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
     hasher.update(b"foo");
-    hasher.finalize_xof().fill(&mut whole);
+    hasher.clone().finalize_xof().fill(&mut whole);
     golden.add(&whole, || official::xof(crate::Mode::Plain, b"foo", 0, 400));
 
     let mut reader = hasher.finalize_xof();
@@ -497,7 +497,9 @@ fn test_fill_computes_each_block_once() {
         call();
         crate::COUNTED.with(|c| c[crate::Counted::RootBlock as usize].get())
     };
-    let mut reader = crate::Hasher::new(crate::Mode::Plain, None).update(b"foo").finalize_xof();
+    let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
+    hasher.update(b"foo");
+    let mut reader = hasher.finalize_xof();
     let mut buf = [0u8; 300];
     assert_eq!(blocks(&mut || reader.fill(&mut buf[..128])), 0, "two whole blocks from the boundary: xof_many alone");
     assert_eq!(blocks(&mut || reader.fill(&mut [])), 0, "an empty fill computes nothing");
@@ -564,10 +566,10 @@ fn test_xof_seek() {
     let mut out = [0; 533];
     let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
     hasher.update(b"foo");
-    hasher.finalize_xof().fill(&mut out);
-    assert_eq!(hasher.finalize().as_bytes(), &out[0..32]);
+    hasher.clone().finalize_xof().fill(&mut out);
+    assert_eq!(hasher.clone().finalize().as_bytes(), &out[0..32]);
 
-    let mut reader = hasher.finalize_xof();
+    let mut reader = hasher.clone().finalize_xof();
     reader.set_position(303);
     let mut out2 = [0; 102];
     reader.fill(&mut out2);
@@ -1220,7 +1222,7 @@ mod guard_pages {
                     let pieces: Vec<(usize, &[u8])> = items.iter().copied().enumerate().collect();
                     crate::throughput::update_each(&mut hashers, &pieces);
                     for (i, h) in hashers.iter().enumerate() {
-                        assert_eq!(*h.finalize().as_bytes(), want[i], "update_each, {count} x {len} B, at end {at_end}");
+                        assert_eq!(*h.clone().finalize().as_bytes(), want[i], "update_each, {count} x {len} B, at end {at_end}");
                     }
                     if count == 1 {
                         let mut h = crate::Hasher::new(crate::Mode::Plain, None);
@@ -1242,12 +1244,14 @@ mod guard_pages {
         // sixteen blocks) writes no byte outside it, from aligned and
         // unaligned positions.
         let mut reference = vec![0u8; 5 * 1024 + 200];
-        crate::Hasher::new(crate::Mode::Plain, None).update(b"guarded").finalize_xof().fill(&mut reference);
+        let mut guarded = crate::Hasher::new(crate::Mode::Plain, None);
+        guarded.update(b"guarded");
+        guarded.clone().finalize_xof().fill(&mut reference);
         for len in [1, 64, 1023, 1024, 1025, 1088, 2048, 3000, 4096, 5 * 1024] {
             for skip in [0usize, 64, 37] {
                 for at_end in [true, false] {
                     let mut out = Guarded::new(len, at_end);
-                    let mut reader = crate::Hasher::new(crate::Mode::Plain, None).update(b"guarded").finalize_xof();
+                    let mut reader = guarded.clone().finalize_xof();
                     reader.set_position(skip as u64);
                     reader.fill(out.bytes());
                     assert_eq!(out.bytes(), &reference[skip..][..len], "{len} B from {skip}, at end {at_end}");
@@ -1320,9 +1324,9 @@ mod guard_pages {
                     assert_eq!(*crate::throughput::hash_multithreaded(mode, blocks, len).as_bytes(), want, "hash_multithreaded, {what}");
                     let mut hasher = crate::Hasher::new(mode, None);
                     crate::throughput::update_multithreaded(&mut hasher, flush.bytes());
-                    assert_eq!(*hasher.finalize().as_bytes(), want, "update_multithreaded, {what}");
+                    assert_eq!(*hasher.clone().finalize().as_bytes(), want, "update_multithreaded, {what}");
                     let (_out_page, out) = digests(1, !at_end);
-                    crate::throughput::finalize_each(core::slice::from_ref(&hasher), &[0], out);
+                    crate::throughput::finalize_each(core::slice::from_mut(&mut hasher), &[0], out);
                     assert_eq!(out[0], want, "finalize_each, {what}");
                     // A stream: the message where it is, the message written into
                     // its rooms, and a batch of three, every digest into places
@@ -1392,7 +1396,7 @@ fn test_hasher_gathers() {
             done += n;
             k += 1;
             if k % 5 == 0 {
-                assert_eq!(hasher.finalize(), crate::convenience::hash(&input[..done]), "after {done} bytes");
+                assert_eq!(hasher.clone().finalize(), crate::convenience::hash(&input[..done]), "after {done} bytes");
                 assert_eq!(hasher.count(), done as u64);
             }
         }
@@ -1635,7 +1639,7 @@ impl SubtreeHasher for crate::Hasher {
 
     fn finalize_non_root(&self) -> CVBytes {
         assert_ne!(self.count(), 0, "empty subtrees are never valid");
-        self.final_output().chaining_value()
+        self.clone().final_output().chaining_value()
     }
 }
 
@@ -1672,13 +1676,17 @@ fn test_too_much_input_should_panic() {
 #[test]
 #[should_panic]
 fn test_set_input_offset_cant_finalize() {
-    crate::Hasher::new(crate::Mode::Plain, None).set_input_offset(CHUNK_LEN as u64).finalize();
+    let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
+    hasher.set_input_offset(CHUNK_LEN as u64);
+    hasher.finalize();
 }
 
 #[test]
 #[should_panic]
 fn test_set_input_offset_cant_finalize_xof() {
-    crate::Hasher::new(crate::Mode::Plain, None).set_input_offset(CHUNK_LEN as u64).finalize_xof();
+    let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
+    hasher.set_input_offset(CHUNK_LEN as u64);
+    hasher.finalize_xof();
 }
 
 /// Every test case hashed as subtrees of 1 to 32 chunks, merged layer by
@@ -1876,7 +1884,9 @@ mod prefetch_counts {
         ]) {
             let prefetches = (CHUNK_LEN + 1..crate::PREFETCH_BELOW).contains(&len);
             check(&std::format!("a fresh Hasher's update of {len} bytes and its finalize"), prefetches, || {
-                std::hint::black_box(neon().update(&input[..len]).finalize());
+                let mut hasher = neon();
+                hasher.update(&input[..len]);
+                std::hint::black_box(hasher.finalize());
             });
             // A second update: never.
             let mut h = neon();

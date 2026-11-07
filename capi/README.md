@@ -61,6 +61,7 @@ The `--static` flag supplies the system libraries Rust's static library needs.
 - `b3_hash`: one message already in memory.
 - `b3_hasher_new`, `b3_hasher_update`, `b3_hasher_finalize`: one message
   arriving in pieces (`b3_hasher_finalize_xof` for output of any length).
+  Finalizing finishes the hasher; `b3_hasher_new` starts the next message.
   [`tests/check.c`](tests/check.c) includes a complete example.
 
 `B3_VERSION` identifies the header; `b3_version()` identifies the linked

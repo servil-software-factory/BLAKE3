@@ -24,11 +24,14 @@ use super::*;
 /// hasher.update(b"foo");
 /// hasher.update(b"bar");
 /// hasher.update(b"baz");
+/// // finalize takes the Hasher: the next message gets a new one.
 /// assert_eq!(hasher.finalize(), blake3_servil::convenience::hash(b"foobarbaz"));
 ///
 /// // Extended output. OutputReader also implements Read and Seek.
 /// # #[cfg(feature = "std")] {
 /// let mut output = [0; 1000];
+/// let mut hasher = blake3_servil::convenience::Hasher::new(blake3_servil::Mode::Plain, None);
+/// hasher.update(b"foobarbaz");
 /// let mut output_reader = hasher.finalize_xof();
 /// output_reader.fill(&mut output);
 /// assert_eq!(&output[..32], blake3_servil::convenience::hash(b"foobarbaz").as_bytes());
@@ -139,6 +142,7 @@ impl Hasher {
     }
 
     /// The bytes gathered in the stage.
+    #[cfg(feature = "std")]
     fn staged_bytes(&self) -> &[u8] {
         // Sound: the first `staged` bytes of the stage were written (gather).
         unsafe { core::slice::from_raw_parts(self.stage.as_ptr() as *const u8, self.staged) }
@@ -222,11 +226,21 @@ impl Hasher {
         self.core.push_group(result);
     }
 
-    /// The root's output: the core's, after the stage's bytes.
-    pub(crate) fn final_output(&self) -> Output {
-        let mut core = self.core.clone();
-        core.update(self.staged_bytes());
-        core.final_output()
+    /// The root's output: the core's, after the stage's bytes, finished in
+    /// place.
+    pub(crate) fn final_output(mut self) -> Output {
+        self.take_output()
+    }
+
+    /// The root's output, the state finished in place: the Hasher is then
+    /// finished, to be reset or dropped.
+    pub(crate) fn take_output(&mut self) -> Output {
+        // Sound: the first `staged` bytes of the stage were written (gather).
+        // The stage and the core are distinct fields: the core takes the
+        // staged bytes in place, with no copy of itself.
+        let staged = unsafe { core::slice::from_raw_parts(self.stage.as_ptr().cast::<u8>(), self.staged) };
+        self.core.update(staged);
+        self.core.final_output()
     }
 
     /// Construct a new `Hasher` in a [`Mode`]: the plain hash, the keyed
@@ -283,24 +297,20 @@ impl Hasher {
         self.gather(input, true)
     }
 
-    /// Finalize the hash state and return the [`Hash`](struct.Hash.html) of
-    /// the input.
-    ///
-    /// This method is idempotent. Calling it twice will give the same result.
-    /// You can also add more input and finalize again.
-    pub fn finalize(&self) -> Hash {
+    /// The [`Hash`] of everything updated: the Hasher is finished, in place,
+    /// and gone. For the next message, make a new one ([`new`](Hasher::new)
+    /// costs what a reset would). A digest of a prefix, with hashing going
+    /// on after it, is `hasher.clone().finalize()`, the copy where it is
+    /// paid.
+    pub fn finalize(self) -> Hash {
         assert_eq!(self.core.initial_chunk_counter, 0, "set_input_offset must be used with finalize_non_root",);
         self.final_output().root_hash()
     }
 
-    /// Finalize the hash state and return an [`OutputReader`], which can
-    /// supply any number of output bytes.
-    ///
-    /// This method is idempotent. Calling it twice will give the same result.
-    /// You can also add more input and finalize again.
-    ///
-    /// [`OutputReader`]: struct.OutputReader.html
-    pub fn finalize_xof(&self) -> OutputReader {
+    /// An [`OutputReader`] over everything updated, which supplies any
+    /// number of output bytes; the Hasher is finished and gone, as with
+    /// [`finalize`](Hasher::finalize).
+    pub fn finalize_xof(self) -> OutputReader {
         assert_eq!(self.core.initial_chunk_counter, 0, "set_input_offset must be used with finalize_non_root",);
         OutputReader::new(self.final_output())
     }

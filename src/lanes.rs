@@ -2359,7 +2359,12 @@ mod test {
             );
             let context_key = crate::throughput::context_key("lanes test");
             assert_eq!(
-                *Hasher::new(crate::Mode::DeriveKeyWith(&context_key), None).update(&input[..len]).finalize().as_bytes(),
+                *{
+                    let mut hasher = Hasher::new(crate::Mode::DeriveKeyWith(&context_key), None);
+                    hasher.update(&input[..len]);
+                    hasher.finalize()
+                }
+                .as_bytes(),
                 *hash_with_key(&input[..len], &crate::platform::words_from_le_bytes_32(&context_key), crate::DERIVE_KEY_MATERIAL).as_bytes(),
                 "derive len = {len}"
             );

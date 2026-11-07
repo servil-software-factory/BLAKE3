@@ -17,12 +17,15 @@
 //! hasher.update(b"foo");
 //! hasher.update(b"bar");
 //! hasher.update(b"baz");
+//! // finalize takes the Hasher: a new one for the next message.
 //! let hash2 = hasher.finalize();
 //! assert_eq!(hash1, hash2);
 //!
 //! // Extended output. OutputReader also implements Read and Seek.
 //! # #[cfg(feature = "std")] {
 //! let mut output = [0; 1000];
+//! let mut hasher = blake3_servil::convenience::Hasher::new(blake3_servil::Mode::Plain, None);
+//! hasher.update(b"foobarbaz");
 //! let mut output_reader = hasher.finalize_xof();
 //! output_reader.fill(&mut output);
 //! assert_eq!(hash1, output[..32]);
@@ -983,7 +986,9 @@ fn hash_all_at_once(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, 
 /// ```
 /// blake3_servil::initialize();
 /// let hash = blake3_servil::convenience::hash(b"foo");
-/// # assert_eq!(hash, blake3_servil::convenience::Hasher::new(blake3_servil::Mode::Plain, None).update(b"foo").finalize());
+/// # let mut hasher = blake3_servil::convenience::Hasher::new(blake3_servil::Mode::Plain, None);
+/// # hasher.update(b"foo");
+/// # assert_eq!(hash, hasher.finalize());
 /// ```
 pub fn initialize() {
     self_test::ensure();

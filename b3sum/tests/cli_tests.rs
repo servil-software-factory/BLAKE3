@@ -162,7 +162,9 @@ fn test_missing_files() {
 fn test_hash_length_and_seek() {
     blake3::initialize();
     let mut expected = [0; 100];
-    blake3::convenience::Hasher::new(blake3::Mode::Plain, None).update(b"foo").finalize_xof().fill(&mut expected);
+    let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Plain, None);
+    hasher.update(b"foo");
+    hasher.finalize_xof().fill(&mut expected);
     let output = cmd!(b3sum_exe(), "--raw", "--length=100").stdin_bytes("foo").stdout_capture().run().unwrap().stdout;
     assert_eq!(expected[..], output);
 

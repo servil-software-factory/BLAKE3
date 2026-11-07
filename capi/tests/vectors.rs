@@ -31,10 +31,13 @@ fn every_call_against_the_test_vectors() {
                 b3_hasher_update(&mut *hasher, a.as_ptr() as *const c_void, a.len());
                 b3_hasher_update(&mut *hasher, b.as_ptr() as *const c_void, b.len());
                 b3_hasher_update(&mut *hasher, c.as_ptr() as *const c_void, c.len());
-                assert_eq!(hex(&b3_hasher_finalize(&*hasher).bytes), expected[..64], "b3_hasher_finalize, {what}");
+                assert_eq!(hex(&b3_hasher_finalize(&mut *hasher).bytes), expected[..64], "b3_hasher_finalize, {what}");
                 let full = expected.len() / 2;
                 let mut output = vec![0u8; full - 7];
-                b3_hasher_finalize_xof(&*hasher, 7, output.as_mut_ptr() as *mut c_void, output.len());
+                // Finalized: the next message starts with b3_hasher_new.
+                b3_hasher_new(&mut *hasher, mode, 0, 0);
+                b3_hasher_update(&mut *hasher, input.as_ptr() as *const c_void, input.len());
+                b3_hasher_finalize_xof(&mut *hasher, 7, output.as_mut_ptr() as *mut c_void, output.len());
                 assert_eq!(hex(&output), expected[14..], "b3_hasher_finalize_xof from byte 7, {what}");
             }
         }

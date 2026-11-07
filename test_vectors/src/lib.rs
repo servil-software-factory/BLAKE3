@@ -95,13 +95,19 @@ pub fn generate_json() -> String {
         paint_test_input(&mut input);
 
         let mut hash_out = [0; OUTPUT_LEN];
-        blake3::convenience::Hasher::new(blake3::Mode::Plain, None).update(&input).finalize_xof().fill(&mut hash_out);
+        let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Plain, None);
+        hasher.update(&input);
+        hasher.finalize_xof().fill(&mut hash_out);
 
         let mut keyed_hash_out = [0; OUTPUT_LEN];
-        blake3::convenience::Hasher::new(blake3::Mode::Keyed(TEST_KEY), None).update(&input).finalize_xof().fill(&mut keyed_hash_out);
+        let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Keyed(TEST_KEY), None);
+        hasher.update(&input);
+        hasher.finalize_xof().fill(&mut keyed_hash_out);
 
         let mut derive_key_out = [0; OUTPUT_LEN];
-        blake3::convenience::Hasher::new(blake3::Mode::DeriveKey(TEST_CONTEXT), None).update(&input).finalize_xof().fill(&mut derive_key_out);
+        let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::DeriveKey(TEST_CONTEXT), None);
+        hasher.update(&input);
+        hasher.finalize_xof().fill(&mut derive_key_out);
 
         cases.push(Case {
             input_len,
@@ -137,21 +143,21 @@ mod tests {
         let mut out = vec![0; expected_hash.len()];
         let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Plain, None);
         hasher.update(input);
-        hasher.finalize_xof().fill(&mut out);
+        hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_hash, &out[..]);
         assert_eq!(&expected_hash[..32], hasher.finalize().as_bytes());
 
         let mut out = vec![0; expected_keyed_hash.len()];
         let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Keyed(key), None);
         hasher.update(input);
-        hasher.finalize_xof().fill(&mut out);
+        hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_keyed_hash, &out[..]);
         assert_eq!(&expected_keyed_hash[..32], hasher.finalize().as_bytes());
 
         let mut out = vec![0; expected_derive_key.len()];
         let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::DeriveKey(TEST_CONTEXT), None);
         hasher.update(input);
-        hasher.finalize_xof().fill(&mut out);
+        hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_derive_key, &out[..]);
         assert_eq!(&expected_derive_key[..32], hasher.finalize().as_bytes());
     }
@@ -163,7 +169,7 @@ mod tests {
             hasher.update(&[input[i]]);
             assert_eq!(i as u64 + 1, hasher.count());
         }
-        hasher.finalize_xof().fill(&mut out);
+        hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_hash, &out[..]);
         assert_eq!(&expected_hash[..32], hasher.finalize().as_bytes());
 
@@ -173,7 +179,7 @@ mod tests {
             hasher.update(&[input[i]]);
             assert_eq!(i as u64 + 1, hasher.count());
         }
-        hasher.finalize_xof().fill(&mut out);
+        hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_keyed_hash, &out[..]);
         assert_eq!(&expected_keyed_hash[..32], hasher.finalize().as_bytes());
 
@@ -183,7 +189,7 @@ mod tests {
             hasher.update(&[input[i]]);
             assert_eq!(i as u64 + 1, hasher.count());
         }
-        hasher.finalize_xof().fill(&mut out);
+        hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_derive_key, &out[..]);
         assert_eq!(&expected_derive_key[..32], hasher.finalize().as_bytes());
     }
