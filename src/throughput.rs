@@ -178,6 +178,7 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 ///
 /// ```
 /// # blake3_servil::initialize();
+/// # #[cfg(feature = "std")] {
 /// use blake3_servil::{Mode, convenience, throughput::{self, Packed}};
 /// let mut leaves = Packed::<32>::new(1000);
 /// for (i, leaf) in leaves.iter_mut().enumerate() {
@@ -186,6 +187,7 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// let mut digests = Packed::<32>::new(1000); // the next layer's input
 /// throughput::hash_many(Mode::Plain, &leaves, &mut digests);
 /// assert_eq!(digests[3], *convenience::hash(&leaves[3]).as_bytes());
+/// # }
 /// ```
 // Inlined, so a constant mode folds to its constants (as
 // convenience::hash is: no mode stored for the call to read).

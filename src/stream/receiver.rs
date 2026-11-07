@@ -489,7 +489,7 @@ unsafe fn execute_batch(context: *mut (), platform: Platform) {
     if !aborted {
         let input = unsafe { core::slice::from_raw_parts(job.input, job.input_len) };
         let out = unsafe { core::slice::from_raw_parts_mut(job.out, job.count) };
-        crate::many::hash_many_on(input, job.message_len, &job.key, job.flags, out, platform);
+        crate::many::hash_many_on(input, job.message_len, crate::many::slot_len(job.message_len), &job.key, job.flags, out, platform);
     }
     let owner = job.owner.clone();
     let id = job.id;

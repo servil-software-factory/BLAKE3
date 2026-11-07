@@ -144,6 +144,9 @@ pub(crate) fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords,
 /// cells show what this copy costs (Zooko, November 7, 2026).
 #[inline(never)]
 fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
+    // Packed's two lengths, in every build: a block-length message sent
+    // here would hash right and slow (a mutant of `packed` did).
+    assert!(matches!(len, 16 | 32), "packed messages are 16 or 32 bytes, not {len}");
     let plans = neon_plans();
     let mut blocks = [crate::block::Block::ZERO; TABLE];
     for (messages, digests) in input.chunks(len * TABLE).zip(outputs.chunks_mut(TABLE)) {
