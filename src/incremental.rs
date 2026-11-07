@@ -564,6 +564,33 @@ mod test {
         input
     }
 
+    /// The length hint is a scheduling hint and never part of the hash:
+    /// every hint, accurate, short, long, zero or absent, gives the
+    /// one-shot digest, in every mode, through `new` and through `reset`.
+    /// A Hasher that one day uses the hint keeps this contract or fails here.
+    #[test]
+    fn test_the_length_hint_never_changes_the_digest() {
+        let input = painted();
+        let key = [3u8; 32];
+        for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("hint test")] {
+            for len in [0, 1, CHUNK_LEN, CHUNK_LEN + 1, STAGE_LEN + 7, input.len()] {
+                let message = &input[..len];
+                let want = crate::convenience::hash_with(mode, message);
+                let hints = [None, Some(0), Some(1), Some(len as u64), Some(len as u64 / 2), Some(2 * len as u64 + 1), Some(u64::MAX)];
+                let mut reused = Hasher::new(mode, Some(7));
+                for hint in hints {
+                    let mut fresh = Hasher::new(mode, hint);
+                    for piece in message.chunks(1000) {
+                        fresh.update(piece);
+                    }
+                    assert_eq!(fresh.finalize(), want, "{len} bytes, hint {hint:?}");
+                    reused.reset(hint).update(message);
+                    assert_eq!(reused.finalize(), want, "{len} bytes, hint {hint:?}, after reset");
+                }
+            }
+        }
+    }
+
     /// A fresh hasher's first chunk and a whole group from a 16 KiB
     /// boundary go to the core unstaged; shorter updates stage up to the
     /// next boundary, where the stage goes to the core. Staging gives the
