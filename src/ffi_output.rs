@@ -442,7 +442,7 @@ pub(crate) fn arm_group(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8;
     }
     #[cfg(blake3_sme2)]
     {
-        let sized = which.len() >= 16 && which.len() * len >= crate::SME2_SIZED_LEN;
+        let sized = false && which.len() >= 16 && which.len() * len >= crate::SME2_SIZED_LEN;
         let turn = crate::platform::Sme2Turn::take(crate::platform::Platform::detect(), sized);
         if sized && matches!(turn.platform(), crate::platform::Platform::SME2) {
             while inputs.len() % 16 != 0 {
