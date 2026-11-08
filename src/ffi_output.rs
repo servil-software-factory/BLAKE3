@@ -409,19 +409,22 @@ mod tests {
     }
 }
 
-/// Probe: reuse the proved ARM message kernels for equal-length first
-/// chunks sharing a key. All preparation and padding belong to the call.
+/// Probe: reuse the proved ARM message kernels for equal-length plain
+/// first chunks. All preparation and padding belong to the call.
 #[cfg(blake3_neon)]
 pub(crate) fn arm_group(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) -> bool {
     let first = &hashers[which[0]];
     let len = first.staged;
-    let key = first.core.key;
+    let key = crate::IV;
     let flags = first.core.chunk_state.flags;
-    if len == 0
+    // The first experiment needs plain messages alone. Mode flags select
+    // it; secret key values stay out of the dispatcher's comparisons.
+    if flags != 0
+        || len == 0
         || len > CHUNK_LEN
         || which.iter().any(|&i| {
             let h = &hashers[i];
-            h.staged != len || h.core.initial_chunk_counter != 0 || h.core.count() != 0 || h.core.key != key || h.core.chunk_state.flags != flags
+            h.staged != len || h.core.initial_chunk_counter != 0 || h.core.count() != 0 || h.core.chunk_state.flags != flags
         })
     {
         return false;
