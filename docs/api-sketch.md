@@ -90,10 +90,10 @@ let nodes = Batch::from_blocks(blocks, 64); // Complete 64-byte messages.
 The pipeline also accepts ready work in its prepared representation. The async form waits for admission, then returns without waiting for hashing:
 
 ```rust
-stream.submit_batch(batch, &mut batch_places, batch_tag).await;
+stream.submit_batch(batch, batch_places, batch_tag).await;
 ```
 
-Here `batch` goes in by value (owned, or borrowing the producer's blocks) and `batch_places` is the producer's `&mut [[u8; 32]]`, one place per batch message. Both come back in the batch's completion, `Event::Batch { tag, batch, places }`, the producer's again to refill and submit (Sam's audit: a borrow for the stream's life would have locked them). A producer can choose bounded groups independently of the million-message direct-call example. A whole batch retains its compact layout and group completion.
+Here `batch` (a `Batch<'static>`: owned, or borrowing blocks that live for the program) and `batch_places` (a `Box<[[u8; 32]]>`, one place per batch message) go in by value: the pipeline owns both while its workers write the digests. Both come back in the batch's completion, `Event::Batch { tag, batch, places }`, the producer's again to refill and submit. A pipeline that is forgotten (`mem::forget`) leaks them; a borrow would free them under the workers (#309). A producer can choose bounded groups independently of the million-message direct-call example. A whole batch retains its compact layout and group completion.
 
 The exact accounting of batch admission against stream limits remains provisional. Preserving the efficient batch representation is a requirement. Input ownership and output lifetimes are part of the review below.
 
@@ -198,7 +198,7 @@ These are Rust-style operation signatures. Private fields, exact lifetime parame
 ```text
 // Existing direct prepared-input calls remain as listed above.
 Stream::new(mode, limits, on_completion) -> Stream
-Stream::submit_batch(&self, batch: Batch, places: &mut [[u8; 32]], tag)
+Stream::submit_batch(&self, batch: Batch<'static>, places: Box<[[u8; 32]]>, tag)
     -> Future<Output = ()>             // Admission, not hash completion; both
                                        // come back in Event::Batch.
 Stream::message(&self, tag, length_hint)
@@ -228,7 +228,7 @@ The public C API is convenience-only in this proposal. Prepared bulk inputs, the
 ## Feedback requested
 
 1. Do the retained typed bulk calls and the `submit_batch` form cover your ready-work flow? Is `input().await` → write → `commit(n)` clear for incremental production?
-2. **Output ownership:** incremental messages hand their digest over by value with the completion (the pipeline owns the result; one 32-byte copy), while batches keep caller-provided digest places under the crash-only lifecycle above. Does that split fit your programs?
+2. **Output ownership:** incremental messages hand their digest over by value with the completion (the pipeline owns the result; one 32-byte copy), while batches move their digest places in and get them back with the batch (#309). Does that split fit your programs?
 3. Are the byte/message budgets and advisory total-length hint enough to predict and control resource use? An incorrect hint changes neither bytes consumed nor end-of-message behavior.
 4. Which concrete receive/generate workflow would make you choose this pipeline over the convenience Hasher or direct prepared-bulk calls?
 
