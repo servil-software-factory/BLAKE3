@@ -319,7 +319,7 @@ pub(crate) fn outputs(platform: Platform, case: Case, input: &[u8], previous: &[
         Hash { offset, len } => digest(crate::hash_serial_from(platform, &input[offset..][..len], crate::IV, 0, false)),
         Many { offset, len, count } => many(platform, &input[..len * count], offset, len, &mut out[..count * crate::OUT_LEN]),
         #[cfg(blake3_neon)]
-        LastLanes { count } => last_lanes(platform, input, previous, count, out),
+        LastLanes { count } => last_lanes::<9>(platform, input, previous, count, out),
         ChunkValues { chunks } => chunk_values(platform, &input[..chunks * crate::CHUNK_LEN], previous, out),
         Keyed { len } => digest(crate::hash_serial_from(platform, &input[..len], &words(previous), crate::KEYED_HASH, false)),
         Derive { len } => {
@@ -418,11 +418,11 @@ fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]
 /// Each last-lane entry, one and three blocks, keyed by the preceding
 /// case. A scalar hash supplies the same answers on CPUs without SHA-3.
 #[cfg(blake3_neon)]
-fn last_lanes(platform: Platform, input: &[u8], previous: &[u8; 32], count: usize, out: &mut [u8]) -> usize {
+fn last_lanes<const N: usize>(platform: Platform, input: &[u8], previous: &[u8; 32], count: usize, out: &mut [u8]) -> usize {
     let key = crate::platform::words_from_le_bytes_32(previous);
-    let inputs: [*const u8; 9] = core::array::from_fn(|i| input[i * 192..].as_ptr());
-    let mut last_blocks = [[0u8; 64]; 9];
-    let mut lengths = [0u32; 9];
+    let inputs: [*const u8; N] = core::array::from_fn(|i| input[i * 192..].as_ptr());
+    let mut last_blocks = [[0u8; 64]; N];
+    let mut lengths = [0u32; N];
     for (pass, blocks) in [1usize, 3].into_iter().enumerate() {
         let out = &mut out[pass * count * 32..][..count * 32];
         for i in 0..count {
@@ -432,11 +432,23 @@ fn last_lanes(platform: Platform, input: &[u8], previous: &[u8; 32], count: usiz
             last_blocks[i][..last].copy_from_slice(&input[i * 192 + prefix..][..last]);
             lengths[i] = last as u32;
             if !crate::neon_hybrid::sha3_detected() {
+                #[cfg(all(blake3_sme2, feature = "std"))]
+                if N == 16 && matches!(platform, Platform::SME2) {
+                    continue;
+                }
                 out[i * 32..][..32].copy_from_slice(crate::hash_serial_on(&input[i * 192..][..prefix + last], &key, crate::KEYED_HASH, platform).as_bytes());
             }
         }
+        #[cfg(all(blake3_sme2, feature = "std"))]
+        if count == 16 && matches!(platform, Platform::SME2) {
+            let lasts: arrayvec::ArrayVec<_, N> = last_blocks.iter().zip(lengths).map(|(b, n)| crate::sme2::LastBlock::new(b, n)).collect();
+            // Sound: the undetected self-test platform supplies SME2;
+            // prefixes and independently padded final blocks are above.
+            unsafe { crate::sme2::hash_last_lanes(&inputs, &lasts, blocks, &key, crate::KEYED_HASH, crate::CHUNK_START, crate::CHUNK_END | crate::ROOT, out) };
+            continue;
+        }
         if crate::neon_hybrid::sha3_detected() {
-            let lasts: [*const u8; 9] = core::array::from_fn(|i| last_blocks[i].as_ptr());
+            let lasts: [*const u8; N] = core::array::from_fn(|i| last_blocks[i].as_ptr());
             // Sound: SHA-3 is present; every prefix lies in its 192-byte
             // input, and each last block is zero-padded in 64 bytes.
             unsafe {
@@ -508,8 +520,38 @@ fn run() -> usize {
     {
         checked += crate::ffi_output::self_test(platform);
     }
+    #[cfg(all(blake3_sme2, feature = "std"))]
+    if matches!(platform, Platform::SME2) {
+        let turn = crate::platform::Sme2Turn::take(platform, true);
+        if matches!(turn.platform(), Platform::SME2) {
+            if sme_last_case(platform, &previous) != SME_LAST_EXPECTED {
+                stop(format_args!("blake3-servil startup self-test failed: SME2 independent last blocks"));
+            }
+            checked += 1;
+        }
+    }
     let _ = previous;
     checked
+}
+
+#[cfg(all(blake3_sme2, feature = "std"))]
+const SME_LAST_EXPECTED: u64 = 0x5f472e01dc266dec;
+
+#[cfg(all(blake3_sme2, feature = "std"))]
+fn sme_last_input(previous: &[u8; 32]) -> [u8; 16 * 192] {
+    let mut input = core::array::from_fn(|i| ((i * 37 + i / 7) % 251) as u8);
+    input[..32].copy_from_slice(previous);
+    input
+}
+
+/// Only an SME2 build running on SME2 pays for this entry's startup check.
+#[cfg(all(blake3_sme2, feature = "std"))]
+#[inline(never)]
+fn sme_last_case(platform: Platform, previous: &[u8; 32]) -> u64 {
+    let input = sme_last_input(previous);
+    let mut out = [0u8; 1024];
+    let written = last_lanes::<16>(platform, &input, previous, 16, &mut out);
+    fold(&out[..written])
 }
 
 /// Stop when this binary was compiled to assume an instruction that this
@@ -679,6 +721,8 @@ mod test {
         } else {
             expected
         };
+        #[cfg(blake3_sme2)]
+        let expected = expected + usize::from(matches!(Platform::detect_unchecked(), Platform::SME2));
         assert_eq!(checked, expected);
     }
 
@@ -849,6 +893,14 @@ mod test {
             assert!(message.contains("blake3-servil startup self-test failed"), "wrong failure for case {bad}: {message}");
             assert_eq!(calls, bad + 1, "a case ran after the failed one");
         }
+    }
+
+    #[test]
+    #[cfg(blake3_sme2)]
+    fn sme_last_expected_matches_official() {
+        let previous = chain(into(reference), |_, _| {});
+        let folded = fold(&reference(LastLanes { count: 16 }, &sme_last_input(&previous), &previous));
+        assert_eq!(SME_LAST_EXPECTED, folded, "SME2 last-block reference: 0x{folded:016x}");
     }
 
     /// EXPECTED is official BLAKE3's answer for every case. On a

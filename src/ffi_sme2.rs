@@ -1,12 +1,12 @@
 //! AArch64 SME2 implementation, 512-bit streaming vector length (Apple M4
 //! and later). The kernels live in c/blake3_sme2_aarch64.S.
 //!
-//! The assembly handles exactly one shape: groups of sixteen whole inputs,
-//! either 1024-byte chunks (sixteen blocks each, counter incrementing) or
-//! 64-byte parent blocks (one block each, counter fixed). This wrapper feeds
-//! it every full group and hands anything else to the NEON backend: a
-//! remainder of fewer than sixteen inputs, chunk hashing with
-//! `IncrementCounter::No`, or parent hashing with `IncrementCounter::Yes`.
+//! The kernels hash groups of sixteen chunks, parents or messages. Message
+//! inputs hold whole blocks, or prefixes with separately padded final
+//! blocks and per-lane lengths. Their final group stores only real lanes.
+//! `hash_many` feeds full groups to SME2 and uses NEON for its remainder,
+//! chunk hashing with `IncrementCounter::No`, and parent hashing with
+//! `IncrementCounter::Yes`.
 //!
 //! The kernels return the streaming vector length in 32-bit lanes and do
 //! work only when it is 16. `Platform::detect()` checks that once and
@@ -184,6 +184,81 @@ pub unsafe fn hash_many<const N: usize>(
             crate::neon_hybrid::hash_many(&inputs[done..], key, rest_counter, increment_counter, flags, flags_start, flags_end, &mut out[done * OUT_LEN..]);
         }
     }
+}
+
+/// One readable, padded final block and its logical length.
+#[cfg(feature = "std")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct LastBlock<'a> {
+    block: &'a [u8; BLOCK_LEN],
+    len: u32,
+}
+
+#[cfg(feature = "std")]
+const _: () = {
+    assert!(core::mem::size_of::<LastBlock<'static>>() == 16);
+    assert!(crate::many::TABLE <= 128); // messages_last's bounded proof domain.
+    assert!(core::mem::offset_of!(LastBlock<'static>, block) == 0);
+    assert!(core::mem::offset_of!(LastBlock<'static>, len) == 8);
+};
+
+#[cfg(feature = "std")]
+impl<'a> LastBlock<'a> {
+    #[inline(always)]
+    pub(crate) fn new(block: &'a [u8; BLOCK_LEN], len: u32) -> Self {
+        // The caller has just copied this tail into a 64-byte block; the
+        // bound folds into that copy's bound when inlined.
+        assert!(len <= BLOCK_LEN as u32, "a final block has 0 to 64 bytes");
+        Self { block, len }
+    }
+}
+
+/// Fixed-count prefixes followed by independently padded final blocks.
+/// Each prefix holds `(blocks - 1) * 64` readable bytes (possibly zero).
+/// `inputs` and `lasts` hold at most `many::TABLE` lanes in whole groups
+/// of sixteen; fewer than sixteen
+/// spare lanes are in their last group. Each last block is zero past its
+/// length. Output holds one 32-byte digest per real lane. Requires SME2
+/// with 512-bit streaming vectors; `blocks` is 1..=16. Prefix bytes
+/// are disjoint from the output.
+#[cfg(feature = "std")]
+pub(crate) unsafe fn hash_last_lanes(
+    inputs: &[*const u8],
+    lasts: &[LastBlock<'_>],
+    blocks: usize,
+    key: &CVWords,
+    flags: u8,
+    start: u8,
+    end: u8,
+    out: &mut [u8],
+) {
+    assert!((1..=16).contains(&blocks), "1 to 16 blocks per message");
+    assert!(inputs.len() <= crate::many::TABLE, "at most the message table's lanes");
+    let count = out.len() / OUT_LEN;
+    assert!(
+        out.len() % OUT_LEN == 0 && inputs.len() == lasts.len() && inputs.len() % GROUP == 0 && count <= inputs.len() && inputs.len() - count < GROUP,
+        "whole groups of lanes with only the final group spare"
+    );
+    if count == 0 {
+        return;
+    }
+    crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_last_512 as *const ());
+    // Sound: the caller supplies the ISA and prefix ranges. LastBlock's
+    // references carry its full reads; the checked counts carry stores.
+    let lanes = unsafe {
+        ffi::blake3_servil_sme2_hash16_messages_last_512(
+            inputs.as_ptr(),
+            key.as_ptr(),
+            0,
+            flags as u64 | (start as u64) << 8 | (end as u64) << 16 | ((count % GROUP) as u64) << 24,
+            out.as_mut_ptr(),
+            (inputs.len() / GROUP) as u64,
+            blocks as u64,
+            lasts.as_ptr(),
+        )
+    };
+    assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
 }
 
 /// Messages in slots of N bytes (1 to 16 whole blocks), every one at
@@ -591,6 +666,7 @@ pub(crate) fn entries() -> std::vec::Vec<(&'static str, *const ())> {
         ("hash16_chunks", ffi::blake3_servil_sme2_hash16_chunks_512 as *const ()),
         ("hash16_chunks_at", ffi::blake3_servil_sme2_hash16_chunks_at_512 as *const ()),
         ("hash16_messages", ffi::blake3_servil_sme2_hash16_messages_512 as *const ()),
+        ("hash16_messages_last", ffi::blake3_servil_sme2_hash16_messages_last_512 as *const ()),
         ("hash16_parents", ffi::blake3_servil_sme2_hash16_parents_512 as *const ()),
         ("xof16", ffi::blake3_servil_sme2_xof16_512 as *const ()),
         ("sme2x2_chunks", ffi::blake3_servil_sme2x2_hash_chunks_512 as *const ()),
@@ -640,6 +716,21 @@ pub mod ffi {
             out: *mut u8,
             groups: u64,
             blocks: u64,
+        ) -> u64;
+
+        /// The message kernel with separately padded final blocks and
+        /// per-lane lengths. Prefix pointers hold blocks-1 whole blocks.
+        /// Requires 1..=8 groups of sixteen lanes and 1..=16 blocks.
+        #[cfg(feature = "std")]
+        pub fn blake3_servil_sme2_hash16_messages_last_512(
+            inputs: *const *const u8,
+            key: *const u32,
+            counter: u64,
+            flags: u64,
+            out: *mut u8,
+            groups: u64,
+            blocks: u64,
+            lasts: *const super::LastBlock<'_>,
         ) -> u64;
 
         /// Sixteen whole 1024-byte chunks per group. `inputs` is a table of

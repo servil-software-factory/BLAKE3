@@ -7,7 +7,7 @@ input, key, counter, and flags value under its harness's contract.
 Commands:
 
     python3 tools/verify/prove_hybrid.py [KERNEL...]   # c/blake3_neon_hybrid_aarch64.S: c1, k2-k10, p2-p9, q1-q9, l2-l9, kn, pn, x1, x4, x8 (527 cases, about 6 minutes on 16 CPUs)
-    python3 tools/verify/prove_sme2.py [KERNEL...]     # c/blake3_sme2_aarch64.S: chunks, chunks_at, messages, parents, xof, and the chunk and parent kernels at every group count (36 cases, minutes); c/blake3_sme2_hybrid_aarch64.S: chunks_x2 (2 cases, 2 min)
+    python3 tools/verify/prove_sme2.py [KERNEL...]     # c/blake3_sme2_aarch64.S: chunks, chunks_at, messages, messages_last, parents, xof, and the chunk and parent kernels at every group count (minutes); c/blake3_sme2_hybrid_aarch64.S: chunks_x2 (2 cases, 2 min)
     python3 tools/verify/prove_sme2.py xof_every messages_every x2_every  # the other kernels at every group count (x2_every about 12 minutes)
     python3 tools/verify/lean/emit.py                   # the definition, from the Lean specification (needs Lean)
     python3 tools/verify/cross_check.py                 # the NEON and integer models against the CPU
@@ -67,6 +67,16 @@ integer units hash chunk 16 in the block loop's passes 0 to 7 and chunk
 two halves, each one pass for every pass of the half; the group loop's
 proof takes the loop by them, its whole entry state checked (the key,
 each SME2 chunk's block 0, the table, counter and output of the group).
+
+The separate-final-block message entry (`messages_last`) is proved for
+all 1 to 8 groups and 1 to 16 blocks: 128 cases, each with arbitrary
+per-lane final lengths and all sixteen final-group store counts. The Rust
+wrapper bounds its table to this domain. Prefix regions hold exactly the
+preceding blocks; final-block regions hold 64 bytes each. Compression
+runs with the store count symbolic. At its first use, the proof forks
+all choices and checks each store/return suffix with its exact output
+bounds. Local assembly labels bind the older block-loop proofs to their
+input object's blocks.
 
 ## What a proof shows
 
@@ -264,7 +274,8 @@ Lessons the tools were built on:
   pointers, its counter) and see the proof reject it. `mutants.py` plants,
   beside an unmodified positive control of each: in the SME2 kernels, a
   group loop's counter and pointer steps, a parent kernel's input and
-  output strides, and a block loop's offset step and a rotation after it;
+  output strides, a block loop's offset step and a rotation after it,
+  and the separate-final-block source, length row and descriptor stride;
   in the AVX2 kernel, its strides, its counter's direction, a loop that
   never ends, and a read past an input; four x86 memory controls (a write
   into the caller's stack, an aligned load of an unaligned buffer, a

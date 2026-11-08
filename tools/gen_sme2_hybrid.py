@@ -78,11 +78,18 @@ def expand(line):
         return [line]
     params, body = MACROS[parts[0]]
     args = [a.strip() for a in parts[1].split(",")] if len(parts) > 1 else []
-    assert len(args) == len(params), (line, params)
+    assert len(args) <= len(params), (line, params)
+    names = []
+    for i, param in enumerate(params):
+        name, optional, default = param.partition("=")
+        names.append(name)
+        if i == len(args):
+            assert optional, (line, params)
+            args.append(default)
     out = []
     for b in body:
-        for p, a in zip(params, args):
-            b = re.sub(r"\\" + p + r"\b", a, b)
+        for p, a in zip(names, args):
+            b = re.sub(r"\\" + re.escape(p) + r"\b", a, b)
         out += expand(b)
     return out
 

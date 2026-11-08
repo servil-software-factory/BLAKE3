@@ -138,8 +138,7 @@ def run(job):
 
 
 def both_stored(sobj):
-    """The SME2 chunk kernel's proof on the path that stores every value
-    and on the one that stores a few: rejected if either fails."""
+    """Chunks and separate-last messages, with full and partial stores."""
     import prove_sme2
     reasons = []
     for stored in (0, 3):
@@ -147,6 +146,10 @@ def both_stored(sobj):
             prove_sme2.prove_chunks(sobj, 1, stored, False)
         except Unproved as e:
             reasons.append(f"storing {stored or 16}: {e}")
+    try:
+        prove_sme2.prove_messages(sobj, 1, 3, None, lasts=True)
+    except Unproved as e:
+        reasons.append(f"separate last blocks: {e}")
     if reasons:
         raise Unproved(reasons[0])
 
@@ -213,6 +216,24 @@ def jobs():
     sobj = prove_sme2.assemble()
     ssyms = aarch64.symbols(sobj)
     sbase = real(sobj, ssyms["blake3_servil_sme2_hash16_chunks_512"], ssyms["blake3_servil_sme2_text_end"], llvm=True)
+    # The descriptor's source, lengths and group step are independent
+    # failure modes of the separate-last entry.
+    entry = ssyms["blake3_servil_sme2_hash16_messages_last_512"]
+    source = entry + 8
+    assert sbase[source] == ("orr", ["x3", "x3", "#0x2000000000000"])
+    length = [a for a, (op, args) in sbase.items()
+              if op == "mov" and args == ["{ z14.s, z15.s }", "za1v.s[w12, 0x0:0x1]"]]
+    step = [a for a, (op, args) in sbase.items()
+            if op == "add" and args[:2] == ["x8", "x8"] and args[2].startswith("#") and aarch64.imm(args[2]) == 256]
+    assert len(length) == len(step) == 1
+    for what, addr, ins, groups, blocks in (
+            ("separate last source", source, ("nop", []), 1, 1),
+            ("per-lane last lengths", length[0], ("mov", ["{ z14.s, z15.s }", "za1v.s[w12, 0x2:0x3]"]), 1, 2),
+            ("last-descriptor group step", step[0], ("add", ["x8", "x8", "#0x80"]), 2, 3)):
+        code = dict(sbase)
+        code[addr] = ins
+        out.append((f"SME2 last mutant, {what}", code,
+                    lambda g=groups, b=blocks: prove_sme2.prove_messages(sobj, g, b, None, lasts=True)))
     for what, code in sme_mutants(sbase):
         out.append((f"SME2 chunks mutant, {what}", code, lambda: both_stored(sobj)))
     # The induction over the SME2 extended-output kernel's group loop
@@ -242,9 +263,24 @@ def jobs():
     # and a rotation after the loop, which only the composed proof sees.
     import prove_block_loop
     msgs = ssyms["blake3_servil_sme2_hash16_messages_512"]
-    msgs_end = min(v for v in ssyms.values() if v > msgs)
+    # The message entries share their body; local proof labels and the
+    # separate-last entry lie inside this range.
+    msgs_end = ssyms["blake3_servil_sme2_hash16_parents_512"]
     step_at = next(a for a, (m, o) in sorted(sbase.items()) if msgs <= a < msgs_end and m == "add" and o == ["x9", "x9", "#0x40"])
-    after = [a for a, (m, o) in sorted(sbase.items()) if prove_block_loop.EXIT <= a < msgs_end and m == "xar"]
+    # Moving the text keeps the proof valid: its block markers move with
+    # the object, rather than a maintainer updating numeric PCs.
+    original = (Path(prove_sme2.ROOT_DIR) / "c/blake3_sme2_aarch64.S").read_text()
+    marker = ".p2align 4\n_blake3_servil_sme2_hash16_chunks_512:"
+    assert original.count(marker) == 1
+    moved_dir = Path(tempfile.mkdtemp(prefix="sme-relocated-"))
+    moved_src, moved_obj = moved_dir / "sme.S", moved_dir / "sme.o"
+    moved_src.write_text(original.replace(marker, "    nop\n" + marker, 1))
+    subprocess.run([prove_sme2.CLANG, "-c", "-march=armv9-a+sme2", str(moved_src), "-o", str(moved_obj)], check=True)
+    assert prove_block_loop.block_labels(str(moved_obj)) != prove_block_loop.block_labels(sobj)
+    prove_block_loop.prove_step(str(moved_obj), 1)
+    prove_block_loop.prove_one_group(str(moved_obj))
+    _, block_exit = prove_block_loop.block_labels(sobj)
+    after = [a for a, (m, o) in sorted(sbase.items()) if block_exit <= a < msgs_end and m == "xar"]
     m_, o_ = sbase[after[len(after) // 2]]
     for what, a, ins, prove in (("the block loop's offset step", step_at, ("add", ["x9", "x9", "#0x48"]), prove_block_loop.prove),
                                 ("a rotation after the block loop", after[len(after) // 2], (m_, o_[:-1] + [f"#{int(o_[-1].lstrip('#'), 0) % 31 + 1}"]), prove_block_loop.prove_one_group)):

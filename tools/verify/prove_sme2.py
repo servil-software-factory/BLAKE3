@@ -110,17 +110,30 @@ def prove_chunks(obj, groups, stored, at, check=True):
     return m.steps
 
 
-def prove_messages(obj, groups, blocks, stored, check=True):
+def prove_messages(obj, groups, blocks, stored, check=True, lasts=False):
     """hash16_messages_512(inputs, key, counter, flags, out, groups,
     blocks): 16 messages a group of `blocks` whole blocks (2 to 16), every
     lane of group g at counter + g * step (step = flags bits 32..39), the
     last block recording last_len bytes (flags bits 40..47: any of 1 to 63,
     or 0 for 64, the contract's range, as a 6-bit symbol),
-    start on block 0, end on the last; stored as the chunk kernel's."""
+    start on block 0, end on the last; stored as the chunk kernel's.
+    With stored=None, check every final-group store count after one
+    compression prefix, each suffix with its exact output bounds."""
     n = 16 * groups
     msgs = [byte_symbols(f"in{i}_", 64 * blocks) for i in range(n)]
     key = byte_symbols("key", 32)
-    regions = {f"input{i}": Region(f"input{i}", 64 * blocks, False, (lambda b: lambda o: b[o])(msgs[i])) for i in range(n)}
+    prefix_bytes = 64 * (blocks - 1 if lasts else blocks)
+    regions = {f"input{i}": Region(f"input{i}", prefix_bytes, False, (lambda b: lambda o: b[o])(msgs[i])) for i in range(n)}
+    last_lengths = [BitVec(f"last_length_{i}", 32) for i in range(n)]
+    if lasts:
+        last_table = Region("lasts", 16 * n, False, None)
+        for i in range(n):
+            regions[f"last{i}"] = Region(f"last{i}", 64, False, (lambda data: lambda o: data[o])(msgs[i][-64:]))
+            for j in range(8):
+                last_table.bytes[16 * i + j] = (Ptr(f"last{i}", 0), j)
+            for j in range(4):
+                last_table.bytes[16 * i + 8 + j] = Extract(8 * j + 7, 8 * j, last_lengths[i])
+        regions["lasts"] = last_table
     regions["key"] = Region("key", 32, False, lambda o: key[o])
     kept = 16 * (groups - 1) + (stored or 16)
     regions["out"] = Region("out", 32 * kept, True, None)
@@ -129,17 +142,54 @@ def prove_messages(obj, groups, blocks, stored, check=True):
         for j in range(8):
             table.bytes[8 * i + j] = (Ptr(f"input{i}", 0), j)
     regions["table"] = table
-    s = SmeSetup(obj, "blake3_servil_sme2_hash16_messages_512", regions)
+    entry = "blake3_servil_sme2_hash16_messages_last_512" if lasts else "blake3_servil_sme2_hash16_messages_512"
+    s = SmeSetup(obj, entry, regions)
     counter = BitVec("counter", 64)
     flags, start, end, step = (BitVec(x, 8) for x in ("flags", "start", "end", "step"))
     last_len = BitVec("last_len", 6)
     m = s.m
     m.x[0], m.x[1], m.x[2] = Ptr("table", 0), Ptr("key", 0), counter
-    m.x[3] = Concat(BitVecVal(0, 18), last_len, step, BitVecVal(stored, 8), end, start, flags)
+    all_stored = stored is None
+    stored_symbol = BitVec("len_stored", 4)
+    stored_bits = ZeroExt(4, stored_symbol) if all_stored else BitVecVal(stored, 8)
+    m.x[3] = Concat(BitVecVal(0, 18), last_len, step, stored_bits, end, start, flags)
     m.x[4], m.x[5], m.x[6] = Ptr("out", 0), BitVecVal(groups, 64), BitVecVal(blocks, 64)
-    s.run_and_check_abi()
-    if aarch64.concrete(m.x[0]) != 16:
-        raise Unproved(f"returned {m.x[0]}, not 16")
+    if lasts:
+        m.x[7] = Ptr("lasts", 0)
+    if all_stored:
+        # Stored is absent from the compression's control flow. Reach its
+        # first use with all sixteen choices still symbolic, then fork the
+        # cheap store/return suffix, giving each its exact output bounds.
+        checkpoints = [pc for pc, (op, args) in m.code.items()
+                       if op == "lsr" and args[:2] == ["w8", "w3"] and aarch64.imm(args[2]) == 24]
+        if len(checkpoints) != 1:
+            raise Unproved("one final-group store-count checkpoint")
+        checkpoint = checkpoints[0]
+        m.lengths.add("len_stored")
+        before = induction.run_to(m, s.entry, checkpoint)
+        if set(before.regions["out"].bytes) != set(range((groups - 1) * 512)):
+            raise Unproved("only preceding whole groups write before the final store count")
+        runs = []
+        for count in range(16):
+            branch = induction.snapshot(before)
+            branch.assumptions.append(stored_symbol == count)
+            count = 16 * (groups - 1) + (count or 16)
+            branch.regions["out"].size = 32 * count
+            # Normalize the actual shift: bits shifted out include secret
+            # flags, while the store count alone remains. No assumptions
+            # about those flags enter the suffix's control proof.
+            op, args = branch.code[checkpoint]
+            aarch64.step(branch, checkpoint, op, args)
+            branch.steps += 1
+            branch.x[8] = simplify(branch.x[8])
+            prove_hybrid.check_abi(aarch64.run(branch, checkpoint + 4))
+            runs.append((branch, count))
+    else:
+        s.run_and_check_abi()
+        runs = [(m, kept)]
+    for machine, _ in runs:
+        if aarch64.concrete(machine.x[0]) != 16:
+            raise Unproved(f"returned {machine.x[0]}, not 16")
     if not check:
         return m.steps
     zero = BitVecVal(0, 8)
@@ -150,11 +200,12 @@ def prove_messages(obj, groups, blocks, stored, check=True):
         cv = spec.words(key)
         for b in range(blocks):
             f = ZeroExt(24, flags | (start if b == 0 else zero) | (end if b == blocks - 1 else zero))
-            length = If(last_len == 0, BitVecVal(64, 32), ZeroExt(26, last_len)) if b == blocks - 1 else BitVecVal(64, 32)
+            length = (last_lengths[i] if lasts else If(last_len == 0, BitVecVal(64, 32), ZeroExt(26, last_len))) if b == blocks - 1 else BitVecVal(64, 32)
             cv = spec.compress(cv, spec.words(msgs[i][64 * b:64 * b + 64]), c, length, f)[:8]
         cvs.append(cv)
-    check_out(m.regions["out"], 0, cvs)
-    return m.steps
+    for machine, count in runs:
+        check_out(machine.regions["out"], 0, cvs[:count])
+    return max(machine.steps for machine, _ in runs)
 
 
 def prove_parents(obj, groups, check=True):
@@ -438,6 +489,9 @@ def cases(only):
             out += [("chunks", groups, stored), ("chunks_at", groups, stored)]
     for blocks in range(2, 17):
         out.append(("messages", 1, (blocks, 0)))
+    for groups in range(1, 9):
+        for blocks in range(1, 17):
+            out.append(("messages_last", groups, (blocks, None)))
     for stored in (1, 15):
         out.append(("messages", 1, (5, stored)))
     out.append(("messages", 2, (3, 7)))
@@ -471,10 +525,12 @@ def prove_case(case):
         if name in ("chunks", "chunks_at"):
             steps = prove_chunks(OBJ, groups, arg, name == "chunks_at")
             what = f"{groups} groups, the last storing {arg or 16}"
-        elif name == "messages":
+        elif name in ("messages", "messages_last"):
             blocks, stored = arg
-            steps = prove_messages(OBJ, groups, blocks, stored)
-            what = f"{groups} groups of {blocks}-block messages, the last block of any length, the last group storing {stored or 16}"
+            steps = prove_messages(OBJ, groups, blocks, stored, lasts=name == "messages_last")
+            tail = "independent padded final blocks and lengths" if name == "messages_last" else "one final length"
+            stores = "every final-group store count" if stored is None else f"the last group storing {stored or 16}"
+            what = f"{groups} groups of {blocks}-block messages, {tail}, {stores}"
         elif name == "every":
             import prove_block_loop
             step = prove_block_loop.prove(OBJ, chunks=True)

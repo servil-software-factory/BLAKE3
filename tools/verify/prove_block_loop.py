@@ -18,8 +18,10 @@ from aarch64 import Ptr, Region, Unproved
 from prove_hybrid import byte_symbols
 import lean_spec as spec
 
-HEAD = 0x21c   # the block loop's head (cmp x5, #1)
-EXIT = 0xcc0   # its exit: the last block's compression
+def block_labels(obj):
+    """Local assembly labels bind the proof to the input object's blocks."""
+    syms = aarch64.symbols(obj)
+    return syms["blake3_servil_sme2_block_loop"], syms["blake3_servil_sme2_last_block"]
 
 
 def setup(obj, groups=1, chunks=False):
@@ -134,12 +136,13 @@ def prove(obj, chunks=False):
 
 
 def prove_step(obj, groups, chunks=False):
+    head, exit_pc = block_labels(obj)
     s, m, lanes, key, (n, counter, flags, start, end, step, last_len) = setup(obj, groups, chunks)
     lc = s.lane_counter
-    s0 = induction.run_to(m, s.entry, HEAD)
+    s0 = induction.run_to(m, s.entry, head)
     s1 = induction.snapshot(s0)
     s1.assumptions = s1.assumptions + [UGE(n, 3)]
-    s1 = induction.run_to(s1, HEAD, HEAD)
+    s1 = induction.run_to(s1, head, head)
     # The first pass: block 0 under the key, with the start flag.
     kw = spec.words(key)
     for l in range(16):
@@ -152,10 +155,10 @@ def prove_step(obj, groups, chunks=False):
     # block 1 in ZA.
     two = induction.snapshot(s0)
     two.assumptions = [a for a in two.assumptions] + [n == 2]
-    outs = [] if chunks else induction.paths(two, HEAD, {HEAD, EXIT})
+    outs = [] if chunks else induction.paths(two, head, {head, exit_pc})
     if chunks:
         pass
-    elif [e.stopped_at for e, _ in outs] != [EXIT]:
+    elif [e.stopped_at for e, _ in outs] != [exit_pc]:
         raise Unproved("with two blocks, the first pass does not leave the loop")
     for out, _ in outs:
         for l in range(16):
@@ -171,7 +174,7 @@ def prove_step(obj, groups, chunks=False):
     # Passes K >= 1 from the arrivals at K = 1 and 2 (four blocks or more for
     # the second arrival; the step itself covers three on).
     s1.assumptions = s1.assumptions + [UGE(n, 4)]
-    s2 = induction.run_to(induction.snapshot(s1), HEAD, HEAD)
+    s2 = induction.run_to(induction.snapshot(s1), head, head)
     k = BitVec("len_k", 64)
     gen = BlockGeneralized(s1, s2, k)
     kept = sum(1 for tile in gen.za for row in tile for c in row if isinstance(c, tuple) and c[0] == "lanew")
@@ -184,7 +187,7 @@ def prove_step(obj, groups, chunks=False):
         mk.assumptions = [UGE(n, 3), ULE(n, 16), ULE(k, 14), ULE(k + 3, n)]   # pass K = 1 + k <= n - 2
         mk.lengths = {"len_blocks", "len_k"}
         h = [[mk.v[i][l] for i in range(8)] for l in range(16)]
-        ends = induction.paths(mk, HEAD, {HEAD, EXIT})
+        ends = induction.paths(mk, head, {head, exit_pc})
         forget = set()
         for end, _ in ends:
             # At the head and at the exit alike: ZA holds block K + 1, and the
@@ -203,7 +206,7 @@ def prove_step(obj, groups, chunks=False):
         at = end.stopped_at
         for l in range(16):
             compare(end, [end.v[i][l] for i in range(8)], expect(h[l], lanes[l], 64 * K, lc(l), flags), f"lane {l} after block K ({at:#x})")
-        if at == EXIT and not aarch64.holds(end, K + 2 == n):
+        if at == exit_pc and not aarch64.holds(end, K + 2 == n):
             raise Unproved("the loop exits before its last pass")
     changed = []
     for r, g in gen.x.items():
@@ -226,7 +229,7 @@ def prove_step(obj, groups, chunks=False):
     return f"every pass K >= 1: {len(ends)} paths (back to the head with block K + 1 in ZA, or out after the last), each the standard's compression of block K"
 
 
-def summary(n, chains, lanes, key, group_base=lambda: 0):
+def summary(n, chains, lanes, key, exit_pc, group_base=lambda: 0):
     """The block loop by its proof (prove): from a group's first arrival
     (pass 0, the key in z0-z7, block 0 in ZA) to its exit after n - 1
     passes: z0-z7 the chain over blocks 0 to n - 2 (`chains`, by lane),
@@ -276,7 +279,7 @@ def summary(n, chains, lanes, key, group_base=lambda: 0):
                 m.za[0][row][col] = Concat(*[Select(w[0], o + j) for j in reversed(range(4))])
         if m.p is not None and 1 in m.p:
             m.p[1] = None
-        return EXIT
+        return exit_pc
     return run
 
 
@@ -289,7 +292,8 @@ def prove_one_group(obj):
     s, m, lanes, key, (n, counter, flags, start, end, step, last_len) = setup(obj)
     table_ = [[BV(f"chain{l}_{w}", 32) for w in range(8)] for l in range(16)]
     chains = lambda l, base: table_[l]
-    m.summaries = {HEAD: summary(n, chains, lanes, key)}
+    head, exit_pc = block_labels(obj)
+    m.summaries = {head: summary(n, chains, lanes, key, exit_pc)}
     ends = induction.paths(m, s.entry, set())
     length = If(last_len == 0, BitVecVal(64, 32), ZeroExt(26, last_len))
     for e, how in ends:
@@ -364,7 +368,8 @@ def prove_every(obj, chunks=False):
     chains = lambda l, base: [Select(f, aarch64.as_bv(base)) for f in funcs[l]]
     current = [0]
     group_base = lambda: aarch64.as_bv(current[0] * 1024) if not isinstance(current[0], int) else BitVecVal(current[0] * 1024, 64)
-    m.summaries = {HEAD: summary(n, chains, lanes, key, group_base)}
+    block_head, exit_pc = block_labels(obj)
+    m.summaries = {block_head: summary(n, chains, lanes, key, exit_pc, group_base)}
     head = prove_sme2.loop_head(obj, (lambda: prove_sme2.prove_chunks(obj, 3, 0, False, check=False)) if chunks else (lambda: prove_sme2.prove_messages(obj, 3, 3, 0, check=False)), 2)
     length = BitVecVal(64, 32) if chunks else If(last_len == 0, BitVecVal(64, 32), ZeroExt(26, last_len))
     def check_group(mach, kval):

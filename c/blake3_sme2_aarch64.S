@@ -105,6 +105,8 @@
 .global blake3_servil_sme2_hash16_chunks_at_512
 .global _blake3_servil_sme2_hash16_messages_512
 .global blake3_servil_sme2_hash16_messages_512
+.global _blake3_servil_sme2_hash16_messages_last_512
+.global blake3_servil_sme2_hash16_messages_last_512
 .global _blake3_servil_sme2_hash16_parents_512
 .global blake3_servil_sme2_hash16_parents_512
 .global _blake3_servil_sme2_xof16_512
@@ -138,26 +140,26 @@
 /*
  * Load all sixteen rows at the current x9 offset.
  */
-.macro LOAD_BLOCK
-    LOAD_ROW   0, w12, 0
-    LOAD_ROW   8, w12, 1
-    LOAD_ROW  16, w12, 2
-    LOAD_ROW  24, w12, 3
+.macro LOAD_BLOCK loader=LOAD_ROW
+    \loader   0, w12, 0
+    \loader   8, w12, 1
+    \loader  16, w12, 2
+    \loader  24, w12, 3
 
-    LOAD_ROW  32, w13, 0
-    LOAD_ROW  40, w13, 1
-    LOAD_ROW  48, w13, 2
-    LOAD_ROW  56, w13, 3
+    \loader  32, w13, 0
+    \loader  40, w13, 1
+    \loader  48, w13, 2
+    \loader  56, w13, 3
 
-    LOAD_ROW  64, w14, 0
-    LOAD_ROW  72, w14, 1
-    LOAD_ROW  80, w14, 2
-    LOAD_ROW  88, w14, 3
+    \loader  64, w14, 0
+    \loader  72, w14, 1
+    \loader  80, w14, 2
+    \loader  88, w14, 3
 
-    LOAD_ROW  96, w15, 0
-    LOAD_ROW 104, w15, 1
-    LOAD_ROW 112, w15, 2
-    LOAD_ROW 120, w15, 3
+    \loader  96, w15, 0
+    \loader 104, w15, 1
+    \loader 112, w15, 2
+    \loader 120, w15, 3
 .endm
 
 /*
@@ -171,6 +173,17 @@
  *
  *     z(16+word)[lane] = input[lane][word]
  */
+/* A separately padded final block and its length, one 16-byte descriptor
+ * per lane: block pointer at 0, u32 length at 8. x9 is the descriptor base.
+ * ZA1 column zero retains the lengths until final-block initialization.
+ */
+.macro LOAD_LAST_ROW ptr_off, selector, slice
+    ldr     x8, [x9, #(2 * \ptr_off)]
+    ld1w    { za0h.s[\selector, \slice] }, p0/z, [x8]
+    add     x8, x9, #(2 * \ptr_off + 8)
+    ld1w    { za1h.s[\selector, \slice] }, p3/z, [x8]
+.endm
+
 .macro READ_MESSAGES
     mov     { z16.s - z19.s }, za0v.s[w12, 0:3]
     mov     { z20.s - z23.s }, za0v.s[w13, 0:3]
@@ -358,57 +371,57 @@
  * independent of the current compression and can execute while the
  * ADD/XAR dependency chains are in flight.
  */
-.macro SEVEN_ROUNDS_PIPELINED
+.macro SEVEN_ROUNDS_PIPELINED loader=LOAD_ROW
     /* Round 0. */
     COLUMN_G4   z16.s, z17.s, z18.s, z19.s,  z20.s, z21.s, z22.s, z23.s
-    LOAD_ROW   0, w12, 0
-    LOAD_ROW   8, w12, 1
+    \loader   0, w12, 0
+    \loader   8, w12, 1
 
     DIAGONAL_G4 z24.s, z25.s, z26.s, z27.s,  z28.s, z29.s, z30.s, z31.s
-    LOAD_ROW  16, w12, 2
-    LOAD_ROW  24, w12, 3
+    \loader  16, w12, 2
+    \loader  24, w12, 3
 
     /* Round 1. */
     COLUMN_G4   z18.s, z22.s, z19.s, z26.s,  z23.s, z16.s, z20.s, z29.s
-    LOAD_ROW  32, w13, 0
+    \loader  32, w13, 0
 
     DIAGONAL_G4 z17.s, z27.s, z28.s, z21.s,  z25.s, z30.s, z31.s, z24.s
-    LOAD_ROW  40, w13, 1
+    \loader  40, w13, 1
 
     /* Round 2. */
     COLUMN_G4   z19.s, z20.s, z26.s, z28.s,  z29.s, z18.s, z23.s, z30.s
-    LOAD_ROW  48, w13, 2
+    \loader  48, w13, 2
 
     DIAGONAL_G4 z22.s, z21.s, z25.s, z16.s,  z27.s, z31.s, z24.s, z17.s
-    LOAD_ROW  56, w13, 3
+    \loader  56, w13, 3
 
     /* Round 3. */
     COLUMN_G4   z26.s, z23.s, z28.s, z25.s,  z30.s, z19.s, z29.s, z31.s
-    LOAD_ROW  64, w14, 0
+    \loader  64, w14, 0
 
     DIAGONAL_G4 z20.s, z16.s, z27.s, z18.s,  z21.s, z24.s, z17.s, z22.s
-    LOAD_ROW  72, w14, 1
+    \loader  72, w14, 1
 
     /* Round 4. */
     COLUMN_G4   z28.s, z29.s, z25.s, z27.s,  z31.s, z26.s, z30.s, z24.s
-    LOAD_ROW  80, w14, 2
+    \loader  80, w14, 2
 
     DIAGONAL_G4 z23.s, z18.s, z21.s, z19.s,  z16.s, z17.s, z22.s, z20.s
-    LOAD_ROW  88, w14, 3
+    \loader  88, w14, 3
 
     /* Round 5. */
     COLUMN_G4   z25.s, z30.s, z27.s, z21.s,  z24.s, z28.s, z31.s, z17.s
-    LOAD_ROW  96, w15, 0
+    \loader  96, w15, 0
 
     DIAGONAL_G4 z29.s, z19.s, z16.s, z26.s,  z18.s, z22.s, z20.s, z23.s
-    LOAD_ROW 104, w15, 1
+    \loader 104, w15, 1
 
     /* Round 6. */
     COLUMN_G4   z27.s, z31.s, z21.s, z16.s,  z17.s, z25.s, z24.s, z22.s
-    LOAD_ROW 112, w15, 2
+    \loader 112, w15, 2
 
     DIAGONAL_G4 z30.s, z26.s, z18.s, z28.s,  z19.s, z20.s, z23.s, z29.s
-    LOAD_ROW 120, w15, 3
+    \loader 120, w15, 3
 .endm
 
 /*
@@ -484,6 +497,21 @@ _blake3_servil_sme2_hash16_messages_512:
 blake3_servil_sme2_hash16_messages_512:
     sub     x6, x6, #1
     mov     x17, #0
+    b       .Lchunks_body
+
+/* The message contract with separately padded final blocks and per-lane
+ * lengths (including zero), passed in x7. Bit 49 selects that layout.
+ * Prefix pointers provide blocks-1 whole blocks, which may be zero.
+ * Contract: 1..8 groups, 1..16 blocks; each descriptor is a readable
+ * 64-byte block pointer at offset 0 and a u32 length at offset 8,
+ * stride 16. The block is zero beyond its length (0..64).
+ */
+.p2align 4
+_blake3_servil_sme2_hash16_messages_last_512:
+blake3_servil_sme2_hash16_messages_last_512:
+    sub     x6, x6, #1
+    mov     x17, #0
+    orr     x3, x3, #(1 << 49)
 
 .Lchunks_body:
     /*
@@ -496,6 +524,7 @@ blake3_servil_sme2_hash16_messages_512:
     stp     d12, d13, [sp, #32]
     stp     d14, d15, [sp, #48]
     str     x2, [sp, #64]
+    str     x7, [sp, #72]
 
     smstart sm
     smstart za
@@ -519,6 +548,8 @@ blake3_servil_sme2_hash16_messages_512:
      */
     mov     x8, #8
     whilelo p2.s, xzr, x8
+    mov     x8, #1
+    whilelo p3.s, xzr, x8
 
     /*
      * ZA slice bases. ZA .S slice indices use W12-W15.
@@ -624,7 +655,14 @@ blake3_servil_sme2_hash16_messages_512:
      * Initially load block zero synchronously.
      */
     mov     x9, #0
+    tbz     x3, #49, .Linitial_prefix
+    cbnz    x6, .Linitial_prefix
+    ldr     x9, [sp, #72]
+    LOAD_BLOCK LOAD_LAST_ROW
+    b       .Linitial_loaded
+.Linitial_prefix:
     LOAD_BLOCK
+.Linitial_loaded:
 
     /*
      * Blocks 0 through the next to last (x6 - 1). Each iteration preloads
@@ -634,6 +672,7 @@ blake3_servil_sme2_hash16_messages_512:
     mov     x9, #64
     cbz     x6, .Llast_block
 
+blake3_servil_sme2_block_loop:
 .Lpipelined_block_loop:
     PREFETCH_NEXT_GROUP
     and     w10, w3, #0xff
@@ -647,7 +686,16 @@ blake3_servil_sme2_hash16_messages_512:
 .Lnot_first_block:
     INITIALIZE_UPPER_STATE w10
     READ_MESSAGES
+    tbz     x3, #49, .Lpreload_prefix
+    add     x8, x7, #1
+    cmp     x8, x6
+    b.ne    .Lpreload_prefix
+    ldr     x9, [sp, #72]
+    SEVEN_ROUNDS_PIPELINED LOAD_LAST_ROW
+    b       .Lpreloaded
+.Lpreload_prefix:
     SEVEN_ROUNDS_PIPELINED
+.Lpreloaded:
     FEED_FORWARD
 
     add     x7, x7, #1
@@ -659,6 +707,7 @@ blake3_servil_sme2_hash16_messages_512:
      * The last block (x6) was loaded into ZA0 during the one before.
      * It takes flags_end and has no following block to preload.
      */
+blake3_servil_sme2_last_block:
 .Llast_block:
     INITIALIZE_UPPER_STATE w16
     /*
@@ -667,11 +716,17 @@ blake3_servil_sme2_hash16_messages_512:
      * are zero, the caller's promise). ((length - 1) & 63) + 1 maps 0 to
      * 64 without a branch, so one proof covers every length.
      */
+    tbz     x3, #49, .Lshared_last_length
+    mov     { z14.s - z15.s }, za1v.s[w12, 0:1]
+    dup     z15.s, w16
+    b       .Llast_length_ready
+.Lshared_last_length:
     ubfx    x8, x3, #40, #8
     sub     w8, w8, #1
     and     w8, w8, #63
     add     w8, w8, #1
     dup     z14.s, w8
+.Llast_length_ready:
     READ_MESSAGES
     SEVEN_ROUNDS
     FEED_FORWARD
@@ -723,6 +778,11 @@ blake3_servil_sme2_hash16_messages_512:
     STORE_OUTPUT 480, w15, 3
 
 .Lstored:
+    tbz     x3, #49, .Llast_descriptors_advanced
+    ldr     x8, [sp, #72]
+    add     x8, x8, #256
+    str     x8, [sp, #72]
+.Llast_descriptors_advanced:
     /*
      * Advance to the next group of sixteen chunks.
      */
