@@ -1368,6 +1368,24 @@ pub(crate) mod sources {
         use super::*;
 
         #[test]
+        fn waiting_help_runs_one_task() {
+            crate::initialize_multithreaded(Some(core::num::NonZeroUsize::new(1).unwrap()));
+            let source = Box::leak(Box::new(Source::new(1)));
+            assert!(!source.help(), "an empty source reports no work");
+            let input = [crate::block::Block([42; crate::BLOCK_LEN]); CHUNK_LEN / crate::BLOCK_LEN];
+            let mut output = crate::block::Block::ZERO;
+            let left = AtomicUsize::new(1);
+            let mut task = Task::of(crate::block::Block::bytes(&input), 1);
+            task.key = *crate::IV;
+            task.out = output.0.as_mut_ptr();
+            task.left = &left;
+            source.publish(task);
+            assert!(source.help(), "the waiting caller runs its queued task");
+            assert_eq!(left.load(Ordering::Acquire), 0, "help completes the task");
+            assert!(!source.help(), "the completed task is taken once");
+        }
+
+        #[test]
         fn stream_task_copy_survives_slot_reuse() {
             crate::initialize_multithreaded(Some(core::num::NonZeroUsize::new(1).unwrap()));
             let source = Box::leak(Box::new(Source::new(1)));

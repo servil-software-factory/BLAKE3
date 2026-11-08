@@ -391,8 +391,6 @@ src/stream.rs	replace == with != in Stream<'env, D>::finish	1	[cpu has sme2] spe
 src/stream.rs	replace == with != in Stream<'env, D>::help	1	[cpu has sme2] speed: a waiting caller hashes a lone task only after handing something back; the SME2 thread takes the task
 src/stream.rs	replace == with != in Stream<'env, D>::submit_long	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream.rs	replace >= with < in Stream<'env, D>::feed	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/stream.rs	replace Storage::run_waiting -> bool with false	1	[cpu has sme2] speed: a waiting caller hashes no lone task itself; the SME2 thread, which every publish wakes, takes it, so finish progresses (without SME2, tests/stream_finish_parked_workers hangs)
-src/stream.rs	replace Storage::run_waiting -> bool with true	1	[cpu has sme2] speed: a waiting caller counts a task it never ran and looks again at once, skipping a pause; the SME2 thread takes the task
 src/stream.rs	replace Stream<'env, D>::feed -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/stream.rs	replace Stream<'env, D>::feed -> bool with true	1	[cpu has sme2] speed: where the GPU's code is not built, help reads a feed and stops there, so a waiting caller neither hashes a lone task nor pauses (the SME2 thread takes stream tasks alone)
 src/stream.rs	replace Stream<'env, D>::reclaim -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
