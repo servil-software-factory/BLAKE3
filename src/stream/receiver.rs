@@ -216,12 +216,12 @@ impl Receiver {
     /// Hash a prepared batch in its compact layout, in `place`s (one per
     /// message). Completes at admission: a message-slot reservation and one
     /// bounded batch job on the pool. Its result token resolves when workers
-    /// have written every digest. Borrowing keeps the batch and places in
-    /// place until then; the result's lifetime carries that borrow.
+    /// have written every digest. The caller holds the buffers until then;
+    /// the returned token carries no borrow lifetime.
     /// Safety: the batch's blocks stay where they are, unwritten, and
     /// `places` is valid for `batch.len()` writes that nothing else reads
     /// or writes, until the completion resolves (the frontend holds the
-    /// batch and the caller's `&mut` meanwhile and hands them back with
+    /// owned batch and output box meanwhile and hands them back with
     /// the event).
     pub(super) unsafe fn submit_batch(&self, batch: &Batch<'_>, places: *mut [u8; OUT_LEN]) -> impl Future<Output = BatchCompletion> + 'static {
         let core = self.core.clone();

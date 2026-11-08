@@ -53,6 +53,32 @@ pub enum Event<T> {
 
 /// A completion the producer has yet to collect. Pushed with one poll, so
 /// its waker is registered before `ready` can wait on it.
+/// A producer-local borrow cannot become accepted pipeline input, even
+/// for an empty batch. This program is compiled only, never executed.
+///
+/// ```compile_fail,E0597
+/// # use blake3_servil::throughput::{Batch, Block, pipeline::{Event, Limits, Stream}};
+/// # use blake3_servil::Mode;
+/// # async fn borrowed_input() {
+/// let blocks = Vec::<Block>::new();
+/// let stream = Stream::new(Mode::Plain, Limits { buffers: 1, messages: 1 }, |_: Event<u8>| {});
+/// stream.submit_batch(Batch::from_blocks(&blocks, 64), Default::default(), 0).await;
+/// core::mem::forget(stream);
+/// # }
+/// ```
+///
+/// Output places move in too. This program is compiled only.
+///
+/// ```compile_fail,E0308
+/// # use blake3_servil::throughput::{Batch, pipeline::{Event, Limits, Stream}};
+/// # use blake3_servil::Mode;
+/// # async fn borrowed_output() {
+/// let mut places = [[0u8; 32]; 2];
+/// let stream = Stream::new(Mode::Plain, Limits { buffers: 1, messages: 1 }, |_: Event<u8>| {});
+/// stream.submit_batch(Batch::new(64, 2), &mut places, 0).await;
+/// core::mem::forget(stream);
+/// # }
+/// ```
 enum Pending<T> {
     Message(T, Pin<Box<Completion>>),
     /// The batch and places, held until the completion returns them.
@@ -89,8 +115,8 @@ impl std::task::Wake for NotifyWake {
 ///
 /// Crash-only: a [`Message`] is ended or aborted, never dropped; a
 /// pipeline is finished, never dropped, once it has accepted work. A
-/// pending `message` or `submit_batch` future holds nothing and drops as
-/// any future does.
+/// pending admission can be cancelled by dropping its future. A pending
+/// batch future owns its input and output buffers until admission.
 ///
 /// [`collect`]: Stream::collect
 /// [`finish`]: Stream::finish
@@ -135,20 +161,8 @@ impl<T: Copy, F: FnMut(Event<T>)> Stream<T, F> {
     /// Submit a prepared batch once admitted (delivering completions as
     /// `message` does while it waits); its digests land in `places`, one
     /// per message of the batch, and both come back with its
-    /// [`Event::Batch`]. The pipeline owns both until then: the workers
-    /// write into them while the producer goes on, so a pipeline that is
-    /// forgotten (`mem::forget`) leaks them, where a borrowed batch would be
-    /// freed under the workers (#309).
-    ///
-    /// ```compile_fail,E0597
-    /// # use blake3_servil::throughput::{Batch, Block, pipeline::{Event, Limits, Stream}};
-    /// # use blake3_servil::Mode;
-    /// # async fn borrowed(stream: &Stream<u8, fn(Event<u8>)>) {
-    /// let blocks = vec![Block::ZERO; 2];
-    /// // A batch borrowed from the producer's memory is refused.
-    /// stream.submit_batch(Batch::from_blocks(&blocks, 64), vec![[0u8; 32]; 2].into(), 0).await;
-    /// # }
-    /// ```
+    /// [`Event::Batch`]. The pipeline takes ownership of both buffers;
+    /// the event returns them for the producer to refill and reuse.
     pub async fn submit_batch(&self, batch: Batch<'static>, mut places: Box<[[u8; OUT_LEN]]>, tag: T) {
         assert_eq!(batch.len(), places.len(), "one place per batch message");
         // Sound: the batch's blocks and `places` live on the heap (or for
