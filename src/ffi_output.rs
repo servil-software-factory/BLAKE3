@@ -284,7 +284,7 @@ mod tests {
                 1 => crate::Mode::Keyed(&keys[i]),
                 _ => crate::Mode::DeriveKey("BLAKE3-Servil bulk prefix test"),
             };
-            let mut hashers: Vec<_> = (0..count).map(|i| Hasher::new(mode(i))).collect();
+            let mut hashers: Vec<_> = (0..count).map(|i| Hasher::new(mode(i), None)).collect();
             // Ordinary and grouped updates can alternate on the same state.
             for (h, bytes) in hashers.iter_mut().zip(&data) {
                 h.update(&bytes[..bytes.len().min(3)]);
@@ -296,19 +296,29 @@ mod tests {
             let which: Vec<_> = (0..count).rev().collect();
             let wanted: Vec<_> = which.iter().map(|&i| crate::test::official::hash(mode(i), &data[i])).collect();
             let mut out = vec![[0u8; OUT_LEN]; count];
-            crate::each::finalize_each(&hashers, &which, &mut out);
-            assert_eq!(out, wanted);
-            crate::each::finalize_each(&hashers, &which, &mut out);
-            assert_eq!(out, wanted, "immutable reusable staged states");
+            // Grouped and ordinary finishing agree, and the states hold
+            // their bytes until finished (a clone finished alone).
             for (i, h) in hashers.iter().enumerate() {
                 assert_eq!(h.count(), data[i].len() as u64);
-                assert_eq!(h.finalize().as_bytes(), &crate::test::official::hash(mode(i), &data[i]));
+                assert_eq!(h.clone().finalize().as_bytes(), &crate::test::official::hash(mode(i), &data[i]));
             }
-            // Continue across the chunk and 16-KiB staging boundaries.
+            crate::each::finalize_each(&mut hashers, &which, &mut out);
+            assert_eq!(out, wanted);
+            // finalize_each reset them: each is the empty message again.
+            crate::each::finalize_each(&mut hashers, &which, &mut out);
+            for (slot, &i) in which.iter().enumerate() {
+                assert_eq!(out[slot], crate::test::official::hash(mode(i), &[]), "reset after finishing, message {i}");
+            }
+            // The same messages again, continued across the chunk and
+            // 16-KiB staging boundaries before finishing.
+            for from in (0..1024).step_by(17) {
+                let pieces: Vec<_> = data.iter().enumerate().map(|(i, bytes)| (i, &bytes[from.min(bytes.len())..(from + 17).min(bytes.len())])).collect();
+                crate::each::update_each(&mut hashers, &pieces);
+            }
             let suffix = vec![0xacu8; 17003];
             let pieces: Vec<_> = (0..count).map(|i| (i, suffix.as_slice())).collect();
             crate::each::update_each(&mut hashers, &pieces);
-            crate::each::finalize_each(&hashers, &which, &mut out);
+            crate::each::finalize_each(&mut hashers, &which, &mut out);
             for (slot, &i) in which.iter().enumerate() {
                 let mut whole = data[i].clone();
                 whole.extend_from_slice(&suffix);
@@ -322,7 +332,7 @@ mod tests {
         crate::initialize();
         for rotation in 0..16 {
             for phase in [0usize, 1, 7, 31, 62, 63] {
-                let mut hashers: Vec<_> = (0..16).map(|_| Hasher::new(crate::Mode::Plain)).collect();
+                let mut hashers: Vec<_> = (0..16).map(|_| Hasher::new(crate::Mode::Plain, None)).collect();
                 let data: Vec<Vec<u8>> = (0..16)
                     .map(|i| {
                         let len = if i == 0 && phase == 0 { 0 } else { 64 * ((i + rotation) % 16) + 1 + (i + phase) % 64 };
@@ -335,7 +345,7 @@ mod tests {
                 }
                 let which: Vec<_> = (0..16).rev().collect();
                 let mut out = [[0u8; OUT_LEN]; 16];
-                crate::each::finalize_each(&hashers, &which, &mut out);
+                crate::each::finalize_each(&mut hashers, &which, &mut out);
                 for (slot, &i) in which.iter().enumerate() {
                     assert_eq!(out[slot], crate::test::official::hash(crate::Mode::Plain, &data[i]), "rotation={rotation} phase={phase} lane={i}");
                 }

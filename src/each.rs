@@ -108,18 +108,16 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
                             unsafe { crate::ffi_output::hash_group(inputs.as_slice().try_into().unwrap(), out) };
                             true
                         }
-                        None => false,
+                        // Sound: the same ISA; staged first chunks finish
+                        // their prefix blocks together, each lane ending
+                        // where its message does.
+                        None => unsafe { crate::ffi_output::staged_group(hashers, which.try_into().unwrap(), out) },
                     }
                 };
                 if hashed {
                     for &i in which {
                         hashers[i].reset(None);
                     }
-                    continue;
-                }
-                // Sound: this branch detected the kernel's ISA. Staged first
-                // chunks retain their digest as independently ending lanes.
-                if unsafe { crate::ffi_output::staged_group(hashers, which.try_into().unwrap(), out) } {
                     continue;
                 }
             }
