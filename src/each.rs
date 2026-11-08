@@ -180,14 +180,20 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: bool) 
 }
 
 /// Hash the whole groups `held` names, one in each of those hashers'
-/// stages, together where they share a key and flags, and pass each
-/// group's subtree to its hasher's core.
+/// stages, and pass each group's subtree to its hasher's core. The plain
+/// hashers' groups hash together; a keyed or key-derivation hasher's group
+/// hashes alone, since its key is secret and must not decide the work
+/// (BLAKE3 #312): the mode alone, public, groups them.
 #[cfg(feature = "std")]
 fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     use crate::{BLOCK_LEN, PARENT};
     let Some(&first) = held.first() else { return };
+    #[cfg(all(test, feature = "std"))]
+    crate::counted(crate::Counted::HeldPass);
     let (key, flags) = (hashers[first].core.key, hashers[first].core.chunk_state.flags);
-    let (alike, others): (Vec<usize>, Vec<usize>) = held.iter().partition(|&&i| hashers[i].core.key == key && hashers[i].core.chunk_state.flags == flags);
+    // Plain's key is the IV, the same for every plain hasher.
+    let plain = |i: usize| hashers[i].core.chunk_state.flags == 0;
+    let (alike, others): (Vec<usize>, Vec<usize>) = if plain(first) { held.iter().partition(|&&i| plain(i)) } else { (vec![first], held[1..].to_vec()) };
     let turn = crate::platform::Sme2Turn::take(hashers[first].core.chunk_state.platform, true);
     let platform = turn.platform();
     let n = alike.len();
@@ -849,6 +855,36 @@ mod test {
                 "fresh hasher {i}, {platform:?}"
             );
         }
+    }
+
+    /// update_each's held groups hash together by their public mode alone
+    /// (BLAKE3 #312): plain hashers share passes, and keyed ones take the
+    /// same passes whether their keys are equal or not.
+    #[cfg(feature = "std")]
+    #[test]
+    fn held_groups_pass_by_mode_not_key() {
+        crate::initialize();
+        let mut input = vec![0u8; crate::STAGE_LEN];
+        crate::test::paint_test_input(&mut input);
+        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let passes = |modes: &[Mode]| {
+            let mut hashers: Vec<Hasher> = modes.iter().map(|&m| Hasher::new(m, None)).collect();
+            // Pieces shorter than a group, so each hasher's group fills in
+            // its stage and is held for the turn.
+            let pieces: Vec<(usize, &[u8])> = input.chunks(4096).flat_map(|piece| (0..modes.len()).map(move |i| (i, piece))).collect();
+            crate::COUNTED.with(|c| c[crate::Counted::HeldPass as usize].set(0));
+            update_each(&mut hashers, &pieces);
+            let passes = crate::COUNTED.with(|c| c[crate::Counted::HeldPass as usize].get());
+            for (h, &m) in hashers.iter().zip(modes) {
+                assert_eq!(h.clone().finalize(), crate::test::official::hash(m, &input));
+            }
+            passes
+        };
+        assert_eq!(passes(&[Mode::Plain; 3]), 1, "plain hashers hash together");
+        assert_eq!(passes(&[Mode::Plain, Mode::Keyed(&a), Mode::Plain]), 2, "the keyed one alone");
+        let same = passes(&[Mode::Keyed(&a); 3]);
+        assert_eq!(same, passes(&[Mode::Keyed(&a), Mode::Keyed(&b), Mode::Keyed(&c)]), "equal keys take the passes distinct keys take");
+        assert_eq!(same, 3);
     }
 
     #[test]
