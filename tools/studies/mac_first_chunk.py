@@ -125,7 +125,7 @@ def main():
     for side, rev in revisions.items():
         run(["git", "worktree", "add", "--detach", ROOT / side, rev], cwd=LIBRARY)
         assert git(ROOT / side, "rev-parse", "HEAD") == rev
-    run(["git", "clone", "--no-checkout", "--shared", LIBRARY.parent / "bench-hashes", ROOT / "bench"])
+    run(["git", "clone", "--no-checkout", "https://github.com/servil-software-factory/bench-hashes", ROOT / "bench"])
     run(["git", "fetch", "https://github.com/servil-software-factory/bench-hashes", BENCH], cwd=ROOT / "bench")
     run(["git", "checkout", "--detach", BENCH], cwd=ROOT / "bench")
     identity = {"adapter": git(LIBRARY, "rev-parse", "HEAD"), "adapter_working_tree": git(LIBRARY, "status", "--porcelain", "--untracked-files=all"), "instrument": INSTRUMENT, "instrument_git_blob": git(LIBRARY, "hash-object", str(Path(__file__).parent / "first-chunk-cycle.sh")), "bench": BENCH, "libraries": revisions, "kind": kind, "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip()}
