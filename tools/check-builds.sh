@@ -11,7 +11,8 @@
 #     sh tools/check-builds.sh
 set -eu
 cd "$(git rev-parse --show-toplevel)"
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/target/check-builds}
+[ "${CARGO_TARGET_DIR:-}" != /tmp/target ] || unset CARGO_TARGET_DIR
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$PWD/target"}
 rustup target add x86_64-unknown-linux-gnu 2>/dev/null
 step() { echo "== $*"; "$@"; }
 step cargo nextest run --cargo-quiet --release --no-default-features
