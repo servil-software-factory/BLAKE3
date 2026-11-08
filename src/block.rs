@@ -103,7 +103,8 @@ impl Batch<'static> {
     /// making, not as its pages are first touched: make one and refill it.
     #[inline]
     pub fn new(message_len: usize, count: usize) -> Self {
-        Batch { blocks: std::vec![Block::ZERO; blocks_per(message_len) * count].into(), message_len }
+        let blocks = blocks_per(message_len).checked_mul(count).expect("batch capacity overflow");
+        Batch { blocks: std::vec![Block::ZERO; blocks].into(), message_len }
     }
 }
 
@@ -334,6 +335,17 @@ mod test {
     use super::*;
     use crate::Mode;
     use crate::throughput::hash_many;
+
+    #[test]
+    fn batch_capacity_rejects_wrapping_block_counts() {
+        for message_len in [128, 256] {
+            let count = usize::MAX / blocks_per(message_len) + 1;
+            assert!(
+                std::panic::catch_unwind(|| Batch::new(message_len, count)).is_err(),
+                "Batch rejects {count} messages of {message_len} bytes before constructing a value"
+            );
+        }
+    }
 
     /// Every byte a Batch lets the program write, written nonzero: every
     /// byte past each message's end stays zero, and each digest is the
