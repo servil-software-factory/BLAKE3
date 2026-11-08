@@ -195,7 +195,7 @@ impl<const N: usize> Packed<N> {
     /// `count` messages of zeros, resident from the making.
     pub fn new(count: usize) -> Self {
         let () = Self::FITS;
-        let lines = (count * N).div_ceil(128);
+        let lines = count.div_ceil(128 / N);
         Packed { lines: std::vec![Line([0; 128]); lines], count }
     }
 
@@ -470,8 +470,22 @@ mod packed_test {
     use crate::Mode;
     use crate::throughput::{hash_many, hash_many_multithreaded};
 
+    #[test]
+    fn packed_capacity_rejects_wrapping_message_counts() {
+        fn check<const N: usize>() {
+            for count in [usize::MAX / N + 1, usize::MAX / N + 2] {
+                // Constructor and drop only: the old value's slices are invalid.
+                assert!(std::panic::catch_unwind(|| Packed::<N>::new(count)).is_err(), "Packed<{N}> rejects {count} messages before constructing a value");
+            }
+        }
+        check::<16>();
+        check::<32>();
+    }
+
     fn packed<const N: usize>(count: usize, seed: u8) -> Packed<N> {
         let mut leaves = Packed::<N>::new(count);
+        assert_eq!(leaves.count, count);
+        assert_eq!(leaves.lines.len(), count.div_ceil(128 / N));
         for (i, leaf) in leaves.iter_mut().enumerate() {
             for (j, b) in leaf.iter_mut().enumerate() {
                 *b = (i as u8).wrapping_mul(31).wrapping_add(j as u8).wrapping_add(seed);
@@ -488,7 +502,7 @@ mod packed_test {
         crate::initialize_multithreaded(None);
         let key = [9u8; 32];
         for (name, mode) in [("plain", Mode::Plain), ("keyed", Mode::Keyed(&key)), ("derive", Mode::DeriveKey("packed test"))] {
-            for count in [0, 1, 2, 15, 16, 17, 31, 33, 100, 1000, 40_000] {
+            for count in [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 100, 1000, 40_000] {
                 let leaves = packed::<32>(count, 3);
                 let mut out = vec![[0u8; 32]; count];
                 hash_many(mode, &leaves, &mut out);
