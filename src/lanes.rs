@@ -1151,15 +1151,20 @@ pub(crate) mod sources {
             Self::run_len(waiting, threads)
         }
 
-        /// A stream's next task, if any (this source is a stream's).
-        pub(crate) fn take_task(&self) -> Option<Task> {
-            self.take_claimed(
+        /// Copy this stream's next task into `out` before releasing its
+        /// slot. The reference borrows the caller's copy; None clears it.
+        pub(crate) fn take_task<'a>(&self, out: &'a mut Option<Task>) -> Option<&'a Task> {
+            *out = None;
+            let _ = self.take_claimed(
                 || {},
-                |item| match item {
-                    Item::Task(task) => task,
-                    Item::Pieces(..) => unreachable!("a stream's source carries tasks"),
+                |item| {
+                    *out = Some(match item {
+                        Item::Task(task) => task,
+                        Item::Pieces(..) => unreachable!("a stream's source carries tasks"),
+                    });
                 },
-            )
+            );
+            out.as_ref()
         }
 
         fn waiting(&self) -> usize {
@@ -1211,7 +1216,8 @@ pub(crate) mod sources {
         /// runs where the pool has no workers (one CPU) or every worker is
         /// parked.
         pub(crate) fn help(&'static self) -> bool {
-            match self.take_task() {
+            let mut task = None;
+            match self.take_task(&mut task) {
                 Some(task) => {
                     crate::lanes::run_task(task);
                     true
@@ -1348,22 +1354,7 @@ pub(crate) mod sources {
     /// slot. The reference borrows that copy; None clears the place.
     pub(crate) fn take_stream_task(out: &mut Option<Task>) -> Option<&Task> {
         *out = None;
-        find(|source| {
-            if source.ring.is_empty() {
-                return false;
-            }
-            source
-                .take_claimed(
-                    || {},
-                    |item| {
-                        *out = Some(match item {
-                            Item::Task(task) => task,
-                            Item::Pieces(..) => unreachable!("a stream's source carries tasks"),
-                        });
-                    },
-                )
-                .is_some()
-        });
+        find(|source| !source.ring.is_empty() && source.take_task(out).is_some());
         out.as_ref()
     }
 
@@ -1382,6 +1373,9 @@ pub(crate) mod sources {
             let source = Box::leak(Box::new(Source::new(1)));
             let slot = source.register().unwrap();
             let mut place = Some(Task::of(&[], 73));
+            assert!(source.take_task(&mut place).is_none());
+            assert!(place.is_none(), "an empty source clears the direct caller's place");
+            place = Some(Task::of(&[], 73));
             assert!(take_stream_task(&mut place).is_none());
             assert!(place.is_none(), "an empty source clears the place");
             source.push(Task::of(&[], 7));
@@ -1420,7 +1414,7 @@ pub(crate) mod sources {
                     task.counter
                 });
                 claimed_rx.recv().unwrap();
-                assert_eq!(source.take_task().unwrap().counter, 1);
+                assert_eq!(source.take_task(&mut None).unwrap().counter, 1);
                 let observer = scope.spawn(move || {
                     let waited = progress_rx.recv().unwrap();
                     // Release even a faulty producer's worker before asserting,
@@ -1432,8 +1426,8 @@ pub(crate) mod sources {
                 let _ = progress_tx.send(false);
                 observer.join().unwrap();
                 assert_eq!(worker.join().unwrap(), 0, "the claimed task survives ring wraparound");
-                assert_eq!(source.take_task().unwrap().counter, 2);
-                assert!(source.take_task().is_none());
+                assert_eq!(source.take_task(&mut None).unwrap().counter, 2);
+                assert!(source.take_task(&mut None).is_none());
             });
         }
 
@@ -1446,10 +1440,10 @@ pub(crate) mod sources {
                         source.push(Task::of(&[], (lap * len + i) as u64));
                     }
                     for i in 0..len {
-                        assert_eq!(source.take_task().unwrap().counter, (lap * len + i) as u64);
+                        assert_eq!(source.take_task(&mut None).unwrap().counter, (lap * len + i) as u64);
                         assert_eq!(source.ring[i].next.load(Ordering::Acquire), (lap + 1) * len + i);
                     }
-                    assert!(source.take_task().is_none());
+                    assert!(source.take_task(&mut None).is_none());
                 }
             }
         }
@@ -1863,8 +1857,8 @@ pub(crate) fn worker_count() -> usize {
     pool().workers()
 }
 
-pub(crate) fn run_task(task: Task) {
-    task.run(pool_platform());
+pub(crate) fn run_task(task: &Task) {
+    task.run_ref(pool_platform());
 }
 
 fn worker_main(me: usize) {
@@ -1893,11 +1887,11 @@ mod test {
         source.reserve_gpu_batch_for_test();
         source.publish(Task::of(&[], 0));
         source.publish(Task::of(&[], 1));
-        assert!(source.take_task().is_none());
+        assert!(source.take_task(&mut None).is_none());
         assert!(!source.take_run(0, 1, 2, |_| panic!("the run is too short")));
-        assert!(source.take_task().is_none(), "a failed claim keeps the reservation");
+        assert!(source.take_task(&mut None).is_none(), "a failed claim keeps the reservation");
         assert!(source.take_run(0, 2, 1, |tasks| assert_eq!(tasks.count(), 1)));
-        assert!(source.take_task().is_some(), "CPU service resumes after the GPU claim");
+        assert!(source.take_task(&mut None).is_some(), "CPU service resumes after the GPU claim");
     }
 
     /// A call gives its place among the pool's callers back: alone in its
@@ -2329,12 +2323,12 @@ mod test {
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "two waiting: a wake");
         source.publish(task());
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "three waiting: a wake");
-        assert!(source.take_task().is_some());
-        assert!(source.take_task().is_some());
+        assert!(source.take_task(&mut None).is_some());
+        assert!(source.take_task(&mut None).is_some());
         counts();
         source.publish(task());
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "one waiting, then two: a wake");
-        assert!(source.take_task().is_some() && source.take_task().is_some() && source.take_task().is_none());
+        assert!(source.take_task(&mut None).is_some() && source.take_task(&mut None).is_some() && source.take_task(&mut None).is_none());
         counts();
         source.wake_for_waiting();
         assert_eq!(counts()[Noted::WakeTry as usize], 0, "none waiting: no wake");
@@ -2342,7 +2336,7 @@ mod test {
         counts();
         source.wake_for_waiting();
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "one waiting: a wake");
-        assert!(source.take_task().is_some());
+        assert!(source.take_task(&mut None).is_some());
     }
 
     /// A source registered is active for the workers at its slot, and
