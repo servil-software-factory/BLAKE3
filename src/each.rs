@@ -186,14 +186,27 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: bool) 
 /// (BLAKE3 #312): the mode alone, public, groups them.
 #[cfg(feature = "std")]
 fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
+    // Plain's key is the IV, the same for every plain hasher.
+    let plain: Vec<usize> = held.iter().copied().filter(|&i| hashers[i].core.chunk_state.flags == 0).collect();
+    if !plain.is_empty() {
+        hash_cohort(hashers, &plain);
+    }
+    for &i in held {
+        if hashers[i].core.chunk_state.flags != 0 {
+            hash_cohort(hashers, &[i]);
+        }
+    }
+}
+
+/// Hash the held groups of `alike`, hashers that share one key and flags,
+/// together.
+#[cfg(feature = "std")]
+fn hash_cohort(hashers: &mut [Hasher], alike: &[usize]) {
     use crate::{BLOCK_LEN, PARENT};
-    let Some(&first) = held.first() else { return };
+    let first = alike[0];
     #[cfg(all(test, feature = "std"))]
     crate::counted(crate::Counted::HeldPass);
     let (key, flags) = (hashers[first].core.key, hashers[first].core.chunk_state.flags);
-    // Plain's key is the IV, the same for every plain hasher.
-    let plain = |i: usize| hashers[i].core.chunk_state.flags == 0;
-    let (alike, others): (Vec<usize>, Vec<usize>) = if plain(first) { held.iter().partition(|&&i| plain(i)) } else { (vec![first], held[1..].to_vec()) };
     let turn = crate::platform::Sme2Turn::take(hashers[first].core.chunk_state.platform, true);
     let platform = turn.platform();
     let n = alike.len();
@@ -254,7 +267,6 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
         }
         hashers[i].take_held(&result);
     }
-    hash_held(hashers, &others);
 }
 
 #[cfg(not(feature = "std"))]
@@ -885,6 +897,10 @@ mod test {
         let same = passes(&[Mode::Keyed(&a); 3]);
         assert_eq!(same, passes(&[Mode::Keyed(&a), Mode::Keyed(&b), Mode::Keyed(&c)]), "equal keys take the passes distinct keys take");
         assert_eq!(same, 3);
+        // A large cohort: one pass for every keyed hasher, iterated, and
+        // one for all the plain ones.
+        assert_eq!(passes(&[Mode::Keyed(&a); 600]), 600, "600 keyed hashers, one pass each");
+        assert_eq!(passes(&[Mode::Plain; 600]), 1, "600 plain hashers, one pass");
     }
 
     #[test]
