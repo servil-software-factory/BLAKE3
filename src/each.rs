@@ -815,7 +815,7 @@ mod test {
                         (0..n).map(|i| (0..offsets[i] + crate::STAGE_LEN + 97).map(|j| ((i * 37 + j * 17) % 251) as u8).collect()).collect();
                     let mut hashers: Vec<_> = (0..n)
                         .map(|i| {
-                            let mut h = Hasher::new(modes[i]);
+                            let mut h = Hasher::new(modes[i], None);
                             h.core.chunk_state.platform = platform;
                             h.update(&data[i][..offsets[i]]);
                             h
@@ -832,13 +832,13 @@ mod test {
                         assert_eq!(hashers[i].staged, 0);
                         assert_eq!(hashers[i].count(), end as u64);
                         assert_eq!(
-                            *hashers[i].finalize().as_bytes(),
+                            *hashers[i].clone().finalize().as_bytes(),
                             crate::test::official::hash(modes[i], &data[i][..end]),
                             "{platform:?} n={n} lane={i} mixed={mixed}"
                         );
                         hashers[i].update(&data[i][end..]);
-                        assert_eq!(*hashers[i].finalize().as_bytes(), crate::test::official::hash(modes[i], &data[i]));
-                        let mut reader = hashers[i].finalize_xof();
+                        assert_eq!(*hashers[i].clone().finalize().as_bytes(), crate::test::official::hash(modes[i], &data[i]));
+                        let mut reader = hashers[i].clone().finalize_xof();
                         reader.set_position(13);
                         let mut out = [0u8; 129];
                         reader.fill(&mut out);
