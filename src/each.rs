@@ -345,7 +345,10 @@ pub fn hash_each(mode: Mode, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LE
     hash_each_on(key, flags, items, out, Platform::detect(), |item| crate::hash_serial(item, key, flags));
 }
 
-/// The most items [`hash_by_blocks`] sorts at once: a stream task's members.
+/// The existing SME2 message table, or a stream task's members elsewhere.
+#[cfg(blake3_sme2)]
+const BY_BLOCKS_AT_ONCE: usize = crate::many::TABLE;
+#[cfg(not(blake3_sme2))]
 const BY_BLOCKS_AT_ONCE: usize = crate::lanes::MEMBERS;
 
 /// The digest of each of `items`, every one of up to a chunk, of any
@@ -366,8 +369,59 @@ fn hash_by_blocks(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT
     }
 }
 
+/// One nonempty chunk of at most BY_BLOCKS_AT_ONCE items from hash_by_blocks.
 fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     const GROUP: usize = 16;
+    #[cfg(blake3_sme2)]
+    {
+        let len = items[0].len();
+        if matches!(platform, Platform::SME2)
+            && items.len() * len >= crate::SME2_SIZED_LEN
+            && len % crate::BLOCK_LEN == 0
+            && items.iter().all(|item| item.len() == len)
+        {
+            let turn = crate::platform::Sme2Turn::take(platform, true);
+            if matches!(turn.platform(), Platform::SME2) {
+                macro_rules! run {
+                    ($n:expr) => {{
+                        let mut lanes: arrayvec::ArrayVec<&[u8; $n], BY_BLOCKS_AT_ONCE> =
+                            items.iter().map(|item| (*item).try_into().expect("equal whole-block lengths")).collect();
+                        while lanes.len() % 16 != 0 {
+                            lanes.push(*lanes.last().unwrap());
+                        }
+                        crate::counted(crate::Counted::ByBlocksCall);
+                        // Sound: detection and the turn provide SME2. Every
+                        // typed lane holds its whole input; spare lanes
+                        // repeat a valid input and write no extra output.
+                        unsafe {
+                            crate::sme2::hash_messages(&lanes, key, flags, CHUNK_START, CHUNK_END | crate::ROOT, crate::BLOCK_LEN, out.as_flattened_mut())
+                        };
+                    }};
+                }
+                // A single-block cohort of at most 128 lanes is below
+                // the existing 16 KiB SME2 threshold.
+                match len {
+                    128 => run!(128),
+                    192 => run!(192),
+                    256 => run!(256),
+                    320 => run!(320),
+                    384 => run!(384),
+                    448 => run!(448),
+                    512 => run!(512),
+                    576 => run!(576),
+                    640 => run!(640),
+                    704 => run!(704),
+                    768 => run!(768),
+                    832 => run!(832),
+                    896 => run!(896),
+                    960 => run!(960),
+                    1024 => run!(1024),
+                    _ => unreachable!("an SME2-sized table of whole blocks"),
+                }
+                return;
+            }
+        }
+    }
     let whole = |item: &[u8]| item.len().saturating_sub(1) / crate::BLOCK_LEN;
     let mut order: arrayvec::ArrayVec<usize, BY_BLOCKS_AT_ONCE> = (0..items.len()).collect();
     order.sort_unstable_by_key(|&i| whole(items[i]));
@@ -699,6 +753,44 @@ mod test {
             golden.add(out.as_flattened(), || items.iter().flat_map(|i| crate::test::official::hash(Mode::Plain, i)).collect());
         }
         golden.check(0x8fa73f9dac40c559);
+    }
+
+    #[cfg(blake3_sme2)]
+    #[test]
+    fn shared_whole_messages_use_the_existing_sme2_kernel() {
+        if !crate::platform::sme2_detected() {
+            return;
+        }
+        crate::initialize();
+        let secret = [0x9du8; crate::KEY_LEN];
+        for mode in [Mode::Plain, Mode::Keyed(&secret), Mode::DeriveKey("shared whole blocks")] {
+            let mut room = core::mem::MaybeUninit::uninit();
+            let (key, flags) = mode.key(&mut room);
+            for len in [64usize, 128, 256, 1024] {
+                for count in [1usize, 15, 16, 17, 31, 32, 63, 64, 127, 128] {
+                    let data: Vec<Vec<u8>> = (0..count).map(|i| (0..len).map(|j| (i * 37 + j * 11) as u8).collect()).collect();
+                    let items: Vec<&[u8]> = data.iter().map(|d| &d[..]).collect();
+                    let expected: Vec<_> = items.iter().map(|i| crate::test::official::hash(mode, i)).collect();
+                    let mut out = vec![[0u8; OUT_LEN]; count];
+                    crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                    hash_by_blocks(&items, key, flags, &mut out, Platform::SME2);
+                    assert_eq!(out, expected, "{count} x {len}");
+                    let entry = crate::sme2::ffi::blake3_servil_sme2_hash16_messages_512 as *const () as usize;
+                    let ran = crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry));
+                    assert_eq!(ran, count * len >= crate::SME2_SIZED_LEN, "SME2 work guard {count} x {len}");
+                    if count == 128 && len == 1024 {
+                        let mut varied = data.clone();
+                        varied[1].pop();
+                        let refs: Vec<&[u8]> = varied.iter().map(|d| &d[..]).collect();
+                        let want: Vec<_> = refs.iter().map(|i| crate::test::official::hash(mode, i)).collect();
+                        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                        hash_by_blocks(&refs, key, flags, &mut out, Platform::SME2);
+                        assert_eq!(out, want, "a partial tail keeps the general collection path");
+                        assert!(!crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry)), "whole-message kernel needs equal whole lengths");
+                    }
+                }
+            }
+        }
     }
 
     /// hash_each_on sends a message to `alone` exactly when it has
