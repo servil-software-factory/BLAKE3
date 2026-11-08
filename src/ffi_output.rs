@@ -1,11 +1,13 @@
 //! Grouped first-chunk compression. On x86, descriptors carry each lane's
 //! block, CV, length and flags independently. The ARM probe reuses the
-//! existing equal-key/length NEON and SME2 message kernels.
+//! existing collection path for short plain messages.
 #[cfg(all(test, not(blake3_neon)))]
 use crate::hasher;
 #[cfg(not(blake3_neon))]
 use crate::platform::Platform;
-use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, ROOT};
+use crate::{BLOCK_LEN, CHUNK_LEN, Hasher};
+#[cfg(not(blake3_neon))]
+use crate::{CHUNK_END, CHUNK_START, OUT_LEN, ROOT};
 
 #[cfg(not(blake3_neon))]
 #[repr(C)]
@@ -409,96 +411,6 @@ mod tests {
     }
 }
 
-/// Probe: reuse the proved ARM message kernels for equal-length plain
-/// first chunks. All preparation and padding belong to the call.
-#[cfg(blake3_neon)]
-pub(crate) fn arm_group(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) -> bool {
-    let first = &hashers[which[0]];
-    let len = first.staged;
-    let key = crate::IV;
-    let flags = first.core.chunk_state.flags;
-    // The first experiment needs plain messages alone. Mode flags select
-    // it; secret key values stay out of the dispatcher's comparisons.
-    if flags != 0
-        || len == 0
-        || len > CHUNK_LEN
-        || which.iter().any(|&i| {
-            let h = &hashers[i];
-            h.staged != len || h.core.initial_chunk_counter != 0 || h.core.count() != 0 || h.core.chunk_state.flags != flags
-        })
-    {
-        return false;
-    }
-    let blocks = len.div_ceil(BLOCK_LEN);
-    let last_len = len - (blocks - 1) * BLOCK_LEN;
-    let mut inputs = arrayvec::ArrayVec::<*const u8, { crate::many::TABLE }>::new();
-    // One raw base keeps the stage pointers valid as later elements are
-    // borrowed for padding. The eligibility reads above checked each index.
-    let base = hashers.as_mut_ptr();
-    for &i in which {
-        let h = unsafe { &mut *base.add(i) };
-        h.stage[len..blocks * BLOCK_LEN].fill(core::mem::MaybeUninit::new(0));
-        inputs.push(h.stage.as_ptr().cast());
-    }
-    #[cfg(blake3_sme2)]
-    {
-        let sized = which.len() >= 16 && which.len() * len >= crate::SME2_SIZED_LEN;
-        let turn = crate::platform::Sme2Turn::take(crate::platform::Platform::detect(), sized);
-        if sized && matches!(turn.platform(), crate::platform::Platform::SME2) {
-            while inputs.len() % 16 != 0 {
-                inputs.push(*inputs.last().unwrap());
-            }
-            macro_rules! run {
-                ($n:expr) => {{
-                    // Sound: every slot has $n initialized bytes; repeated
-                    // tail lanes borrow the last valid slot. Detection and
-                    // the turn supply SME2 with sixteen streaming lanes.
-                    let refs: arrayvec::ArrayVec<_, { crate::many::TABLE }> = inputs.iter().map(|&p| unsafe { &*p.cast::<[u8; $n]>() }).collect();
-                    unsafe { crate::sme2::hash_messages(&refs, &key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, out.as_flattened_mut()) };
-                }};
-            }
-            match blocks {
-                2 => run!(128),
-                3 => run!(192),
-                4 => run!(256),
-                5 => run!(320),
-                6 => run!(384),
-                7 => run!(448),
-                8 => run!(512),
-                9 => run!(576),
-                10 => run!(640),
-                11 => run!(704),
-                12 => run!(768),
-                13 => run!(832),
-                14 => run!(896),
-                15 => run!(960),
-                16 => run!(1024),
-                _ => unreachable!("an SME-sized group has at least two blocks per message"),
-            }
-            return true;
-        }
-    }
-    for (inputs, out) in inputs.chunks(16).zip(out.chunks_mut(16)) {
-        // Sound: NEON exists on this target. Every prefix holds `blocks`
-        // initialized blocks, padded above; key/flags/length agree per group.
-        unsafe {
-            crate::neon_hybrid::hash_messages_raw(
-                inputs.as_ptr(),
-                inputs.len(),
-                blocks,
-                &key,
-                0,
-                flags,
-                CHUNK_START,
-                CHUNK_END | ROOT,
-                last_len,
-                out.as_flattened_mut(),
-            );
-        }
-    }
-    true
-}
-
 #[cfg(all(test, blake3_neon))]
 mod arm_tests {
     use super::*;
@@ -530,6 +442,34 @@ mod arm_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn varied_plain_first_chunks_use_the_existing_collection_path() {
+        crate::initialize();
+        for n in [2, 17, 128] {
+            let lens = [0, 1, 63, 64, 65, 511, 1024];
+            let data: Vec<Vec<u8>> = (0..n).map(|i| (0..lens[i % lens.len()]).map(|j| (i * 37 + j * 13) as u8).collect()).collect();
+            let mut hashers: Vec<_> = (0..n).map(|_| Hasher::new(crate::Mode::Plain, None)).collect();
+            for from in (0..1024).step_by(17) {
+                let pieces: Vec<_> = data.iter().enumerate().map(|(i, d)| (i, &d[from.min(d.len())..(from + 17).min(d.len())])).collect();
+                crate::each::update_each(&mut hashers, &pieces);
+            }
+            let which: Vec<_> = (0..n).rev().collect();
+            let mut out = vec![[0; 32]; n];
+            crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].set(0));
+            crate::each::finalize_each(&mut hashers, &which, &mut out);
+            for (&i, got) in which.iter().zip(&out) {
+                assert_eq!(*got, crate::test::official::hash(crate::Mode::Plain, &data[i]));
+            }
+            if crate::neon_hybrid::sha3_detected() {
+                assert!(
+                    crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].get()) > 0,
+                    "the existing block-group mechanism serves these varying lengths"
+                );
+            }
+            assert!(hashers.iter().all(|h| h.count() == 0));
         }
     }
 }

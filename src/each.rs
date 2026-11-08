@@ -129,7 +129,30 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
     #[cfg(blake3_neon)]
     if which.len() >= 2 {
         for (which, out) in which.chunks(crate::many::TABLE).zip(out.chunks_mut(crate::many::TABLE)) {
-            if crate::ffi_output::arm_group(hashers, which, out) {
+            let hashed = {
+                let items: Option<arrayvec::ArrayVec<_, { crate::many::TABLE }>> = which
+                    .iter()
+                    .map(|&i| {
+                        let h = &hashers[i];
+                        let c = &h.core.chunk_state;
+                        (h.core.initial_chunk_counter == 0
+                            && c.chunk_counter == 0
+                            && c.blocks_compressed == 0
+                            && c.buf_len == 0
+                            && h.core.cv_stack.len() == 0
+                            && c.flags == 0
+                            && h.staged <= CHUNK_LEN)
+                            .then(|| h.staged_bytes())
+                    })
+                    .collect();
+                if let Some(items) = items {
+                    hash_by_blocks(&items, &crate::IV, 0, out, Platform::detect());
+                    true
+                } else {
+                    false
+                }
+            };
+            if hashed {
                 for &i in which {
                     hashers[i].reset(None);
                 }
