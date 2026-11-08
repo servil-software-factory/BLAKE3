@@ -198,8 +198,8 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     }
 }
 
-/// Hash the held groups of `alike`, hashers that share one key and flags,
-/// together.
+/// Hash one nonempty cohort: plain hashers together, or exactly one
+/// keyed or key-derivation hasher, selected by public mode.
 #[cfg(feature = "std")]
 fn hash_cohort(hashers: &mut [Hasher], alike: &[usize]) {
     use crate::{BLOCK_LEN, PARENT};
