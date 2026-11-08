@@ -374,6 +374,11 @@ extern "C" fn completed(context: *mut c_void, ok: bool) {
             // task's place (64 bytes) and count stay until the count is zero.
             unsafe {
                 core::ptr::copy_nonoverlapping(command.out_bytes.add(i * 64), t.out, 64);
+                #[cfg(test)]
+                if i == 0 {
+                    // Planted value fault before publishing GPU completion.
+                    *t.out = (*t.out).wrapping_add(1);
+                }
                 (*t.left).fetch_sub(1, Ordering::Release);
             }
         }
