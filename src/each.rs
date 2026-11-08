@@ -126,6 +126,19 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         }
         return;
     }
+    #[cfg(blake3_neon)]
+    if which.len() >= 2 {
+        for (which, out) in which.chunks(16).zip(out.chunks_mut(16)) {
+            if crate::ffi_output::arm_group(hashers, which, out) {
+                for &i in which {
+                    hashers[i].reset(None);
+                }
+            } else {
+                finish_each(hashers, which, out);
+            }
+        }
+        return;
+    }
     finish_each(hashers, which, out);
 }
 
@@ -146,6 +159,14 @@ fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]
 /// their parents in one call. Then the waiting pieces, the same way, until
 /// none is left.
 fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: bool) {
+    #[cfg(blake3_neon)]
+    let pieces = {
+        let mut gathered = 0;
+        while gathered < pieces.len() && crate::ffi_output::gather_first(&mut hashers[pieces[gathered].0], pieces[gathered].1) {
+            gathered += 1;
+        }
+        &pieces[gathered..]
+    };
     #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     let pieces = if hashers.len() >= 16 && matches!(Platform::detect(), Platform::AVX512) {
         let mut gathered = 0;

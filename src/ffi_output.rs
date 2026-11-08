@@ -1,10 +1,13 @@
 //! Sixteen independent counter-zero compressions, one full-round compression
 //! per lane. Descriptors borrow blocks and CVs; keys, lengths and flags may
 //! differ between lanes. ROOT selects root digests; other blocks produce CVs.
-#[cfg(test)]
+#[cfg(all(test, not(blake3_neon)))]
 use crate::hasher;
-use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, ROOT, platform::Platform};
+#[cfg(not(blake3_neon))]
+use crate::platform::Platform;
+use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, ROOT};
 
+#[cfg(not(blake3_neon))]
 #[repr(C)]
 pub(crate) struct Input<'a> {
     block: &'a [u8; BLOCK_LEN],
@@ -12,6 +15,7 @@ pub(crate) struct Input<'a> {
     len: u8,
     flags: u8,
 }
+#[cfg(not(blake3_neon))]
 const _: () = {
     assert!(core::mem::size_of::<Input<'static>>() == 24);
     assert!(core::mem::offset_of!(Input<'static>, block) == 0);
@@ -19,6 +23,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Input<'static>, len) == 16);
     assert!(core::mem::offset_of!(Input<'static>, flags) == 17);
 };
+#[cfg(not(blake3_neon))]
 unsafe extern "C" {
     fn blake3_servil_output16(inputs: *const Input<'_>, out: *mut u8);
 }
@@ -26,6 +31,7 @@ unsafe extern "C" {
 /// A whole message still in its first chunk, with no staged suffix or
 /// stacked subtree. Its final block is already padded by ChunkState.
 /// Other states keep Hasher's existing finalization path.
+#[cfg(not(blake3_neon))]
 pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
     let c = &hasher.core.chunk_state;
     (hasher.staged == 0 && hasher.core.initial_chunk_counter == 0 && c.chunk_counter == 0 && hasher.core.cv_stack.len() == 0).then(|| Input {
@@ -39,6 +45,7 @@ pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
 /// Requires AVX-512F+VL on Linux. Each descriptor holds a readable padded
 /// block and CV; its block length is 0..64. Output holds sixteen CVs or root
 /// digests, according to each descriptor's flags. All counters are zero.
+#[cfg(not(blake3_neon))]
 pub(crate) unsafe fn hash_group(inputs: &[Input<'_>; 16], out: &mut [[u8; OUT_LEN]]) {
     assert_eq!(out.len(), 16, "sixteen compression outputs");
     crate::ran_kernel(blake3_servil_output16 as *const ());
@@ -56,22 +63,35 @@ pub(crate) fn gather_first(hasher: &mut Hasher, bytes: &[u8]) -> bool {
         || c.chunk_counter != 0
         || c.blocks_compressed != 0
         || hasher.core.cv_stack.len() != 0
-        || (hasher.staged != 0 && c.buf_len as usize != BLOCK_LEN)
+        || (hasher.staged != 0 && c.buf_len as usize != if cfg!(blake3_neon) { 0 } else { BLOCK_LEN })
         || c.buf_len as usize + hasher.staged + bytes.len() > CHUNK_LEN
     {
         return false;
     }
-    let take = bytes.len().min(BLOCK_LEN - c.buf_len as usize);
-    let start = c.buf_len as usize;
-    c.buf[start..start + take].copy_from_slice(&bytes[..take]);
-    c.buf_len += take as u8;
-    hasher.stage(&bytes[take..]);
+    #[cfg(blake3_neon)]
+    {
+        // Existing ARM message kernels take contiguous prefixes. A fresh
+        // first chunk stays in the existing stage, with no extra buffer.
+        if c.buf_len != 0 {
+            return false;
+        }
+        hasher.stage(bytes);
+    }
+    #[cfg(not(blake3_neon))]
+    {
+        let take = bytes.len().min(BLOCK_LEN - c.buf_len as usize);
+        let start = c.buf_len as usize;
+        c.buf[start..start + take].copy_from_slice(&bytes[..take]);
+        c.buf_len += take as u8;
+        hasher.stage(&bytes[take..]);
+    }
     true
 }
 
 /// Finalize sixteen first-chunk states whose uncompressed suffixes wait in
 /// their stages. Hashers remain immutable. Finished lanes keep their digest
 /// while longer lanes complete their prefix blocks.
+#[cfg(not(blake3_neon))]
 pub(crate) unsafe fn staged_group(hashers: &[Hasher], which: &[usize; 16], out: &mut [[u8; OUT_LEN]]) -> bool {
     let states = which.map(|i| &hashers[i]);
     if states.iter().any(|h| {
@@ -129,7 +149,9 @@ pub(crate) unsafe fn staged_group(hashers: &[Hasher], which: &[usize; 16], out: 
     true
 }
 
+#[cfg(not(blake3_neon))]
 const SELF_TEST_EXPECTED: u64 = 0x153e0dfbeac2bb44;
+#[cfg(not(blake3_neon))]
 fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; OUT_LEN]])) -> u64 {
     let mut lens: [u8; 16] = [0, 1, 31, 63, 64, 7, 32, 55, 3, 15, 48, 60, 2, 33, 62, 64];
     let flags: [u8; 16] = core::array::from_fn(|i| {
@@ -148,9 +170,11 @@ fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; OUT_LEN]]))
     hash(&inputs, &mut out);
     crate::self_test::fold(out.as_flattened())
 }
+#[cfg(not(blake3_neon))]
 fn check_self_test(answer: u64) {
     assert_eq!(answer, SELF_TEST_EXPECTED, "blake3-servil startup self-test failed: sixteen root outputs");
 }
+#[cfg(not(blake3_neon))]
 pub(crate) fn self_test(platform: Platform) -> usize {
     if !matches!(platform, Platform::AVX512) {
         return 0;
@@ -162,11 +186,13 @@ pub(crate) fn self_test(platform: Platform) -> usize {
     check_self_test(answer);
     1
 }
+#[cfg(not(blake3_neon))]
 #[cfg(test)]
 pub(crate) fn entry() -> *const () {
     blake3_servil_output16 as *const ()
 }
 
+#[cfg(not(blake3_neon))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +405,84 @@ mod tests {
         crate::each::finalize_each(&mut hashers, &which, &mut out);
         assert_eq!(out, expected);
         assert!(!crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry() as usize))));
+    }
+}
+
+/// Probe: reuse the proved ARM message kernels for equal-length first
+/// chunks sharing a key. All preparation and padding belong to the call.
+#[cfg(blake3_neon)]
+pub(crate) fn arm_group(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) -> bool {
+    let first = &hashers[which[0]];
+    let len = first.staged;
+    let key = first.core.key;
+    let flags = first.core.chunk_state.flags;
+    if len == 0
+        || len > CHUNK_LEN
+        || which.iter().any(|&i| {
+            let h = &hashers[i];
+            h.staged != len || h.core.initial_chunk_counter != 0 || h.core.count() != 0 || h.core.key != key || h.core.chunk_state.flags != flags
+        })
+    {
+        return false;
+    }
+    let blocks = len.div_ceil(BLOCK_LEN);
+    let last_len = len - (blocks - 1) * BLOCK_LEN;
+    let mut inputs = arrayvec::ArrayVec::<*const u8, 16>::new();
+    for &i in which {
+        let h = &mut hashers[i];
+        h.stage[len..blocks * BLOCK_LEN].fill(core::mem::MaybeUninit::new(0));
+        inputs.push(h.stage.as_ptr().cast());
+    }
+    // Sound: NEON exists on this target. Every prefix holds `blocks`
+    // initialized blocks, padded above; key/flags/length agree per group.
+    unsafe {
+        crate::neon_hybrid::hash_messages_raw(
+            inputs.as_ptr(),
+            inputs.len(),
+            blocks,
+            &key,
+            0,
+            flags,
+            CHUNK_START,
+            CHUNK_END | ROOT,
+            last_len,
+            out.as_flattened_mut(),
+        );
+    }
+    true
+}
+
+#[cfg(all(test, blake3_neon))]
+mod arm_tests {
+    use super::*;
+
+    #[test]
+    fn grouped_first_chunks_match_the_reference_and_reset() {
+        crate::initialize();
+        for n in [2, 16, 17, 64] {
+            for len in [0, 1, 63, 64, 65, 255, 1023, 1024, 1025, 2048, 16385] {
+                for width in [17, 256] {
+                    let key = [37; 32];
+                    for mode in [crate::Mode::Plain, crate::Mode::Keyed(&key), crate::Mode::DeriveKey("ARM grouped first chunk")] {
+                        let data: Vec<Vec<u8>> = (0..n).map(|i| (0..len).map(|j| (i * 37 + j * 13) as u8).collect()).collect();
+                        let mut hashers: Vec<_> = (0..n).map(|_| Hasher::new(mode, None)).collect();
+                        for start in (0..len).step_by(width) {
+                            let pieces: Vec<_> = data.iter().enumerate().map(|(i, d)| (i, &d[start..(start + width).min(len)])).collect();
+                            crate::each::update_each(&mut hashers, &pieces);
+                        }
+                        assert!(hashers.iter().all(|h| h.count() == len as u64));
+                        let which: Vec<_> = (0..n).rev().collect();
+                        let mut out = vec![[0; 32]; n];
+                        crate::each::finalize_each(&mut hashers, &which, &mut out);
+                        for (&i, got) in which.iter().zip(&out) {
+                            assert_eq!(*got, crate::test::official::hash(mode, &data[i]), "n={n}, len={len}, width={width}");
+                        }
+                        assert!(hashers.iter().all(|h| h.count() == 0));
+                        crate::each::finalize_each(&mut hashers, &which, &mut out);
+                        assert!(out.iter().all(|got| *got == crate::test::official::hash(mode, &[])));
+                    }
+                }
+            }
+        }
     }
 }
