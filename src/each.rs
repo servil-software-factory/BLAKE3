@@ -128,7 +128,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
     }
     #[cfg(blake3_neon)]
     if which.len() >= 2 {
-        for (which, out) in which.chunks(16).zip(out.chunks_mut(16)) {
+        for (which, out) in which.chunks(crate::many::TABLE).zip(out.chunks_mut(crate::many::TABLE)) {
             if crate::ffi_output::arm_group(hashers, which, out) {
                 for &i in which {
                     hashers[i].reset(None);

@@ -1,6 +1,6 @@
-//! Sixteen independent counter-zero compressions, one full-round compression
-//! per lane. Descriptors borrow blocks and CVs; keys, lengths and flags may
-//! differ between lanes. ROOT selects root digests; other blocks produce CVs.
+//! Grouped first-chunk compression. On x86, descriptors carry each lane's
+//! block, CV, length and flags independently. The ARM probe reuses the
+//! existing equal-key/length NEON and SME2 message kernels.
 #[cfg(all(test, not(blake3_neon)))]
 use crate::hasher;
 #[cfg(not(blake3_neon))]
@@ -55,8 +55,9 @@ pub(crate) unsafe fn hash_group(inputs: &[Input<'_>; 16], out: &mut [[u8; OUT_LE
 }
 
 /// Gather a bulk caller's first chunk without serial prefix compression.
-/// The existing chunk buffer holds its first block; the existing stage holds
-/// the suffix. The next bulk finalization compresses the prefixes together.
+/// On x86 the chunk buffer holds the first block and the stage its suffix.
+/// On ARM the existing stage holds the contiguous first chunk that its
+/// message kernels take. Bulk finalization compresses those prefixes together.
 pub(crate) fn gather_first(hasher: &mut Hasher, bytes: &[u8]) -> bool {
     let c = &mut hasher.core.chunk_state;
     if hasher.core.initial_chunk_counter != 0
@@ -427,27 +428,70 @@ pub(crate) fn arm_group(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8;
     }
     let blocks = len.div_ceil(BLOCK_LEN);
     let last_len = len - (blocks - 1) * BLOCK_LEN;
-    let mut inputs = arrayvec::ArrayVec::<*const u8, 16>::new();
+    let mut inputs = arrayvec::ArrayVec::<*const u8, { crate::many::TABLE }>::new();
+    // One raw base keeps the stage pointers valid as later elements are
+    // borrowed for padding. The eligibility reads above checked each index.
+    let base = hashers.as_mut_ptr();
     for &i in which {
-        let h = &mut hashers[i];
+        let h = unsafe { &mut *base.add(i) };
         h.stage[len..blocks * BLOCK_LEN].fill(core::mem::MaybeUninit::new(0));
         inputs.push(h.stage.as_ptr().cast());
     }
-    // Sound: NEON exists on this target. Every prefix holds `blocks`
-    // initialized blocks, padded above; key/flags/length agree per group.
-    unsafe {
-        crate::neon_hybrid::hash_messages_raw(
-            inputs.as_ptr(),
-            inputs.len(),
-            blocks,
-            &key,
-            0,
-            flags,
-            CHUNK_START,
-            CHUNK_END | ROOT,
-            last_len,
-            out.as_flattened_mut(),
-        );
+    #[cfg(blake3_sme2)]
+    {
+        let sized = which.len() >= 16 && which.len() * len >= crate::SME2_SIZED_LEN;
+        let turn = crate::platform::Sme2Turn::take(crate::platform::Platform::detect(), sized);
+        if sized && matches!(turn.platform(), crate::platform::Platform::SME2) {
+            while inputs.len() % 16 != 0 {
+                inputs.push(*inputs.last().unwrap());
+            }
+            macro_rules! run {
+                ($n:expr) => {{
+                    // Sound: every slot has $n initialized bytes; repeated
+                    // tail lanes borrow the last valid slot. Detection and
+                    // the turn supply SME2 with sixteen streaming lanes.
+                    let refs: arrayvec::ArrayVec<_, { crate::many::TABLE }> = inputs.iter().map(|&p| unsafe { &*p.cast::<[u8; $n]>() }).collect();
+                    unsafe { crate::sme2::hash_messages(&refs, &key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, out.as_flattened_mut()) };
+                }};
+            }
+            match blocks {
+                2 => run!(128),
+                3 => run!(192),
+                4 => run!(256),
+                5 => run!(320),
+                6 => run!(384),
+                7 => run!(448),
+                8 => run!(512),
+                9 => run!(576),
+                10 => run!(640),
+                11 => run!(704),
+                12 => run!(768),
+                13 => run!(832),
+                14 => run!(896),
+                15 => run!(960),
+                16 => run!(1024),
+                _ => unreachable!("an SME-sized group has at least two blocks per message"),
+            }
+            return true;
+        }
+    }
+    for (inputs, out) in inputs.chunks(16).zip(out.chunks_mut(16)) {
+        // Sound: NEON exists on this target. Every prefix holds `blocks`
+        // initialized blocks, padded above; key/flags/length agree per group.
+        unsafe {
+            crate::neon_hybrid::hash_messages_raw(
+                inputs.as_ptr(),
+                inputs.len(),
+                blocks,
+                &key,
+                0,
+                flags,
+                CHUNK_START,
+                CHUNK_END | ROOT,
+                last_len,
+                out.as_flattened_mut(),
+            );
+        }
     }
     true
 }
@@ -459,7 +503,7 @@ mod arm_tests {
     #[test]
     fn grouped_first_chunks_match_the_reference_and_reset() {
         crate::initialize();
-        for n in [2, 16, 17, 64] {
+        for n in [2, 16, 17, 64, 128] {
             for len in [0, 1, 63, 64, 65, 255, 1023, 1024, 1025, 2048, 16385] {
                 for width in [17, 256] {
                     let key = [37; 32];
