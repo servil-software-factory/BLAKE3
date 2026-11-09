@@ -42,9 +42,7 @@ use super::*;
 pub struct Hasher {
     pub(crate) core: HasherCore,
     /// The message's bytes from its last 16 KiB boundary, gathered while
-    /// they arrive in shorter updates: the first `staged`. While a held
-    /// cohort hashes, consumed input stores intermediate CVs until
-    /// `take_held` empties the stage.
+    /// they arrive in shorter updates: the first `staged`.
     pub(crate) staged: usize,
     pub(crate) stage: [core::mem::MaybeUninit<u8>; STAGE_LEN],
 }
@@ -167,7 +165,7 @@ impl Hasher {
 
     /// Copy `bytes` into the stage after what it holds.
     pub(crate) fn stage(&mut self, bytes: &[u8]) {
-        self.write_stage(self.staged, bytes);
+        self.stage[self.staged..self.staged + bytes.len()].write_copy_of_slice(bytes);
         self.staged += bytes.len();
     }
 
@@ -219,8 +217,7 @@ impl Hasher {
     }
 
     /// A whole group in the stage, from offset zero: its first chunk's
-    /// counter and its bytes. During cohort hashing those bytes hold
-    /// intermediate CVs instead of the consumed input.
+    /// counter and its bytes.
     #[cfg(feature = "std")]
     pub(crate) fn held_group(&self) -> Option<(u64, &[u8; STAGE_LEN])> {
         (self.staged == STAGE_LEN && self.core.initial_chunk_counter == 0)
@@ -230,16 +227,6 @@ impl Hasher {
     #[cfg(not(feature = "std"))]
     pub(crate) fn held_group(&self) -> Option<(u64, &[u8; STAGE_LEN])> {
         None
-    }
-
-    /// Write input bytes or intermediate CVs within the stage. Appending
-    /// input updates `staged` through `stage`; a held cohort owns its CVs
-    /// until `take_held` clears it. Kernel reads of overwritten input must
-    /// have completed. Requires `offset + bytes.len() <= STAGE_LEN`.
-    pub(crate) fn write_stage(&mut self, offset: usize, bytes: &[u8]) {
-        for (slot, &byte) in self.stage[offset..offset + bytes.len()].iter_mut().zip(bytes) {
-            slot.write(byte);
-        }
     }
 
     /// The held group's subtree, as [`HasherCore::push_group`] takes it

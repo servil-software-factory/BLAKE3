@@ -155,8 +155,8 @@
 //!   64 KiB, and [`throughput::hash_each`] 32 bytes for each chunk of its messages
 //!   of 2 to 15 chunks and up to 128 for each such message, each freed when
 //!   it returns.
-//! - **Grouped incremental calls** reuse each hasher's stage and bounded
-//!   stack tables. [`throughput::update_each`] allocates and frees nothing.
+//! - **Grouped incremental calls** use bounded stack tables and tree buffers.
+//!   [`throughput::update_each`] allocates and frees nothing.
 //!   [`throughput::update_each_multithreaded`] may allocate worker-job lists
 //!   when a large piece uses other cores.
 //! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
