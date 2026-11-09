@@ -700,3 +700,37 @@ mod test {
         assert_eq!((counter, &bytes[..]), ((STAGE_LEN / CHUNK_LEN) as u64, &input[STAGE_LEN..2 * STAGE_LEN]));
     }
 }
+
+#[cfg(all(test, feature = "std"))]
+#[test]
+fn finish_shape_state_probe() {
+    crate::initialize();
+    for (n, len) in [(24usize, 32768usize), (512, 16384), (128, 16384), (8, 16384)] {
+        let input = vec![37u8; len];
+        let mut hashers: Vec<_> = (0..n).map(|_| Hasher::new(Mode::Plain, None)).collect();
+        let which: Vec<_> = (0..n).collect();
+        for chunk in input.chunks(4096) {
+            let pieces: Vec<_> = (0..n).map(|i| (i, chunk)).collect();
+            crate::throughput::update_each(&mut hashers, &pieces);
+        }
+        let states: std::collections::BTreeSet<_> = hashers
+            .iter()
+            .map(|h| {
+                (
+                    h.staged,
+                    h.core.cv_stack.len(),
+                    h.core.chunk_state.chunk_counter,
+                    h.core.chunk_state.count(),
+                    h.core.chunk_state.flags,
+                    h.core.chunk_state.platform as u8,
+                    h.core.initial_chunk_counter,
+                )
+            })
+            .collect();
+        let mut out = vec![[0u8; 32]; n];
+        crate::throughput::finalize_each(&mut hashers, &which, &mut out);
+        eprintln!("STATE_SOURCE=new n={n} len={len} states={states:?}");
+        let expected = *crate::convenience::hash(&input).as_bytes();
+        assert!(out.iter().all(|&d| d == expected));
+    }
+}
