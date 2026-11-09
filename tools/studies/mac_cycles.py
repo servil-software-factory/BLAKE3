@@ -21,7 +21,7 @@ import sys
 
 PAIRS = {
     "main": ("6e0dffd37e04b01b80dc56eb833b00fc337b6873", "7b1ba7b9da67e61dd53010de2054edfa32035170"),
-    "next": ("0b5bf7b71cb5f850067fa4182d9a3c724d7e5710", "0d6f6b8138c7616f83de9ac215d969e9a86cc4f4"),
+    "next": ("f13933376c8b8236adaeffe6aa9d25ad25f2af24", "0d6f6b8138c7616f83de9ac215d969e9a86cc4f4"),
 }
 BENCH = "9994de190259648ede82f7c5e4dbac4f1534a41d"
 INSTRUMENT = "0b2e9892f6cb30e38ddce5ba82ad7b8d85f060d0"
