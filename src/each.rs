@@ -196,6 +196,12 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: bool) 
     }
 }
 
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    // Actual cohorts passed to the shared-key body.
+    static HELD_GROUPS: core::cell::RefCell<Vec<Vec<usize>>> = const { core::cell::RefCell::new(Vec::new()) };
+}
+
 /// Hash the whole groups `held` names, one in each of those hashers'
 /// stages, and pass each group's subtree to its hasher's core. The plain
 /// hashers' groups hash together; a keyed or key-derivation hasher's group
@@ -221,6 +227,8 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
 fn hash_cohort(hashers: &mut [Hasher], alike: &[usize]) {
     use crate::{BLOCK_LEN, PARENT};
     let first = alike[0];
+    #[cfg(all(test, feature = "std"))]
+    HELD_GROUPS.with(|groups| groups.borrow_mut().push(alike.to_vec()));
     #[cfg(all(test, feature = "std"))]
     crate::counted(crate::Counted::HeldPass);
     let (key, flags) = (hashers[first].core.key, hashers[first].core.chunk_state.flags);
@@ -918,6 +926,76 @@ mod test {
         // one for all the plain ones.
         assert_eq!(passes(&[Mode::Keyed(&a); 600]), 600, "600 keyed hashers, one pass each");
         assert_eq!(passes(&[Mode::Plain; 600]), 1, "600 plain hashers, one pass");
+    }
+
+    /// With public shape fixed, changing key equality or the number of
+    /// matching leading words changes neither cohorts nor kernel entries.
+    /// This checks dispatch, not instruction-level constant-time execution.
+    #[cfg(feature = "std")]
+    #[test]
+    fn held_dispatch_ignores_key_equality_and_prefixes() {
+        crate::initialize();
+        let input = vec![42u8; 2 * crate::STAGE_LEN];
+        for platform in crate::test::every_platform() {
+            for n in [3usize, 8, 16, 17, 33] {
+                for mixed in [false, true] {
+                    let mut reference = None;
+                    // Eight words means identical keys. Otherwise exactly
+                    // `prefix` leading words match between every pair.
+                    for prefix in (0..=8).rev() {
+                        let keys: Vec<[u8; 32]> = (0..n)
+                            .map(|i| {
+                                let mut key = [0x6du8; 32];
+                                if prefix < 8 {
+                                    key[4 * prefix..4 * prefix + 4].copy_from_slice(&(i as u32 + 1).to_le_bytes());
+                                }
+                                key
+                            })
+                            .collect();
+                        let mode = |i: usize| {
+                            if !mixed || i % 3 == 1 {
+                                Mode::Keyed(&keys[i])
+                            } else if i % 3 == 0 {
+                                Mode::Plain
+                            } else {
+                                Mode::DeriveKey("held key-prefix regression")
+                            }
+                        };
+                        let mut hashers: Vec<_> = (0..n)
+                            .map(|i| {
+                                let mut h = Hasher::new(mode(i), None);
+                                h.core.chunk_state.platform = platform;
+                                h
+                            })
+                            .collect();
+                        HELD_GROUPS.with(|g| g.borrow_mut().clear());
+                        crate::RAN_ENTRIES.with(|e| e.borrow_mut().clear());
+                        crate::COUNTED.with(|c| c[crate::Counted::HeldPass as usize].set(0));
+                        for piece in input.chunks(4096) {
+                            let pieces: Vec<_> = (0..n).map(|i| (i, piece)).collect();
+                            update_each(&mut hashers, &pieces);
+                        }
+                        // Capture before finalization and the official oracle.
+                        let groups = HELD_GROUPS.with(|g| g.borrow().clone());
+                        let entries = crate::RAN_ENTRIES.with(|e| e.borrow().clone());
+                        let passes = crate::COUNTED.with(|c| c[crate::Counted::HeldPass as usize].get());
+                        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 2 * n, "both held stages observed");
+                        let work = (groups, entries, passes);
+                        if let Some(expected) = &reference {
+                            assert_eq!(
+                                &work, expected,
+                                "dispatch work independent of key equality and prefix: {platform:?} n={n} mixed={mixed} prefix={prefix}"
+                            );
+                        } else {
+                            reference = Some(work);
+                        }
+                        for (i, h) in hashers.iter().enumerate() {
+                            assert_eq!(h.clone().finalize(), crate::test::official::hash(mode(i), &input));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

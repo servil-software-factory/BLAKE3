@@ -20,6 +20,7 @@ struct Counting;
 // separately from the test harness's other threads.
 thread_local! {
     static BYTES: Cell<usize> = const { Cell::new(0) };
+    static REQUESTS: Cell<usize> = const { Cell::new(0) };
 }
 
 // Sound: every call goes on to the system allocator, unchanged.
@@ -27,6 +28,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // A thread whose locals are gone counts nothing.
         let _ = BYTES.try_with(|b| b.set(b.get() + layout.size()));
+        let _ = REQUESTS.try_with(|n| n.set(n.get() + 1));
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -46,7 +48,68 @@ fn allocated(call: impl FnOnce()) -> usize {
 
 #[test]
 fn allocation_counter_sees_a_callers_allocation() {
+    let before = REQUESTS.with(Cell::get);
     assert_eq!(allocated(|| drop(std::hint::black_box(vec![0u8; 4096]))), 4096);
+    assert_eq!(REQUESTS.with(Cell::get) - before, 1);
+}
+
+/// Only key bytes vary: caller preparation stays outside the allocator
+/// counters, and two held stages cover zero and nonzero chunk counters.
+#[test]
+fn held_allocations_ignore_key_equality_and_prefixes() {
+    blake3_servil::initialize();
+    let input = vec![42u8; 2 * 16 * 1024];
+    for n in [3usize, 8, 16, 17, 33] {
+        for mixed in [false, true] {
+            let mut reference = None;
+            for prefix in (0..=8).rev() {
+                let keys: Vec<[u8; 32]> = (0..n)
+                    .map(|i| {
+                        let mut key = [0x6du8; 32];
+                        if prefix < 8 {
+                            key[4 * prefix..4 * prefix + 4].copy_from_slice(&(i as u32 + 1).to_le_bytes());
+                        }
+                        key
+                    })
+                    .collect();
+                let mode = |i: usize| {
+                    if !mixed || i % 3 == 1 {
+                        Mode::Keyed(&keys[i])
+                    } else if i % 3 == 0 {
+                        Mode::Plain
+                    } else {
+                        Mode::DeriveKey("held key-prefix regression")
+                    }
+                };
+                let mut hashers: Vec<_> = (0..n).map(|i| Hasher::new(mode(i), None)).collect();
+                let mut pieces = Vec::with_capacity(n);
+                let requests = REQUESTS.with(Cell::get);
+                let bytes = allocated(|| {
+                    for piece in input.chunks(4096) {
+                        pieces.clear();
+                        pieces.extend((0..n).map(|i| (i, piece)));
+                        throughput::update_each(&mut hashers, &pieces);
+                    }
+                });
+                let work = (bytes, REQUESTS.with(Cell::get) - requests);
+                assert!(work.0 > 0 && work.1 > 0, "held allocation work observed");
+                if let Some(expected) = reference {
+                    assert_eq!(work, expected, "allocation work independent of key equality and prefix: n={n} mixed={mixed} prefix={prefix}");
+                } else {
+                    reference = Some(work);
+                }
+                for (i, h) in hashers.iter().enumerate() {
+                    let expected = match mode(i) {
+                        Mode::Plain => *blake3::hash(&input).as_bytes(),
+                        Mode::Keyed(key) => *blake3::keyed_hash(key, &input).as_bytes(),
+                        Mode::DeriveKey(context) => blake3::derive_key(context, &input),
+                        _ => unreachable!("only plain, keyed and derive-key test modes"),
+                    };
+                    assert_eq!(h.clone().finalize().as_bytes(), &expected);
+                }
+            }
+        }
+    }
 }
 
 fn blocks(len: usize, seed: u8) -> Vec<Block> {
