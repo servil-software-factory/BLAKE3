@@ -662,6 +662,30 @@ mod tests {
         assert_eq!(returned.borrow().len(), 2, "the last round of each came back at the finish");
     }
 
+    /// `collect` says how many completions it delivered: each ready one
+    /// once, then none. A pool of one thread has no worker, so no part is
+    /// hashed until the producer helps: neither completion is ready as it
+    /// is pushed, and the drain hashes both.
+    #[test]
+    fn collect_counts_the_completions_it_delivers() {
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+        let events = RefCell::new(Vec::new());
+        let stream = Stream::new(Mode::Plain, Limits { buffers: 2, messages: 2 }, |event| events.borrow_mut().push(event));
+        for tag in 0..2u8 {
+            let mut message = run(stream.message(tag, None));
+            let mut room = run(message.input());
+            room.bytes_mut()[..64].fill(tag);
+            room.commit(64);
+            message.end(0);
+        }
+        assert!(events.borrow().is_empty(), "no worker has hashed either");
+        stream.receiver.drain();
+        assert_eq!(stream.collect(), 2, "the ready completions, each once");
+        assert_eq!(stream.collect(), 0, "none twice");
+        assert_eq!(events.borrow().len(), 2);
+        stream.finish();
+    }
+
     /// Whole-block storage is borrowed as a batch without a copy.
     #[test]
     fn a_borrowed_batch_fills_the_producers_places() {
