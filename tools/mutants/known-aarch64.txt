@@ -378,7 +378,9 @@ src/stream.rs	replace && with || in Stream<'env, D>::finish	2	[cpu has sme2] spe
 src/stream.rs	replace && with || in Stream<'env, D>::help	2	[cpu has sme2] speed: a waiting caller pauses only when it handed nothing back and ran no task, otherwise hashes or pauses as it may; the SME2 thread takes the task
 src/stream.rs	replace && with || in Stream<'env, D>::submit_long	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream.rs	replace + with *	1	equivalent: the long message's stack keeps MAX_DEPTH values for MAX_DEPTH + 1, still more than a 2^64-byte message's 48 pieces need
+src/stream.rs	replace + with * in task_slots	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream.rs	replace + with -	1	equivalent: the long message's stack keeps MAX_DEPTH - 1 values, still more than a 2^64-byte message's 48 pieces need
+src/stream.rs	replace + with - in task_slots	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream.rs	replace += with *= in Stream<'env, D>::deliver	3	[cpu has sme2] speed: deliver reports no places handed back, so collect and help act as if nothing was done: a wake or a hashed task more; the SME2 thread takes the task; and two places in the GPU's branch, where the GPU's code is not built, same code
 src/stream.rs	replace += with *= in Stream<'env, D>::reserve_gpu	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream.rs	replace += with -= in Stream<'env, D>::deliver	3	[cpu has sme2] speed: deliver's count wraps: collect and help act as if places came back when none did, waking or hashing a turn later; the SME2 thread takes the task; and two places in the GPU's branch, where the GPU's code is not built, same code

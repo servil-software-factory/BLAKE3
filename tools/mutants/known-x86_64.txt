@@ -297,6 +297,8 @@ src/tree.rs	replace + with - in wide	1	SME2 only: the argument is `ahead`, consu
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::children -> Option<[Cv; 2]> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/stream.rs	replace + with *	1	equivalent: the long message's stack keeps MAX_DEPTH values for MAX_DEPTH + 1, still more than a 2^64-byte message's 48 pieces need
+src/stream.rs	replace + with * in task_slots	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream.rs	replace + with -	1	equivalent: the long message's stack keeps MAX_DEPTH - 1 values, still more than a 2^64-byte message's 48 pieces need
+src/stream.rs	replace + with - in task_slots	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream/receiver.rs	replace && with || in Core::forget	1	equivalent: forget(id, false) comes only from a result's retire, after its result has transferred and `done` is set; there `cancel || !done` is false, as `cancel && !done` is
 src/stream/receiver.rs	replace + with * in Receiver::core	1	equivalent: the ring holds every task published before a worker claims it, at most buffers + messages - 1 (a part holds a buffer and its message's slot, a batch job a slot), and buffers * messages is never less: a larger ring, never an overflow
