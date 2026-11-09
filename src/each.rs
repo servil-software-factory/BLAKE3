@@ -208,16 +208,19 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     }
 }
 
+/// Parent blocks supplied by a full staged message's pairs of CVs.
+const STAGE_PARENTS: usize = ALONE_CHUNKS / 2;
+
 /// Contiguous parent inputs retain the kernels' direct path. Both CV
 /// levels live on the stack; ping-pong leaves the final two children in
 /// the other buffer. Block supplies the existing 64-byte alignment.
 pub(crate) struct HeldWorkspace<const N: usize> {
-    level: arrayvec::ArrayVec<[Block; ALONE_CHUNKS / 2], N>,
-    next: arrayvec::ArrayVec<[Block; ALONE_CHUNKS / 4], N>,
+    level: arrayvec::ArrayVec<[Block; STAGE_PARENTS], N>,
+    next: arrayvec::ArrayVec<[Block; STAGE_PARENTS / 2], N>,
 }
 
 impl<const N: usize> HeldWorkspace<N> {
-    /// Empty storage moves without copying initialized tree buffers.
+    /// Empty buffers, ready to initialize in their final place.
     #[inline(always)]
     pub(crate) fn new() -> Self {
         const {
@@ -230,8 +233,8 @@ impl<const N: usize> HeldWorkspace<N> {
     /// workspace's final place, then borrow its two CV levels.
     pub(crate) fn buffers(&mut self, count: usize) -> (&mut [CVBytes], &mut [CVBytes]) {
         debug_assert!(count > 0 && count <= N && self.level.is_empty() && self.next.is_empty());
-        self.level.extend(core::iter::repeat_n([Block::ZERO; ALONE_CHUNKS / 2], count));
-        self.next.extend(core::iter::repeat_n([Block::ZERO; ALONE_CHUNKS / 4], count));
+        self.level.extend(core::iter::repeat_n([Block::ZERO; STAGE_PARENTS], count));
+        self.next.extend(core::iter::repeat_n([Block::ZERO; STAGE_PARENTS / 2], count));
         let (level, _) = Block::bytes_mut(self.level.as_mut_slice().as_flattened_mut()).as_chunks_mut::<OUT_LEN>();
         let (next, _) = Block::bytes_mut(self.next.as_mut_slice().as_flattened_mut()).as_chunks_mut::<OUT_LEN>();
         (level, next)
@@ -297,10 +300,14 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
         let count = alike.len() * per / 2;
         {
             let bytes = level[..2 * count].as_flattened();
-            let first: &[u8; BLOCK_LEN] = bytes[..BLOCK_LEN].try_into().unwrap();
-            let mut blocks = bytes.chunks_exact(BLOCK_LEN).map(|b| b.try_into().unwrap());
-            let mut rows = arrayvec::ArrayVec::<[&[u8; BLOCK_LEN]; ALONE_CHUNKS / 2], N>::new();
-            rows.extend((0..count.div_ceil(ALONE_CHUNKS / 2)).map(|_| core::array::from_fn(|_| blocks.next().unwrap_or(first))));
+            // Eight parent blocks per full stage. Derive descriptor rows
+            // from that layout, including its readable final padding.
+            let (full, tail) = bytes.as_chunks::<BLOCK_LEN>().0.as_chunks::<STAGE_PARENTS>();
+            let mut rows = arrayvec::ArrayVec::<_, N>::new();
+            rows.extend(full.iter().map(|row| row.each_ref()));
+            if let Some(first) = tail.first() {
+                rows.push(core::array::from_fn(|i| tail.get(i).unwrap_or(first)));
+            }
             platform.hash_many(&rows.as_slice().as_flattened()[..count], &key, 0, IncrementCounter::No, flags | PARENT, 0, 0, next[..count].as_flattened_mut());
         }
         core::mem::swap(&mut level, &mut next);
@@ -962,6 +969,10 @@ mod test {
     fn held_workspace_preserves_distinct_message_rows() {
         crate::initialize();
         for n in [2usize, 15, 16, 17, 31, 32, 33, 127, 128, 129, 257] {
+            let count = n.min(TABLE);
+            let mut workspace = HeldWorkspace::<TABLE>::new();
+            let (level, next) = workspace.buffers(count);
+            assert_eq!((level.len(), next.len()), (16 * count, 8 * count), "workspace CV capacities");
             let inputs: Vec<Vec<u8>> =
                 (0..n).map(|i| (0..2 * crate::STAGE_LEN + i % 71).map(|j| ((i * 37 + j * 17 + (j >> 8)) % 251) as u8).collect()).collect();
             let mut hashers: Vec<_> = (0..n).map(|_| Hasher::new(Mode::Plain, None)).collect();
