@@ -41,10 +41,14 @@ src/incremental.rs	replace Hasher::held_group -> Option<(u64, &[u8; STAGE_LEN])>
 src/incremental.rs	replace Hasher::held_group -> Option<(u64, &[u8; STAGE_LEN])> with Some((1, Box::leak(Box::new([1; STAGE_LEN]))))	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/io.rs	replace < with <= in fill	1	equivalent: one more read into an empty buffer, which returns 0 and ends the loop
 src/lanes.rs	delete ! in initialize	1	as on aarch64: survives (known-aarch64.txt): OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
+src/lanes.rs	replace % with + in sources::Source::take_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/lanes.rs	replace % with / in sources::Source::take_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace && with || in initialize	2	compiled out on x86: the SME2 thread (cfg!(blake3_sme2) is false, so the expression is false whatever the comparison)
 src/lanes.rs	replace * with + in merge_to_children	1	array capacity: 2 + MAX children a call instead of 2 * MAX, the same tree in more calls
 src/lanes.rs	replace * with + in sources::Source::run_len	1	the pool's scheduling: how many of a job's pieces one claim takes (the claimed range stays consistent)
+src/lanes.rs	replace + with * in sources::Source::take_run	4	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace + with - in sources::Source::publish_job	1	another architecture's: `own`, the caller's own pieces, is nonzero only where the SME2 thread takes a prefix (cut_with_prefix on AArch64); on x86 own is 0 and base - 0 is base, so claimed is where it was. On AArch64 the change strands the job (the old hangs.txt had it)
+src/lanes.rs	replace + with - in sources::Source::take_run	4	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace - with + in Pool::run_job	2	AArch64 only: `pieces - own`, where own, the caller's own pieces, is nonzero only with the SME2 thread's prefix; on x86-64 own is 0 and the sum is the difference (the wake count itself is tested, test_a_job_wakes_one_worker_a_piece_past_its_own)
 src/lanes.rs	replace / with % in sources::Source::run_len	1	the pool's scheduling: how many of a job's pieces one claim takes (the claimed range stays consistent)
 src/lanes.rs	replace << with >> in sources::Source::unregister	1	speed: the source's bit stays in ACTIVE, and find walks past the slot, whose pointer is null; register finds free slots by REGISTERED alone, so no slot is lost
@@ -62,6 +66,8 @@ src/lanes.rs	replace all_workers_parked -> bool with true	1	a test-only hook (__
 src/lanes.rs	replace prefix_for -> usize with 0	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace prefix_for -> usize with 1	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace sme2_main with ()	1	another machine's code: the SME2 thread runs only where pool.sme2 is set (an SME2 build on a CPU with it); on x86 it is never started
+src/lanes.rs	replace sources::Source::take_run -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
+src/lanes.rs	replace sources::Source::take_run -> bool with true	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	replace sources::take_stream_task -> Option<Task> with None	1	another machine's code: the SME2 thread runs only where pool.sme2 is set (an SME2 build on a CPU with it); on x86 it is never started
 src/lanes.rs	replace wake_sme2 with ()	1	another machine's code: the SME2 thread runs only where pool.sme2 is set (an SME2 build on a CPU with it); on x86 it is never started
 src/lanes.rs	replace | with ^ in Task::run_equal_members	4	equivalent: | and ^ agree on flag bits that never overlap

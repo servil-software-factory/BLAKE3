@@ -67,6 +67,42 @@ const LONG: usize = 4 << 20;
 /// 26-130% at 64 and 256 B).
 const ENTRIES: usize = 1024;
 
+/// The places of the stream's source: enough that a task's place comes
+/// round only after the task has completed, so after its claimer copied it
+/// (BLAKE3 #302; `publish`'s contract). Every published task holds an entry
+/// of its own, and the stream hands entries back in order, each once its
+/// task completes, with at most ENTRIES out. Say task X, in the place task
+/// p is about to take, is still incomplete. Then every entry from X's first
+/// on is still out. Of the tasks from X to p, every one but two kinds holds
+/// an entry from X's on: the one task that was open (gathering short
+/// messages) when X, a piece of a long message, went out, and is published
+/// after it with older entries; and, with the GPU, a piece the GPU gave
+/// back at a finish, published again under the entry it already had (at
+/// most HELD of them). So at least TASK_SLOTS + 1 - 1 - HELD of those
+/// tasks' entries are out, more than ENTRIES: X has completed. With ENTRIES
+/// places the margin was zero: the open task's entry handed back while the
+/// first piece of a long message was still claimed and uncopied, and the
+/// last piece took its place (test
+/// a_publication_never_meets_a_claimed_uncopied_task).
+///
+/// HELD bounds the GPU's duplicates cumulatively, not only at an instant:
+/// a reclaim runs only in `finish`, `finish` commits no new GPU work, and
+/// `finish` cannot return while X's entry is out. So while X is uncopied
+/// the GPU gives back at most the HELD pieces its commands then hold. A
+/// change that feeds the GPU or reclaims anywhere else, or that hands
+/// entries back out of order, changes this bound (the pipeline's receiver
+/// hands buffers back out of order, and names its places instead:
+/// `Source::publish_part`).
+const TASK_SLOTS: usize = task_slots();
+
+/// TASK_SLOTS' count (a function, so that a mutation test names its rule).
+const fn task_slots() -> usize {
+    #[cfg(not(blake3_gpu))]
+    return ENTRIES + 1;
+    #[cfg(blake3_gpu)]
+    return ENTRIES + 1 + crate::gpu::HELD;
+}
+
 /// One message, one piece of a long one, or one part of a batch, from its
 /// submission to its delivery: what the program's thread keeps of it. Its
 /// task's threads write its digests, then count down the `left` of the
@@ -300,7 +336,7 @@ impl Storage {
 
     fn new() -> Storage {
         Storage {
-            source: Box::leak(Box::new(crate::lanes::sources::Source::new(ENTRIES))),
+            source: Box::leak(Box::new(crate::lanes::sources::Source::new(TASK_SLOTS))),
             entries: std::vec![Entry { len: 0, kind: Kind::Abandoned, first: 0, ring_end: 0 }; ENTRIES].into_boxed_slice(),
             ring: ring(RING_BYTES),
             long_ring: ring(LONG_RING_BYTES),
@@ -1932,6 +1968,72 @@ mod test {
             assert_eq!(got[0], crate::convenience::hash(&input));
         }
         assert!(!FREE.lock().unwrap().is_empty(), "the storage is the thread's spare again");
+    }
+
+    /// The stream's source has places enough that a publication never
+    /// meets a task claimed and not yet copied (BLAKE3 #302; TASK_SLOTS).
+    /// The tightest public schedule: a short message's task stays open
+    /// while long messages' pieces are published ahead of it, until every
+    /// entry is in flight; then the open task goes out, completes, and
+    /// hands its entry back while the first piece is still claimed and
+    /// uncopied, and the last piece is published. With ENTRIES places that
+    /// piece lands in the first piece's place, and `publish`'s check stops
+    /// the test. Workers see no task (the source is unregistered); this
+    /// thread hashes the rest as it waits for room, and one thread claims
+    /// the first piece before the rest are submitted, and holds it between
+    /// its claim and its copy.
+    #[test]
+    fn a_publication_never_meets_a_claimed_uncopied_task() {
+        use crate::lanes::sources::Source;
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+        let short = std::vec![crate::throughput::Block::ZERO; 1];
+        // Two pieces, the first one held; then enough pieces that every
+        // entry is in flight (the short message's and these 1 + 1 + 1021),
+        // and one more, which takes the short message's entry.
+        let two = std::vec![crate::throughput::Block::ZERO; 2 * PIECE / 64];
+        let long = std::vec![crate::throughput::Block::ZERO; (ENTRIES - 2) * PIECE / 64];
+        let mut hashes = std::vec![Hash::from_bytes([0; 32]); 3];
+        let [first, second, third] = &mut hashes[..] else { unreachable!() };
+        let (claimed_tx, claimed_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let held_input = crate::throughput::Block::bytes(&two).as_ptr() as usize;
+        stream(
+            Mode::Plain,
+            |_| {},
+            |s| {
+                let slot = s.slot.expect("a source slot (two CPUs)");
+                Source::unregister(slot);
+                // A fresh source has never been visible to a registry walker.
+                // The stream still publishes through its ordinary slot path.
+                s.s.source = Box::leak(Box::new(Source::new(TASK_SLOTS)));
+                let source = s.s.source;
+                s.submit(&short, 64, first);
+                s.submit(&two, two.len() * 64, second);
+                std::thread::scope(|scope| {
+                    let holder = scope.spawn(move || {
+                        // Hold the first piece between its claim and its
+                        // copy until the submissions end.
+                        let task = source.take_task_claimed(|| {
+                            claimed_tx.send(()).unwrap();
+                            let _ = go_rx.recv();
+                        });
+                        let task = task.expect("the first piece");
+                        assert_eq!((task.input as usize, task.counter), (held_input, 0), "the held claimer copied another task than the one it claimed");
+                        crate::lanes::run_task(task);
+                    });
+                    claimed_rx.recv().unwrap();
+                    // Release the holder whatever happens below.
+                    let go = crate::test::Released(go_tx);
+                    s.submit(&long, long.len() * 64, third);
+                    drop(go);
+                    holder.join().unwrap();
+                    s.finish();
+                });
+            },
+        );
+        assert_eq!(hashes[0], crate::convenience::hash(&[0u8; 64]));
+        assert_eq!(hashes[1], crate::convenience::hash(&std::vec![0u8; 2 * PIECE]));
+        assert_eq!(hashes[2], crate::convenience::hash(&std::vec![0u8; (ENTRIES - 2) * PIECE]));
     }
 
     /// A few messages through a stream: the handover of entries to the

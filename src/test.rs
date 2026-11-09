@@ -71,6 +71,18 @@ fn test_official_kernels_and_ours_stay_apart() {
     }
 }
 
+/// Dropped, it releases a thread a test holds on its channel (`recv`): so
+/// a fault in the test fails it at once where it would strand the held
+/// thread, and the test with it, until the clock.
+#[cfg(feature = "std")]
+pub(crate) struct Released(pub(crate) std::sync::mpsc::Sender<()>);
+#[cfg(feature = "std")]
+impl Drop for Released {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
 /// `bytes` copied into whole blocks, zero after them: a message as the
 /// throughput calls take one.
 #[cfg(feature = "std")]
