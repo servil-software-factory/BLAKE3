@@ -81,7 +81,7 @@ src/lanes.rs	replace > with == in initialize	1	speed: whether the pool starts it
 src/lanes.rs	replace > with == in sme2_serve	1	speed: whether the SME2 thread runs a gathered task on NEON or in an SME2 session (equally correct)
 src/lanes.rs	replace > with == in sources::Source::take_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace > with == in sources::open	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace > with >= in Task::run	1	equivalent: a subtree task at counter zero is more than one chunk (the pool splits at MIN_SPLIT_LEN and above), so len == CHUNK_LEN never reaches this branch
+src/lanes.rs	replace > with >= in Task::run_ref	1	equivalent: a subtree task at counter zero is more than one chunk (the pool splits at MIN_SPLIT_LEN and above), so len == CHUNK_LEN never reaches this branch
 src/lanes.rs	replace > with >= in initialize	1	equivalent: it differs only with one thread, where no SME2 thread starts and wake_sme2 finds none
 src/lanes.rs	replace > with >= in sme2_serve	1	speed: whether the SME2 thread runs a gathered task on NEON or in an SME2 session (equally correct)
 src/lanes.rs	replace > with >= in sources::Source::take_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -106,7 +106,6 @@ src/lanes.rs	replace sources::open -> bool with false	1	OPEN: the pool's schedul
 src/lanes.rs	replace sources::open -> bool with true	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::opened with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::run_one -> bool with false	1	[cpu has sme2] speed: the workers never run a source's item; each caller hashes its own job's pieces, and the SME2 thread every stream task, so every call completes, on fewer threads, on every schedule (without SME2 a collect loop waits forever: x86-64's time-out, tests/api_plan.rs)
-src/lanes.rs	replace sources::take_stream_task -> Option<Task> with None	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::visible -> bool with false	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace wake_sme2 with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace | with & in Task::run_equal_members	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -391,8 +390,6 @@ src/stream.rs	replace == with != in Stream<'env, D>::finish	1	[cpu has sme2] spe
 src/stream.rs	replace == with != in Stream<'env, D>::help	1	[cpu has sme2] speed: a waiting caller hashes a lone task only after handing something back; the SME2 thread takes the task
 src/stream.rs	replace == with != in Stream<'env, D>::submit_long	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/stream.rs	replace >= with < in Stream<'env, D>::feed	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/stream.rs	replace Storage::run_waiting -> bool with false	1	[cpu has sme2] speed: a waiting caller hashes no lone task itself; the SME2 thread, which every publish wakes, takes it, so finish progresses (without SME2, tests/stream_finish_parked_workers hangs)
-src/stream.rs	replace Storage::run_waiting -> bool with true	1	[cpu has sme2] speed: a waiting caller counts a task it never ran and looks again at once, skipping a pause; the SME2 thread takes the task
 src/stream.rs	replace Stream<'env, D>::feed -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/stream.rs	replace Stream<'env, D>::feed -> bool with true	1	[cpu has sme2] speed: where the GPU's code is not built, help reads a feed and stops there, so a waiting caller neither hashes a lone task nor pauses (the SME2 thread takes stream tasks alone)
 src/stream.rs	replace Stream<'env, D>::reclaim -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)

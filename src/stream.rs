@@ -317,7 +317,7 @@ impl Storage {
     /// was one. A waiting caller's own help, the one way a lone task runs
     /// while every worker is parked (only collect wakes one for it).
     fn run_waiting(&self) -> bool {
-        match self.source.take_task() {
+        match self.source.take_task(&mut None) {
             Some(task) => {
                 crate::lanes::run_task(task);
                 true
@@ -947,7 +947,7 @@ impl<'env, D: FnMut(&'env mut [Hash])> Stream<'env, D> {
     fn hand_over(&mut self, task: Task) {
         match self.slot {
             Some(_) => self.s.source.publish(task),
-            None => crate::lanes::run_task(task),
+            None => crate::lanes::run_task(&task),
         }
     }
 
@@ -1044,6 +1044,25 @@ impl<D> Drop for Stream<'_, D> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn waiting_help_runs_one_task() {
+        crate::initialize_multithreaded(Some(core::num::NonZeroUsize::new(1).unwrap()));
+        let storage = Storage::new();
+        assert!(!storage.run_waiting(), "empty storage reports no work");
+        let input = [crate::block::Block([42; crate::BLOCK_LEN]); crate::CHUNK_LEN / crate::BLOCK_LEN];
+        let mut output = crate::block::Block::ZERO;
+        let left = AtomicUsize::new(1);
+        let mut task = Task::of(crate::block::Block::bytes(&input), 1);
+        task.key = *crate::IV;
+        task.out = output.0.as_mut_ptr();
+        task.left = &left;
+        storage.source.publish(task);
+        assert!(storage.run_waiting(), "the waiting caller runs its queued task");
+        assert_eq!(left.load(Ordering::Acquire), 0, "help completes the task");
+        assert!(!storage.run_waiting(), "the completed task is taken once");
+    }
+
 
     /// The GPU's batches so far, in this process.
     #[cfg(blake3_gpu)]

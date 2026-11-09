@@ -50,7 +50,7 @@ src/lanes.rs	replace > with < in initialize	1	as on aarch64: survives (known-aar
 src/lanes.rs	replace > with < in sme2_serve	1	as on aarch64: survives (known-aarch64.txt): speed: whether the SME2 thread runs a gathered task on NEON or in an SME2 session (equally correct)
 src/lanes.rs	replace > with == in initialize	1	as on aarch64: survives (known-aarch64.txt): speed: whether the pool starts its SME2 thread (without it the NEON workers do its share; the same results)
 src/lanes.rs	replace > with == in sme2_serve	1	as on aarch64: survives (known-aarch64.txt): speed: whether the SME2 thread runs a gathered task on NEON or in an SME2 session (equally correct)
-src/lanes.rs	replace > with >= in Task::run	1	equivalent: a subtree task at counter zero is more than one chunk (the pool splits at MIN_SPLIT_LEN and above), so len == CHUNK_LEN never reaches this branch
+src/lanes.rs	replace > with >= in Task::run_ref	1	equivalent: a subtree task at counter zero is more than one chunk (the pool splits at MIN_SPLIT_LEN and above), so len == CHUNK_LEN never reaches this branch
 src/lanes.rs	replace > with >= in initialize	1	as on aarch64: survives (known-aarch64.txt): equivalent: it differs only with one thread, where no SME2 thread starts and wake_sme2 finds none
 src/lanes.rs	replace > with >= in sme2_serve	1	as on aarch64: survives (known-aarch64.txt): speed: whether the SME2 thread runs a gathered task on NEON or in an SME2 session (equally correct)
 src/lanes.rs	replace > with >= in sources::Source::wake_for_waiting	1	the pool's scheduling: whether a waiting task wakes a parked worker; the caller takes what waits meanwhile
@@ -59,7 +59,6 @@ src/lanes.rs	replace all_workers_parked -> bool with true	1	a test-only hook (__
 src/lanes.rs	replace prefix_for -> usize with 0	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace prefix_for -> usize with 1	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace sme2_main with ()	1	another machine's code: the SME2 thread runs only where pool.sme2 is set (an SME2 build on a CPU with it); on x86 it is never started
-src/lanes.rs	replace sources::take_stream_task -> Option<Task> with None	1	another machine's code: the SME2 thread runs only where pool.sme2 is set (an SME2 build on a CPU with it); on x86 it is never started
 src/lanes.rs	replace wake_sme2 with ()	1	another machine's code: the SME2 thread runs only where pool.sme2 is set (an SME2 build on a CPU with it); on x86 it is never started
 src/lanes.rs	replace | with ^ in Task::run_equal_members	4	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	delete ! in compress_chunks_parallel	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

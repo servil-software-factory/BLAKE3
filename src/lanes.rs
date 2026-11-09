@@ -1022,11 +1022,13 @@ pub(crate) mod sources {
 
         /// Claim the next published item, if any.
         pub(crate) fn take(&self) -> Option<Item> {
-            self.take_claimed(|| {})
+            self.take_claimed(|| {}, core::convert::identity)
         }
 
         /// `claimed` lets the schedule test pause before the task copy.
-        fn take_claimed(&self, claimed: impl FnOnce()) -> Option<Item> {
+        /// Construct the caller's result before releasing the slot, so a
+        /// different return representation needs no copy after release.
+        fn take_claimed<T>(&self, claimed: impl FnOnce(), map: impl FnOnce(Item) -> T) -> Option<T> {
             let mut c = self.claimed.load(Ordering::Acquire);
             loop {
                 let p = self.finish.published.load(Ordering::Acquire);
@@ -1045,15 +1047,17 @@ pub(crate) mod sources {
                 // balance. A stream's tasks go one at a time.
                 let n = if self.ring.is_empty() { Self::run_len(p - c, pool().threads) } else { 1 };
                 match self.claimed.compare_exchange_weak(c, c + n, Ordering::AcqRel, Ordering::Acquire) {
-                    Ok(_) if self.ring.is_empty() => return Some(Item::Pieces(self.job.load(Ordering::Relaxed), c - self.base.load(Ordering::Relaxed), n)),
+                    Ok(_) if self.ring.is_empty() => {
+                        return Some(map(Item::Pieces(self.job.load(Ordering::Relaxed), c - self.base.load(Ordering::Relaxed), n)));
+                    }
                     Ok(_) => {
                         claimed();
                         let slot = &self.ring[c % self.ring.len()];
                         // Sound: this worker claimed the task after its
                         // publication; the producer waits for `next` below.
-                        let task = unsafe { (*slot.task.get()).assume_init_read() };
+                        let result = Some(map(Item::Task(unsafe { (*slot.task.get()).assume_init_read() })));
                         slot.next.store(c + self.ring.len(), Ordering::Release);
-                        return Some(Item::Task(task));
+                        return result;
                     }
                     Err(now) => c = now,
                 }
@@ -1113,13 +1117,20 @@ pub(crate) mod sources {
             Self::run_len(waiting, threads)
         }
 
-        /// A stream's next task, if any (this source is a stream's).
-        pub(crate) fn take_task(&self) -> Option<Task> {
-            match self.take() {
-                Some(Item::Task(task)) => Some(task),
-                Some(Item::Pieces(..)) => unreachable!("a stream's source carries tasks"),
-                None => None,
-            }
+        /// Copy this stream's next task into `out` before releasing its
+        /// slot. The reference borrows the caller's copy; None clears it.
+        pub(crate) fn take_task<'a>(&self, out: &'a mut Option<Task>) -> Option<&'a Task> {
+            *out = None;
+            let _ = self.take_claimed(
+                || {},
+                |item| {
+                    *out = Some(match item {
+                        Item::Task(task) => task,
+                        Item::Pieces(..) => unreachable!("a stream's source carries tasks"),
+                    });
+                },
+            );
+            out.as_ref()
         }
 
         fn waiting(&self) -> usize {
@@ -1283,14 +1294,12 @@ pub(crate) mod sources {
         }
     }
 
-    /// A task from any stream (the SME2 thread takes these alone).
-    pub(crate) fn take_stream_task() -> Option<Task> {
-        let mut found = None;
-        find(|source| {
-            found = if source.ring.is_empty() { None } else { source.take_task() };
-            found.is_some()
-        });
-        found
+    /// Copy a stream task into the caller's place before releasing its
+    /// slot. The reference borrows that copy; None clears the place.
+    pub(crate) fn take_stream_task(out: &mut Option<Task>) -> Option<&Task> {
+        *out = None;
+        find(|source| !source.ring.is_empty() && source.take_task(out).is_some());
+        out.as_ref()
     }
 
     /// Whether any source has work waiting (`streams`: any stream).
@@ -1395,15 +1404,18 @@ pub(crate) mod sources {
             std::thread::scope(|scope| {
                 let source = &source;
                 let worker = scope.spawn(move || {
-                    let item = source.take_claimed(|| {
-                        claimed_tx.send(()).unwrap();
-                        resume_rx.recv().unwrap();
-                    });
+                    let item = source.take_claimed(
+                        || {
+                            claimed_tx.send(()).unwrap();
+                            resume_rx.recv().unwrap();
+                        },
+                        core::convert::identity,
+                    );
                     let Some(Item::Task(task)) = item else { panic!("the first task is claimed") };
                     task.counter
                 });
                 claimed_rx.recv().unwrap();
-                assert_eq!(source.take_task().unwrap().counter, 1);
+                assert_eq!(source.take_task(&mut None).unwrap().counter, 1);
                 let observer = scope.spawn(move || {
                     let waited = progress_rx.recv().unwrap();
                     // Release even a faulty producer's worker before asserting,
@@ -1415,8 +1427,8 @@ pub(crate) mod sources {
                 let _ = progress_tx.send(false);
                 observer.join().unwrap();
                 assert_eq!(worker.join().unwrap(), 0, "the claimed task survives ring wraparound");
-                assert_eq!(source.take_task().unwrap().counter, 2);
-                assert!(source.take_task().is_none());
+                assert_eq!(source.take_task(&mut None).unwrap().counter, 2);
+                assert!(source.take_task(&mut None).is_none());
             });
         }
 
@@ -1429,6 +1441,25 @@ pub(crate) mod sources {
         }
 
         #[test]
+        fn a_task_copy_belongs_to_the_callers_place() {
+            crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+            let source: &'static Source = Box::leak(Box::new(Source::new(1)));
+            let slot = source.register().expect("a free source slot");
+            let mut place = Some(Task::of(&[], 99));
+            assert!(source.take_task(&mut place).is_none());
+            assert!(place.is_none(), "an empty source clears the caller's place");
+            assert!(take_stream_task(&mut place).is_none());
+            source.publish(Task::of(&[], 7));
+            assert_eq!(take_stream_task(&mut place).unwrap().counter, 7);
+            source.publish(Task::of(&[], 8));
+            assert_eq!(place.as_ref().unwrap().counter, 7, "ring reuse leaves the caller's copy intact");
+            assert_eq!(source.take_task(&mut place).unwrap().counter, 8);
+            assert!(source.take_task(&mut place).is_none());
+            assert!(place.is_none());
+            Source::unregister(slot);
+        }
+
+        #[test]
         fn ring_slots_advance_after_every_copy() {
             for len in [1, 2, 3] {
                 let source = Source::new(len);
@@ -1437,10 +1468,10 @@ pub(crate) mod sources {
                         source.publish(Task::of(&[], (lap * len + i) as u64));
                     }
                     for i in 0..len {
-                        assert_eq!(source.take_task().unwrap().counter, (lap * len + i) as u64);
+                        assert_eq!(source.take_task(&mut None).unwrap().counter, (lap * len + i) as u64);
                         assert_eq!(source.ring[i].next.load(Ordering::Acquire), (lap + 1) * len + i);
                     }
-                    assert!(source.take_task().is_none());
+                    assert!(source.take_task(&mut None).is_none());
                 }
             }
         }
@@ -1585,7 +1616,14 @@ impl Task {
     /// chunk zero (it may be the whole message), its pair of child chaining
     /// values; for any other, its chaining value (first 32 bytes). Then
     /// count down.
+    #[inline(always)]
     pub(crate) fn run(self, platform: Platform) {
+        self.run_ref(platform);
+    }
+
+    // Borrow the caller's copied task so its member array stays in place.
+    // Each claimed task is executed once.
+    fn run_ref(&self, platform: Platform) {
         if self.members > 0 {
             self.run_members(platform);
             // Sound: the stream keeps `left` in place until it is zero.
@@ -1695,18 +1733,19 @@ fn sme2_main() {
 
 fn sme2_serve() -> ! {
     assert!(SME2_THREAD.set(std::thread::current()).is_ok(), "one SME2 thread");
+    let mut copied = None;
     loop {
-        if let Some(task) = sources::take_stream_task() {
+        if let Some(task) = sources::take_stream_task(&mut copied) {
             if task.members > 0 {
                 // Short messages and small batches, gathered, run faster
                 // on NEON than through an SME2 session per task (Mac:
                 // 64-byte messages 14-15% faster, batches of 16 and 64
                 // 10-15%); below 16 KiB the other members run the NEON
                 // kernels on either platform.
-                task.run(pool_platform());
+                task.run_ref(pool_platform());
             } else {
                 let turn = crate::platform::Sme2Turn::take(Platform::detect(), true);
-                task.run(turn.platform());
+                task.run_ref(turn.platform());
                 drop(turn);
             }
             continue;
@@ -1746,8 +1785,8 @@ pub(crate) fn assert_past_the_split(what: &str) {
 }
 
 /// Run `task` on this thread, as a worker would.
-pub(crate) fn run_task(task: Task) {
-    task.run(pool_platform());
+pub(crate) fn run_task(task: &Task) {
+    task.run_ref(pool_platform());
 }
 
 fn worker_main(me: usize) {
@@ -1776,11 +1815,11 @@ mod test {
         source.reserve_gpu_batch_for_test();
         source.publish(Task::of(&[], 0));
         source.publish(Task::of(&[], 1));
-        assert!(source.take_task().is_none());
+        assert!(source.take_task(&mut None).is_none());
         assert!(!source.take_run(0, 1, 2, |_| panic!("the run is too short")));
-        assert!(source.take_task().is_none(), "a failed claim keeps the reservation");
+        assert!(source.take_task(&mut None).is_none(), "a failed claim keeps the reservation");
         assert!(source.take_run(0, 2, 1, |tasks| assert_eq!(tasks.count(), 1)));
-        assert!(source.take_task().is_some(), "CPU service resumes after the GPU claim");
+        assert!(source.take_task(&mut None).is_some(), "CPU service resumes after the GPU claim");
     }
 
     /// A call gives its place among the pool's callers back: alone in its
@@ -2212,12 +2251,12 @@ mod test {
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "two waiting: a wake");
         source.publish(task());
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "three waiting: a wake");
-        assert!(source.take_task().is_some());
-        assert!(source.take_task().is_some());
+        assert!(source.take_task(&mut None).is_some());
+        assert!(source.take_task(&mut None).is_some());
         counts();
         source.publish(task());
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "one waiting, then two: a wake");
-        assert!(source.take_task().is_some() && source.take_task().is_some() && source.take_task().is_none());
+        assert!(source.take_task(&mut None).is_some() && source.take_task(&mut None).is_some() && source.take_task(&mut None).is_none());
         counts();
         source.wake_for_waiting();
         assert_eq!(counts()[Noted::WakeTry as usize], 0, "none waiting: no wake");
@@ -2225,7 +2264,7 @@ mod test {
         counts();
         source.wake_for_waiting();
         assert_eq!(counts()[Noted::WakeTry as usize], 1, "one waiting: a wake");
-        assert!(source.take_task().is_some());
+        assert!(source.take_task(&mut None).is_some());
     }
 
     /// A source registered is active for the workers at its slot, and
