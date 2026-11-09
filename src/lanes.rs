@@ -912,8 +912,9 @@ pub(crate) mod sources {
         #[cfg(all(test, blake3_gpu))]
         gpu_batch_reserved: core::sync::atomic::AtomicBool,
         claimed: OwnLine<AtomicUsize>,
-        /// A stream's tasks; empty for a caller's jobs.
-        ring: Box<[TaskSlot]>,
+        /// A stream's tasks; empty for a caller's jobs. Keep a slot's
+        /// release counter off the following slot's first cache line.
+        ring: Box<[OwnLine<TaskSlot>]>,
         /// A caller's current job and its first number; the job stays the
         /// claimed numbers' until `finish.finished` passes them.
         job: AtomicPtr<Job<'static>>,
@@ -948,7 +949,7 @@ pub(crate) mod sources {
                 #[cfg(all(test, blake3_gpu))]
                 gpu_batch_reserved: core::sync::atomic::AtomicBool::new(false),
                 claimed: OwnLine(AtomicUsize::new(0)),
-                ring: (0..len).map(|i| TaskSlot { task: UnsafeCell::new(MaybeUninit::uninit()), next: AtomicUsize::new(i) }).collect(),
+                ring: (0..len).map(|i| OwnLine(TaskSlot { task: UnsafeCell::new(MaybeUninit::uninit()), next: AtomicUsize::new(i) })).collect(),
                 job: AtomicPtr::new(core::ptr::null_mut()),
                 base: AtomicUsize::new(0),
                 finish: crate::finish::Finish::new(),
