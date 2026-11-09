@@ -1063,7 +1063,6 @@ mod test {
         assert!(!storage.run_waiting(), "the completed task is taken once");
     }
 
-
     /// The GPU's batches so far, in this process.
     #[cfg(blake3_gpu)]
     fn gpu_batches() -> usize {
