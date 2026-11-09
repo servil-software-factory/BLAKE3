@@ -909,10 +909,9 @@ pub(crate) mod sources {
         uncopied: core::sync::atomic::AtomicBool,
     }
 
-    /// How often a publication met its slot's last task claimed and not yet
-    /// copied (tests).
+    /// Publications that met a slot whose task was still uncopied (tests).
     #[cfg(test)]
-    pub(crate) static COPY_WAITS: AtomicUsize = AtomicUsize::new(0);
+    pub(crate) static UNCOPIED_REUSE: AtomicUsize = AtomicUsize::new(0);
 
     #[repr(align(128))]
     pub(crate) struct Source {
@@ -939,8 +938,8 @@ pub(crate) mod sources {
     // ring (TASK_SLOTS: a slot is reused only after its task completed,
     // after its copy; BLAKE3 #303), checked in tests and debug builds. The
     // GPU reads its claimed slots on the stream's own thread, inside
-    // `take_run`'s callback. `owner` is behind its lock; the rest is
-    // atomics.
+    // `take_run`'s callback. A caller's job stays alive until its finish
+    // line counts every piece; the remaining shared fields are atomics.
     unsafe impl Sync for Source {}
     unsafe impl Send for Source {}
 
@@ -1001,7 +1000,7 @@ pub(crate) mod sources {
             #[cfg(any(test, debug_assertions))]
             if slot.uncopied.swap(true, Ordering::SeqCst) {
                 #[cfg(test)]
-                COPY_WAITS.fetch_add(1, Ordering::SeqCst);
+                UNCOPIED_REUSE.fetch_add(1, Ordering::SeqCst);
                 panic!("a publication met a task claimed and not yet copied: the stream's ring is too short (BLAKE3 #303)");
             }
             // Sound: the slot's last task was copied out by its claimer (the

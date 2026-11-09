@@ -289,10 +289,10 @@ src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::children -> Option<[
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/stream.rs	replace + with *	1	equivalent: the long message's stack keeps MAX_DEPTH values for MAX_DEPTH + 1, still more than a 2^64-byte message's 48 pieces need
 src/stream.rs	replace + with -	1	equivalent: the long message's stack keeps MAX_DEPTH - 1 values, still more than a 2^64-byte message's 48 pieces need
-src/lanes.rs	replace % with + in sources::Source::take_run	1	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
-src/lanes.rs	replace % with / in sources::Source::take_run	1	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
-src/lanes.rs	replace + with * in sources::Source::take_run	3	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
-src/lanes.rs	replace + with - in sources::Source::take_run	3	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
+src/lanes.rs	replace % with + in sources::Source::take_run	2	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
+src/lanes.rs	replace % with / in sources::Source::take_run	2	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
+src/lanes.rs	replace + with * in sources::Source::take_run	4	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
+src/lanes.rs	replace + with - in sources::Source::take_run	4	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)
 src/lanes.rs	replace sources::Source::take_run -> bool with false	1	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; confirmed identical release test code with line counts retained (tools/mutants/release_same.py)
 src/lanes.rs	replace sources::Source::take_run -> bool with true	1	compiled out: take_run is cfg(blake3_gpu), absent on x86-64; confirmed identical release test code with line counts retained (tools/mutants/release_same.py)
 src/stream.rs	replace + with * in task_slots	2	compiled out: the GPU's count (ENTRIES + 1 + HELD) is cfg(blake3_gpu), absent on x86-64; the changed-line gate confirms identical test code (tools/mutants/code_hash.py)

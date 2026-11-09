@@ -1943,10 +1943,6 @@ mod test {
         assert!(!FREE.lock().unwrap().is_empty(), "the storage is the thread's spare again");
     }
 
-    /// A few messages through a stream: the handover of entries to the
-    /// pool's threads and back.
-    /// Keep: it detects, by hanging, mutants the clock then stops
-    /// (tools/mutants/timeouts-x86_64.txt).
     /// The ring of tasks is long enough that a publication never meets a
     /// task claimed and not yet copied (BLAKE3 #303). The tightest public
     /// schedule: a short message's task stays open while long borrowed
@@ -1959,7 +1955,7 @@ mod test {
     /// the rest are submitted, and holds it between its claim and its copy.
     #[test]
     fn a_publication_never_meets_a_claimed_uncopied_task() {
-        use crate::lanes::sources::{COPY_WAITS, Source};
+        use crate::lanes::sources::{Source, UNCOPIED_REUSE};
         crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
         let short = std::vec![crate::throughput::Block::ZERO; 1];
         // Two pieces, the first one held; then enough pieces that every
@@ -1976,30 +1972,33 @@ mod test {
             |s| {
                 let slot = s.slot.expect("a source slot (two CPUs)");
                 Source::unregister(slot);
+                // A fresh source has never been visible to a registry walker.
+                // The stream still publishes through its ordinary slot path.
+                s.s.source = Box::leak(Box::new(Source::new(TASK_SLOTS)));
                 let source = s.s.source;
-                let before = COPY_WAITS.load(Ordering::SeqCst);
+                let before = UNCOPIED_REUSE.load(Ordering::SeqCst);
+                s.submit(&short, 64, first);
+                s.submit(&two, two.len() * 64, second);
                 std::thread::scope(|scope| {
                     let submitted = &submitted;
                     let holder = scope.spawn(move || {
                         // Hold the first piece between its claim and its copy
-                        // until a publication waits on it, or the submissions end.
+                        // until a publication meets it, or the submissions end.
                         let task = source.take_task_claimed(|| {
                             claimed_tx.send(()).unwrap();
-                            while COPY_WAITS.load(Ordering::SeqCst) == before && !submitted.load(Ordering::SeqCst) {
+                            while UNCOPIED_REUSE.load(Ordering::SeqCst) == before && !submitted.load(Ordering::SeqCst) {
                                 std::thread::yield_now();
                             }
                         });
                         crate::lanes::run_task(task.expect("the first piece"));
                     });
-                    s.submit(&short, 64, first);
-                    s.submit(&two, two.len() * 64, second);
                     claimed_rx.recv().unwrap();
                     s.submit(&long, long.len() * 64, third);
                     submitted.store(true, Ordering::SeqCst);
                     holder.join().unwrap();
                     s.finish();
                 });
-                assert_eq!(COPY_WAITS.load(Ordering::SeqCst) - before, 0, "a publication met a task claimed and not yet copied");
+                assert_eq!(UNCOPIED_REUSE.load(Ordering::SeqCst) - before, 0, "a publication met a task claimed and not yet copied");
             },
         );
         assert_eq!(hashes[0], crate::convenience::hash(&[0u8; 64]));
@@ -2007,6 +2006,10 @@ mod test {
         assert_eq!(hashes[2], crate::convenience::hash(&std::vec![0u8; (ENTRIES - 2) * PIECE]));
     }
 
+    /// A few messages through a stream: the handover of entries to the
+    /// pool's threads and back.
+    /// Keep: it detects, by hanging, mutants the clock then stops
+    /// (tools/mutants/timeouts-x86_64.txt).
     #[test]
     fn test_small_stream() {
         let input = std::vec![3u8; 3 * PIECE + 5];
