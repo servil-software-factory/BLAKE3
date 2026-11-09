@@ -359,6 +359,125 @@ fn grouped_fragmentation_reuses_storage_at_table_boundaries() {
     }
 }
 
+/// The pipeline's batch cycle (#325, #317): two batches go round one
+/// pipeline, each refilled, submitted, hashed by the workers, collected
+/// with its places, and refilled again, as a continuous batch producer
+/// does. After the first round, which prepares the receiver, a cycle
+/// allocates nothing on the producer or the workers.
+#[test]
+fn a_pipeline_batch_cycle_allocates_nothing_after_the_first() {
+    use std::cell::RefCell;
+    use throughput::pipeline::{Event, Limits, Stream};
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+            std::thread::yield_now();
+        }
+    }
+    pool_ready(4);
+    let fill = |batch: &mut Batch<'_>, round: u8| {
+        for i in 0..batch.len() {
+            batch.set(i, &[round.wrapping_mul(7).wrapping_add(i as u8); 64]);
+        }
+    };
+    let mut places = [vec![[0u8; 32]; 32], vec![[0u8; 32]; 32]];
+    let returned: RefCell<Vec<(u8, Batch<'_>, &mut [[u8; 32]])>> = RefCell::new(Vec::with_capacity(2));
+    let stream = Stream::new(Mode::Plain, Limits { buffers: 2, messages: 2 }, |event| match event {
+        Event::Batch { tag, batch, places } => returned.borrow_mut().push((tag, batch, places)),
+        _ => unreachable!("batches alone"),
+    });
+    let [pa, pb] = &mut places;
+    let (mut a, mut b) = (Batch::new(64, 32), Batch::new(64, 32));
+    fill(&mut a, 0);
+    fill(&mut b, 1);
+    run(stream.submit_batch(a, pa, 0));
+    run(stream.submit_batch(b, pb, 1));
+    let mut rounds = [0u8; 2];
+    // One batch's cycle: wait for a returned batch, check its digests,
+    // refill it and submit it again.
+    let mut cycle = |check: bool| {
+        while returned.borrow().is_empty() {
+            run(stream.ready());
+            stream.collect();
+        }
+        let (tag, mut batch, places) = returned.borrow_mut().pop().unwrap();
+        let round = rounds[tag as usize] * 2 + tag;
+        if check {
+            for (i, place) in places.iter().enumerate() {
+                assert_eq!(*place, *blake3::hash(&[round.wrapping_mul(7).wrapping_add(i as u8); 64]).as_bytes(), "round {round}, message {i}");
+            }
+        }
+        rounds[tag as usize] += 1;
+        fill(&mut batch, rounds[tag as usize] * 2 + tag);
+        run(stream.submit_batch(batch, places, tag));
+    };
+    cycle(true);
+    cycle(true);
+    let work = counts_with_workers(|| {
+        for _ in 0..12 {
+            cycle(false);
+        }
+    });
+    cycle(true);
+    cycle(true);
+    stream.finish();
+    assert_eq!(work, Counts::default(), "twelve batch cycles after the first round");
+}
+
+/// The pipeline's message cycle: begin, write, end, collect, a message at
+/// a time. After the first two, a cycle allocates nothing on the producer
+/// or the workers.
+#[test]
+fn a_pipeline_message_cycle_allocates_nothing_after_the_first() {
+    use std::cell::RefCell;
+    use throughput::pipeline::{Event, Limits, Stream};
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return value;
+            }
+            std::thread::yield_now();
+        }
+    }
+    pool_ready(4);
+    let hashed: RefCell<Vec<(u8, blake3_servil::Hash)>> = RefCell::new(Vec::with_capacity(2));
+    let stream = Stream::new(Mode::Plain, Limits { buffers: 2, messages: 2 }, |event| match event {
+        Event::Hashed { tag, hash } => hashed.borrow_mut().push((tag, hash)),
+        _ => unreachable!("ended messages alone"),
+    });
+    let cycle = |round: u8, check: bool| {
+        let mut message = run(stream.message(round, Some(1024)));
+        let mut input = run(message.input());
+        input.bytes_mut()[..1024].fill(round);
+        input.commit(1024);
+        message.end(0);
+        while hashed.borrow().is_empty() {
+            run(stream.ready());
+            stream.collect();
+        }
+        let (tag, hash) = hashed.borrow_mut().pop().unwrap();
+        if check {
+            assert_eq!(*hash.as_bytes(), *blake3::hash(&[tag; 1024]).as_bytes(), "message {tag}");
+        }
+    };
+    cycle(0, true);
+    cycle(1, true);
+    let work = counts_with_workers(|| {
+        for round in 2..14 {
+            cycle(round, false);
+        }
+    });
+    cycle(14, true);
+    stream.finish();
+    assert_eq!(work, Counts::default(), "twelve message cycles after the first two");
+}
+
 /// The pool of `threads`, started and at rest: the first worker starts
 /// the others after `initialize_multithreaded` returns (their thread
 /// names are allocations on `blake3-` threads), so a measured window

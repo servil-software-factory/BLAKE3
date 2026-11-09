@@ -106,6 +106,10 @@ struct Progress {
     receiver_gone: bool,
     slot: Option<OwnedLease<usize>>,
     output: Option<OwnedLease<Outcome>>,
+    /// A submitted batch's job, from its publication until a worker takes
+    /// it: kept in its message slot, as a part's job is kept in its buffer's
+    /// slot, so a batch cycle allocates nothing (#325).
+    batch: Option<BatchJob>,
 }
 
 /// A receiver's storage: kept for the next receiver of the same capacity
@@ -169,6 +173,7 @@ impl Receiver {
                     receiver_gone: true,
                     slot: None,
                     output: None,
+                    batch: None,
                 })
             })
             .collect();
@@ -245,12 +250,13 @@ impl Receiver {
                 state.receiver_gone = false;
                 state.slot = Some(slot);
                 state.output = Some(output);
-                Id { index, generation: state.generation }
+                let id = Id { index, generation: state.generation };
+                assert!(state.batch.is_none(), "a returned message slot holds no batch job");
+                state.batch = Some(BatchJob { owner: core.clone(), id, key, flags, input, input_len, message_len, out: places, count });
+                id
             };
-            let job = Box::new(BatchJob { owner: core.clone(), id, key, flags, input, input_len, message_len, out: places, count });
-            let context = Box::into_raw(job);
             let mut task = Task::of(&[], 0);
-            task.action = Some((execute_batch, context.cast()));
+            task.action = Some((execute_batch, (&core.messages[id.index] as *const Mutex<Progress>).cast_mut().cast()));
             core.source.publish_part(task);
             BatchCompletion { request: core.outputs[id.index].clone().acquire_owned(), core, id, guard: Some(crate::lanes::AbortOnUnwind) }
         }
@@ -440,6 +446,13 @@ struct BatchJob {
     count: usize,
 }
 
+// Sound: the pointers name the producer's batch and places, which
+// submit_batch's contract keeps in place, unwritten and unread by anyone
+// else, until the completion resolves; the one task that takes the job from
+// its slot reads the batch and writes the places on whichever thread runs
+// it, as the boxed job did.
+unsafe impl Send for BatchJob {}
+
 /// A batch's result. The borrowed batch and places stay in place until the
 /// receiver drains; a producer that unwinds first ends the process (a test
 /// that panicked before draining once let a worker write into a freed stack
@@ -482,10 +495,14 @@ impl BatchFinished {
 }
 
 unsafe fn execute_batch(context: *mut (), platform: Platform) {
-    // Sound: the job box was published by submit_batch and is claimed by
-    // this one task. The batch and places outlive the receiver's drain.
-    let job = unsafe { Box::from_raw(context.cast::<BatchJob>()) };
-    let aborted = job.owner.messages[job.id.index].lock().unwrap().aborted;
+    // Sound: the context is the batch's message slot in its core, which the
+    // job it holds keeps alive (the job's owner) until this one task takes
+    // it. The batch and places outlive the receiver's drain.
+    let progress = unsafe { &*context.cast::<Mutex<Progress>>() };
+    let (job, aborted) = {
+        let mut state = progress.lock().unwrap();
+        (state.batch.take().expect("one task takes the published batch job"), state.aborted)
+    };
     if !aborted {
         let input = unsafe { core::slice::from_raw_parts(job.input, job.input_len) };
         let out = unsafe { core::slice::from_raw_parts_mut(job.out, job.count) };
