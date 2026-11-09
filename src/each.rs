@@ -179,7 +179,6 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: bool) 
 /// Hash every queued stage, then return the bounded table to its caller.
 fn flush_held(hashers: &mut [Hasher], held: &mut arrayvec::ArrayVec<usize, TABLE>) {
     hash_held(hashers, held);
-    assert!(held.iter().all(|&i| hashers[i].held_group().is_none()), "a held group outlived its turn");
     held.clear();
 }
 
@@ -197,7 +196,8 @@ std::thread_local! {
 #[cfg(feature = "std")]
 fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     // Plain's key is the IV, the same for every plain hasher.
-    let plain: arrayvec::ArrayVec<usize, TABLE> = held.iter().copied().filter(|&i| hashers[i].core.chunk_state.flags == 0).collect();
+    let mut plain = arrayvec::ArrayVec::<usize, TABLE>::new();
+    plain.extend(held.iter().copied().filter(|&i| hashers[i].core.chunk_state.flags == 0));
     if !plain.is_empty() {
         hash_cohort::<TABLE>(hashers, &plain);
     }
@@ -208,31 +208,30 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     }
 }
 
-const HELD_CHUNKS: usize = crate::STAGE_LEN / CHUNK_LEN;
-
 /// Contiguous parent inputs retain the kernels' direct path. Both CV
 /// levels live on the stack; ping-pong leaves the final two children in
 /// the other buffer. Block supplies the existing 64-byte alignment.
 pub(crate) struct HeldWorkspace<const N: usize> {
-    level: arrayvec::ArrayVec<[Block; HELD_CHUNKS / 2], N>,
-    next: arrayvec::ArrayVec<[Block; HELD_CHUNKS / 4], N>,
+    level: arrayvec::ArrayVec<[Block; ALONE_CHUNKS / 2], N>,
+    next: arrayvec::ArrayVec<[Block; ALONE_CHUNKS / 4], N>,
 }
 
 impl<const N: usize> HeldWorkspace<N> {
-    /// Requires 1 <= count <= N. Construct in the caller's place.
+    /// Empty storage moves without copying initialized tree buffers.
     #[inline(always)]
-    pub(crate) fn new(count: usize) -> Self {
+    pub(crate) fn new() -> Self {
         const {
-            assert!(HELD_CHUNKS == 16);
+            assert!(ALONE_CHUNKS == 16 && crate::STAGE_LEN == ALONE_CHUNKS * CHUNK_LEN);
         }
-        debug_assert!(count > 0 && count <= N);
-        let mut work = Self { level: arrayvec::ArrayVec::new(), next: arrayvec::ArrayVec::new() };
-        work.level.extend(core::iter::repeat_n([Block::ZERO; HELD_CHUNKS / 2], count));
-        work.next.extend(core::iter::repeat_n([Block::ZERO; HELD_CHUNKS / 4], count));
-        work
+        Self { level: arrayvec::ArrayVec::new(), next: arrayvec::ArrayVec::new() }
     }
 
-    pub(crate) fn buffers(&mut self) -> (&mut [CVBytes], &mut [CVBytes]) {
+    /// Call once, with 1 <= count <= N: initialize through a borrow of the
+    /// workspace's final place, then borrow its two CV levels.
+    pub(crate) fn buffers(&mut self, count: usize) -> (&mut [CVBytes], &mut [CVBytes]) {
+        debug_assert!(count > 0 && count <= N && self.level.is_empty() && self.next.is_empty());
+        self.level.extend(core::iter::repeat_n([Block::ZERO; ALONE_CHUNKS / 2], count));
+        self.next.extend(core::iter::repeat_n([Block::ZERO; ALONE_CHUNKS / 4], count));
         let (level, _) = Block::bytes_mut(self.level.as_mut_slice().as_flattened_mut()).as_chunks_mut::<OUT_LEN>();
         let (next, _) = Block::bytes_mut(self.next.as_mut_slice().as_flattened_mut()).as_chunks_mut::<OUT_LEN>();
         (level, next)
@@ -244,6 +243,8 @@ impl<const N: usize> HeldWorkspace<N> {
 /// one SME2 entry covers the cohort; contiguous parents use its direct
 /// path. Spare descriptor slots repeat a readable block and stay unused.
 #[cfg(feature = "std")]
+// Keep the workspace frame out of empty turns and the other mode's caller.
+#[inline(never)]
 fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     use crate::{BLOCK_LEN, PARENT};
     let first = alike[0];
@@ -254,18 +255,17 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     let (key, flags) = (hashers[first].core.key, hashers[first].core.chunk_state.flags);
     let turn = crate::platform::Sme2Turn::take(hashers[first].core.chunk_state.platform, true);
     let platform = turn.platform();
-    let mut work = HeldWorkspace::<N>::new(alike.len());
-    let (mut level, mut next) = work.buffers();
+    let mut work = HeldWorkspace::<N>::new();
+    let (mut level, mut next) = work.buffers(alike.len());
     {
-        let refs: arrayvec::ArrayVec<[&[u8; CHUNK_LEN]; HELD_CHUNKS], N> = alike
-            .iter()
-            .map(|&i| {
-                let stage = hashers[i].held_group().expect("a held group").1;
-                core::array::from_fn(|j| stage[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap())
-            })
-            .collect();
+        let mut refs = arrayvec::ArrayVec::<[&[u8; CHUNK_LEN]; ALONE_CHUNKS], N>::new();
+        refs.extend(alike.iter().map(|&i| {
+            let stage = hashers[i].held_group().expect("a held group").1;
+            core::array::from_fn(|j| stage[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap())
+        }));
         let refs = refs.as_slice().as_flattened();
-        let counters: arrayvec::ArrayVec<u64, N> = alike.iter().map(|&i| hashers[i].held_group().unwrap().0).collect();
+        let mut counters = arrayvec::ArrayVec::<u64, N>::new();
+        counters.extend(alike.iter().map(|&i| hashers[i].held_group().unwrap().0));
         #[cfg(blake3_sme2)]
         let on_sme2 = matches!(platform, Platform::SME2);
         #[cfg(not(blake3_sme2))]
@@ -280,33 +280,31 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
         } else {
             for (k, &counter) in counters.iter().enumerate() {
                 platform.hash_many(
-                    &refs[k * HELD_CHUNKS..(k + 1) * HELD_CHUNKS],
+                    &refs[k * ALONE_CHUNKS..(k + 1) * ALONE_CHUNKS],
                     &key,
                     counter,
                     IncrementCounter::Yes,
                     flags,
                     CHUNK_START,
                     CHUNK_END,
-                    level[k * HELD_CHUNKS..(k + 1) * HELD_CHUNKS].as_flattened_mut(),
+                    level[k * ALONE_CHUNKS..(k + 1) * ALONE_CHUNKS].as_flattened_mut(),
                 );
             }
         }
     }
-    let mut per = HELD_CHUNKS;
+    let mut per = ALONE_CHUNKS;
     while per > 1 {
         let count = alike.len() * per / 2;
         {
             let bytes = level[..2 * count].as_flattened();
             let first: &[u8; BLOCK_LEN] = bytes[..BLOCK_LEN].try_into().unwrap();
             let mut blocks = bytes.chunks_exact(BLOCK_LEN).map(|b| b.try_into().unwrap());
-            let rows: arrayvec::ArrayVec<[&[u8; BLOCK_LEN]; HELD_CHUNKS], N> =
-                (0..count.div_ceil(HELD_CHUNKS)).map(|_| core::array::from_fn(|_| blocks.next().unwrap_or(first))).collect();
+            let mut rows = arrayvec::ArrayVec::<[&[u8; BLOCK_LEN]; ALONE_CHUNKS / 2], N>::new();
+            rows.extend((0..count.div_ceil(ALONE_CHUNKS / 2)).map(|_| core::array::from_fn(|_| blocks.next().unwrap_or(first))));
             platform.hash_many(&rows.as_slice().as_flattened()[..count], &key, 0, IncrementCounter::No, flags | PARENT, 0, 0, next[..count].as_flattened_mut());
         }
         core::mem::swap(&mut level, &mut next);
-        let before = per;
         per /= 2;
-        assert!(per < before, "a parent level shrinks");
     }
     drop(turn);
     for (k, &i) in alike.iter().enumerate() {
@@ -972,6 +970,7 @@ mod test {
                 pieces.clear();
                 pieces.extend(inputs.iter().enumerate().map(|(i, b)| (i, &b[start..start + 4096])));
                 update_each(&mut hashers, &pieces);
+                assert!(hashers.iter().all(|h| h.held_group().is_none()), "each turn completes its held stages");
             }
             for (h, input) in hashers.iter_mut().zip(&inputs) {
                 h.update(&input[2 * crate::STAGE_LEN..]);
