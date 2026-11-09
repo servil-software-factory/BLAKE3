@@ -42,7 +42,9 @@ use super::*;
 pub struct Hasher {
     pub(crate) core: HasherCore,
     /// The message's bytes from its last 16 KiB boundary, gathered while
-    /// they arrive in shorter updates: the first `staged`.
+    /// they arrive in shorter updates: the first `staged`. While a held
+    /// cohort hashes, consumed input stores intermediate CVs until
+    /// `take_held` empties the stage.
     pub(crate) staged: usize,
     pub(crate) stage: [core::mem::MaybeUninit<u8>; STAGE_LEN],
 }
@@ -219,7 +221,8 @@ impl Hasher {
     }
 
     /// A whole group in the stage, from offset zero: its first chunk's
-    /// counter and its bytes.
+    /// counter and its bytes. During cohort hashing those bytes hold
+    /// intermediate CVs instead of the consumed input.
     #[cfg(feature = "std")]
     pub(crate) fn held_group(&self) -> Option<(u64, &[u8; STAGE_LEN])> {
         (self.staged == STAGE_LEN && self.core.initial_chunk_counter == 0)
@@ -229,6 +232,18 @@ impl Hasher {
     #[cfg(not(feature = "std"))]
     pub(crate) fn held_group(&self) -> Option<(u64, &[u8; STAGE_LEN])> {
         None
+    }
+
+    /// Store intermediate CVs after the held stage's input was consumed.
+    /// A cohort owns the hasher exclusively until `take_held` clears it.
+    /// Requires a held group, completed kernel reads of the overwritten
+    /// input, and `offset + bytes.len() <= STAGE_LEN`.
+    #[cfg(feature = "std")]
+    pub(crate) fn store_held(&mut self, offset: usize, bytes: &[u8]) {
+        debug_assert!(self.held_group().is_some(), "intermediate values belong to a held stage");
+        for (slot, &byte) in self.stage[offset..offset + bytes.len()].iter_mut().zip(bytes) {
+            slot.write(byte);
+        }
     }
 
     /// The held group's subtree, as [`HasherCore::push_group`] takes it

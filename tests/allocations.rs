@@ -16,22 +16,55 @@ use std::cell::Cell;
 
 struct Counting;
 
-// The calls measured here are single-threaded; count their allocations
-// separately from the test harness's other threads.
-thread_local! {
-    static BYTES: Cell<usize> = const { Cell::new(0) };
-    static REQUESTS: Cell<usize> = const { Cell::new(0) };
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Counts {
+    allocations: usize,
+    reallocations: usize,
+    deallocations: usize,
+    bytes: usize,
 }
 
-// Sound: every call goes on to the system allocator, unchanged.
+// Count the calling thread separately from the harness's other threads.
+thread_local! {
+    static COUNTS: Cell<Counts> = const { Cell::new(Counts {
+        allocations: 0, reallocations: 0, deallocations: 0, bytes: 0,
+    }) };
+}
+
+fn record(change: impl FnOnce(&mut Counts)) {
+    // Allocations during thread-local destruction still reach System.
+    let _ = COUNTS.try_with(|c| {
+        let mut value = c.get();
+        change(&mut value);
+        c.set(value);
+    });
+}
+
+// Sound: each allocator operation forwards its arguments to System unchanged.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // A thread whose locals are gone counts nothing.
-        let _ = BYTES.try_with(|b| b.set(b.get() + layout.size()));
-        let _ = REQUESTS.try_with(|n| n.set(n.get() + 1));
+        record(|c| {
+            c.allocations += 1;
+            c.bytes += layout.size();
+        });
         unsafe { System.alloc(layout) }
     }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record(|c| {
+            c.allocations += 1;
+            c.bytes += layout.size();
+        });
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        record(|c| {
+            c.reallocations += 1;
+            c.bytes += new_size;
+        });
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        record(|c| c.deallocations += 1);
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -39,30 +72,45 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static COUNTING: Counting = Counting;
 
+/// The allocator work `call` requests on this thread.
+fn counts(call: impl FnOnce()) -> Counts {
+    let before = COUNTS.with(Cell::get);
+    call();
+    let after = COUNTS.with(Cell::get);
+    Counts {
+        allocations: after.allocations - before.allocations,
+        reallocations: after.reallocations - before.reallocations,
+        deallocations: after.deallocations - before.deallocations,
+        bytes: after.bytes - before.bytes,
+    }
+}
+
 /// The bytes `call` asks the allocator for, on this thread.
 fn allocated(call: impl FnOnce()) -> usize {
-    let before = BYTES.with(Cell::get);
-    call();
-    BYTES.with(Cell::get) - before
+    counts(call).bytes
 }
 
 #[test]
 fn allocation_counter_sees_a_callers_allocation() {
-    let before = REQUESTS.with(Cell::get);
-    assert_eq!(allocated(|| drop(std::hint::black_box(vec![0u8; 4096]))), 4096);
-    assert_eq!(REQUESTS.with(Cell::get) - before, 1);
+    assert_eq!(counts(|| drop(std::hint::black_box(vec![0u8; 4096]))), Counts { allocations: 1, deallocations: 1, bytes: 4096, ..Counts::default() });
+    let mut buffer = vec![0u8; 8];
+    assert_eq!(counts(|| buffer.reserve_exact(4096)), Counts { reallocations: 1, bytes: 4104, ..Counts::default() });
+    assert_eq!(counts(|| drop(buffer)), Counts { deallocations: 1, ..Counts::default() });
 }
 
 /// Only key bytes vary: caller preparation stays outside the allocator
-/// counters, and two held stages cover zero and nonzero chunk counters.
+/// counters. Three complete cycles cover first use, reset and storage reuse;
+/// each input has two held stages (zero and nonzero chunk counters).
 #[test]
-fn held_allocations_ignore_key_equality_and_prefixes() {
+fn grouped_cycles_reuse_storage_for_every_key_prefix() {
     blake3_servil::initialize();
-    let input = vec![42u8; 2 * 16 * 1024];
+    let inputs: Vec<_> = (0..3).map(|i| vec![42u8 + i; 2 * 16 * 1024]).collect();
     for n in [3usize, 8, 16, 17, 33] {
-        for mixed in [false, true] {
-            let mut reference = None;
+        for flavor in 0..3 {
             for prefix in (0..=8).rev() {
+                if flavor == 0 && prefix != 8 {
+                    continue;
+                }
                 let keys: Vec<[u8; 32]> = (0..n)
                     .map(|i| {
                         let mut key = [0x6du8; 32];
@@ -73,39 +121,89 @@ fn held_allocations_ignore_key_equality_and_prefixes() {
                     })
                     .collect();
                 let mode = |i: usize| {
-                    if !mixed || i % 3 == 1 {
-                        Mode::Keyed(&keys[i])
-                    } else if i % 3 == 0 {
+                    if flavor == 0 || (flavor == 2 && i % 3 == 0) {
                         Mode::Plain
+                    } else if flavor == 1 || i % 3 == 1 {
+                        Mode::Keyed(&keys[i])
                     } else {
                         Mode::DeriveKey("held key-prefix regression")
                     }
                 };
                 let mut hashers: Vec<_> = (0..n).map(|i| Hasher::new(mode(i), None)).collect();
                 let mut pieces = Vec::with_capacity(n);
-                let requests = REQUESTS.with(Cell::get);
-                let bytes = allocated(|| {
-                    for piece in input.chunks(4096) {
-                        pieces.clear();
-                        pieces.extend((0..n).map(|i| (i, piece)));
-                        throughput::update_each(&mut hashers, &pieces);
+                let which: Vec<_> = (0..n).collect();
+                let mut outputs = vec![[0u8; 32]; n * inputs.len()];
+                let work = counts(|| {
+                    for (input, outputs) in inputs.iter().zip(outputs.chunks_mut(n)) {
+                        for piece in input.chunks(4096) {
+                            pieces.clear();
+                            pieces.extend((0..n).map(|i| (i, piece)));
+                            throughput::update_each(&mut hashers, &pieces);
+                        }
+                        throughput::finalize_each(&mut hashers, &which, outputs);
                     }
                 });
-                let work = (bytes, REQUESTS.with(Cell::get) - requests);
-                assert!(work.0 > 0 && work.1 > 0, "held allocation work observed");
-                if let Some(expected) = reference {
-                    assert_eq!(work, expected, "allocation work independent of key equality and prefix: n={n} mixed={mixed} prefix={prefix}");
-                } else {
-                    reference = Some(work);
+                assert_eq!(work, Counts::default(), "prepared grouped cycles: n={n} flavor={flavor} prefix={prefix}");
+                for (input, outputs) in inputs.iter().zip(outputs.chunks(n)) {
+                    for (i, output) in outputs.iter().enumerate() {
+                        let expected = match mode(i) {
+                            Mode::Plain => *blake3::hash(input).as_bytes(),
+                            Mode::Keyed(key) => *blake3::keyed_hash(key, input).as_bytes(),
+                            Mode::DeriveKey(context) => blake3::derive_key(context, input),
+                            _ => unreachable!("only plain, keyed and derive-key test modes"),
+                        };
+                        assert_eq!(*output, expected);
+                    }
                 }
-                for (i, h) in hashers.iter().enumerate() {
-                    let expected = match mode(i) {
-                        Mode::Plain => *blake3::hash(&input).as_bytes(),
-                        Mode::Keyed(key) => *blake3::keyed_hash(key, &input).as_bytes(),
-                        Mode::DeriveKey(context) => blake3::derive_key(context, &input),
-                        _ => unreachable!("only plain, keyed and derive-key test modes"),
-                    };
-                    assert_eq!(h.clone().finalize().as_bytes(), &expected);
+            }
+        }
+    }
+}
+
+/// Repeated indices, empty pieces and uneven initial stages around the
+/// ready table's boundary, in adjacent and interleaved caller order.
+#[test]
+fn grouped_fragmentation_reuses_storage_at_table_boundaries() {
+    blake3_servil::initialize_multithreaded(None);
+    let input: Vec<u8> = (0..3 * 16 * 1024 + 137).map(|i| (i % 251) as u8).collect();
+    let key = [93u8; 32];
+    let mode = |i| match i % 3 {
+        0 => Mode::Plain,
+        1 => Mode::Keyed(&key),
+        _ => Mode::DeriveKey("bounded grouped storage"),
+    };
+    let expected = [*blake3::hash(&input).as_bytes(), *blake3::keyed_hash(&key, &input).as_bytes(), blake3::derive_key("bounded grouped storage", &input)];
+    for n in [1usize, 127, 128, 129, 257] {
+        for interleaved in [false, true] {
+            for pooled in [false, true] {
+                let mut hashers: Vec<_> = (0..n)
+                    .map(|i| {
+                        let mut h = Hasher::new(mode(i), None);
+                        h.update(&input[..i % 3 * 511]);
+                        h
+                    })
+                    .collect();
+                let mut pieces = Vec::new();
+                for i in 0..n {
+                    pieces.push((i, &input[..0]));
+                    pieces.extend(input[i % 3 * 511..].chunks(4093).map(|p| (i, p)));
+                }
+                if interleaved {
+                    pieces.sort_by_key(|(i, p)| (p.as_ptr() as usize - input.as_ptr() as usize, *i));
+                }
+                let which: Vec<_> = (0..n).collect();
+                let mut outputs = vec![[0; 32]; n];
+                let work = counts(|| {
+                    if pooled {
+                        throughput::update_each_multithreaded(&mut hashers, &pieces);
+                    } else {
+                        throughput::update_each(&mut hashers, &pieces);
+                    }
+                    throughput::finalize_each(&mut hashers, &which, &mut outputs);
+                });
+                assert_eq!(work, Counts::default(), "n={n} interleaved={interleaved} pooled={pooled}");
+                for (i, output) in outputs.iter().enumerate() {
+                    assert_eq!(*output, expected[i % 3]);
                 }
             }
         }
