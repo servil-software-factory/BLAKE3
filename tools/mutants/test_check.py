@@ -139,11 +139,15 @@ class Leftovers(unittest.TestCase):
             def git(*args):
                 return subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True, text=True)
             git("init", "-q")
+            git("config", "user.name", "Mutation test")
+            git("config", "user.email", "mutation@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("config", "core.hooksPath", os.devnull)
             for name in ["changed.rs", "stable.rs"]:
                 with open(os.path.join(repo, name), "w") as f:
                     f.write("original\n")
             git("add", ".")
-            git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "original inputs")
+            git("commit", "-qm", "original inputs")
             with patch.object(check, "ROOT", repo), patch.object(check, "WORKTREES", os.path.join(base, "trees")):
                 tree = check.shard_tree("run", 0)
                 stable = os.path.join(tree, "stable.rs")
@@ -165,7 +169,7 @@ class Leftovers(unittest.TestCase):
                 with open(os.path.join(repo, "changed.rs"), "w") as f:
                     f.write("next HEAD\n")
                 git("add", "changed.rs")
-                git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "changed input")
+                git("commit", "-qm", "changed input")
                 check.shard_tree("run", 0)
                 with open(changed) as f:
                     self.assertEqual(f.read(), "next HEAD\n")
