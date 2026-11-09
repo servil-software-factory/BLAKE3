@@ -157,6 +157,7 @@ class Leftovers(unittest.TestCase):
         listed = "\n".join([
             "worktree /repo", "HEAD a", "",
             "worktree /tmpdir/blake3-servil-mutants/mutants-abc123", "HEAD b", "",
+            "worktree /tmpdir/blake3-servil-mutants/run-0", "HEAD e", "",
             "worktree /elsewhere/mutants-xyz", "HEAD c", "",
             "worktree /repo/tmp/tests-map-worktree", "HEAD d", "",
         ])
@@ -167,10 +168,10 @@ class Leftovers(unittest.TestCase):
         with patch.object(check, "ROOT", "/repo"), patch.object(check, "WORKTREES", "/tmpdir/blake3-servil-mutants"), \
              patch.object(check, "TARGET_DIR", "/tmpdir/target"), patch.object(check.os.path, "realpath", lambda p: p), \
              patch.object(check.subprocess, "run", run), patch.object(check.shutil, "rmtree", lambda *a, **k: None), \
-             patch.object(check.os, "makedirs", lambda *a, **k: None):
+             patch.object(check.os, "makedirs", lambda *a, **k: None), patch.object(check.os, "listdir", lambda p: []):
             check.remove_leftovers()
         removed = [a[-1] for a in calls if "remove" in a]
-        self.assertEqual(removed, ["/tmpdir/blake3-servil-mutants/mutants-abc123"], "every other worktree stays")
+        self.assertEqual(removed, ["/tmpdir/blake3-servil-mutants/mutants-abc123"], "a shard's own worktree (run-0) and every other worktree stay")
 
 
 

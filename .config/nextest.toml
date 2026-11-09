@@ -38,14 +38,16 @@ fail-fast = { max-fail = 1, terminate = "immediate" }
 # (i7-12700K, November 3; alone it reads 1.0-1.1 against its bound of
 # 1.5). It runs in the default profile, on a quiet machine (BLAKE3 #215).
 default-filter = "not binary(pool_fairness)"
-# A test still running at 30 s hangs: killed and named. The run's one
+# A test still running at 15 s hangs: killed and named. The run's one
 # clock: check.py reports a mutant that only this clock stopped as CLOCK
-# ONLY, not as caught by a test. The slowest test takes under 1 s alone,
-# but at 5 s this clock stopped an unmutated stream test (5,055 ms, a
+# ONLY, not as caught by a test. The slowest test takes under 1 s alone;
+# at 5 s this clock stopped an unmutated stream test (5,055 ms, a
 # compiled-out mutant, six shards on 48 threads: an EPYC 9255, October
-# 22), so it sits far above any test's time under a run's load; a hang
-# costs 25 s more than it did.
-slow-timeout = { period = "30s", terminate-after = 1 }
+# 22), and six shards' baselines on the i7-12700K took 1.7 s at most
+# (November 9). 15 s is three times the EPYC's slowest; each hang, a
+# mutant that never ends, costs that much (at 30 s, two hangs were most of
+# a change's minute, BLAKE3 #257).
+slow-timeout = { period = "15s", terminate-after = 1 }
 # Each test's line once, as it ends, with its outcome and time.
 status-level = "all"
 final-status-level = "none"
