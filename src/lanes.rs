@@ -970,7 +970,8 @@ pub(crate) mod sources {
 
         /// A stream's task to the workers: one write, one Release store;
         /// then the SME2 thread first, and with two or more waiting and a
-        /// worker parked, a worker.
+        /// worker parked, a worker. Requires a stream's nonempty ring with
+        /// room for one more unclaimed task.
         pub(crate) fn publish(&self, task: Task) {
             self.publish_waiting(task, || {});
         }
@@ -978,11 +979,12 @@ pub(crate) mod sources {
         /// `waiting` exposes the copy/reuse boundary to the schedule test.
         fn publish_waiting(&self, task: Task, waiting: impl FnOnce()) {
             let p = self.finish.published.load(Ordering::Relaxed);
-            // Every build: an unclaimed full ring is a broken capacity
-            // contract. Only a claimed reader may delay slot reuse.
-            assert!(p - self.claimed.load(Ordering::Relaxed) < self.ring.len(), "a source's ring holds every task not yet taken");
             let slot = &self.ring[p % self.ring.len()];
             if slot.next.load(Ordering::Acquire) != p {
+                // An available generation proves the prior reader copied
+                // this slot. Only a claimed reader may delay reuse; an
+                // unclaimed full ring violates the capacity contract.
+                assert!(p - self.claimed.load(Ordering::Relaxed) < self.ring.len(), "a source's ring holds every task not yet taken");
                 waiting();
                 // A worker has claimed the old task and may be descheduled
                 // before its copy. Let it run before reusing that storage.
