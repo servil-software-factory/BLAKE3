@@ -686,6 +686,73 @@ mod tests {
         stream.finish();
     }
 
+    /// One poll of `future` with a waker that does nothing: its output,
+    /// which must be ready.
+    fn once<F: Future>(future: F, what: &str) -> F::Output {
+        let mut cx = Context::from_waker(Waker::noop());
+        match core::pin::pin!(future).poll(&mut cx) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("{what}: not ready in one poll, though the producer could hash what it waits for"),
+        }
+    }
+
+    /// With no worker (a pool of one thread), the producer hashes what it
+    /// waits for itself, at once: a room its own message's part holds, a
+    /// message slot an uncollected message holds, a completion. Each wait
+    /// ends in the one poll that hashes it (#325's mutation run: the help in
+    /// `input`, `admit` and `ready` survived every test, which had workers).
+    #[test]
+    fn with_no_worker_each_wait_ends_in_one_poll() {
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+        let events = RefCell::new(Vec::new());
+        let stream = Stream::new(Mode::Plain, Limits { buffers: 1, messages: 1 }, |event| events.borrow_mut().push(event));
+        let full = crate::incremental::STAGE_LEN;
+        let mut first = once(stream.message(0u8, None), "the first message's slot");
+        let mut room = once(first.input(), "the first room");
+        room.bytes_mut()[..full].fill(1);
+        room.commit(full); // A part, holding the one room.
+        let mut room = once(first.input(), "the room the first part holds");
+        room.bytes_mut()[..10].fill(2);
+        room.commit(10);
+        first.end(0);
+        let mut second = once(stream.message(1u8, None), "the slot the first message holds");
+        assert_eq!(events.borrow().len(), 1, "the first message was hashed and collected for the slot");
+        let mut room = once(second.input(), "the room after the first message");
+        room.bytes_mut()[..3].copy_from_slice(b"abc");
+        room.commit(3);
+        second.end(0);
+        assert_eq!(events.borrow().len(), 1, "the second message waits for the producer's help");
+        // The first completion's wake left `ready`'s flag set: one `ready`
+        // takes it; the next must hash the second message.
+        once(stream.ready(), "the flag the first completion set");
+        once(stream.ready(), "the second message's completion");
+        assert_eq!(stream.collect(), 1);
+        let mut first_input = vec![1u8; full];
+        first_input.extend([2u8; 10]);
+        let events = events.borrow();
+        assert!(matches!(events[0], Event::Hashed { tag: 0, hash } if hash.as_bytes() == &expected(Mode::Plain, &first_input)));
+        assert!(matches!(events[1], Event::Hashed { tag: 1, hash } if hash.as_bytes() == &expected(Mode::Plain, b"abc")));
+        drop(events);
+        stream.finish();
+    }
+
+    /// A message ended with its room empty gives the room back and
+    /// publishes no part: no task waits for the producer's help, and the
+    /// digest is the empty message's (a mutant that published an empty last
+    /// part had the same digest and survived; this counts the task).
+    #[test]
+    fn ending_on_an_empty_room_publishes_no_part() {
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+        let events = RefCell::new(Vec::new());
+        let stream = Stream::new(Mode::Plain, Limits { buffers: 1, messages: 1 }, |event| events.borrow_mut().push(event));
+        let mut message = once(stream.message((), None), "a slot");
+        drop(once(message.input(), "a room"));
+        message.end(0);
+        assert!(!stream.receiver.help(), "no part to hash");
+        assert!(matches!(events.borrow()[0], Event::Hashed { hash, .. } if hash.as_bytes() == &expected(Mode::Plain, b"")));
+        stream.finish();
+    }
+
     /// Whole-block storage is borrowed as a batch without a copy.
     #[test]
     fn a_borrowed_batch_fills_the_producers_places() {
