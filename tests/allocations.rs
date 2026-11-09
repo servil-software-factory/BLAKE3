@@ -13,6 +13,8 @@ use blake3_servil::throughput::{self, Batch, Block};
 use blake3_servil::{Mode, convenience};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::os::unix::thread::RawPthread;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct Counting;
 
@@ -22,6 +24,67 @@ struct Counts {
     reallocations: usize,
     deallocations: usize,
     bytes: usize,
+}
+
+impl Counts {
+    fn since(self, before: Self) -> Self {
+        Self {
+            allocations: self.allocations - before.allocations,
+            reallocations: self.reallocations - before.reallocations,
+            deallocations: self.deallocations - before.deallocations,
+            bytes: self.bytes - before.bytes,
+        }
+    }
+    fn plus(self, other: Self) -> Self {
+        Self {
+            allocations: self.allocations + other.allocations,
+            reallocations: self.reallocations + other.reallocations,
+            deallocations: self.deallocations + other.deallocations,
+            bytes: self.bytes + other.bytes,
+        }
+    }
+}
+
+struct AtomicCounts {
+    allocations: AtomicUsize,
+    reallocations: AtomicUsize,
+    deallocations: AtomicUsize,
+    bytes: AtomicUsize,
+}
+impl AtomicCounts {
+    fn get(&self) -> Counts {
+        Counts {
+            allocations: self.allocations.load(Ordering::Relaxed),
+            reallocations: self.reallocations.load(Ordering::Relaxed),
+            deallocations: self.deallocations.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+        }
+    }
+    fn add(&self, c: Counts) {
+        self.allocations.fetch_add(c.allocations, Ordering::Relaxed);
+        self.reallocations.fetch_add(c.reallocations, Ordering::Relaxed);
+        self.deallocations.fetch_add(c.deallocations, Ordering::Relaxed);
+        self.bytes.fetch_add(c.bytes, Ordering::Relaxed);
+    }
+}
+static WORKER_COUNTS: AtomicCounts =
+    AtomicCounts { allocations: AtomicUsize::new(0), reallocations: AtomicUsize::new(0), deallocations: AtomicUsize::new(0), bytes: AtomicUsize::new(0) };
+
+unsafe extern "C" {
+    fn pthread_self() -> RawPthread;
+    fn pthread_getname_np(thread: RawPthread, name: *mut std::ffi::c_char, len: usize) -> std::ffi::c_int;
+}
+
+// These are the library's OS-thread names (lanes.rs and gpu.rs). Reading
+// them uses no Rust allocation; the harness's threads have other names.
+// This observes Rust GlobalAlloc requests, not native allocators/drivers.
+fn library_worker() -> bool {
+    let mut name = [0u8; 64];
+    // Sound: the calling thread is live and name is 64 writable bytes.
+    if unsafe { pthread_getname_np(pthread_self(), name.as_mut_ptr().cast(), name.len()) } != 0 {
+        std::process::abort();
+    }
+    name.starts_with(b"blake3-")
 }
 
 // Count the calling thread separately from the harness's other threads.
@@ -34,9 +97,13 @@ thread_local! {
 fn record(change: impl FnOnce(&mut Counts)) {
     // Allocations during thread-local destruction still reach System.
     let _ = COUNTS.try_with(|c| {
-        let mut value = c.get();
+        let before = c.get();
+        let mut value = before;
         change(&mut value);
         c.set(value);
+        if library_worker() {
+            WORKER_COUNTS.add(value.since(before));
+        }
     });
 }
 
@@ -77,12 +144,16 @@ fn counts(call: impl FnOnce()) -> Counts {
     let before = COUNTS.with(Cell::get);
     call();
     let after = COUNTS.with(Cell::get);
-    Counts {
-        allocations: after.allocations - before.allocations,
-        reallocations: after.reallocations - before.reallocations,
-        deallocations: after.deallocations - before.deallocations,
-        bytes: after.bytes - before.bytes,
-    }
+    after.since(before)
+}
+
+/// A complete synchronous call, including this process's named library
+/// workers. The call waits for all of its work before returning. Each
+/// nextest process owns its window; the harness's other threads stay out.
+fn counts_with_workers(call: impl FnOnce()) -> Counts {
+    let before = WORKER_COUNTS.get();
+    let caller = counts(call);
+    caller.plus(WORKER_COUNTS.get().since(before))
 }
 
 /// The bytes `call` asks the allocator for, on this thread.
@@ -96,6 +167,83 @@ fn allocation_counter_sees_a_callers_allocation() {
     let mut buffer = vec![0u8; 8];
     assert_eq!(counts(|| buffer.reserve_exact(4096)), Counts { reallocations: 1, bytes: 4104, ..Counts::default() });
     assert_eq!(counts(|| drop(buffer)), Counts { deallocations: 1, ..Counts::default() });
+}
+
+#[test]
+fn worker_counter_sees_an_owned_background_allocation() {
+    use std::sync::Arc;
+    let flags = Arc::new([AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)]);
+    let f = flags.clone();
+    let worker = std::thread::Builder::new()
+        .name("blake3-worker-meter".into())
+        .spawn(move || {
+            f[0].store(true, Ordering::Release);
+            while !f[1].load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            drop(std::hint::black_box(vec![0u8; 4096]));
+            f[2].store(true, Ordering::Release);
+            while !f[3].load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        })
+        .unwrap();
+    while !flags[0].load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
+    let work = counts_with_workers(|| {
+        flags[1].store(true, Ordering::Release);
+        while !flags[2].load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+    flags[3].store(true, Ordering::Release);
+    worker.join().unwrap();
+    assert_eq!(work, Counts { allocations: 1, deallocations: 1, bytes: 4096, ..Counts::default() });
+}
+
+/// Setup precedes the first measured cycle. Full-message updates reach
+/// the pool as well as the caller; output consumption and grouped resets
+/// remain inside three complete cycles. The zero-allocation assertion
+/// marks the pooled-tree work still open in BLAKE3 #325.
+#[test]
+fn prepared_multithreaded_cycles_include_the_workers() {
+    blake3_servil::initialize_multithreaded(std::num::NonZeroUsize::new(4));
+    let inputs: Vec<_> = (0..3).map(|i| vec![37u8 + i; 4 << 20]).collect();
+    let keys = [[19u8; 32], [91u8; 32]];
+    for shared in [true, false] {
+        let mode = |i| match i {
+            0 => Mode::Plain,
+            2 => Mode::DeriveKey("prepared worker allocation cycles"),
+            _ => Mode::Keyed(&keys[usize::from(!shared && i == 3)]),
+        };
+        let mut hashers: Vec<_> = (0..4).map(|i| Hasher::new(mode(i), None)).collect();
+        let which = [0usize, 1, 2, 3];
+        let mut pieces = Vec::with_capacity(4);
+        let mut outputs = vec![[0u8; 32]; 3 * 4];
+        let work = counts_with_workers(|| {
+            for (input, out) in inputs.iter().zip(outputs.chunks_mut(4)) {
+                pieces.clear();
+                pieces.extend((0..4).map(|i| (i, &input[..])));
+                throughput::update_each_multithreaded(&mut hashers, &pieces);
+                throughput::finalize_each(&mut hashers, &which, out);
+                let consumed = out.as_flattened().iter().fold(0usize, |sum, &b| sum.wrapping_add(b as usize));
+                std::hint::black_box(consumed);
+            }
+        });
+        assert_eq!(work, Counts::default(), "prepared worker cycles, shared={shared}");
+        for (input, out) in inputs.iter().zip(outputs.chunks(4)) {
+            for (i, digest) in out.iter().enumerate() {
+                let expected = match mode(i) {
+                    Mode::Plain => *blake3::hash(input).as_bytes(),
+                    Mode::Keyed(k) => *blake3::keyed_hash(k, input).as_bytes(),
+                    Mode::DeriveKey(c) => blake3::derive_key(c, input),
+                    _ => unreachable!("the test's three modes"),
+                };
+                assert_eq!(*digest, expected);
+            }
+        }
+    }
 }
 
 /// Only key bytes vary: caller preparation stays outside the allocator
