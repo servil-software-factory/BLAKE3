@@ -99,9 +99,9 @@
 //! [`throughput::hash_many`] call take about a fifth of the time of 1024
 //! [`convenience::hash`] calls.
 //!
-//! **Keyed hashing and key derivation** run at the plain hash's speed
-//! through a [`Mode`], which every throughput call takes, the
-//! [`Hasher`]'s constructor among them.
+//! Select **keyed hashing or key derivation** with [`Mode`], supplied to
+//! throughput calls and the [`Hasher`] constructor. See [Key-dependent
+//! timing](#key-dependent-timing) for the key-independence contract.
 //!
 //! **Hashing now and then** (rather than nonstop) is slower per byte on
 //! every hash function, since its code and data must come back into the
@@ -126,19 +126,41 @@
 //! to turn on, and the digests are the same; a pool of one thread keeps to
 //! its core.
 //!
+//! # Key-dependent timing
+//!
+//! Hashing code treats secret key bytes, including derived keys, as data:
+//! they select neither branches, memory-access addresses, nor kernels.
+//! For a fixed public call shape, grouped calls do the same work whether
+//! their hashers' keys are equal or different. Key equality selects neither
+//! groups nor temporary storage sizes.
+//!
+//! Public call shape includes the mode kind (plain, keyed, or key derivation),
+//! message and output lengths, input layout, update boundaries, hasher indices,
+//! and size hints. Dispatch may also depend on CPU features and available
+//! processing resources. A batch supplied with one [`Mode`] shares a key by
+//! construction. Plain mode's fixed key is public.
+//!
+//! This is a software-level key-independence contract. Elapsed time varies
+//! with public call shape, scheduling, clock speed, and machine load. Caller
+//! callbacks and I/O have their own timing properties. Applications choose
+//! which lengths, modes, and operation patterns they expose to observers.
+//!
 //! # Memory
 //!
 //! - **A [`Hasher`] is about 18 KiB**; box it where that matters.
-//! - **Single-threaded calls allocate nothing**: [`convenience::hash`],
+//! - **These single-threaded calls allocate nothing**: [`convenience::hash`],
 //!   [`throughput::hash`], [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
 //!   and [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
 //!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 1 MiB buffer while it reads past
 //!   64 KiB, and [`throughput::hash_each`] 32 bytes for each chunk of its messages
 //!   of 2 to 15 chunks and up to 128 for each such message, each freed when
 //!   it returns.
-//! - **Multithreaded calls** allocate nothing below 512 KiB, where they
-//!   hash on the calling thread. Above it they keep a list of the pieces
-//!   they hand out, freed when they return: 48 bytes for each 128 KiB of
+//! - **Grouped incremental calls** ([`throughput::update_each`] and
+//!   [`throughput::update_each_multithreaded`]) use temporary heap-allocated
+//!   piece lists and intermediate tree buffers during updates.
+//! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
+//!   where it hashes on the calling thread. Above that length it keeps a list
+//!   of pieces it hands out, freed when it returns: 48 bytes for each 128 KiB of
 //!   input, and at most 200 bytes for each CPU (1 GiB on 16 CPUs: 390 KiB).
 //! - **A [stream](throughput::stream)** takes its storage (its 2 MiB ring, 8 MiB more for
 //!   messages of 4 MiB or more, of which only the pages used are faulted in, and its entries)

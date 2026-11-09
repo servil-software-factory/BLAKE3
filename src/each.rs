@@ -61,6 +61,12 @@ pub fn hash_each_multithreaded(mode: Mode, items: &[(&[Block], usize)], out: &mu
 /// [`update`](Hasher::update) each: many messages arriving at once, such
 /// as a server's uploads, each with its own [`Hasher`]. Requires each `i < hashers.len()`.
 ///
+/// # Key-dependent timing
+///
+/// Hashers may use different secret keys. Grouping, kernel selection, and
+/// temporary storage sizes are independent of key values and key equality.
+/// See the [key-independence contract](crate#key-dependent-timing).
+///
 /// ```
 /// # blake3_servil::initialize();
 /// use blake3_servil::{convenience::Hasher, throughput};
@@ -79,6 +85,11 @@ pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
 /// that is faster (pieces of 512 KiB and more): the same result, never
 /// slower.
 /// Requires each `i < hashers.len()`.
+///
+/// # Key-dependent timing
+///
+/// The same [key-independence contract](crate#key-dependent-timing) as
+/// [`update_each`] applies when workers participate.
 #[cfg(feature = "std")]
 pub fn update_each_multithreaded(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
     crate::lanes::require();
@@ -89,6 +100,12 @@ pub fn update_each_multithreaded(hashers: &mut [Hasher], pieces: &[(usize, &[u8]
 /// `hashers[which[k]].finalize()` would give, and that hasher is then
 /// reset for its next message (no length hint). Requires
 /// `out.len() == which.len()`, each index `< hashers.len()`, and distinct indices.
+///
+/// # Key-dependent timing
+///
+/// Selected hashers may use different secret keys. Key values and key equality
+/// select neither the finalization path nor its amount of work.
+/// See the [key-independence contract](crate#key-dependent-timing).
 pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     assert_eq!(which.len(), out.len(), "one digest per message named");
     debug_assert!(which.iter().enumerate().all(|(at, i)| !which[..at].contains(i)), "each finalized index is distinct");
