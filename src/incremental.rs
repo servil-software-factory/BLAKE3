@@ -167,9 +167,7 @@ impl Hasher {
 
     /// Copy `bytes` into the stage after what it holds.
     pub(crate) fn stage(&mut self, bytes: &[u8]) {
-        // Sound: MaybeUninit<u8> has u8's layout, and the bytes fit (gather).
-        let room = unsafe { core::slice::from_raw_parts_mut(self.stage.as_mut_ptr().add(self.staged) as *mut u8, bytes.len()) };
-        room.copy_from_slice(bytes);
+        self.write_stage(self.staged, bytes);
         self.staged += bytes.len();
     }
 
@@ -234,13 +232,11 @@ impl Hasher {
         None
     }
 
-    /// Store intermediate CVs after the held stage's input was consumed.
-    /// A cohort owns the hasher exclusively until `take_held` clears it.
-    /// Requires a held group, completed kernel reads of the overwritten
-    /// input, and `offset + bytes.len() <= STAGE_LEN`.
-    #[cfg(feature = "std")]
-    pub(crate) fn store_held(&mut self, offset: usize, bytes: &[u8]) {
-        debug_assert!(self.held_group().is_some(), "intermediate values belong to a held stage");
+    /// Write input bytes or intermediate CVs within the stage. Appending
+    /// input updates `staged` through `stage`; a held cohort owns its CVs
+    /// until `take_held` clears it. Kernel reads of overwritten input must
+    /// have completed. Requires `offset + bytes.len() <= STAGE_LEN`.
+    pub(crate) fn write_stage(&mut self, offset: usize, bytes: &[u8]) {
         for (slot, &byte) in self.stage[offset..offset + bytes.len()].iter_mut().zip(bytes) {
             slot.write(byte);
         }

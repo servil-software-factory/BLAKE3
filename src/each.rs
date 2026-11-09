@@ -158,7 +158,7 @@ fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]
 fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: bool) {
     let mut held = arrayvec::ArrayVec::<usize, TABLE>::new();
     for &(i, mut bytes) in pieces {
-        if hashers[i].held_group().is_some() && !bytes.is_empty() {
+        if hashers[i].held_group().is_some() {
             flush_held(hashers, &mut held);
         }
         while !bytes.is_empty() {
@@ -218,7 +218,9 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
 fn hash_cohort(hashers: &mut [Hasher], alike: &[usize]) {
     use crate::{BLOCK_LEN, PARENT};
     const PER: usize = crate::STAGE_LEN / CHUNK_LEN;
-    const { assert!(PER == 16 && TABLE % PER == 0); }
+    const {
+        assert!(PER == 16 && TABLE % PER == 0);
+    }
     let first = alike[0];
     debug_assert!(alike.len() <= TABLE, "the ready table bounds a cohort");
     #[cfg(all(test, feature = "std"))]
@@ -244,7 +246,7 @@ fn hash_cohort(hashers: &mut [Hasher], alike: &[usize]) {
                     .flat_map(|&i| hashers[i].held_group().expect("a held group").1.chunks_exact(CHUNK_LEN))
                     .map(|c| c.try_into().unwrap())
                     .collect();
-                let counters: arrayvec::ArrayVec<u64, { TABLE / PER }> = group.iter().map(|&i| hashers[i].held_group().unwrap().0).collect();
+                let counters: arrayvec::ArrayVec<u64, TABLE> = group.iter().map(|&i| hashers[i].held_group().unwrap().0).collect();
                 // Sound: the turn detects SME2. Borrowed input stages and
                 // stack outputs are disjoint, with one counter per stage.
                 unsafe { crate::sme2::hash_groups_at(&refs, &counters, &key, flags, CHUNK_START, CHUNK_END, output[..count].as_flattened_mut()) };
@@ -266,17 +268,17 @@ fn hash_cohort(hashers: &mut [Hasher], alike: &[usize]) {
             }
         }
         for (&i, values) in group.iter().zip(output[..count].chunks_exact(PER)) {
-            hashers[i].store_held(0, values.as_flattened());
+            hashers[i].write_stage(0, values.as_flattened());
         }
     }
-    for depth in 0..4 {
-        let per = PER >> (depth + 1);
-        if depth == 3 {
+    let mut per = PER / 2;
+    while per != 0 {
+        if per == 1 {
             // The first group may be the message's root: preserve its two
             // children beyond the largest intermediate level's 512 bytes.
             for &i in alike {
                 let halves: [u8; BLOCK_LEN] = hashers[i].held_group().unwrap().1[..BLOCK_LEN].try_into().unwrap();
-                hashers[i].store_held(PER * OUT_LEN, &halves);
+                hashers[i].write_stage(PER * OUT_LEN, &halves);
             }
         }
         for group in alike.chunks(TABLE / per) {
@@ -290,9 +292,12 @@ fn hash_cohort(hashers: &mut [Hasher], alike: &[usize]) {
                 platform.hash_many(&refs, &key, 0, IncrementCounter::No, flags | PARENT, 0, 0, output[..count].as_flattened_mut());
             }
             for (&i, values) in group.iter().zip(output[..count].chunks_exact(per)) {
-                hashers[i].store_held(0, values.as_flattened());
+                hashers[i].write_stage(0, values.as_flattened());
             }
         }
+        let before = per;
+        per /= 2;
+        assert!(per < before, "a parent level shrinks");
     }
     drop(turn);
     for &i in alike {
@@ -935,6 +940,9 @@ mod test {
         let same = passes(&[Mode::Keyed(&a); 3]);
         assert_eq!(same, passes(&[Mode::Keyed(&a), Mode::Keyed(&b), Mode::Keyed(&c)]), "equal keys take the passes distinct keys take");
         assert_eq!(same, 3);
+        let derived = passes(&[Mode::DeriveKey("shared context"); 3]);
+        assert_eq!(derived, passes(&[Mode::DeriveKey("context a"), Mode::DeriveKey("context b"), Mode::DeriveKey("context c")]));
+        assert_eq!(derived, 3, "derived-key equality stays private");
         // The ready table bounds plain cohorts. Keyed cohorts iterate
         // one hasher at a time, independent of key equality.
         assert_eq!(passes(&[Mode::Keyed(&a); 600]), 600, "600 keyed hashers, one pass each");

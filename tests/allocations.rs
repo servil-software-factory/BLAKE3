@@ -176,34 +176,36 @@ fn grouped_fragmentation_reuses_storage_at_table_boundaries() {
     for n in [1usize, 127, 128, 129, 257] {
         for interleaved in [false, true] {
             for pooled in [false, true] {
-                let mut hashers: Vec<_> = (0..n)
-                    .map(|i| {
-                        let mut h = Hasher::new(mode(i), None);
-                        h.update(&input[..i % 3 * 511]);
-                        h
-                    })
-                    .collect();
-                let mut pieces = Vec::new();
-                for i in 0..n {
-                    pieces.push((i, &input[..0]));
-                    pieces.extend(input[i % 3 * 511..].chunks(4093).map(|p| (i, p)));
-                }
-                if interleaved {
-                    pieces.sort_by_key(|(i, p)| (p.as_ptr() as usize - input.as_ptr() as usize, *i));
-                }
-                let which: Vec<_> = (0..n).collect();
-                let mut outputs = vec![[0; 32]; n];
-                let work = counts(|| {
-                    if pooled {
-                        throughput::update_each_multithreaded(&mut hashers, &pieces);
-                    } else {
-                        throughput::update_each(&mut hashers, &pieces);
+                for piece_len in [4093, 4096] {
+                    let mut hashers: Vec<_> = (0..n)
+                        .map(|i| {
+                            let mut h = Hasher::new(mode(i), None);
+                            h.update(&input[..i % 3 * 511]);
+                            h
+                        })
+                        .collect();
+                    let mut pieces = Vec::new();
+                    for i in 0..n {
+                        pieces.push((i, &input[..0]));
+                        pieces.extend(input[i % 3 * 511..].chunks(piece_len).map(|p| (i, p)));
                     }
-                    throughput::finalize_each(&mut hashers, &which, &mut outputs);
-                });
-                assert_eq!(work, Counts::default(), "n={n} interleaved={interleaved} pooled={pooled}");
-                for (i, output) in outputs.iter().enumerate() {
-                    assert_eq!(*output, expected[i % 3]);
+                    if interleaved {
+                        pieces.sort_by_key(|(i, p)| (p.as_ptr() as usize - input.as_ptr() as usize, *i));
+                    }
+                    let which: Vec<_> = (0..n).collect();
+                    let mut outputs = vec![[0; 32]; n];
+                    let work = counts(|| {
+                        if pooled {
+                            throughput::update_each_multithreaded(&mut hashers, &pieces);
+                        } else {
+                            throughput::update_each(&mut hashers, &pieces);
+                        }
+                        throughput::finalize_each(&mut hashers, &which, &mut outputs);
+                    });
+                    assert_eq!(work, Counts::default(), "n={n} interleaved={interleaved} pooled={pooled} piece_len={piece_len}");
+                    for (i, output) in outputs.iter().enumerate() {
+                        assert_eq!(*output, expected[i % 3]);
+                    }
                 }
             }
         }
