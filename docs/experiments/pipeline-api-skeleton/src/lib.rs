@@ -48,20 +48,24 @@ pub struct Message {
     _slot: u32,
 }
 
-/// Room for a message's next bytes: a token. Its memory never moves.
-#[must_use = "commit the room; a dropped Room goes back unused"]
+/// Room for messages' next bytes: a token over `ROOM_LEN` bytes of the
+/// pipeline's memory, which never moves. Each commit takes bytes from its
+/// front; what is left serves the next commit, of any message.
+#[must_use = "commit from the room; a dropped Room gives back what is left of it"]
 pub struct Room {
     _index: u32,
 }
 impl Room {
+    /// What is left of the room, from a 64-byte boundary.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         todo!()
     }
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         todo!()
     }
+    /// The bytes left.
     pub fn len(&self) -> usize {
-        ROOM_LEN
+        todo!()
     }
 }
 
@@ -109,8 +113,10 @@ impl<T, B> Pipeline<T, B> {
     pub async fn room(&mut self) -> Room {
         todo!()
     }
-    /// The room's first `written` bytes are `message`'s next bytes.
-    pub fn commit(&mut self, message: &mut Message, room: Room, written: usize) {
+    /// The first `written` bytes of what is left of `room` are `message`'s
+    /// next bytes; the room goes on from the next 64-byte boundary. Every
+    /// commit to a message but its last is a whole room.
+    pub fn commit(&mut self, message: &mut Message, room: &mut Room, written: usize) {
         todo!()
     }
     pub fn end(&mut self, message: Message) {
@@ -159,10 +165,10 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 ///     let mut b = pipeline.message("B", None).await;
 ///     let mut room = pipeline.room().await;
 ///     let n = read(room.bytes_mut()).await;      // the pipeline is free during this wait
-///     pipeline.commit(&mut a, room, n);
+///     pipeline.commit(&mut a, &mut room, n);
 ///     let mut room = pipeline.room().await;
 ///     let n = read(room.bytes_mut()).await;
-///     pipeline.commit(&mut b, room, n);
+///     pipeline.commit(&mut b, &mut room, n);
 ///     pipeline.end(a);
 ///     pipeline.end(b);
 ///     pipeline.ready().await;
@@ -186,7 +192,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 ///     let mut m = pipeline.message(7, None).await;
 ///     let mut room = pipeline.room().await;
 ///     let n = read(room.bytes_mut()).await;
-///     pipeline.commit(&mut m, room, n);
+///     pipeline.commit(&mut m, &mut room, n);
 ///     pipeline.end(m);
 ///     let whole = pipeline.message(8, None).await;
 ///     pipeline.owned(whole, vec![1, 2, 3]);
@@ -199,9 +205,9 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// use pipeline_api_skeleton::*;
 /// async fn f(pipeline: &mut Pipeline<u64>) {
 ///     let mut m = pipeline.message(1, None).await;
-///     let room = pipeline.room().await;
+///     let mut room = pipeline.room().await;
 ///     pipeline.end(m);
-///     pipeline.commit(&mut m, room, 1);
+///     pipeline.commit(&mut m, &mut room, 1);
 /// }
 /// ```
 ///
@@ -260,7 +266,25 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// async fn f(pipeline: &mut Pipeline<u64>, a: &mut Message, b: &mut Message) {
 ///     let mut room = pipeline.room().await;
 ///     let (n, for_a) = read(room.bytes_mut()).await;
-///     pipeline.commit(if for_a { a } else { b }, room, n);
+///     pipeline.commit(if for_a { a } else { b }, &mut room, n);
+/// }
+/// ```
+///
+/// Many short messages share a room: one `room` call serves them all,
+/// each from the next 64-byte boundary:
+/// ```
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<usize>, messages: &[&[u8]]) {
+///     let mut room = pipeline.room().await;
+///     for (tag, bytes) in messages.iter().enumerate() {
+///         if room.len() < bytes.len() {
+///             room = pipeline.room().await; // the old room's rest goes back
+///         }
+///         let mut m = pipeline.message(tag, None).await;
+///         room.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+///         pipeline.commit(&mut m, &mut room, bytes.len());
+///         pipeline.end(m);
+///     }
 /// }
 /// ```
 ///
