@@ -11,7 +11,20 @@ pub enum Mode<'a> {
     Keyed(&'a [u8; 32]),
     DeriveKey(&'a str),
 }
-pub struct Batch;
+/// The crate's `Batch<'a>`: owned (`'static`) or over borrowed blocks.
+pub struct Batch<'a> {
+    _blocks: PhantomData<&'a [u8]>,
+}
+impl Batch<'static> {
+    pub fn new(message_len: usize, count: usize) -> Self {
+        todo!()
+    }
+}
+impl<'a> Batch<'a> {
+    pub fn from_blocks(blocks: &'a [u8], message_len: usize) -> Self {
+        todo!()
+    }
+}
 
 /// The pipeline's fixed memory.
 pub struct Limits {
@@ -66,7 +79,7 @@ impl Drop for Lent<'_> {
 pub enum Event<T, B = ()> {
     Hashed { tag: T, hash: Hash, owner: Option<B> },
     Aborted { tag: T, owner: Option<B> },
-    Batch { tag: T, batch: Batch, digests: Box<[[u8; 32]]> },
+    Batch { tag: T, batch: Batch<'static>, digests: Box<[[u8; 32]]> },
 }
 
 impl<T> Pipeline<T, ()> {
@@ -91,11 +104,12 @@ impl<T, B> Pipeline<T, B> {
     pub async fn message(&mut self, tag: T, length_hint: Option<u64>) -> Message {
         todo!()
     }
-    /// Wait for a room for `message`'s next bytes.
-    pub async fn room(&mut self, message: &mut Message) -> Room {
+    /// Wait for a room: memory for some message's next bytes. A room
+    /// belongs to no message until it is committed to one.
+    pub async fn room(&mut self) -> Room {
         todo!()
     }
-    /// The room's first `written` bytes are the message's next bytes.
+    /// The room's first `written` bytes are `message`'s next bytes.
     pub fn commit(&mut self, message: &mut Message, room: Room, written: usize) {
         todo!()
     }
@@ -114,7 +128,7 @@ impl<T, B> Pipeline<T, B> {
         todo!()
     }
     /// The message is a batch; it and its digests come back in its event.
-    pub fn batch(&mut self, message: Message, batch: Batch, digests: Box<[[u8; 32]]>) {
+    pub fn batch(&mut self, message: Message, batch: Batch<'static>, digests: Box<[[u8; 32]]>) {
         todo!()
     }
     /// The next finished message, if any.
@@ -143,10 +157,10 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// async fn two_uploads(pipeline: &mut Pipeline<&'static str>) {
 ///     let mut a = pipeline.message("A", None).await;
 ///     let mut b = pipeline.message("B", None).await;
-///     let mut room = pipeline.room(&mut a).await;
+///     let mut room = pipeline.room().await;
 ///     let n = read(room.bytes_mut()).await;      // the pipeline is free during this wait
 ///     pipeline.commit(&mut a, room, n);
-///     let mut room = pipeline.room(&mut b).await;
+///     let mut room = pipeline.room().await;
 ///     let n = read(room.bytes_mut()).await;
 ///     pipeline.commit(&mut b, room, n);
 ///     pipeline.end(a);
@@ -170,7 +184,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// spawnable(async {
 ///     let mut pipeline = Pipeline::<u64, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 4 });
 ///     let mut m = pipeline.message(7, None).await;
-///     let mut room = pipeline.room(&mut m).await;
+///     let mut room = pipeline.room().await;
 ///     let n = read(room.bytes_mut()).await;
 ///     pipeline.commit(&mut m, room, n);
 ///     pipeline.end(m);
@@ -185,8 +199,9 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// use pipeline_api_skeleton::*;
 /// async fn f(pipeline: &mut Pipeline<u64>) {
 ///     let mut m = pipeline.message(1, None).await;
+///     let room = pipeline.room().await;
 ///     pipeline.end(m);
-///     let _ = pipeline.room(&mut m).await;
+///     pipeline.commit(&mut m, room, 1);
 /// }
 /// ```
 ///
@@ -236,6 +251,47 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// }
 /// ```
 ///
+/// A room is taken before the program knows whose bytes it will hold (a
+/// multiplexed connection: read, then learn the message), and committed
+/// to that message:
+/// ```
+/// use pipeline_api_skeleton::*;
+/// async fn read(_into: &mut [u8]) -> (usize, bool) { (0, true) }
+/// async fn f(pipeline: &mut Pipeline<u64>, a: &mut Message, b: &mut Message) {
+///     let mut room = pipeline.room().await;
+///     let (n, for_a) = read(room.bytes_mut()).await;
+///     pipeline.commit(if for_a { a } else { b }, room, n);
+/// }
+/// ```
+///
+/// A batch the pipeline may keep is handed over and comes back, with its
+/// digests' storage, in its event:
+/// ```
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) -> Option<(Batch<'static>, Box<[[u8; 32]]>)> {
+///     let batch = Batch::new(64, 1024);
+///     let digests = vec![[0u8; 32]; 1024].into_boxed_slice();
+///     let m = pipeline.message(1, None).await;
+///     pipeline.batch(m, batch, digests);
+///     pipeline.ready().await;
+///     match pipeline.next_event() {
+///         Some(Event::Batch { batch, digests, .. }) => Some((batch, digests)),
+///         _ => None,
+///     }
+/// }
+/// ```
+///
+/// A batch over borrowed blocks is refused: the pipeline would read them
+/// after the loan:
+/// ```compile_fail
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>, blocks: &[u8]) {
+///     let batch = Batch::from_blocks(blocks, 64);
+///     let m = pipeline.message(1, None).await;
+///     pipeline.batch(m, batch, Box::new([]));
+/// }
+/// ```
+///
 /// One driver at a time: two waits on one pipeline at once are refused:
 /// ```compile_fail
 /// use pipeline_api_skeleton::*;
@@ -243,6 +299,19 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 ///     let slot = pipeline.message(1, None);
 ///     let event = pipeline.ready();
 ///     let _ = (slot.await, event.await);
+/// }
+/// ```
+///
+/// What the compiler cannot refuse, and the pipeline stops at run time
+/// (the page's "Contract checks"): a wait that only its caller could end.
+/// With one message slot, this compiles, and `message` stops the program:
+/// ```
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) {
+///     let a = pipeline.message(1, None).await;
+///     let b = pipeline.message(2, None).await; // every slot is an open message of this caller's
+///     pipeline.end(a);
+///     pipeline.end(b);
 /// }
 /// ```
 pub mod claims {}

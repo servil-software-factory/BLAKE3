@@ -5,7 +5,8 @@ worked it out in conversation; this page is what they arrived at. It is to
 replace both `throughput::stream` and `throughput::pipeline` before 0.9.
 Its signatures compile, with every body empty, in
 `docs/experiments/pipeline-api-skeleton`, whose examples are the claims
-below as the compiler checks them (`cargo test --doc` there). No speed
+below as the compiler checks them (`cargo test --doc` there): six that
+compile and six it refuses. No speed
 claim on this page is measured.
 
 ## What it is for
@@ -59,7 +60,7 @@ impl<T, B: AsRef<[u8]>> Pipeline<T, B> {
 impl<T, B> Pipeline<T, B> {
     pub async fn message(&mut self, tag: T, length_hint: Option<u64>) -> Message;
 
-    pub async fn room(&mut self, message: &mut Message) -> Room;
+    pub async fn room(&mut self) -> Room;
     pub fn commit(&mut self, message: &mut Message, room: Room, written: usize);
     pub fn end(&mut self, message: Message);
     pub fn abort(&mut self, message: Message);
@@ -96,9 +97,12 @@ What was handed over comes back in it: the owner, the batch and its
 digests' storage.
 
 **Rooms.** A room is `ROOM_LEN` bytes of the pipeline's memory, at an
-address that never changes. `commit(message, room, written)` makes its
-first `written` bytes the message's next bytes. A message may have
-several rooms out at once; commits append in the order they are made.
+address that never changes. It belongs to no message until it is
+committed: `commit(message, room, written)` makes its first `written`
+bytes that message's next bytes. So a program may take a room before it
+knows whose bytes it will hold (a multiplexed connection: read, then
+learn the message), and may have several rooms out at once; commits
+append to a message in the order they are made.
 
 **In place, owned.** The pipeline keeps `owner` where it puts it and reads
 `owner.as_ref()` there, so any type that gives its bytes works: a `Vec`,
@@ -156,12 +160,23 @@ write into freed memory.
 
 ## Contract checks
 
-Each stops the program, in every build, with a plain message; each is a
-compare on memory the call already reads.
+What the compiler cannot refuse. Each stops the program, in every build,
+with a plain message; each is a compare on counts and records the call
+already reads.
 
 - a `Message` or `Room` used with a pipeline that did not make it;
 - `commit` with `written > room.len()`;
-- `message` when it would wait on events only the program can pull.
+- bytes given two ways: `owned`, `lent` or `batch` on a message that has
+  committed bytes;
+- **a wait that only its caller could end**:
+  - `message` when every slot is an open message of the caller's, or
+    `limits.messages` events wait to be pulled;
+  - `room` when every room is out, uncommitted, in the caller's hands.
+
+  Each is checked when the wait begins and each time it is woken: a slot
+  or a room that a worker will free is waited for; one that only the
+  waiting caller could free never comes. (With `limits.messages = 1`:
+  open A, then wait for B before ending A.)
 
 ## io_uring
 
