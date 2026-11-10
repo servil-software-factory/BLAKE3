@@ -52,6 +52,7 @@ impl CvStack {
         self.len += 1;
     }
 
+    #[cfg(any(feature = "std", test))]
     pub fn clear(&mut self) {
         self.len = 0;
     }

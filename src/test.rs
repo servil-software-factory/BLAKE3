@@ -803,21 +803,21 @@ fn test_xof_seek() {
 fn test_reset() {
     let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
     hasher.update(&[42; 3 * CHUNK_LEN + 7]);
-    hasher.reset(None);
+    hasher.reset();
     hasher.update(&[42; CHUNK_LEN + 3]);
     assert_eq!(hasher.finalize(), crate::convenience::hash(&[42; CHUNK_LEN + 3]));
 
     let key = &[99; crate::KEY_LEN];
     let mut keyed_hasher = crate::Hasher::new(crate::Mode::Keyed(key), None);
     keyed_hasher.update(&[42; 3 * CHUNK_LEN + 7]);
-    keyed_hasher.reset(None);
+    keyed_hasher.reset();
     keyed_hasher.update(&[42; CHUNK_LEN + 3]);
     assert_eq!(keyed_hasher.finalize(), crate::convenience::hash_with(crate::Mode::Keyed(key), &[42; CHUNK_LEN + 3]),);
 
     let context = "BLAKE3 2020-02-12 10:20:58 reset test";
     let mut kdf = crate::Hasher::new(crate::Mode::DeriveKey(context), None);
     kdf.update(&[42; 3 * CHUNK_LEN + 7]);
-    kdf.reset(None);
+    kdf.reset();
     kdf.update(&[42; CHUNK_LEN + 3]);
     let expected = *crate::convenience::hash_with(crate::Mode::DeriveKey(context), &[42; CHUNK_LEN + 3]).as_bytes();
     assert_eq!(kdf.finalize(), expected);
@@ -827,7 +827,7 @@ fn test_reset() {
     let long = std::vec![42u8; 5 * crate::STAGE_LEN + 7];
     let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
     hasher.update(&long);
-    hasher.reset(None);
+    hasher.reset();
     hasher.update(&long[..CHUNK_LEN + 3]);
     assert_eq!(hasher.finalize(), crate::convenience::hash(&[42; CHUNK_LEN + 3]));
 }

@@ -167,7 +167,6 @@ mod tests {
         let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Plain, None);
         for i in 0..input.len() {
             hasher.update(&[input[i]]);
-            assert_eq!(i as u64 + 1, hasher.count());
         }
         hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_hash, &out[..]);
@@ -177,7 +176,6 @@ mod tests {
         let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Keyed(key), None);
         for i in 0..input.len() {
             hasher.update(&[input[i]]);
-            assert_eq!(i as u64 + 1, hasher.count());
         }
         hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_keyed_hash, &out[..]);
@@ -187,7 +185,6 @@ mod tests {
         let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::DeriveKey(TEST_CONTEXT), None);
         for i in 0..input.len() {
             hasher.update(&[input[i]]);
-            assert_eq!(i as u64 + 1, hasher.count());
         }
         hasher.clone().finalize_xof().fill(&mut out);
         assert_eq!(expected_derive_key, &out[..]);

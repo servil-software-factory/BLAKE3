@@ -138,7 +138,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
                 };
                 if hashed {
                     for &i in which {
-                        hashers[i].reset(None);
+                        hashers[i].reset();
                     }
                     continue;
                 }
@@ -175,7 +175,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
                 if !whole_in_stage(&hashers[i]) {
                     *out = *hashers[i].take_output().root_hash().as_bytes();
                 }
-                hashers[i].reset(None);
+                hashers[i].reset();
             }
             return;
         }
@@ -188,7 +188,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
 fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     for (&i, out) in which.iter().zip(out) {
         *out = *hashers[i].take_output().root_hash().as_bytes();
-        hashers[i].reset(None);
+        hashers[i].reset();
     }
 }
 

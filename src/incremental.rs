@@ -278,16 +278,12 @@ impl Hasher {
         Self::from_core(HasherCore::new_internal(&key, flags))
     }
 
-    /// Reset the `Hasher` to its initial state, for a new message with its
-    /// own `length_hint` (as [`new`](Hasher::new) takes it).
-    ///
-    /// This is functionally the same as overwriting the `Hasher` with a new
-    /// one, using the same key or context string if any.
-    pub fn reset(&mut self, length_hint: Option<u64>) -> &mut Self {
-        let _ = length_hint;
+    /// The `Hasher` back in its initial state, its mode kept: what
+    /// `finalize_each` leaves the hashers it finishes in.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn reset(&mut self) {
         self.core.reset();
         self.staged = 0;
-        self
     }
 
     /// Add the message's next piece, of any length, on the calling thread.
@@ -336,7 +332,7 @@ impl Hasher {
     }
 
     /// The number of bytes passed to [`update`](Hasher::update) so far.
-    pub fn count(&self) -> u64 {
+    pub(crate) fn count(&self) -> u64 {
         self.core.count() + self.staged as u64
     }
 
@@ -395,6 +391,7 @@ impl HasherCore {
     }
 
     /// Back to the empty message, with the same key, flags, and platform.
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn reset(&mut self) -> &mut Self {
         self.chunk_state = ChunkState::new(&self.key, 0, self.chunk_state.flags, self.chunk_state.platform);
         self.cv_stack.clear();
@@ -614,7 +611,8 @@ mod test {
                         fresh.update(piece);
                     }
                     assert_eq!(fresh.finalize(), want, "{len} bytes, hint {hint:?}");
-                    reused.reset(hint).update(message);
+                    reused.reset();
+                    reused.update(message);
                     assert_eq!(reused.clone().finalize(), want, "{len} bytes, hint {hint:?}, after reset");
                 }
             }
