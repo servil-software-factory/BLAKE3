@@ -5,7 +5,7 @@ worked it out in conversation; this page is what they arrived at. It is to
 replace both `throughput::stream` and `throughput::pipeline` before 0.9.
 Its signatures compile, with every body empty, in
 `docs/experiments/pipeline-api-skeleton`, whose examples are the claims
-below as the compiler checks them (`cargo test --doc` there): six that
+below as the compiler checks them (`cargo test --doc` there): seven that
 compile and six it refuses. No speed
 claim on this page is measured.
 
@@ -41,7 +41,7 @@ pub const ROOM_LEN: usize = 16 * 1024;
 
 pub struct Pipeline<T, B = ()>;        // T: the program's tag. B: the owner of a message hashed in place.
 pub struct Message;                  // an open message
-pub struct Room;                     // room for a message's next bytes
+pub struct Room;                     // room for messages' next bytes
 pub struct Lent<'a>;                 // the loan of a lent message
 
 pub enum Event<T, B = ()> {
@@ -61,7 +61,7 @@ impl<T, B> Pipeline<T, B> {
     pub async fn message(&mut self, tag: T, length_hint: Option<u64>) -> Message;
 
     pub async fn room(&mut self) -> Room;
-    pub fn commit(&mut self, message: &mut Message, room: Room, written: usize);
+    pub fn commit(&mut self, message: &mut Message, room: &mut Room, written: usize);
     pub fn end(&mut self, message: Message);
     pub fn abort(&mut self, message: Message);
 
@@ -87,7 +87,7 @@ message. The program then gives it bytes in exactly one of four ways.
 
 | The bytes | Calls | Copies | Checked by |
 |---|---|---|---|
-| arrive over time (a socket, a file, a generator) | `room`, write, `commit`, repeated; then `end` | the one that brings them into the process; none when produced in the room | the compiler |
+| arrive over time (a socket, a file, a generator), or are short and many | `room`, write, `commit`, repeated; then `end` | the one that brings them into the process; none when produced in the room | the compiler |
 | are in memory, owned by a value the program can hand over | `owned(message, owner)` | none | the compiler |
 | are in memory, on loan | `unsafe lent(message, bytes)` | none | the compiler, given one promise |
 | are a batch of equal-length messages | `batch(message, batch, digests)` | none | the compiler |
@@ -97,12 +97,23 @@ What was handed over comes back in it: the owner, the batch and its
 digests' storage.
 
 **Rooms.** A room is `ROOM_LEN` bytes of the pipeline's memory, at an
-address that never changes. It belongs to no message until it is
-committed: `commit(message, room, written)` makes its first `written`
-bytes that message's next bytes. So a program may take a room before it
-knows whose bytes it will hold (a multiplexed connection: read, then
-learn the message), and may have several rooms out at once; commits
-append to a message in the order they are made.
+address that never changes, and it belongs to no message.
+`commit(message, room, written)` makes the first `written` bytes of what
+is left of the room that message's next bytes; the room goes on from the
+next 64-byte boundary, for the next commit, of any message. So:
+
+- many short messages share a room, back to back, and one `room` call
+  serves them all (256 messages of 64 bytes to a room);
+- a program may take a room before it knows whose bytes it will hold (a
+  multiplexed connection: read, then learn the message);
+- a program may hold several rooms at once.
+
+**Every commit to a message but its last is a whole room.** A short
+message is one commit, from what is left of a room; a long one is whole
+rooms and a last part. Each part then hashes where it lies, as a whole
+subtree of the message, with nothing copied and no memory kept per
+message. A program that cannot tell whether a message fits what is left
+of a room takes a fresh room for it.
 
 **In place, owned.** The pipeline keeps `owner` where it puts it and reads
 `owner.as_ref()` there, so any type that gives its bytes works: a `Vec`,
@@ -134,10 +145,11 @@ write into freed memory.
   `limits.messages` messages open or in flight and as many finished
   events, made with the pipeline. Nothing is allocated after.
 - **Two waits.** `message` waits for a message slot; `room` waits for a
-  room. A room frees when its bytes are hashed.
+  room. A room frees when every byte committed from it is hashed and the
+  program has let it go; the room freed most recently is handed out first.
 - **Events are pulled.** `next_event()` returns the next finished message;
   `ready().await` waits until there is one. Events come in the order
-  messages finish.
+  messages were ended.
 - **Pull to make progress.** Finished events wait to be pulled, up to
   `limits.messages` of them, beside the messages still open or in flight.
   A program pulls events between opening messages. When `message` would
@@ -151,7 +163,7 @@ write into freed memory.
 - A `Message` dropped without `end`, `abort` or a hand-over is aborted:
   the pipeline notices at its next call and its `Aborted` event follows. So
   `?` and a cancelled task release what they held.
-- A `Room` dropped uncommitted goes back unused.
+- A `Room` dropped gives back what is left of it.
 - A wait that is dropped took nothing, except that `message` drops its
   tag.
 - A `Pipeline` dropped with work in flight abandons it. Its memory serves a
@@ -166,6 +178,8 @@ already reads.
 
 - a `Message` or `Room` used with a pipeline that did not make it;
 - `commit` with `written > room.len()`;
+- a commit after one that was less than a whole room: a message's parts
+  but its last are whole rooms;
 - bytes given two ways: `owned`, `lent` or `batch` on a message that has
   committed bytes;
 - **a wait that only its caller could end**:
@@ -197,8 +211,10 @@ once, so that reads land in them by io_uring's fixed-buffer path.
 
 ## Open questions
 
-1. **Events in finishing order.** A program that wants submission order
-   sorts by tag. The old stream handed digests back in order.
+1. **Whether the last commit and `end` become one call**, and whether
+   events are pulled several at a call: each saves a call a short
+   message. Left for the measurements of the build (the stream spends
+   17 ns of the producer's time a 64 B message, i7-12700K).
 2. **A count of unpulled messages** (`pending()`), so that "wait for
    everything" is a three-line loop without the program counting. Left out
    as the program can count; cheap to add.
