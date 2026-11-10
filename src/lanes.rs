@@ -995,6 +995,26 @@ pub(crate) mod sources {
     /// Streams open: workers spin a while for more work only when some are.
     static OPEN: OwnLine<AtomicUsize> = OwnLine(AtomicUsize::new(0));
 
+    /// The low bits of a ring word: its place's number.
+    const PLACE_BITS: u32 = 16;
+
+    /// The ring word of publication `p` in `place`: the place, and above it
+    /// the publication's number (its low 48 bits). The word says which
+    /// publication wrote it, so a claimer can tell its own publication's
+    /// word from a later one's by the word alone ([`ring_place`]).
+    fn ring_word(p: usize, place: usize) -> usize {
+        debug_assert!(place < 1 << PLACE_BITS);
+        p << PLACE_BITS | place
+    }
+
+    /// The place `word` names, if publication `c` wrote it. A word at index
+    /// `c % len` is `c`'s or that of a publication some multiples of `len`
+    /// away, never 2^48 away, so the low 48 bits of the number tell them
+    /// apart.
+    fn ring_place(word: usize, c: usize) -> Option<usize> {
+        (word >> PLACE_BITS == c << PLACE_BITS >> PLACE_BITS).then_some(word & ((1 << PLACE_BITS) - 1))
+    }
+
     /// A task's place in a source.
     struct Place {
         task: UnsafeCell<MaybeUninit<Task>>,
@@ -1038,12 +1058,12 @@ pub(crate) mod sources {
     // whose CAS claimed the publication in it, across the Release store
     // of `published` and the Acquire load. The GPU reads its claimed
     // places on the stream's own thread, inside `take_run`'s callback. The
-    // ring's words are atomics: a claimer reads its word before its CAS,
-    // and a CAS that succeeds read the word its publication wrote, since
-    // the publisher writes that word again only once `claimed` has passed
-    // it (`take`). So a claimer held between its claim and its copy keeps
-    // its task (BLAKE3 #302). `owner` is behind its lock; the rest is
-    // atomics.
+    // ring's words are atomics, and each names the publication that wrote
+    // it: a claimer claims publication c only with c's own word in hand
+    // (`take`), whatever order its load and the publisher's next store of
+    // that word take. So a claimer held between its claim and its copy
+    // keeps its task (BLAKE3 #302). `owner` is behind its lock; the rest
+    // is atomics.
     unsafe impl Sync for Source {}
     unsafe impl Send for Source {}
 
@@ -1068,6 +1088,7 @@ pub(crate) mod sources {
         }
 
         fn with(len: usize, ring: usize) -> Source {
+            assert!(ring <= 1 << PLACE_BITS, "a ring word holds a place's number in {PLACE_BITS} bits");
             Source {
                 #[cfg(all(test, blake3_gpu))]
                 gpu_batch_reserved: core::sync::atomic::AtomicBool::new(false),
@@ -1156,7 +1177,7 @@ pub(crate) mod sources {
                 Some(place) => {
                     // Word p % len is free: `claimed` has passed its last
                     // publication (the assertion above).
-                    self.ring[p % self.ring.len()].store(place, Ordering::Relaxed);
+                    self.ring[p % self.ring.len()].store(ring_word(p, place), Ordering::Relaxed);
                     place
                 }
                 None => p % self.places.len(),
@@ -1218,19 +1239,29 @@ pub(crate) mod sources {
                 // balance. A stream's tasks go one at a time.
                 let n = if self.places.is_empty() { Self::run_len(p - c, pool().threads) } else { 1 };
                 // A task's place: c's in order, or where its publisher
-                // named it, the ring's word, read before the claim.
-                // Publication c wrote that word before `published` passed
-                // c (the Acquire above), and its publisher writes it again,
-                // for publication c + len, only once it has seen `claimed`
-                // past c. So if the CAS below succeeds, `claimed` was c
-                // until then, no such write had begun, and this is c's
-                // place. Read after the claim, it could be a later task's.
+                // named it, the ring's word, read before the claim (after
+                // it, the word could be a later task's). Publication c
+                // wrote its word before `published` passed c (the Acquire
+                // above), and its publisher writes that word again, for
+                // publication c + len, only once it has seen `claimed`
+                // past c. The word names its publication, and only c's own
+                // is claimed with: another's means `claimed` has moved on,
+                // and the claim starts over. So the claim is right
+                // whatever order this load and the publisher's next store
+                // take: no argument from the order of a relaxed load and
+                // the CAS below is needed (Rust's atomics promise none).
                 let place = if self.places.is_empty() {
                     0
                 } else if self.ring.is_empty() {
                     c % self.places.len()
                 } else {
-                    self.ring[c % self.ring.len()].load(Ordering::Relaxed)
+                    match ring_place(self.ring[c % self.ring.len()].load(Ordering::Relaxed), c) {
+                        Some(place) => place,
+                        None => {
+                            c = self.claimed.load(Ordering::Acquire);
+                            continue;
+                        }
+                    }
                 };
                 match self.claimed.compare_exchange_weak(c, c + n, Ordering::AcqRel, Ordering::Acquire) {
                     Ok(_) if self.places.is_empty() => return Some(Item::Pieces(self.job.load(Ordering::Relaxed), c - self.base.load(Ordering::Relaxed), n)),
@@ -1627,6 +1658,27 @@ pub(crate) mod sources {
                 assert_eq!(holder.join().unwrap(), Some(100), "the held claimer copies the task it claimed");
             });
             assert!(source.take_task().is_none(), "each task was taken once");
+        }
+
+        /// A ring word names the publication that wrote it: publication
+        /// c's word gives its place to a claimer of c, and the word of a
+        /// publication a lap or more away (the same index of the ring)
+        /// gives none, so a claimer never takes another task's place for
+        /// its own (BLAKE3 #302).
+        #[test]
+        fn a_ring_word_gives_its_place_to_its_own_publication_alone() {
+            for len in [2usize, 3, 66, 1 << PLACE_BITS] {
+                for c in [0usize, 1, len - 1, len, 5 * len + 1, (1 << 40) + 7, usize::MAX - 2 * len] {
+                    for place in [0, 1, len - 1] {
+                        let word = ring_word(c, place);
+                        assert_eq!(ring_place(word, c), Some(place), "its own publication");
+                        for lap in [1, 2, 3] {
+                            assert_eq!(ring_place(word, c.wrapping_add(lap * len)), None, "a later claimer, {lap} laps on");
+                            assert_eq!(ring_place(ring_word(c.wrapping_add(lap * len), place), c), None, "a later word, {lap} laps on");
+                        }
+                    }
+                }
+            }
         }
 
         /// A publication into a place whose task is claimed and not yet
