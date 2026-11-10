@@ -45,13 +45,20 @@ impl Drop for Repo {
     }
 }
 
-/// A directory of this test's own under Cargo's scratch directory for
-/// integration tests, which is on the build's disk. The system's temporary
-/// directory is wherever TMPDIR points: in a VM whose checkout and TMPDIR
-/// sit on a mount shared with its host, each of these tests took 6 to 60
-/// seconds there (BLAKE3 #347) and milliseconds elsewhere.
+/// A directory of this test's own, in memory where the system has the
+/// standard place for it (Linux's /dev/shm), else under Cargo's scratch
+/// directory for integration tests. These tests' time is Git's work on
+/// directories and small files, which waits behind whatever else is
+/// writing to the disk: in a VM whose builds' disk was busy (a mutation
+/// run's shards, check-builds.sh), creating one directory took up to
+/// 0.9 s and `git init` up to 6 s, where each takes milliseconds on an
+/// idle disk, and a test passed its clock (BLAKE3 #347: the steps' times
+/// showed Git's, and writing 20 GiB beside them reproduced it). What the
+/// tests check is the name, whatever holds the files.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("build-version-{name}-{}", std::process::id()));
+    let memory = Path::new("/dev/shm");
+    let base = if memory.is_dir() { memory } else { Path::new(env!("CARGO_TARGET_TMPDIR")) };
+    let dir = base.join(format!("blake3-servil-build-version-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
