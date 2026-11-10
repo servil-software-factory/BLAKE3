@@ -1235,6 +1235,8 @@ mod test {
     #[cfg(blake3_gpu)]
     #[test]
     fn test_gpu_stream_against_hash_with() {
+        // The core's own tests initialize on their first call; a test here says so.
+        crate::initialize();
         let mut input = std::vec![0u8; (64 << 20) + 300];
         crate::test::paint_test_input(&mut input);
         let key = [9u8; 32];
@@ -1260,6 +1262,8 @@ mod test {
     #[cfg(blake3_gpu)]
     #[test]
     fn test_gpu_streams_of_one_message() {
+        // The core's own tests initialize on their first call; a test here says so.
+        crate::initialize();
         let mut input = std::vec![0u8; (64 << 20) + 300];
         crate::test::paint_test_input(&mut input);
         gpu_ready(Mode::Plain, &input);
@@ -1278,6 +1282,8 @@ mod test {
     #[cfg(blake3_gpu)]
     #[test]
     fn test_gpu_ring_fills_to_its_end_and_its_run_holds_every_piece() {
+        // The core's own tests initialize on their first call; a test here says so.
+        crate::initialize();
         let mut input = std::vec![0u8; (64 << 20) + 300];
         crate::test::paint_test_input(&mut input);
         gpu_ready(Mode::Plain, &input);
@@ -1314,6 +1320,8 @@ mod test {
     #[cfg(blake3_gpu)]
     #[test]
     fn test_gpu_feed_asks_only_with_a_batch_s_run() {
+        // The core's own tests initialize on their first call; a test here says so.
+        crate::initialize();
         let mut input = std::vec![0u8; (64 << 20) + 300];
         crate::test::paint_test_input(&mut input);
         gpu_ready(Mode::Plain, &input);
@@ -1331,6 +1339,8 @@ mod test {
     #[cfg(blake3_gpu)]
     #[test]
     fn test_gpu_finish_reclaims_the_gpus_tasks() {
+        // The core's own tests initialize on their first call; a test here says so.
+        crate::initialize();
         let mut input = std::vec![0u8; (64 << 20) + 300];
         crate::test::paint_test_input(&mut input);
         // Keyed: the tasks finish rebuilds for the pool carry the stream's
