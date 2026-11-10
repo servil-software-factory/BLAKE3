@@ -158,7 +158,7 @@ impl Hasher {
 
     /// The bytes gathered in the stage.
     #[cfg(feature = "std")]
-    fn staged_bytes(&self) -> &[u8] {
+    pub(crate) fn staged_bytes(&self) -> &[u8] {
         // Sound: the first `staged` bytes of the stage were written (gather).
         unsafe { core::slice::from_raw_parts(self.stage.as_ptr() as *const u8, self.staged) }
     }
@@ -172,7 +172,8 @@ impl Hasher {
     /// `update`'s gathering: an update of STAGE_LEN or more from a 16 KiB
     /// boundary of the message (or an empty stage) goes to the core whole;
     /// shorter ones gather in the stage until it reaches the next boundary
-    /// (but a fresh hasher's first chunk goes to the core),
+    /// (but a fresh hasher's first chunk goes to the core, outside a turn
+    /// on AArch64: `gather_part`),
     /// and the stage goes to the core as one update, its chunks side by
     /// side in the lanes.
     fn gather(&mut self, input: &[u8], pooled: bool) -> &mut Self {
@@ -187,9 +188,15 @@ impl Hasher {
     pub(crate) fn gather_part<'a>(&mut self, mut input: &'a [u8], pooled: bool, hold: bool) -> &'a [u8] {
         self.core.assert_room(self.count(), input.len());
         while !input.is_empty() {
-            // Whole groups, and a fresh hasher's first chunk (which hashes
-            // serially either way), skip the stage.
-            if self.staged == 0 && (input.len() >= STAGE_LEN || self.core.count() + input.len() as u64 <= CHUNK_LEN as u64) {
+            // Whole groups skip the stage, and so does a fresh hasher's
+            // first chunk, which hashes serially in the core. In a turn of
+            // many hashers on AArch64 (`hold`) the first chunk is staged
+            // too: `finalize_each` then finds the messages of up to a
+            // chunk whole in their stages and hashes them side by side
+            // (each.rs), and a longer message's first chunk joins its
+            // group of sixteen.
+            let first_chunk_to_core = !(cfg!(blake3_neon) && hold) && self.core.count() + input.len() as u64 <= CHUNK_LEN as u64;
+            if self.staged == 0 && (input.len() >= STAGE_LEN || first_chunk_to_core) {
                 self.core.update_pooled(input, pooled);
                 return &[];
             }

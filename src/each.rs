@@ -63,6 +63,9 @@ pub fn hash_each_multithreaded(mode: Mode, items: &[(&[Block], usize)], out: &mu
 /// (one turn of its event loop): never slower than one
 /// [`update`](Hasher::update) each: many messages arriving at once, such
 /// as a server's uploads, each with its own [`Hasher`]. Requires each `i < hashers.len()`.
+/// Finish the messages with [`finalize_each`]: on AArch64 a message of up
+/// to 1024 bytes waits whole in its hasher, and those that finish together
+/// hash side by side there.
 ///
 /// # Key-dependent timing
 ///
@@ -103,6 +106,9 @@ pub fn update_each_multithreaded(hashers: &mut [Hasher], pieces: &[(usize, &[u8]
 /// `hashers[which[k]].finalize()` would give, and that hasher is then
 /// reset for its next message (no length hint). Requires
 /// `out.len() == which.len()`, each index `< hashers.len()`, and distinct indices.
+/// Messages that finish in one call hash side by side where the CPU has
+/// the lanes: sixteen at once on AVX-512, and on AArch64 the plain
+/// messages of up to 1024 bytes fed by [`update_each`].
 ///
 /// # Key-dependent timing
 ///
@@ -140,6 +146,39 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
             finish_each(hashers, which, out);
         }
         return;
+    }
+    // AArch64: the messages of up to a chunk that a turn left whole in
+    // their stages (`Hasher::gather_part`) hash side by side by their
+    // blocks, as a collection's small items do (`hash_by_blocks`: the NEON
+    // lanes, or one SME2 call for a table of equal whole blocks). The
+    // plain ones only: their key is the IV, the same for all, and a keyed
+    // hasher's key is its own and secret, so it finishes alone (BLAKE3
+    // #312). Which hashers qualify is their public shape: mode and length.
+    #[cfg(blake3_neon)]
+    {
+        let whole_in_stage = |h: &Hasher| h.staged <= CHUNK_LEN && h.core.count() == 0 && h.core.initial_chunk_counter == 0 && h.core.chunk_state.flags == 0;
+        if which.iter().filter(|&&i| whole_in_stage(&hashers[i])).nth(1).is_some() {
+            let platform = Platform::detect();
+            // BY_BLOCKS_AT_ONCE of them at a time, their places on the
+            // stack: a finish allocates nothing.
+            let mut small = (0..which.len()).filter(|&k| whole_in_stage(&hashers[which[k]])).peekable();
+            while small.peek().is_some() {
+                let part: arrayvec::ArrayVec<usize, BY_BLOCKS_AT_ONCE> = small.by_ref().take(BY_BLOCKS_AT_ONCE).collect();
+                let bytes: arrayvec::ArrayVec<&[u8], BY_BLOCKS_AT_ONCE> = part.iter().map(|&k| hashers[which[k]].staged_bytes()).collect();
+                let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
+                hash_by_blocks(&bytes, crate::IV, 0, &mut digests[..part.len()], platform);
+                for (&k, digest) in part.iter().zip(&digests) {
+                    out[k] = *digest;
+                }
+            }
+            for (&i, out) in which.iter().zip(out.iter_mut()) {
+                if !whole_in_stage(&hashers[i]) {
+                    *out = *hashers[i].take_output().root_hash().as_bytes();
+                }
+                hashers[i].reset(None);
+            }
+            return;
+        }
     }
     finish_each(hashers, which, out);
 }
@@ -408,7 +447,11 @@ pub fn hash_each(mode: Mode, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LE
     hash_each_on(key, flags, items, out, Platform::detect(), |item| crate::hash_serial(item, key, flags));
 }
 
-/// The most items [`hash_by_blocks`] sorts at once: a stream task's members.
+/// The most items [`hash_by_blocks`] sorts at once: a stream task's
+/// members, or with SME2 its message kernel's table.
+#[cfg(blake3_sme2)]
+const BY_BLOCKS_AT_ONCE: usize = TABLE;
+#[cfg(not(blake3_sme2))]
 const BY_BLOCKS_AT_ONCE: usize = crate::lanes::MEMBERS;
 
 /// The digest of each of `items`, every one of up to a chunk, of any
@@ -431,6 +474,60 @@ fn hash_by_blocks(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT
 
 fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     const GROUP: usize = 16;
+    // On SME2, a table of messages of one length, whole blocks, with at
+    // least the work that pays for the SME2 turn: one call of the message
+    // kernel for all of them (a turn's 1 KiB messages finishing together:
+    // the NEON lanes took 30-64% longer on an Apple M4 Max, jobs 2016 and
+    // 2019). A table of one-block messages never reaches the threshold
+    // (BY_BLOCKS_AT_ONCE of 64 bytes is under SME2_SIZED_LEN).
+    #[cfg(blake3_sme2)]
+    {
+        let len = items[0].len();
+        if matches!(platform, Platform::SME2)
+            && items.len() * len >= crate::SME2_SIZED_LEN
+            && len % crate::BLOCK_LEN == 0
+            && items.iter().all(|item| item.len() == len)
+        {
+            let turn = crate::platform::Sme2Turn::take(platform, true);
+            if matches!(turn.platform(), Platform::SME2) {
+                macro_rules! run {
+                    ($n:expr) => {{
+                        let mut lanes: arrayvec::ArrayVec<&[u8; $n], BY_BLOCKS_AT_ONCE> =
+                            items.iter().map(|item| (*item).try_into().expect("equal whole-block lengths")).collect();
+                        while lanes.len() % GROUP != 0 {
+                            lanes.push(*lanes.last().unwrap());
+                        }
+                        crate::counted(crate::Counted::ByBlocksCall);
+                        // Sound: detection and the turn provide SME2. Every
+                        // typed lane holds its whole input; spare lanes
+                        // repeat a valid input and write no output.
+                        unsafe {
+                            crate::sme2::hash_messages(&lanes, key, flags, CHUNK_START, CHUNK_END | crate::ROOT, crate::BLOCK_LEN, out.as_flattened_mut())
+                        };
+                    }};
+                }
+                match len {
+                    128 => run!(128),
+                    192 => run!(192),
+                    256 => run!(256),
+                    320 => run!(320),
+                    384 => run!(384),
+                    448 => run!(448),
+                    512 => run!(512),
+                    576 => run!(576),
+                    640 => run!(640),
+                    704 => run!(704),
+                    768 => run!(768),
+                    832 => run!(832),
+                    896 => run!(896),
+                    960 => run!(960),
+                    1024 => run!(1024),
+                    _ => unreachable!("an SME2-sized table of whole blocks of up to a chunk"),
+                }
+                return;
+            }
+        }
+    }
     let whole = |item: &[u8]| item.len().saturating_sub(1) / crate::BLOCK_LEN;
     let mut order: arrayvec::ArrayVec<usize, BY_BLOCKS_AT_ONCE> = (0..items.len()).collect();
     order.sort_unstable_by_key(|&i| whole(items[i]));
@@ -973,6 +1070,155 @@ mod test {
                 crate::convenience::hash_with(crate::Mode::Keyed(&keys[i % 2]), &input[start(i)..start(i) + group + 7]),
                 "fresh hasher {i}, {platform:?}"
             );
+        }
+    }
+
+    /// A turn of many hashers on AArch64 keeps a fresh hasher's first
+    /// chunk in its stage, for `finalize_each` to find; elsewhere, and in
+    /// a single `update` everywhere, it goes to the core. The digest is
+    /// the same either way, so the stage's length tells.
+    #[test]
+    fn a_turn_on_aarch64_stages_a_first_chunk_and_update_never_does() {
+        crate::initialize();
+        let bytes = [7u8; 300];
+        let mut hashers = vec![Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        update_each(&mut hashers, &[(0, &bytes[..100]), (0, &bytes[100..])]);
+        hashers[1].update(&bytes);
+        let in_turn = if cfg!(blake3_neon) { (300, 0) } else { (0, 300) };
+        assert_eq!((hashers[0].staged, hashers[0].core.count()), in_turn, "a turn's first chunk");
+        assert_eq!((hashers[1].staged, hashers[1].core.count()), (0, 300), "an update's first chunk goes to the core");
+        for h in hashers {
+            assert_eq!(h.finalize(), crate::test::official::hash(Mode::Plain, &bytes));
+        }
+    }
+
+    /// Messages fed by turns and finished together match the official
+    /// implementation at every length around a block, a chunk and a
+    /// group, in every mode, in pieces short and long, and their hashers
+    /// are reset: a second finish gives the empty message's hash.
+    #[test]
+    fn messages_fed_by_turns_finish_together_and_reset() {
+        crate::initialize();
+        let key = [37; 32];
+        for n in [2, 16, 17, 64, 128, 130] {
+            for len in [0, 1, 63, 64, 65, 255, 1023, 1024, 1025, 2048, 16385] {
+                for width in [17, 256] {
+                    for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("grouped first chunk")] {
+                        let data: Vec<Vec<u8>> = (0..n).map(|i| (0..len).map(|j| (i * 37 + j * 13) as u8).collect()).collect();
+                        let mut hashers: Vec<_> = (0..n).map(|_| Hasher::new(mode, None)).collect();
+                        for start in (0..len).step_by(width) {
+                            let pieces: Vec<_> = data.iter().enumerate().map(|(i, d)| (i, &d[start..(start + width).min(len)])).collect();
+                            update_each(&mut hashers, &pieces);
+                        }
+                        assert!(hashers.iter().all(|h| h.count() == len as u64));
+                        let which: Vec<_> = (0..n).rev().collect();
+                        let mut out = vec![[0; 32]; n];
+                        finalize_each(&mut hashers, &which, &mut out);
+                        for (&i, got) in which.iter().zip(&out) {
+                            assert_eq!(*got, crate::test::official::hash(mode, &data[i]), "n={n}, len={len}, width={width}");
+                        }
+                        assert!(hashers.iter().all(|h| h.count() == 0));
+                        finalize_each(&mut hashers, &which, &mut out);
+                        assert!(out.iter().all(|got| *got == crate::test::official::hash(mode, &[])));
+                    }
+                }
+            }
+        }
+    }
+
+    /// AArch64: of the hashers one finish names, the plain messages of up
+    /// to a chunk still whole in their stages go by their blocks together,
+    /// whatever stands between them: a keyed message, a longer one, one
+    /// that a single `update` sent to the core. Each of those finishes
+    /// alone, every digest lands in its own place, and every hasher is
+    /// reset. One such message alone takes no block-group call.
+    #[cfg(blake3_neon)]
+    #[test]
+    fn a_finish_takes_the_staged_first_chunks_from_among_the_others() {
+        crate::initialize();
+        let key = [91u8; 32];
+        // The first and third messages (plain, in every count below) hold
+        // whole blocks before their last, so they take a group call on a
+        // CPU without SHA-3 too, whose shortest messages take none.
+        let lens = [511usize, 1, 1024, 64, 65, 0, 63];
+        for n in [3usize, 17, 128, 200] {
+            let data: Vec<Vec<u8>> =
+                (0..n).map(|i| (0..if i % 5 == 3 { 3000 } else { lens[i % lens.len()] }).map(|j| (i * 37 + j * 13) as u8).collect()).collect();
+            let mode = |i: usize| if i % 5 == 1 { Mode::Keyed(&key) } else { Mode::Plain };
+            let mut hashers: Vec<_> = (0..n).map(|i| Hasher::new(mode(i), None)).collect();
+            for (i, d) in data.iter().enumerate() {
+                if i % 5 == 4 {
+                    hashers[i].update(d);
+                }
+            }
+            for from in (0..3000).step_by(17) {
+                let pieces: Vec<_> =
+                    data.iter().enumerate().filter(|(i, _)| i % 5 != 4).map(|(i, d)| (i, &d[from.min(d.len())..(from + 17).min(d.len())])).collect();
+                update_each(&mut hashers, &pieces);
+            }
+            let which: Vec<_> = (0..n).rev().collect();
+            let mut out = vec![[0; 32]; n];
+            crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].set(0));
+            finalize_each(&mut hashers, &which, &mut out);
+            for (&i, got) in which.iter().zip(&out) {
+                assert_eq!(*got, crate::test::official::hash(mode(i), &data[i]), "n={n}, message {i}");
+            }
+            assert!(crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].get()) > 0, "the staged first chunks went by their blocks");
+            assert!(hashers.iter().all(|h| h.count() == 0));
+        }
+        // One staged first chunk beside a long message: nothing to group.
+        let mut hashers = vec![Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        let long = [5u8; 3000];
+        update_each(&mut hashers, &[(0, &long[..700]), (1, &long)]);
+        let mut out = [[0; 32]; 2];
+        crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].set(0));
+        finalize_each(&mut hashers, &[0, 1], &mut out);
+        assert_eq!(out, [crate::test::official::hash(Mode::Plain, &long[..700]), crate::test::official::hash(Mode::Plain, &long)]);
+        assert_eq!(crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].get()), 0, "one message of up to a chunk finishes alone");
+    }
+
+    /// On SME2, a table of messages of one length, whole blocks, with
+    /// SME2_SIZED_LEN of work or more, takes the message kernel in one
+    /// call; a shorter table, or one with a message of another length,
+    /// keeps the NEON lanes. The digests match the official implementation
+    /// in every mode.
+    #[cfg(blake3_sme2)]
+    #[test]
+    fn a_sized_table_of_whole_block_messages_takes_the_sme2_message_kernel() {
+        if !crate::platform::sme2_detected() {
+            return;
+        }
+        crate::initialize();
+        let secret = [0x9du8; crate::KEY_LEN];
+        let entry = crate::sme2::ffi::blake3_servil_sme2_hash16_messages_512 as *const () as usize;
+        let ran = || crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry));
+        for mode in [Mode::Plain, Mode::Keyed(&secret), Mode::DeriveKey("a table of whole blocks")] {
+            let mut room = core::mem::MaybeUninit::uninit();
+            let (key, flags) = mode.key(&mut room);
+            // Every whole-block length of up to a chunk: each has its own
+            // typed call of the kernel.
+            for len in (64usize..=1024).step_by(64) {
+                for count in [1usize, 15, 16, 17, 31, 32, 63, 64, 127, 128] {
+                    let data: Vec<Vec<u8>> = (0..count).map(|i| (0..len).map(|j| (i * 37 + j * 11) as u8).collect()).collect();
+                    let items: Vec<&[u8]> = data.iter().map(|d| &d[..]).collect();
+                    let expected: Vec<_> = items.iter().map(|i| crate::test::official::hash(mode, i)).collect();
+                    let mut out = vec![[0u8; OUT_LEN]; count];
+                    crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                    hash_by_blocks(&items, key, flags, &mut out, Platform::SME2);
+                    assert_eq!(out, expected, "{count} x {len}");
+                    assert_eq!(ran(), count * len >= crate::SME2_SIZED_LEN, "the message kernel at {count} x {len}");
+                }
+            }
+            // One message a byte short: the table is no longer of one length.
+            let mut data: Vec<Vec<u8>> = (0..128).map(|i| (0..1024).map(|j| (i * 37 + j * 11) as u8).collect()).collect();
+            data[1].pop();
+            let items: Vec<&[u8]> = data.iter().map(|d| &d[..]).collect();
+            let expected: Vec<_> = items.iter().map(|i| crate::test::official::hash(mode, i)).collect();
+            let mut out = vec![[0u8; OUT_LEN]; 128];
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            hash_by_blocks(&items, key, flags, &mut out, Platform::SME2);
+            assert_eq!(out, expected);
+            assert!(!ran(), "the message kernel takes messages of one length");
         }
     }
 

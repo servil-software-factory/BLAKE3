@@ -478,6 +478,49 @@ fn a_pipeline_message_cycle_allocates_nothing_after_the_first() {
     assert_eq!(work, Counts::default(), "twelve message cycles after the first two");
 }
 
+/// Messages of up to a chunk, fed in short pieces by turns and finished
+/// together (on AArch64 from their stages, side by side: the plain ones):
+/// three cycles of each count, length and mode allocate nothing, the
+/// first cycle after setup included. Caller preparation stays outside.
+#[test]
+fn short_messages_fed_by_turns_and_finished_together_allocate_nothing() {
+    blake3_servil::initialize();
+    let key = [29u8; 32];
+    for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("short messages by turns")] {
+        for n in [2usize, 16, 100, 128, 300] {
+            for len in [1usize, 64, 256, 1000, 1024] {
+                let data: Vec<Vec<u8>> = (0..n).map(|i| (0..len).map(|j| (i * 31 + j * 17) as u8).collect()).collect();
+                let expected: Vec<[u8; 32]> = data
+                    .iter()
+                    .map(|d| match mode {
+                        Mode::Plain => *blake3::hash(d).as_bytes(),
+                        Mode::Keyed(k) => *blake3::keyed_hash(k, d).as_bytes(),
+                        Mode::DeriveKey(c) => blake3::derive_key(c, d),
+                        _ => unreachable!("the test's three modes"),
+                    })
+                    .collect();
+                let mut hashers: Vec<_> = (0..n).map(|_| Hasher::new(mode, None)).collect();
+                let which: Vec<usize> = (0..n).collect();
+                let mut pieces: Vec<(usize, &[u8])> = Vec::with_capacity(n);
+                let mut out = vec![[0u8; 32]; n];
+                let work = counts(|| {
+                    for _ in 0..3 {
+                        for from in (0..len).step_by(256) {
+                            pieces.clear();
+                            pieces.extend(data.iter().enumerate().map(|(i, d)| (i, &d[from..(from + 256).min(len)])));
+                            throughput::update_each(&mut hashers, &pieces);
+                        }
+                        throughput::finalize_each(&mut hashers, &which, &mut out);
+                        std::hint::black_box(&out);
+                    }
+                });
+                assert_eq!(work, Counts::default(), "{n} messages of {len} B");
+                assert_eq!(out, expected, "{n} messages of {len} B");
+            }
+        }
+    }
+}
+
 /// The pool of `threads`, started and at rest: the first worker starts
 /// the others after `initialize_multithreaded` returns (their thread
 /// names are allocations on `blake3-` threads), so a measured window
