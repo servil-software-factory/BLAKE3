@@ -4,10 +4,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for cfg_name in ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "blake3_gpu", "shuttle"] {
         println!("cargo::rustc-check-cfg=cfg({cfg_name}, values(none()))");
     }
-    // TRIAL: the moved files and the shared test helpers still say
-    // `feature = "std"`; here it is always so.
-    println!("cargo::rustc-check-cfg=cfg(feature, values(\"std\", \"zeroize\", \"serde\"))");
-    println!("cargo::rustc-cfg=feature=\"std\"");
     let var = |name: &str| env::var(name).unwrap_or_default();
     let (arch, os) = (var("CARGO_CFG_TARGET_ARCH"), var("CARGO_CFG_TARGET_OS"));
     // The core's build conditions, where this crate's code reads them.

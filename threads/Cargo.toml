@@ -8,6 +8,12 @@ license = "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
 edition = "2024"
 include = ["/src", "/build.rs", "/blake3_gpu.*", "/LICENSE_*"]
 
+# TRIAL: 0.8's dependents name the `std` feature (the bench does); here it is
+# always needed, and the moved files still say `feature = "std"`.
+[features]
+default = ["std"]
+std = []
+
 [dependencies]
 # The one-thread library: the kernels and their proofs, the Hasher, the
 # direct and grouped calls. This crate re-exports it whole.
