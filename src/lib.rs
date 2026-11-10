@@ -84,7 +84,6 @@
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::update_each`] |
 //! | A stream of messages read, made, or arriving | [`throughput::stream`] |
-//! | Messages arriving in pieces, under a memory budget | [`throughput::pipeline`] (evolving) |
 //!
 //! Each call returns once its hash is done, and uses other CPU cores
 //! where that is faster (the forms without `multithreaded` stay on the
@@ -294,8 +293,6 @@ mod finish_sync {
     pub use std::sync::atomic::{AtomicUsize, Ordering};
     pub use std::thread;
 }
-#[cfg(feature = "std")]
-mod admission;
 #[cfg(feature = "std")]
 mod finish;
 /// The primitives src/park.rs runs on: the standard library's here, and

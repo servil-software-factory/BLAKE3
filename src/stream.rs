@@ -101,10 +101,7 @@ const ENTRIES: usize = 1024;
 /// `finish` cannot return while X's entry is out. So while X is uncopied
 /// the GPU gives back at most the HELD pieces its commands then hold. A
 /// change that feeds the GPU or reclaims anywhere else, or that hands
-/// entries back out of order, changes this bound (the pipeline's receiver
-/// hands buffers back out of order, and no count bounds its lap: its
-/// tasks are actions, whole in the ring's atomic words, read before the
-/// claim: `Source::publish_part`).
+/// entries back out of order, changes this bound.
 const TASK_SLOTS: usize = task_slots();
 
 /// TASK_SLOTS' count (a function, so that a mutation test names its rule).
@@ -1103,12 +1100,6 @@ impl<D> Drop for Stream<'_, D> {
         FREE.lock().unwrap().push(FreeStorage(s));
     }
 }
-
-pub(crate) mod frontend;
-#[cfg(test)]
-#[path = "stream_prototype.rs"]
-mod prototype;
-pub(crate) mod receiver;
 
 #[cfg(test)]
 mod test {

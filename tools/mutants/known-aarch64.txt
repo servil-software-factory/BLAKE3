@@ -2,7 +2,7 @@
 # SME2 and the SHA-3 extension), each with its reason; tools/mutants/check.py
 # fails on any other survivor and on any listed one now caught.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/finish.rs src/hasher.rs src/incremental.rs src/io.rs src/lanes.rs src/lib.rs src/many.rs src/park.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stream.rs src/stream/frontend.rs
+files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/finish.rs src/hasher.rs src/incremental.rs src/io.rs src/lanes.rs src/lib.rs src/many.rs src/park.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stream.rs
 model files: src/finish.rs src/park.rs
 src/each.rs	delete ! in independent_lanes	1	x86-64 only: independent_lanes is compiled for x86-64 Linux alone (its cfg), so here the mutant builds the code the unmutated source builds; the x86-64 machines catch it (BLAKE3 #344)
 src/each.rs	replace && with || in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
@@ -92,7 +92,6 @@ src/lanes.rs	replace < with > in sources::keeps_polling	1	OPEN: the pool's sched
 src/lanes.rs	replace << with >> in sources::Source::unregister	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace == with != in Task::run_equal_members	1	speed: chooses between equally correct paths (a member length's own kernel, or the general one)
 src/lanes.rs	replace == with != in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace == with != in sources::Source::publish_part	1	[cpu has sme2] speed: a part published while every worker is parked wakes none of them; the SME2 thread, woken on the lines above, and the producer's own help hash it
 src/lanes.rs	replace > with < in initialize	1	speed: whether the pool starts its SME2 thread (without it the NEON workers do its share; the same results)
 src/lanes.rs	replace > with < in sme2_serve	1	speed: whether the SME2 thread runs a gathered task on NEON or in an SME2 session (equally correct)
 src/lanes.rs	replace > with < in sources::Source::take_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

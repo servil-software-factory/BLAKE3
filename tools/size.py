@@ -40,7 +40,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEST_FILES = re.compile(r"src/(test|stream_prototype|.*_tests)\.rs$")
+TEST_FILES = re.compile(r"src/(test|.*_tests)\.rs$")
 
 
 def git(*args):
