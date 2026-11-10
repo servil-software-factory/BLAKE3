@@ -52,3 +52,4 @@ src/stream.rs	replace Stream<'env, D>::feed -> bool with true	1	a hang the test 
 src/stream.rs	replace Stream<'env, D>::hand_over with ()	1	a loop variant broken: no task reaches the workers or the caller, so no entry finishes and the stream waits forever; the clock stops every stream test
 src/stream.rs	replace Stream<'env, D>::help with ()	1	a loop variant broken: help neither hands back nor hashes, so finish, which loops on it, never returns; the clock stops every stream test
 src/stream/frontend.rs	replace == with != in Stream<T, F>::admit	1	a loop variant broken: with nothing to collect the wait polls again without helping, so in a pool of one thread it never hashes what it waits for; the clock stops stream::frontend::tests::with_no_worker_each_wait_ends_in_one_poll
+src/stream/receiver.rs	delete ! in Core::forget	1	an abort no longer ends an unfinished message: its completion waits for an end that never comes (messages_batches_and_an_abort_reach_the_handler)

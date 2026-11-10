@@ -2,7 +2,7 @@
 # SME2 and the SHA-3 extension), each with its reason; tools/mutants/check.py
 # fails on any other survivor and on any listed one now caught.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/finish.rs src/hasher.rs src/incremental.rs src/io.rs src/lanes.rs src/lib.rs src/many.rs src/park.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stream.rs src/stream/frontend.rs
+files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/finish.rs src/hasher.rs src/incremental.rs src/io.rs src/lanes.rs src/lib.rs src/many.rs src/park.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stream.rs src/stream/frontend.rs src/admission.rs src/stream/receiver.rs
 model files: src/finish.rs src/park.rs
 src/each.rs	delete ! in independent_lanes	1	x86-64 only: independent_lanes is compiled for x86-64 Linux alone (its cfg), so here the mutant builds the code the unmutated source builds; the x86-64 machines catch it (BLAKE3 #344)
 src/each.rs	replace && with || in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
@@ -456,3 +456,5 @@ src/self_test.rs	replace * with / in last_lanes	2	[cpu has sha3] equivalent here
 src/self_test.rs	replace + with * in last_lanes	1	[cpu has sha3] equivalent here: changes only the scalar startup path that this CPU leaves uncalled; the SHA-3-free startup tests check those answers
 src/self_test.rs	replace + with - in last_lanes	1	[cpu has sha3] equivalent here: changes only the scalar startup path that this CPU leaves uncalled; the SHA-3-free startup tests check those answers
 src/self_test.rs	replace | with ^ in last_lanes	1	equivalent: CHUNK_END and ROOT are disjoint bits
+src/admission.rs	replace += with -= in <impl Future for Acquire<P, T>>::poll	1	equivalent: a ticket only tells its request from the others queued; counting down, wrapping, tells them apart as well
+src/stream/receiver.rs	replace && with || in Core::forget	1	equivalent: forget(id, false) comes only from a result's retire, after its result has transferred and `done` is set; there `cancel || !done` is false, as `cancel && !done` is

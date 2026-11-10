@@ -7,7 +7,7 @@
 # mutants have a list of their own. Rows come from its runs (the runner's
 # mutants job), --since the GPU's change first (job 1909).
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/finish.rs src/hasher.rs src/incremental.rs src/io.rs src/lanes.rs src/lib.rs src/many.rs src/park.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stream.rs src/gpu.rs src/stream/frontend.rs
+files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/finish.rs src/hasher.rs src/incremental.rs src/io.rs src/lanes.rs src/lib.rs src/many.rs src/park.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stream.rs src/gpu.rs src/stream/frontend.rs src/admission.rs src/stream/receiver.rs
 model files: src/finish.rs src/park.rs
 src/gpu.rs	replace % with + in start	1	the start's check of the GPU against the CPU, its input's bytes, counters or compared lengths changed: a GPU that hashes right passes it on any input, and only a faulty GPU tells the two apart
 src/gpu.rs	replace % with / in start	1	the start's check of the GPU against the CPU, its input's bytes, counters or compared lengths changed: a GPU that hashes right passes it on any input, and only a faulty GPU tells the two apart
@@ -55,3 +55,5 @@ src/self_test.rs	replace * with / in last_lanes	2	[cpu has FEAT_SHA3] equivalent
 src/self_test.rs	replace + with * in last_lanes	1	[cpu has FEAT_SHA3] equivalent here: changes only the scalar startup path that this CPU leaves uncalled; the SHA-3-free startup tests check those answers
 src/self_test.rs	replace + with - in last_lanes	1	[cpu has FEAT_SHA3] equivalent here: changes only the scalar startup path that this CPU leaves uncalled; the SHA-3-free startup tests check those answers
 src/self_test.rs	replace | with ^ in last_lanes	1	equivalent: CHUNK_END and ROOT are disjoint bits
+src/admission.rs	replace += with -= in <impl Future for Acquire<P, T>>::poll	1	equivalent: a ticket only tells its request from the others queued; counting down, wrapping, tells them apart as well
+src/stream/receiver.rs	replace && with || in Core::forget	1	equivalent: forget(id, false) comes only from a result's retire, after its result has transferred and `done` is set; there `cancel || !done` is false, as `cancel && !done` is
