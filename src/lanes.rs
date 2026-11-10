@@ -1040,10 +1040,10 @@ pub(crate) mod sources {
     // places on the stream's own thread, inside `take_run`'s callback. The
     // ring's words are atomics: a claimer reads its word before its CAS,
     // and a CAS that succeeds read the word its publication wrote, since
-    // the publisher writes that word again only once `claimed` has passed
-    // it (`take`). So a claimer held between its claim and its copy keeps
-    // its task (BLAKE3 #302). `owner` is behind its lock; the rest is
-    // atomics.
+    // the publisher writes that word again only once it has seen, with an
+    // Acquire load, `claimed` past it (`take`, `push`). So a claimer held
+    // between its claim and its copy keeps its task (BLAKE3 #302). `owner`
+    // is behind its lock; the rest is atomics.
     unsafe impl Sync for Source {}
     unsafe impl Send for Source {}
 
@@ -1150,8 +1150,11 @@ pub(crate) mod sources {
             let p = self.finish.published.load(Ordering::Relaxed);
             // Every build: a task or a ring word written over one not yet
             // claimed would lose its task (at the cost of a load and a
-            // comparison).
-            assert!(p - self.claimed.load(Ordering::Relaxed) < self.places.len(), "a source's places hold every task not yet taken");
+            // comparison). Acquire, against the claimers' releasing CAS:
+            // everything a claimer did before the claim this load sees,
+            // its read of its ring word among them, happens before what
+            // follows here, the store of that word among them (`take`).
+            assert!(p - self.claimed.load(Ordering::Acquire) < self.places.len(), "a source's places hold every task not yet taken");
             let place = match named {
                 Some(place) => {
                     // Word p % len is free: `claimed` has passed its last
@@ -1222,9 +1225,15 @@ pub(crate) mod sources {
                 // Publication c wrote that word before `published` passed
                 // c (the Acquire above), and its publisher writes it again,
                 // for publication c + len, only once it has seen `claimed`
-                // past c. So if the CAS below succeeds, `claimed` was c
-                // until then, no such write had begun, and this is c's
-                // place. Read after the claim, it could be a later task's.
+                // past c, with an Acquire load (`push`). So if the CAS
+                // below succeeds, `claimed` was c until then: this read
+                // comes before the CAS, the CAS releases, the publisher's
+                // load acquires it, and its next store of the word comes
+                // after that load. The read happens before that store, and
+                // this is c's place. Read after the claim, it could be a
+                // later task's. (With a Relaxed load in `push` no real
+                // machine differs, but the language's rules then order
+                // nothing between this read and that store.)
                 let place = if self.places.is_empty() {
                     0
                 } else if self.ring.is_empty() {
