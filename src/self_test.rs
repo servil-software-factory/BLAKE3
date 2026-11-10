@@ -672,11 +672,19 @@ mod test {
             expected
         };
         #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-        let expected = if matches!(Platform::detect_unchecked(), Platform::AVX512) {
-            let entry = crate::ffi_output::entry() as usize;
-            assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry)), "startup left out root output16");
-            expected + 1
-        } else {
+        let expected = {
+            let width = crate::ffi_output::lanes(Platform::detect_unchecked());
+            let mut expected = expected;
+            if width == 16 {
+                let entry = crate::ffi_output::entry() as usize;
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry)), "startup left out independent output16");
+                expected += 1;
+            }
+            if width == 8 || (width == 16 && crate::platform::avx2_detected()) {
+                let entry = crate::ffi_output::entry8() as usize;
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry)), "startup left out independent output8");
+                expected += 1;
+            }
             expected
         };
         assert_eq!(checked, expected);

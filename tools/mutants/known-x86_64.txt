@@ -6,8 +6,9 @@ files: src/block.rs src/convenience.rs src/each.rs src/ffi_avx2.rs src/ffi_parti
 model files: src/finish.rs src/park.rs
 src/each.rs	replace hash_held with ()	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace | with ^ in hash_cohort	1	equivalent: | and ^ agree on flag bits that never overlap
-src/ffi_output.rs	replace | with ^ in input	2	equivalent: mode flags (0, 16, 32, 64), CHUNK_START (1) and CHUNK_END (2) occupy disjoint bits
-src/ffi_output.rs	replace | with ^ in self_test_shape	1	equivalent: fixture structural flags (3, 2, 4) and mode flags (0, 16, 32, 64) occupy disjoint bits
+src/ffi_output.rs	replace | with ^ in held_groups	1	equivalent: mode flags (0, 16, 32, 64) and PARENT (4) occupy disjoint bits
+src/ffi_output.rs	replace | with ^ in input	3	equivalent: mode flags (0, 16, 32, 64), CHUNK_START (1), CHUNK_END (2) and ROOT (8) occupy disjoint bits
+src/ffi_output.rs	replace | with ^ in self_test_shape	2	equivalent: fixture structural flags (3, 2, 4), mode flags (0, 16, 32, 64) and optional ROOT (8) occupy disjoint bits
 src/ffi_partial.rs	replace % with + in rotation	1	equivalent: k % 4 becomes k + 4, which adds 16 to each shuffle index; pshufb reads an index's low four bits (and bit 7, clear: the largest is 47), so the shuffle is the same
 src/ffi_partial.rs	replace | with ^ in rotation	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/finish.rs	delete ! in Finish::wait	1	a scheduling choice: `if poll()` breaks when the poll says to go on, so the waiter spins through its polls in place of parking; the count is still what it returns on. Loom passes it; the whole suite, run unnarrowed, spins into the clock on it (the stream tests)

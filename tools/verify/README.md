@@ -17,7 +17,8 @@ Commands:
     python3 tools/verify/isla_check.py                  # the NEON and integer models against Arm's specification (needs Isla)
     python3 tools/verify/prove_x86.py [CASE...]         # the x86-64 kernels: compressions, hash_many at fixed counts, xof_many, the chunk root, the partial pass and the wide kernels (390 cases; --representative: 203 of them)
     python3 tools/verify/prove_x86_loop.py              # hash_many at every input count, by induction (51 cases)
-    python3 tools/verify/prove_output.py                # 16 independent root outputs, per-lane CV/block/length/flags; four fault controls
+    python3 tools/verify/prove_output.py                # 16 independent CV/root outputs; four fault controls
+    python3 tools/verify/prove_output8.py               # 8 independent AVX2 CV/root outputs; four fault controls
     python3 tools/verify/cross_check_x86.py             # the x86-64 model against the CPU (needs an x86-64 CPU; AVX-512 forms need one with AVX-512)
     sh tools/verify/long-proofs.sh [COMMIT]             # the proofs, the Arm CPU cross-check and the controls together (Isla and the x86 CPU check apart); posts the commit's "long proofs" status, from an earlier run when the proofs' inputs (c/, c2sp/, tools/verify/, the checked NEON, SME2-hybrid and x86 generators, and the executing driver's contents) are the same
 
@@ -233,15 +234,19 @@ the process's memory limit (`ulimit -v 6291456`) and choose `--workers`
 from the host's memory. `--help` describes the command; with no case list
 it runs the whole matrix, which `cases()` enumerates in one place.
 
-## Batched root outputs
+## Independent counter-zero compressions
 
-`prove_output.py` checks the single-block root-output kernel with an independent
-arbitrary CV, block, byte length and flags for each of sixteen lanes. Every lane
-matches `compress(cv, block, 0, length, flags | ROOT)[:8]` from the same Lean
-specification. Descriptor, CV and block regions are read-only; output coverage,
+`prove_output.py` and `prove_output8.py` check sixteen AVX-512 and eight AVX2
+lanes, each with its own arbitrary CV, block, byte length and flags. Every lane
+matches `compress(cv, block, 0, length, flags)[:8]` from the same Lean
+specification: ROOT selects a digest; otherwise the output is a chaining value.
+Descriptors/parameters, CVs and blocks are read-only; exact output coverage,
 all legal entry-stack residues, bounds and callee-saved registers are checked.
-Fault controls omit ROOT, select another lane's CV, overread a CV and omit the
-last outputs. `cross_check_x86.py` includes the new kernel's vector forms.
+Each harness rejects four faults: wrong flags, wrong CV, an input overread and
+missing final output. `cross_check_x86.py` includes both kernels' vector forms.
+The Rust callers' flag selection, borrowed data and key-independent grouping
+remain separate test/review obligations; these assembly proofs do not establish
+them or whole-library constant-time behavior.
 
 ## Extending
 
