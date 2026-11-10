@@ -265,6 +265,15 @@ fn drain<'a>(hashers: &mut [Hasher], held: &mut arrayvec::ArrayVec<usize, TABLE>
     }
 }
 
+/// The fewest held stages that take the independent parent lanes. Two
+/// keyed hashers each hash alone at full width instead: on an Ice Lake
+/// Xeon the lanes cost a pair 3.5% of a whole cycle (16 and 32 KiB
+/// messages in 4 KiB pieces, November 10, 2026), and from eight up they
+/// gain 2-3% there and 7-11% on an EPYC 9255. The count is public; no
+/// key decides the route.
+#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+const INDEPENDENT_MIN: usize = 3;
+
 /// Hash every queued stage, then return the bounded table to its caller.
 fn flush_held(hashers: &mut [Hasher], held: &mut arrayvec::ArrayVec<usize, TABLE>) {
     hash_held(hashers, held);
@@ -291,7 +300,7 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     {
         let platform = hashers[_first].core.chunk_state.platform;
-        if matches!(platform, Platform::AVX2 | Platform::AVX512) {
+        if held.len() >= INDEPENDENT_MIN && matches!(platform, Platform::AVX2 | Platform::AVX512) {
             crate::ffi_output::held_groups(hashers, held, platform);
             #[cfg(all(test, feature = "std"))]
             HELD_GROUPS.with(|groups| groups.borrow_mut().push(held.to_vec()));
@@ -1387,6 +1396,9 @@ mod test {
         let same = passes(&[Mode::Keyed(&a); 3]);
         assert_eq!(same, passes(&[Mode::Keyed(&a), Mode::Keyed(&b), Mode::Keyed(&c)]), "equal keys take the passes distinct keys take");
         assert_eq!(same, if independent { 1 } else { 3 });
+        // Two held hashers stay below the lanes' count: each keyed one alone.
+        assert_eq!(passes(&[Mode::Keyed(&a), Mode::Keyed(&b)]), 2, "a pair of keyed hashers, on either route");
+        assert_eq!(passes(&[Mode::Keyed(&a); 2]), 2, "equal keys take the same two passes");
         let derived = passes(&[Mode::DeriveKey("shared context"); 3]);
         assert_eq!(derived, passes(&[Mode::DeriveKey("context a"), Mode::DeriveKey("context b"), Mode::DeriveKey("context c")]));
         assert_eq!(derived, if independent { 1 } else { 3 }, "derived-key equality stays private");
@@ -1568,9 +1580,11 @@ mod test {
                         assert_eq!(out.as_slice(), crate::test::official::xof(modes[i], &data[i], 13, out.len()));
                     }
                     let partitions = crate::COUNTED.with(|c| c[crate::Counted::HeldPass as usize].get());
-                    assert_eq!(partitions, 1, "one held partition: {platform:?} n={n} flavor={flavor}");
-                    assert_eq!(parent_entries.contains(&(entry(width) as usize)), flavor != 0, "independent parent entry: {platform:?} n={n}");
-                    if flavor != 0 && platform == crate::platform::Platform::AVX512 && crate::platform::avx2_detected() {
+                    // Below INDEPENDENT_MIN a keyed hasher hashes alone, and the plain ones together.
+                    let lanes = flavor != 0 && n >= INDEPENDENT_MIN;
+                    assert_eq!(partitions, if flavor != 0 && !lanes { n as u64 } else { 1 }, "held partitions: {platform:?} n={n} flavor={flavor}");
+                    assert_eq!(parent_entries.contains(&(entry(width) as usize)), lanes, "independent parent entry: {platform:?} n={n}");
+                    if lanes && platform == crate::platform::Platform::AVX512 && crate::platform::avx2_detected() {
                         let eight_needed = (1..=4).any(|shift| ((n * (crate::STAGE_LEN / crate::CHUNK_LEN)) >> shift) % 16 >= 8);
                         assert_eq!(
                             parent_entries.contains(&(entry(8) as usize)),
