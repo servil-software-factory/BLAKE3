@@ -114,6 +114,40 @@ fn dropping_the_woken_waiter_wakes_the_next() {
     ready(second.as_mut(), &mut second_cx).release();
 }
 
+/// A dropped request wakes the next waiter only when it leaves the front
+/// of the queue with a resource free: otherwise nobody's turn has come,
+/// and a wake is a poll for nothing. Three drops tell: one from the
+/// middle and one from the front with nothing free (no wake), and one
+/// from behind the front after a release (the front has its one wake).
+#[test]
+fn a_dropped_request_wakes_the_next_only_from_the_front_with_a_resource_free() {
+    let pool = Pool::new(vec![3]);
+    let quiet = Waker::from(Arc::new(Signal::default()));
+    let held = take(&pool, &mut Context::from_waker(&quiet));
+    let signals: Vec<Arc<Signal>> = (0..4).map(|_| Arc::new(Signal::default())).collect();
+    let wakers: Vec<Waker> = signals.iter().map(|s| Waker::from(s.clone())).collect();
+    let woken = || signals.iter().map(|s| s.0.load(Ordering::SeqCst)).collect::<Vec<_>>();
+    let mut front = Box::pin(pool.acquire());
+    let mut middle = Box::pin(pool.acquire());
+    let mut last = Box::pin(pool.acquire());
+    assert!(front.as_mut().poll(&mut Context::from_waker(&wakers[0])).is_pending());
+    assert!(middle.as_mut().poll(&mut Context::from_waker(&wakers[1])).is_pending());
+    assert!(last.as_mut().poll(&mut Context::from_waker(&wakers[2])).is_pending());
+    drop(middle);
+    assert_eq!(woken(), [0, 0, 0, 0], "a request leaving the middle wakes nobody");
+    drop(front);
+    assert_eq!(woken(), [0, 0, 0, 0], "the front leaving with nothing free wakes nobody");
+    held.release();
+    assert_eq!(woken(), [0, 0, 1, 0], "the release wakes the new front");
+    let mut behind = Box::pin(pool.acquire());
+    assert!(behind.as_mut().poll(&mut Context::from_waker(&wakers[3])).is_pending());
+    drop(behind);
+    assert_eq!(woken(), [0, 0, 1, 0], "a request leaving from behind the front wakes nobody again");
+    let granted = ready(last.as_mut(), &mut Context::from_waker(&wakers[2]));
+    assert_eq!(*granted, 3);
+    granted.release();
+}
+
 #[test]
 fn a_moved_pending_future_replaces_its_notification() {
     let pool = Pool::new(vec![1]);
