@@ -283,9 +283,10 @@ std::thread_local! {
 }
 
 /// This thread's storage for its pool calls, made now: its scratch for
-/// [`PREPARED_PIECES`] pieces and its job source (`sources::job_source`,
-/// 640 bytes). After this, its calls on inputs the scratch holds allocate
-/// nothing.
+/// [`PREPARED_PIECES`] pieces, its job source (`sources::job_source`,
+/// 640 bytes), and its storage for a collection's range
+/// (`each::prepare_thread`). After this, its calls on inputs the scratch
+/// holds allocate nothing.
 pub(crate) fn prepare_thread() {
     SCRATCH.with(|s| {
         let mut s = s.borrow_mut();
@@ -293,6 +294,7 @@ pub(crate) fn prepare_thread() {
         s.cvs.reserve(PREPARED_PIECES);
     });
     sources::job_source();
+    crate::each::prepare_thread();
 }
 
 /// `cut` fills this thread's scratch with a job's pieces; `job` runs with
@@ -801,10 +803,19 @@ fn forked() -> ! {
     )
 }
 
-/// Whether every worker is parked: false before the pool exists
-/// ([`crate::__all_workers_parked`], for tests).
+/// Whether every worker is parked, and the SME2 thread where there is
+/// one: false before the pool exists, and until every one of its threads
+/// has started and found nothing to do ([`crate::__all_workers_parked`],
+/// for tests: the SME2 thread's start, its name freed as it begins, fell
+/// inside a test's allocation window when only the workers were waited for).
 pub(crate) fn all_workers_parked() -> bool {
-    POOL.get().is_some_and(|pool| pool.park.parked_count() == pool.workers())
+    POOL.get().is_some_and(|pool| at_rest(pool.park.parked_count(), pool.workers(), pool.sme2, SME2_PARKED.load(Ordering::SeqCst)))
+}
+
+/// Every one of the pool's threads parked: its workers, and its SME2
+/// thread if it has one.
+fn at_rest(parked: usize, workers: usize, sme2: bool, sme2_parked: bool) -> bool {
+    parked == workers && (!sme2 || sme2_parked)
 }
 
 /// How many workers are parked, and how many there are (tests: a case
@@ -2066,6 +2077,9 @@ fn worker_main(me: usize) {
     let _ = std::panic::catch_unwind(move || {
         let pool = pool();
         pool.park.register(me);
+        // Before the first piece: a collection's range then allocates
+        // nothing here.
+        crate::each::prepare_thread();
         pool.serve(me)
     });
     std::process::abort()
@@ -2074,6 +2088,17 @@ fn worker_main(me: usize) {
 #[cfg(test)]
 mod test {
     use super::*;
+    /// The pool is at rest when every worker is parked and, where it has
+    /// one, its SME2 thread too: a test that waits for the pool waits for
+    /// that thread's start as well.
+    #[test]
+    fn the_pool_at_rest_counts_its_sme2_thread() {
+        assert!(at_rest(3, 3, false, false), "no SME2 thread: the workers decide");
+        assert!(at_rest(3, 3, true, true));
+        assert!(!at_rest(3, 3, true, false), "the SME2 thread is still starting, or at work");
+        assert!(!at_rest(2, 3, true, true), "a worker is at work");
+        assert!(!at_rest(2, 3, false, false));
+    }
 
     /// Fake task payloads stay off workers. The fixture's reservation blocks
     /// CPU claims, survives a failed GPU claim and ends at a successful one.

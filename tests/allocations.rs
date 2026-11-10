@@ -1,8 +1,8 @@
 //! The crate's "Memory" section, held to its word: the single-threaded
-//! calls allocate nothing, and `hash_each` only 32 bytes for each chunk of
-//! its messages of 2 to 15 chunks and up to 128 for each such message. A
-//! counting allocator, in a process of its own, counts the bytes each call
-//! asks for on its calling thread.
+//! calls allocate nothing, and the prepared, repeated calls nothing after
+//! their preparation. A counting allocator, in a process of its own,
+//! counts what each call asks for on its calling thread, and on the
+//! library's worker threads where the call uses them.
 #![cfg(feature = "std")]
 
 #[path = "../tools/require_nextest.rs"]
@@ -534,16 +534,24 @@ fn pool_ready(threads: usize) {
 
 /// The other pool calls, after preparation and above the length that
 /// reaches the pool (512 KiB): a whole message, a batch of messages, and
-/// a collection of items of a chunk (items of 2 to 15 chunks allocate as
-/// the Memory section says, pooled or not), each three times, on the
-/// caller and the workers.
+/// a collection of items from a chunk to twelve, each three times, on
+/// the caller and the workers.
 #[test]
 fn prepared_pool_calls_allocate_nothing() {
     pool_ready(4);
     let message = blocks(4 << 20, 5);
     let batch = Batch::from_blocks(&message[..(2 << 20) / 64], 16 * 1024);
     let mut digests = vec![[0u8; 32]; batch.len()];
-    let items: Vec<(&[Block], usize)> = message.chunks(1024 / 64).map(|b| (b, 1024)).collect();
+    // Items of 1, 3, 7 and 12 chunks in turn: the small ones go by their
+    // blocks and the others share the lanes, on every worker's range.
+    let item_chunks = [1usize, 3, 7, 12];
+    let mut items: Vec<(&[Block], usize)> = Vec::new();
+    let mut at = 0;
+    while at + 12 * 16 <= message.len() {
+        let chunks = item_chunks[items.len() % item_chunks.len()];
+        items.push((&message[at..at + chunks * 16], chunks * 1024));
+        at += chunks * 16;
+    }
     let mut out = vec![[0u8; 32]; items.len()];
     for round in 0..3 {
         let whole = counts_with_workers(|| {
@@ -557,7 +565,9 @@ fn prepared_pool_calls_allocate_nothing() {
     }
     assert_eq!(throughput::hash_multithreaded(Mode::Plain, &message, 4 << 20), convenience::hash(Block::bytes(&message)));
     assert_eq!(digests[3], *blake3::hash(&Block::bytes(&message)[3 * 16 * 1024..4 * 16 * 1024]).as_bytes());
-    assert_eq!(out[7], *blake3::hash(&Block::bytes(&message)[7 * 1024..8 * 1024]).as_bytes());
+    for (item, digest) in items.iter().zip(&out).step_by(97) {
+        assert_eq!(*digest, *blake3::hash(&Block::bytes(item.0)[..item.1]).as_bytes());
+    }
 }
 
 fn blocks(len: usize, seed: u8) -> Vec<Block> {
@@ -604,24 +614,30 @@ fn single_threaded_calls_allocate_as_the_memory_section_says() {
     let mut digests = vec![[0u8; 32]; batch.len()];
     assert_eq!(allocated(|| throughput::hash_many(Mode::Plain, &batch, &mut digests)), 0, "hash_many");
 
-    // A collection: items of up to a chunk allocate nothing; a message of
-    // 2 to 15 chunks, 32 bytes a chunk.
+    // A collection of items of up to a chunk allocates nothing (they go by
+    // their blocks). Messages of 2 to 15 chunks keep their chunk values in
+    // the thread's storage: the first such collection grows it (32 bytes a
+    // chunk, 16 a message, at most doubled), and the same collection again,
+    // or a smaller one, allocates nothing.
     let lens = [0usize, 1, 63, 64, 65, 300, 700, 1000, 1024];
     let small: Vec<Vec<Block>> = (0..100).map(|i| blocks(lens[i % lens.len()], i as u8)).collect();
     let items: Vec<(&[Block], usize)> = small.iter().zip((0..100).map(|i| lens[i % lens.len()])).map(|(b, l)| (&b[..], l)).collect();
     let mut digests = vec![[0u8; 32]; items.len()];
     assert_eq!(allocated(|| throughput::hash_each(Mode::Plain, &items, &mut digests)), 0, "hash_each of 100 items of up to a chunk");
-    let long = blocks(5 * 1024, 9);
-    let mut mixed = items.clone();
-    mixed.push((&long[..], 5 * 1024));
-    let mut digests = vec![[0u8; 32]; mixed.len()];
-    let bytes = allocated(|| throughput::hash_each(Mode::Plain, &mixed, &mut digests));
-    assert!(bytes <= 32 * 5 + 128, "hash_each with one message of 5 chunks: {bytes} B");
-    // Forty such messages: 32 bytes a chunk, and the bookkeeping a message.
-    let longs: Vec<(&[Block], usize)> = (0..40).map(|_| (&long[..], 5 * 1024)).collect();
+    let long = blocks(20 * 1024, 9);
+    let longs: Vec<(&[Block], usize)> = (0..150).map(|i| (&long[..], [2 * 1024, 5 * 1024 + 1, 15 * 1024, 20 * 1024, 1024 + 1][i % 5])).collect();
+    let chunks: usize = longs.iter().map(|l| l.1.div_ceil(1024)).filter(|c| (2..16).contains(c)).sum();
     let mut digests = vec![[0u8; 32]; longs.len()];
-    let bytes = allocated(|| throughput::hash_each(Mode::Plain, &longs, &mut digests));
-    assert!(bytes <= 40 * (32 * 5 + 128), "hash_each of 40 messages of 5 chunks: {bytes} B");
+    let first = allocated(|| throughput::hash_each(Mode::Plain, &longs, &mut digests));
+    assert!(first > 0 && first <= 2 * (32 * chunks + 16 * longs.len()), "the first collection of 150 messages of 2 to 20 chunks grows the storage: {first} B");
+    assert_eq!(counts(|| throughput::hash_each(Mode::Plain, &longs, &mut digests)), Counts::default(), "the same collection again");
+    let mut mixed = items.clone();
+    mixed.push((&long[..5 * 16], 5 * 1024));
+    let mut digests_mixed = vec![[0u8; 32]; mixed.len()];
+    assert_eq!(counts(|| throughput::hash_each(Mode::Plain, &mixed, &mut digests_mixed)), Counts::default(), "a smaller collection after it");
+    for (item, digest) in longs.iter().zip(&digests).take(5) {
+        assert_eq!(*digest, *blake3::hash(&Block::bytes(item.0)[..item.1]).as_bytes());
+    }
 }
 
 // The pipeline's admission source uses the same counting allocator.

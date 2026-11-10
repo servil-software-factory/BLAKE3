@@ -152,9 +152,11 @@
 //!   [`throughput::hash`], [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
 //!   and [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
 //!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 1 MiB buffer while it reads past
-//!   64 KiB, and [`throughput::hash_each`] 32 bytes for each chunk of its messages
-//!   of 2 to 15 chunks and up to 128 for each such message, each freed when
-//!   it returns.
+//!   64 KiB, freed when it returns. [`throughput::hash_each`] keeps, on the
+//!   thread that calls it, 32 bytes for each chunk of the collection's
+//!   messages of 2 to 15 chunks and 16 for each such message: its first
+//!   collection and a larger one grow that storage, and a repeated
+//!   collection allocates nothing.
 //! - **Grouped incremental calls** use bounded stack tables and tree buffers.
 //!   [`throughput::update_each`] allocates and frees nothing.
 //!   [`throughput::update_each_multithreaded`] may allocate worker-job lists
