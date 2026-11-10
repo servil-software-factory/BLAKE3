@@ -56,7 +56,18 @@ const RING_BYTES: usize = 2 << 20;
 /// footprint cost what the depth gave (4 and 16 MiB messages, 16 a stream:
 /// 1.01-1.02 of the 2 MiB ring's time, where 8 MiB took 0.93; Mac check
 /// 1895: shared-os continuous 4 MiB +19.3%).
+///
+/// On x86-64 it is 2 MiB, the other ring's size: there the depth costs
+/// more than it gives. On an i7-12700K (cores sharing one 25 MiB cache),
+/// 8 MiB against the one 2 MiB ring before it made the multithreaded
+/// stream of 4 MiB messages 52% slower, and of 16 MiB messages 30%
+/// slower, where two programs share the cache, for 4% gained and 3% lost
+/// on the same two alone (BLAKE3 #349, 16 pairs; that size was chosen on
+/// the Mac and measured on no x86 machine).
+#[cfg(not(target_arch = "x86_64"))]
 const LONG_RING_BYTES: usize = 8 << 20;
+#[cfg(target_arch = "x86_64")]
+const LONG_RING_BYTES: usize = 2 << 20;
 
 /// The shortest message whose pieces go to the long ring: 4 MiB, past the
 /// caches where the 2 MiB ring is kept hot.
@@ -521,8 +532,8 @@ impl<'env, D: FnMut(&'env mut [Hash])> Stream<'env, D> {
     /// streams, so a room may hold bytes an earlier message left (a program
     /// that must keep one caller's secrets from another reads none of
     /// `room` before writing it). The stream reuses the bytes once `out`
-    /// is handed back; a stream keeps 2 MiB of them, and 8 MiB more for
-    /// messages of 4 MiB or more, and `submit_with` waits for room as
+    /// is handed back; a stream keeps 2 MiB of them, and for messages of
+    /// 4 MiB or more 8 MiB more (2 MiB on x86-64), and `submit_with` waits for room as
     /// `submit` does. On an Apple silicon Mac, a run of messages of 4 MiB or
     /// more is shared with the GPU (the crate's "Which call to use"); their
     /// rooms are then in 64 MiB of memory the GPU shares, on the same terms.
@@ -1705,13 +1716,17 @@ mod test {
         }
     }
 
-    /// The long ring's arithmetic, exact on every machine: 2 messages of
-    /// 4 MiB, 128 whole pieces, fill it to its end with no lap skipped and
-    /// no wait for room, and the 2 MiB ring keeps none of their bytes.
+    /// The long ring's arithmetic, exact on every machine: messages of
+    /// 4 MiB, whole pieces, bring its head to the end of a lap with no lap
+    /// skipped, the 2 MiB ring keeps none of their bytes, and every piece
+    /// back frees exactly its room. Where the ring holds them all (8 MiB:
+    /// 2 messages, 128 pieces) nothing waits for room; where it is shorter
+    /// than a message (x86-64's 2 MiB) the one message laps it twice.
     #[test]
     fn test_long_messages_fill_the_long_ring_to_its_end() {
         let input = std::vec![5u8; LONG];
-        let mut got = places(LONG_RING_BYTES / LONG);
+        let count = (LONG_RING_BYTES / LONG).max(1);
+        let mut got = places(count);
         stream(
             Mode::Plain,
             |_| {},
@@ -1726,10 +1741,13 @@ mod test {
                         out,
                     );
                 }
-                assert_eq!((s.long_head, s.head), (LONG_RING_BYTES, 0), "128 pieces end the long ring's first lap exactly");
-                assert_eq!(s.delivered, 0, "and nothing waited for room");
+                assert_eq!((s.long_head, s.head), (count * LONG, 0), "whole pieces end the long ring's lap exactly");
+                assert_eq!(s.long_head % LONG_RING_BYTES, 0);
+                if LONG_RING_BYTES >= count * LONG {
+                    assert_eq!(s.delivered, 0, "and nothing waited for room");
+                }
                 s.finish();
-                assert_eq!(s.long_tail, LONG_RING_BYTES, "every long piece back frees exactly its room");
+                assert_eq!(s.long_tail, count * LONG, "every long piece back frees exactly its room");
             },
         );
         assert!(got.iter().all(|h| *h == crate::convenience::hash(&input)));

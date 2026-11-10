@@ -166,7 +166,7 @@
 //!   of pieces it hands out, freed when it returns: 48 bytes for each 128 KiB of
 //!   input, and at most 200 bytes for each CPU (1 GiB on 16 CPUs: 390 KiB).
 //! - **A [stream](throughput::stream)** takes its storage (its 2 MiB ring, 8 MiB more for
-//!   messages of 4 MiB or more, of which only the pages used are faulted in, and its entries)
+//!   messages of 4 MiB or more (2 MiB on x86-64), of which only the pages used are faulted in, and its entries)
 //!   from a pool the process keeps: a thread's first stream allocates it
 //!   and later streams reuse it, never freed. On an Apple silicon Mac, a
 //!   stream that has used the GPU keeps 64 MiB of memory the CPU and GPU
