@@ -47,3 +47,5 @@ src/each.rs	replace | with & in by_blocks_at_once	3	[cpu has FEAT_SHA3] equivale
 src/each.rs	replace && with || in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
 src/each.rs	replace == with != in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
 src/each.rs	replace >= with < in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
+src/each.rs	replace && with || in hash_held	1	x86-64-only selector: the independent lanes' branch is compiled out on ARM; the VM confirmed identical test code
+src/each.rs	replace >= with < in hash_held	1	x86-64-only selector: the independent lanes' branch is compiled out on ARM; the VM confirmed identical test code

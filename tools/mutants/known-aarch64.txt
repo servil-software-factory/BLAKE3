@@ -421,5 +421,7 @@ src/each.rs	replace > with == in by_blocks_at_once	1	[cpu has sha3] equivalent h
 src/each.rs	replace > with >= in by_blocks_at_once	1	[cpu has sha3] equivalent here: changes only the SHA-3-free prefix/scalar path; this CPU hashes the whole group through the last-lane kernels instead. Cortex-A72 CI exercises the prefix/scalar path
 src/each.rs	replace | with & in by_blocks_at_once	3	[cpu has sha3] equivalent here: changes only the SHA-3-free prefix/scalar path; this CPU hashes the whole group through the last-lane kernels instead. Cortex-A72 CI exercises the prefix/scalar path
 src/each.rs	replace && with || in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
+src/each.rs	replace && with || in hash_held	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace == with != in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
 src/each.rs	replace >= with < in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
+src/each.rs	replace >= with < in hash_held	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
