@@ -13,7 +13,7 @@ pub enum Mode<'a> {
 }
 pub struct Batch;
 
-/// The stream's fixed memory.
+/// The pipeline's fixed memory.
 pub struct Limits {
     /// Messages open or in flight; as many finished events again may
     /// wait to be pulled.
@@ -24,12 +24,12 @@ pub struct Limits {
 pub const ROOM_LEN: usize = 16 * 1024;
 
 /// `T`: the program's tag, handed back with each event. `B`: the type
-/// that owns a message hashed where it lies (`whole`); `()` for none.
-pub struct Stream<T, B = ()> {
+/// that owns a message hashed where it lies (`owned`); `()` for none.
+pub struct Pipeline<T, B = ()> {
     _own: PhantomData<(T, B)>,
 }
 
-/// An open message: a token. It holds no reference to its stream.
+/// An open message: a token. It holds no reference to its pipeline.
 #[must_use = "end, abort, or hand the message's bytes over; a dropped Message is aborted"]
 pub struct Message {
     _slot: u32,
@@ -69,24 +69,24 @@ pub enum Event<T, B = ()> {
     Batch { tag: T, batch: Batch, digests: Box<[[u8; 32]]> },
 }
 
-impl<T> Stream<T, ()> {
+impl<T> Pipeline<T, ()> {
     pub fn new(mode: Mode<'_>, limits: Limits) -> Self {
         todo!()
     }
 }
 
-impl<T, B: AsRef<[u8]>> Stream<T, B> {
+impl<T, B: AsRef<[u8]>> Pipeline<T, B> {
     pub fn with_owners(mode: Mode<'_>, limits: Limits) -> Self {
         todo!()
     }
     /// The message is `owner`'s bytes, hashed where they lie; the owner
     /// comes back in the message's event.
-    pub fn whole(&mut self, message: Message, owner: B) {
+    pub fn owned(&mut self, message: Message, owner: B) {
         todo!()
     }
 }
 
-impl<T, B> Stream<T, B> {
+impl<T, B> Pipeline<T, B> {
     /// Wait for a message slot.
     pub async fn message(&mut self, tag: T, length_hint: Option<u64>) -> Message {
         todo!()
@@ -110,7 +110,7 @@ impl<T, B> Stream<T, B> {
     /// # Safety
     /// The returned guard is dropped, never leaked (`mem::forget`,
     /// `Box::leak`, a reference cycle, a leaked task that holds it).
-    pub unsafe fn lend<'a>(&mut self, message: Message, bytes: &'a [u8]) -> Lent<'a> {
+    pub unsafe fn lent<'a>(&mut self, message: Message, bytes: &'a [u8]) -> Lent<'a> {
         todo!()
     }
     /// The message is a batch; it and its digests come back in its event.
@@ -135,113 +135,113 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 
 /// What the design claims, for the compiler to confirm.
 ///
-/// Two messages open at once, fed in turns; events pulled, and the stream
+/// Two messages open at once, fed in turns; events pulled, and the pipeline
 /// called while handling one:
 /// ```
-/// use stream_api_skeleton::*;
+/// use pipeline_api_skeleton::*;
 /// async fn read(_into: &mut [u8]) -> usize { 0 }
-/// async fn two_uploads(stream: &mut Stream<&'static str>) {
-///     let mut a = stream.message("A", None).await;
-///     let mut b = stream.message("B", None).await;
-///     let mut room = stream.room(&mut a).await;
-///     let n = read(room.bytes_mut()).await;      // the stream is free during this wait
-///     stream.commit(&mut a, room, n);
-///     let mut room = stream.room(&mut b).await;
+/// async fn two_uploads(pipeline: &mut Pipeline<&'static str>) {
+///     let mut a = pipeline.message("A", None).await;
+///     let mut b = pipeline.message("B", None).await;
+///     let mut room = pipeline.room(&mut a).await;
+///     let n = read(room.bytes_mut()).await;      // the pipeline is free during this wait
+///     pipeline.commit(&mut a, room, n);
+///     let mut room = pipeline.room(&mut b).await;
 ///     let n = read(room.bytes_mut()).await;
-///     stream.commit(&mut b, room, n);
-///     stream.end(a);
-///     stream.end(b);
-///     stream.ready().await;
-///     while let Some(event) = stream.next_event() {
+///     pipeline.commit(&mut b, room, n);
+///     pipeline.end(a);
+///     pipeline.end(b);
+///     pipeline.ready().await;
+///     while let Some(event) = pipeline.next_event() {
 ///         if let Event::Hashed { tag, .. } = event {
-///             let follow_up = stream.message(tag, None).await;   // no re-entrancy: the call returned
-///             stream.end(follow_up);
+///             let follow_up = pipeline.message(tag, None).await;   // no re-entrancy: the call returned
+///             pipeline.end(follow_up);
 ///         }
 ///     }
 /// }
 /// ```
 ///
-/// A task that holds the stream, messages and a room across awaits may
+/// A task that holds the pipeline, messages and a room across awaits may
 /// move between threads (what `tokio::spawn` requires):
 /// ```
-/// use stream_api_skeleton::*;
+/// use pipeline_api_skeleton::*;
 /// fn spawnable<F: Future + Send + 'static>(_task: F) {}
 /// async fn read(_into: &mut [u8]) -> usize { 0 }
 /// spawnable(async {
-///     let mut stream = Stream::<u64, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 4 });
-///     let mut m = stream.message(7, None).await;
-///     let mut room = stream.room(&mut m).await;
+///     let mut pipeline = Pipeline::<u64, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 4 });
+///     let mut m = pipeline.message(7, None).await;
+///     let mut room = pipeline.room(&mut m).await;
 ///     let n = read(room.bytes_mut()).await;
-///     stream.commit(&mut m, room, n);
-///     stream.end(m);
-///     let whole = stream.message(8, None).await;
-///     stream.whole(whole, vec![1, 2, 3]);
-///     stream.ready().await;
+///     pipeline.commit(&mut m, room, n);
+///     pipeline.end(m);
+///     let whole = pipeline.message(8, None).await;
+///     pipeline.owned(whole, vec![1, 2, 3]);
+///     pipeline.ready().await;
 /// });
 /// ```
 ///
 /// A message used after it ended is refused:
 /// ```compile_fail
-/// use stream_api_skeleton::*;
-/// async fn f(stream: &mut Stream<u64>) {
-///     let mut m = stream.message(1, None).await;
-///     stream.end(m);
-///     let _ = stream.room(&mut m).await;
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) {
+///     let mut m = pipeline.message(1, None).await;
+///     pipeline.end(m);
+///     let _ = pipeline.room(&mut m).await;
 /// }
 /// ```
 ///
 /// A lent buffer cannot be freed while its guard lives:
 /// ```compile_fail
-/// use stream_api_skeleton::*;
-/// async fn f(stream: &mut Stream<u64>) {
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) {
 ///     let buffer = vec![0u8; 1 << 20];
-///     let m = stream.message(1, None).await;
-///     let guard = unsafe { stream.lend(m, &buffer) };
+///     let m = pipeline.message(1, None).await;
+///     let guard = unsafe { pipeline.lent(m, &buffer) };
 ///     drop(buffer);
-///     stream.ready().await;
+///     pipeline.ready().await;
 ///     drop(guard);
 /// }
 /// ```
 ///
 /// nor written:
 /// ```compile_fail
-/// use stream_api_skeleton::*;
-/// async fn f(stream: &mut Stream<u64>) {
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) {
 ///     let mut buffer = vec![0u8; 1 << 20];
-///     let m = stream.message(1, None).await;
-///     let guard = unsafe { stream.lend(m, &buffer) };
+///     let m = pipeline.message(1, None).await;
+///     let guard = unsafe { pipeline.lent(m, &buffer) };
 ///     buffer[0] = 1;
-///     stream.ready().await;
+///     pipeline.ready().await;
 ///     drop(guard);
 /// }
 /// ```
 ///
 /// and held properly, it compiles, the guard dropped before the buffer:
 /// ```
-/// use stream_api_skeleton::*;
-/// async fn f(stream: &mut Stream<u64>) {
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) {
 ///     let buffer = vec![0u8; 1 << 20];
-///     let m = stream.message(1, None).await;
-///     let _guard = unsafe { stream.lend(m, &buffer) };
-///     stream.ready().await;
+///     let m = pipeline.message(1, None).await;
+///     let _guard = unsafe { pipeline.lent(m, &buffer) };
+///     pipeline.ready().await;
 /// }
 /// ```
 ///
-/// A stream with no owner type has no `whole`:
+/// A pipeline with no owner type has no `owned`:
 /// ```compile_fail
-/// use stream_api_skeleton::*;
-/// async fn f(stream: &mut Stream<u64>) {
-///     let m = stream.message(1, None).await;
-///     stream.whole(m, ());
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) {
+///     let m = pipeline.message(1, None).await;
+///     pipeline.owned(m, ());
 /// }
 /// ```
 ///
-/// One driver at a time: two waits on one stream at once are refused:
+/// One driver at a time: two waits on one pipeline at once are refused:
 /// ```compile_fail
-/// use stream_api_skeleton::*;
-/// async fn f(stream: &mut Stream<u64>) {
-///     let slot = stream.message(1, None);
-///     let event = stream.ready();
+/// use pipeline_api_skeleton::*;
+/// async fn f(pipeline: &mut Pipeline<u64>) {
+///     let slot = pipeline.message(1, None);
+///     let event = pipeline.ready();
 ///     let _ = (slot.await, event.await);
 /// }
 /// ```
