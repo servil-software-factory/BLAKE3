@@ -364,6 +364,7 @@ impl Storage {
     fn run_waiting(&self) -> bool {
         match self.source.take_task() {
             Some(task) => {
+                crate::lanes::probe::HELPED.one_writer();
                 crate::lanes::run_task(&task);
                 true
             }
@@ -921,6 +922,7 @@ impl<'env, D: FnMut(&'env mut [Hash])> Stream<'env, D> {
     /// (BLAKE3 #244; a hang is a failure, never a slow success).
     fn pause(&self) {
         assert!(self.slot.is_some(), "a stream with no slot can make no progress: its tasks hash on the calling thread, so nothing it waits for can finish");
+        crate::lanes::probe::PAUSES.one_writer();
         core::hint::spin_loop();
     }
 

@@ -742,6 +742,7 @@ pub(crate) fn initialize(threads: usize) {
     let sme2 = threads > 1 && cfg!(blake3_sme2) && !matches!(pool_platform(), p if core::mem::discriminant(&p) == core::mem::discriminant(&Platform::detect()));
     let pool = Pool { callers: AtomicUsize::new(0), threads, sme2, park: crate::park::Park::new(Pool::workers_of(threads), crate::park::FANOUT) };
     assert!(POOL.set(pool).is_ok(), "initialize_multithreaded creates the pool once");
+    probe::register();
     if threads == 1 {
         return;
     }
@@ -783,6 +784,39 @@ pub(crate) fn splits() -> bool {
 
 /// The pool, once [`initialize`] has created it.
 static POOL: OnceLock<Pool> = OnceLock::new();
+
+/// PROBE: the stream's events counted, printed as the process ends.
+pub(crate) mod probe {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    #[repr(align(128))]
+    pub(crate) struct Count(AtomicU64);
+    impl Count {
+        /// The producer's alone: one writer, no locked instruction.
+        #[inline(always)]
+        pub(crate) fn one_writer(&self) {
+            self.0.store(self.0.load(Relaxed) + 1, Relaxed);
+        }
+        #[inline(always)]
+        pub(crate) fn shared(&self) {
+            self.0.fetch_add(1, Relaxed);
+        }
+    }
+    pub(crate) static PUBLISHED: Count = Count(AtomicU64::new(0));
+    pub(crate) static WAKES: Count = Count(AtomicU64::new(0));
+    pub(crate) static HELPED: Count = Count(AtomicU64::new(0));
+    pub(crate) static PAUSES: Count = Count(AtomicU64::new(0));
+    pub(crate) static PARKS: Count = Count(AtomicU64::new(0));
+    extern "C" fn report() {
+        let r = |c: &Count| c.0.load(Relaxed);
+        std::eprintln!("b3probe pid={} published={} wakes={} helped={} pauses={} parks={}", std::process::id(), r(&PUBLISHED), r(&WAKES), r(&HELPED), r(&PAUSES), r(&PARKS));
+    }
+    pub(crate) fn register() {
+        unsafe extern "C" {
+            fn atexit(f: extern "C" fn()) -> i32;
+        }
+        unsafe { atexit(report) };
+    }
+}
 
 /// Set in a child forked after the pool started its threads (the fork
 /// handler, `pthread_atfork`'s child): the child has none of them.
@@ -933,6 +967,7 @@ impl Pool {
             // Park unless work shows (crate::park's handshake); woken, pay
             // the wakes owed before working.
             if self.park.park_unless(me, || sources::visible(false)) {
+                probe::PARKS.shared();
                 self.park.pay_owed();
             }
         }
@@ -1095,8 +1130,10 @@ pub(crate) mod sources {
         /// BLAKE3 #302), checked in tests and debug builds.
         pub(crate) fn publish(&self, task: &Task) {
             self.push(task);
+            crate::lanes::probe::PUBLISHED.one_writer();
             if self.waiting() >= 2 {
                 noted(Noted::WakeTry);
+                crate::lanes::probe::WAKES.one_writer();
                 pool().park.wake_one();
             }
         }
