@@ -999,6 +999,7 @@ pub(crate) mod sources {
     static OPEN: OwnLine<AtomicUsize> = OwnLine(AtomicUsize::new(0));
 
     /// A task's place in a source.
+    #[repr(align(64))]
     struct Place {
         task: UnsafeCell<MaybeUninit<Task>>,
         /// Whether the place holds a published task not yet copied out (by
