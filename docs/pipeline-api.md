@@ -122,9 +122,13 @@ fastest.
 
 **In place, lent.** `lent` returns a guard. While the guard lives the
 compiler keeps `bytes` borrowed: the program can neither free nor write
-them. Dropped before the message's event, the guard withdraws the pieces
-not yet started, waits the microseconds for those being read, and the
-message ends `Aborted`; so a cancelled task and an early return are safe.
+them. The loan ends when the last worker has read its last byte, which
+is when the message's event exists, pulled or still waiting. Dropped
+after that, the guard does nothing and the event is `Hashed`. Dropped
+before it, the guard withdraws the pieces not yet started, waits the
+microseconds for those being read, and the message ends `Aborted`; so a
+cancelled task and an early return are safe. A program that wants the
+digest keeps the guard until it has pulled the event.
 
 - **The caller's promise** (why the call is `unsafe`): the guard is
   dropped, never leaked (`mem::forget`, `Box::leak`, a reference cycle, a
@@ -154,7 +158,10 @@ write into freed memory.
   `limits.messages` of them, beside the messages still open or in flight.
   A program pulls events between opening messages. When `message` would
   have to wait and that many events are waiting, nothing could ever free
-  a slot: the call stops the program, saying so.
+  a slot: the call stops the program, saying so. A message that finishes
+  while that many events wait keeps its slot, with its result in its
+  own record, until an event is pulled. No result is lost and no worker
+  waits.
 - **Blocking programs** run the waits with `block_on`, which parks the
   thread between polls.
 
