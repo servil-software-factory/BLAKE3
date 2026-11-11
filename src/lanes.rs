@@ -1001,6 +1001,7 @@ pub(crate) mod sources {
     /// A task's place in a source.
     struct Place {
         task: UnsafeCell<MaybeUninit<Task>>,
+        _stride: [usize; 2],
         /// Whether the place holds a published task not yet copied out (by
         /// its claimer's copy, or the GPU's callback): set as the task is
         /// published, cleared after the copy. The check of `publish`'s
@@ -1061,6 +1062,7 @@ pub(crate) mod sources {
                 places: (0..len)
                     .map(|_| Place {
                         task: UnsafeCell::new(MaybeUninit::new(Task::of(&[], 0))),
+                        _stride: [0; 2],
                         #[cfg(any(test, debug_assertions))]
                         uncopied: core::sync::atomic::AtomicBool::new(false),
                     })
