@@ -33,12 +33,12 @@ algorithm:
   size take them and upstream's kernel the rest, on CPUs where they pay
   (`platform::wide_cpu`: AMD Zen 5 and later); and batches across
   messages on upstream's kernels (`src/many.rs`);
-- a pool of worker threads for multithreaded hashing (`src/lanes.rs`);
+- a pool of worker threads for multithreaded hashing, in the crate
+  `blake3-servil` (`threads/src/lanes.rs`); every other item of this
+  list is in `blake3-servil-core`, which that crate contains;
 - batches of many messages in one call (`hash_many`, `src/many.rs`),
   collections of messages and many hashers at once (`throughput::hash_each`,
   `throughput::update_each`, `src/each.rs`);
-- the stream, which hashes the program's messages behind it, each digest
-  into the place the program names (`stream`, `src/stream.rs`).
 - the startup self-test (`src/self_test.rs`);
 - the C API (`capi/b3.h` over the crate, `capi/src/lib.rs`), tested
   through every call against the official test vectors, and from a C
@@ -94,15 +94,12 @@ check and pays nothing for it.
 A mistake that would give a wrong digest with no error is made
 impossible where a type can: the batch calls take a `Batch`, which lets
 the program write only its messages' bytes, so the bytes past each
-message, which the AArch64 kernels hash as they stand, stay zero. A
-stream's `fill` has `Read::read`'s contract, so a short write is
-continued, never hashed with stale bytes.
+message, which the AArch64 kernels hash as they stand, stay zero.
 
 Some checks use plain `assert!` in every build, guarding what a user
 would otherwise never see. Some guard progress in loops: without them,
 bad internal state could make a loop repeat forever, with no result and
-no error. One guards a stream's `fill` that ends before its message's
-length. Each costs one comparison.
+no error. Each costs one comparison.
 
 Most of these checks are loop variants. Meyer used that term in Design by
 Contract for a quantity that decreases on every pass and cannot decrease
@@ -154,14 +151,14 @@ deleted line moves every later panic's location in the binary, and the
 tested builds' incremental optimization keeps code a release build
 drops. Hashing alike there, it is same code too. Every other
 mutant a test survives is
-listed with its reason in `tools/mutants/known-aarch64.txt`: code for
+listed with its reason in `tools/mutants/known-aarch64.txt` (the crate
+with the pool has its own lists, in `tools/mutants/threads/`): code for
 another machine (x86, a CPU without SME2 or the SHA-3 extension, one
 CPU), a choice between equally correct paths (what to prefetch, a speed
 threshold, how work is cut among threads, how long an idle worker
 spins), or an equivalent change (`|` made `^` on flag bits that never
-overlap). Two groups stay open: the thread pool's and the stream's
-scheduling under interleavings the tests leave to chance (Loom would
-force them). The assembly kernels are the proofs'.
+overlap). One group stays open: the thread pool's scheduling under
+interleavings the tests leave to chance (Loom would force them). The assembly kernels are the proofs'.
 
 A mutant that changes only speed is work to finish (Zooko, November 3;
 BLAKE3 #219). Either a test catches it at once and the same way on every
@@ -239,10 +236,11 @@ unrolled kernel code.
   positions. `test_every_call_inside_guard_pages` takes every other
   public call that reads a caller's bytes or writes into a caller's
   places, in each mode, from 0 bytes to 1 MiB + 5: `hash_with`,
-  `hash_xof`, `throughput::hash` and `hash_multithreaded`,
-  `throughput::update_multithreaded`, `finalize_each`, and the stream's `submit`,
-  `submit_with` and `submit_batch` with their digests; the key and the
-  context string sit against pages too. The C API has its own
+  `hash_xof`, `throughput::hash`, the Hasher's `update` and
+  `finalize_each`; the key and the context string sit against pages
+  too. The crate with the pool does the same for its calls
+  (`test_every_multithreaded_call_inside_guard_pages`:
+  `hash_multithreaded`, `update_multithreaded` and the rest). The C API has its own
   (`capi/tests/guard_pages.rs`), with the hasher's state in guarded
   memory as well. A byte planted past an input (in `throughput::hash`)
   or past an output (in `b3_hasher_finalize_xof`) crashes them. They found
@@ -476,10 +474,11 @@ each bug are in `git log`.
    like a padded group, and an assertion stopped the program. The
    function now records its own choice.
 4. **A `Stream` branch would have hashed only the last buffer**
-   (`finalize_handed_over` in `src/stream.rs`). That state cannot
+   (`finalize_handed_over`, in the stream's code of that time; 0.9
+   offers no stream). That state cannot
    occur once a buffer has been handed over; the branch is now a
    fail-stop `expect`.
-5. **On macOS a pool could allocate after warm-up** (`src/lanes.rs`).
+5. **On macOS a pool could allocate after warm-up** (`threads/src/lanes.rs`).
    The pool now makes every `Mutex` and `Condvar` it needs while it
    starts, before any thread first sleeps.
 6. **`update_reader` could lose bytes before an error**
@@ -487,7 +486,7 @@ each bug are in `git log`.
    hashing bytes the reader had already consumed. The bytes read are
    now hashed first.
 7. **A data race by Rust's aliasing rules** (the stream's chain in
-   `src/lanes.rs`). A submitter held a reference to a whole slot while
+   `threads/src/lanes.rs`). A submitter held a reference to a whole slot while
    another thread could take that slot's buffer. Only the field is now
    touched, through the raw pointer. Miri found it, back when the crate
    had portable Rust kernels for Miri to run.
