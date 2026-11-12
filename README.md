@@ -53,6 +53,13 @@ blake3_servil::initialize(); // once, before any other call
 let hash = blake3_servil::convenience::hash(b"foobarbaz");
 ```
 
+**Two crates.** `blake3-servil` is the one most programs want: every
+call, and a pool of threads for the calls that hash on every core.
+`blake3-servil-core` is the same library on one thread: the same
+kernels and the same calls but the multithreaded ones, and it starts no
+thread. `blake3-servil` contains it whole, so a program depends on one
+of the two.
+
 The [crate documentation](https://servil-software-factory.github.io/BLAKE3/blake3_servil/) covers the
 calls for programs that hash a lot, and the C library in [`capi/`](capi/).
 [`b3sum/README.md`](b3sum/README.md) covers the command-line tool.
@@ -84,7 +91,7 @@ Jack O'Connor's, kept and rebuilt around. `b3sum`'s command line and checkfiles 
 vectors are the BLAKE3 team's. What this fork adds: the
 64-bit Arm kernels (NEON with integer lanes, and SME2), the x86-64 kernels for whole
 chunks with a partial one, for the chunk root and, on AMD Zen 5 and later, for 32 chunks
-or 16 parent nodes at once, the thread pool, the stream and batch calls, the C API, the
+or 16 parent nodes at once, the thread pool, the batch calls, the C API, the
 proofs, and the tests of the tests.
 
 ## Contributing and licenses
