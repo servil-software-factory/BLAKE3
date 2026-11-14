@@ -1,0 +1,16 @@
+# This standalone binary crate has its own workspace/config root.
+# Keep the library workflow's clocks and outcomes, without library-only filters.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 1 }
+
+[profile.mutants]
+fail-fast = { max-fail = 1, terminate = "immediate" }
+slow-timeout = { period = "15s", terminate-after = 1 }
+status-level = "all"
+final-status-level = "none"
+
+[profile.mutants-map]
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 1 }
+status-level = "all"
+final-status-level = "none"

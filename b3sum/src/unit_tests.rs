@@ -128,3 +128,14 @@ fn test_filepath_to_string() {
     assert_eq!(output.filepath_string, "f\\\\ \t\\r\\noo");
     assert!(output.is_escaped);
 }
+
+#[test]
+fn test_outbuf_boundaries() {
+    let mut ob = crate::OutBuf::new();
+    ob.write_bytes(&vec![b' '; crate::OUT_BUF_CAP]).unwrap();
+    assert_eq!(ob.buf.len(), crate::OUT_BUF_CAP, "exact OUT_BUF_CAP stays buffered");
+    ob.write_bytes(b" ").unwrap();
+    assert_eq!(ob.buf.len(), 1, "exceeding OUT_BUF_CAP flushes prior bytes first");
+    ob.write_bytes(&vec![b' '; crate::OUT_BUF_CAP]).unwrap();
+    assert!(ob.buf.is_empty(), "single write >= OUT_BUF_CAP writes directly after flush");
+}

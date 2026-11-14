@@ -18,7 +18,8 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 import check
 
 # One small file of the crate, every mutant of it caught or unbuildable.
-FILE = "src/lib.rs" if check.CRATE else "src/io.rs"
+FILE = (os.path.relpath(next(t["src_path"] for t in check.TARGETS if "lib" in t["kind"] or "bin" in t["kind"]), check.CRATE_DIR)
+        if check.CRATE else "src/io.rs")
 
 def trees():
     """The worktrees under check.py's directory, by name."""

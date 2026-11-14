@@ -55,7 +55,7 @@ fork commit: the mutants in the lines the change since SINCE makes, judged
 against the list for this machine. Its exit is the verdict, and each run's
 outcomes land in the job's mutants-last/. No timing: other programs on the
 Mac can only make some mutants time out, an outcome of their own.)
-    {"type": "mutants-whole", "fork_commit": "...", "crate": "." | "threads"}
+    {"type": "mutants-whole", "fork_commit": "...", "crate": "." | "threads" | "b3sum"}
 
 (A whole mutation run of one crate, the core at "." or the crate in
 threads/: tools/mutants/check.py --whole --write --crate CRATE at the fork
@@ -418,7 +418,7 @@ def mutants_whole(job, run, work, out):
     #374): the lists this machine writes, what that changes in the
     commit's lists, and every mutant's outcome."""
     crate = job.get("crate")
-    assert crate in (".", "threads"), 'crate must be "." (the core) or "threads" (the crate in threads/)'
+    assert crate in (".", "threads", "b3sum"), 'crate must be ".", "threads", or "b3sum"'
     fork, _ = run.checkouts(hex_commit(job, "fork_commit"), None)
     verdict = mutation_check(run, fork, ["--whole", "--write", "--crate", crate])
     fork = Path(fork)

@@ -32,3 +32,17 @@ memmap2 = "0.9"
 [dev-dependencies]
 duct = "1.0.0"
 tempfile = "3.1.0"
+
+# Match the library crates' test policy. This separate crate reads its
+# own profiles: optimized tests with checks, mutants as users' release code.
+[profile.test]
+opt-level = 3
+codegen-units = 16
+incremental = false
+debug = false
+debug-assertions = true
+overflow-checks = true
+
+[profile.mutants]
+inherits = "release"
+incremental = true

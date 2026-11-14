@@ -150,6 +150,19 @@ def build_args(crate):
     return ["--profile", "mutants"] + ([] if crate else ["--features", "serde,zeroize"])
 
 
+def test_args(targets):
+    """Library unit/integration tests, or a binary crate's unit/CLI tests."""
+    has_lib = any("lib" in t["kind"] for t in targets)
+    return (["--lib"] if has_lib else []) + ["--tests"]
+
+
+def same_code_supported(targets):
+    """Test-binary hashes alone cannot identify a CLI build: its integration
+    tests invoke a separate executable. Run those tests until that executable
+    is included in the fingerprint too (BLAKE3 #386)."""
+    return not any("bin" in t["kind"] for t in targets)
+
+
 def divide_list(text, moved):
     """A list's text as two: (what stays, what goes with the files of
     `moved` to another crate). Comments go to both; the `files:` and
@@ -300,8 +313,13 @@ SHARDS = 6
 HOST = next(l.split(": ", 1)[1] for l in subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True).stdout.splitlines() if l.startswith("host: "))
 # The target directory cargo is set to use (a cargo config's target-dir, or
 # the checkout's target/): the shards build inside it.
-TARGET_DIR = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=CRATE_DIR,
-                                       capture_output=True, text=True, check=True).stdout)["target_directory"]
+METADATA = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=CRATE_DIR,
+                                    capture_output=True, text=True, check=True).stdout)
+TARGET_DIR = METADATA["target_directory"]
+TARGETS = next(p["targets"] for p in METADATA["packages"]
+               if os.path.realpath(p["manifest_path"]) == os.path.realpath(os.path.join(CRATE_DIR, "Cargo.toml")))
+TESTS = test_args(TARGETS)
+SAME_CODE_SUPPORTED = same_code_supported(TARGETS)
 # cargo-mutants needs a limit on a mutant's tests (with --in-place it would
 # otherwise take 300 s). The run's one clock is nextest's, a test's 15 s
 # (.config/nextest.toml, profile mutants), which ends a hanging test first;
@@ -563,7 +581,9 @@ def run(files, extra=(), shards=SHARDS, label="run", loom=False, known=None, tkn
         env["MUTANTS_TEST_DATA_KIB"] = str(test_cap >> 10)
         # Through sh: a checkout's files may sit where nothing executes.
         env[f"CARGO_TARGET_{HOST.upper().replace('-', '_')}_RUNNER"] = "sh " + os.path.join(ROOT, "tools", "mutants", "test-runner")
-        if sys.platform == "linux":  # code_hash.py reads ELF
+        # Do not inherit another run's skip state into a binary-crate run.
+        env.pop("MUTANTS_SAME_CODE", None)
+        if sys.platform == "linux" and SAME_CODE_SUPPORTED:  # code_hash.py reads ELF
             # Fresh each run: its first build is this run's unmutated one.
             env["MUTANTS_SAME_CODE"] = os.path.join(target, "same-code")
             shutil.rmtree(env["MUTANTS_SAME_CODE"], ignore_errors=True)
@@ -587,7 +607,7 @@ def run(files, extra=(), shards=SHARDS, label="run", loom=False, known=None, tkn
         # Consecutive slices (cargo-mutants' default): a shard's mutants in one
         # file one after another rebuild less (round-robin evened the shards
         # and made each build 10% slower, the run no faster, October 21).
-        tests = ["--test", "shuttle_finish", "--test", "shuttle_park", "--test", "shuttle_waker"] if loom else ["--lib", "--tests"]
+        tests = ["--test", "shuttle_finish", "--test", "shuttle_park", "--test", "shuttle_waker"] if loom else TESTS
         shard = args + ["--shard", f"{k}/{shards}", "--output", os.path.join(tree, "mutants-result"), "--", *tests]
         runs.append((tree, subprocess.Popen(shard, cwd=os.path.join(tree, CRATE), env=env, preexec_fn=capped(shards))))
         envs[tree] = env
@@ -648,7 +668,7 @@ def run(files, extra=(), shards=SHARDS, label="run", loom=False, known=None, tkn
                     STOPPED.setdefault(name, set()).update(t for t, o, _ in tests if o == "TIMEOUT")
                 PLACE_OUTCOMES.setdefault(label, {})[(name, place)] = summary
             functions[(mutant["file"], function)].append((summary, name))
-            if summary == "MissedMutant" and sys.platform == "linux" and not loom:
+            if summary == "MissedMutant" and sys.platform == "linux" and SAME_CODE_SUPPORTED and not loom:
                 # A survivor whose tested build hashed otherwise: its
                 # release build's turn (release_same, after the shards).
                 survivors.setdefault(tree, []).append(((name, place), mutant["file"], open(os.path.join(out, outcome["diff_path"])).read(),

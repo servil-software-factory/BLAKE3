@@ -1,0 +1,213 @@
+# The mutants known to survive b3sum's tests on x86-64 Linux, each with its reason;
+# tools/mutants/check.py fails on any other survivor and on any listed one now caught.
+# A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
+files: src/main.rs src/linux_pipe.rs src/uring.rs
+src/linux_pipe.rs	delete ! in ColdRingState::step_ring	4	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	delete ! in WarmLargePipe::drain	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	delete ! in hash_single_cold_large_file_1t	1	linux_pipe sizing constant: buffer/ring/window size or bit shift; all paths compute identical hashes
+src/linux_pipe.rs	delete ! in run_hybrid_worker	12	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	delete ! in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	delete - in ColdRingState::step_ring	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace % with + in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace % with / in stream_fd_into_rooms	2	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace & with ^ in stream_fd_into_rooms	2	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace & with | in stream_fd_into_rooms	2	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace && with || in ColdRingState::step_ring	11	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace && with || in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace && with || in run_hybrid_worker	3	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace && with || in stream_fd_into_rooms	6	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace && with || in try_pread_cached	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace * with +	1	linux_pipe sizing constant: buffer/ring/window size or bit shift; all paths compute identical hashes
+src/linux_pipe.rs	replace * with + in ColdRingState::step_ring	3	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace * with + in WarmBatch::flush	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace * with + in WarmBatch::slot_ptr_and_cap	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace * with + in hash_paths_inner	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace * with + in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace * with / in ColdRingState::step_ring	3	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace * with / in WarmBatch::flush	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace * with / in WarmBatch::slot_ptr_and_cap	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace * with / in hash_paths_inner	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace * with / in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace + with *	1	linux_pipe sizing constant: buffer/ring/window size or bit shift; all paths compute identical hashes
+src/linux_pipe.rs	replace + with * in ColdRingState::queue_file	2	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace + with * in hash_paths_inner	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace + with * in run_hybrid_worker	3	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace + with * in stream_fd_into_rooms	3	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace + with - in hash_paths_inner	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace + with - in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace + with - in stream_fd_into_rooms	3	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace += with *= in ColdRingState::step_ring	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace += with *= in pread_fill_rest	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace += with *= in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace += with -= in ColdRingState::step_ring	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace += with -= in pread_fill_rest	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace += with -= in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace - with + in ColdRingState::queue_file	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace - with + in ColdRingState::step_ring	2	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace - with + in run_hybrid_worker	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace - with + in try_pread_cached	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace - with / in ColdRingState::step_ring	2	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace - with / in WarmBatch::flush	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace - with / in run_hybrid_worker	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace -= with += in ColdRingState::step_ring	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace -= with += in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace -= with /= in ColdRingState::step_ring	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace -= with /= in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace / with % in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace / with * in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace < with <= in ColdRingState::step_ring	4	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace < with <= in ensure_spare_cap	1	linux_pipe sizing constant: buffer/ring/window size or bit shift; all paths compute identical hashes
+src/linux_pipe.rs	replace < with <= in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace < with <= in hash_paths_inner	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with <= in pread_fill_rest	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace < with <= in read_rest_sync_uninit	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace < with <= in run_hybrid_worker	4	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with <= in stream_fd_into_rooms	3	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace < with <= in try_pread_cached	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with == in ColdRingState::step_ring	4	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace < with == in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace < with == in hash_paths_inner	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with == in pread_fill_rest	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace < with == in read_rest_sync_uninit	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace < with == in run_hybrid_worker	4	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with == in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace < with == in try_pread_cached	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with > in ColdRingState::step_ring	4	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace < with > in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace < with > in hash_paths_inner	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with > in run_hybrid_worker	4	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace < with > in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace < with > in try_pread_cached	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace << with >>	1	linux_pipe sizing constant: buffer/ring/window size or bit shift; all paths compute identical hashes
+src/linux_pipe.rs	replace << with >> in ColdRingState::step_ring	3	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace << with >> in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace <= with > in ColdRingState::step_ring	4	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace <= with > in hash_paths_inner	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace <= with > in run_hybrid_worker	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace == with != in ColdRingState::step_ring	6	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace == with != in WarmBatch::push_raw	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace == with != in WarmLargePipe::drain	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace == with != in grow_descriptor_table	3	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace == with != in hash_paths_inner	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace == with != in pread_fill_rest	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace == with != in read_rest_sync_uninit	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace == with != in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace == with != in stream_fd_into_rooms	4	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace == with != in try_pread_cached	2	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace > with < in ColdRingState::queue_file	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace > with < in ColdRingState::step_ring	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace > with < in WarmBatch::flush	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace > with < in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace > with < in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace > with < in stream_fd_into_rooms	2	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace > with < in try_pread_cached	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace > with == in ColdRingState::queue_file	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace > with == in ColdRingState::step_ring	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace > with == in WarmBatch::flush	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace > with == in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace > with == in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace > with == in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace > with == in try_pread_cached	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace > with >= in ColdRingState::queue_file	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace > with >= in ColdRingState::step_ring	2	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace > with >= in WarmBatch::flush	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace > with >= in WarmBatch::push_raw	1	warm batching: 16 KiB / 16-slot arena batching vs single-item hash_slice_32 fallback (same hash)
+src/linux_pipe.rs	replace > with >= in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace > with >= in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace > with >= in stream_fd_into_rooms	4	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace > with >= in try_pread_cached	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace >= with < in grow_descriptor_table	2	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace >= with < in hash_paths_inner	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace >= with < in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace >= with < in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace grow_descriptor_table with ()	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace hash_single_cold_large_file_1t -> Option<io::Result<blake3::Hash>> with None	1	linux_pipe sizing constant: buffer/ring/window size or bit shift; all paths compute identical hashes
+src/linux_pipe.rs	replace try_pread_cached -> io::Result<(usize, bool)> with Ok((0, false))	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace | with & in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace | with & in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace | with ^ in grow_descriptor_table	1	performance setup: RLIMIT_NOFILE / dup2 fd-table pre-growth avoids kernel synchronize_rcu stalls without changing hashed output
+src/linux_pipe.rs	replace | with ^ in stream_fd_into_rooms	2	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/linux_pipe.rs	replace || with && in ColdRingState::queue_file	1	io_uring batching/fallback: slot/buffer pool cap, EINTR/EINVAL/EOPNOTSUPP sync-pread fallback, or deferred CQE queue
+src/linux_pipe.rs	replace || with && in run_hybrid_worker	1	hybrid worker dispatch: RWF_NOWAIT probe vs io_uring vs sync fallback, submit_batch threshold, or worker count heuristic (same hash)
+src/linux_pipe.rs	replace || with && in stream_fd_into_rooms	1	streaming window/retry: io_uring large-file window, EINTR retry, speculative max_issue_seq bound, or short-pread completion loop
+src/main.rs	delete ! in hash_paths_32	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	delete - in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace & with ^ in resident	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace & with | in resident	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace && with || in resident	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace && with || in use_pool_for	2	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace * with +	1	sizing constant: MAP_LEN / OUT_BUF_CAP / HOLD_PAGES shift or arithmetic; all paths compute the same digest
+src/main.rs	replace * with + in hash_path	2	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace * with / in hash_path	2	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace + with * in hash_path_hash	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace + with * in hold	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace + with * in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace + with - in hold	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace + with - in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace - with + in pool_threads	1	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace - with + in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace - with / in pool_threads	1	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace < with <= in check_one_checkfile	1	batch chunking: CHECK_CHUNK 256 vs 257 checkfile line batch size produces identical check results
+src/main.rs	replace < with <= in fill	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with <= in hash_path	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with <= in hash_path_hash	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with <= in mapped	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace < with <= in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with <= in write_all_stdout	1	stdio retry/buffer sizing: EINTR/short-write loop on stdout writes or output buffer capacity
+src/main.rs	replace < with == in hash_path	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with == in hash_path_hash	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with == in mapped	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace < with == in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with == in write_all_stdout	1	stdio retry/buffer sizing: EINTR/short-write loop on stdout writes or output buffer capacity
+src/main.rs	replace < with > in hash_path	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with > in hash_path_hash	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace < with > in mapped	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace << with >>	3	sizing constant: MAP_LEN / OUT_BUF_CAP / HOLD_PAGES shift or arithmetic; all paths compute the same digest
+src/main.rs	replace <= with > in hold	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace == with != in check_one_checkfile	1	batch chunking: CHECK_CHUNK 256 vs 257 checkfile line batch size produces identical check results
+src/main.rs	replace == with != in fill	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace == with != in hash_inputs	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace == with != in hash_path	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace == with != in hash_path_hash	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace == with != in read_all_uninit	3	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace == with != in resident	2	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace == with != in update_from	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace == with != in write_all_stdout	1	stdio retry/buffer sizing: EINTR/short-write loop on stdout writes or output buffer capacity
+src/main.rs	replace > with < in use_pool_for	2	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace > with == in use_pool_for	2	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace > with >= in use_pool_for	2	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace >= with < in hash_inputs_with	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace >= with < in hash_path_hash	2	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace >= with < in hash_paths_32	2	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace >= with < in use_pool_for	2	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace Args::num_threads -> Option<std::num::NonZeroUsize> with None	1	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace Args::num_threads -> Option<std::num::NonZeroUsize> with Some(1.try_into().unwrap())	1	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace explain_sigbus with ()	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace explain_sigbus::on_sigbus with ()	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace hold with ()	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace mapped -> Option<memmap2::Mmap> with None	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace match guard e.kind() == io::ErrorKind::Interrupted with false in fill	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace match guard e.kind() == io::ErrorKind::Interrupted with false in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace match guard e.kind() == io::ErrorKind::Interrupted with true in fill	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace match guard e.kind() == io::ErrorKind::Interrupted with true in read_all_uninit	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace match guard parsed.file_path == Path::new("-") with false in check_one_checkfile	1	batch vs serial path: `-` through Entry::File hits hash_paths_32 which falls back to hash_path_hash, and regular files through Entry::Stdin hit hash_path_hash directly
+src/main.rs	replace match guard parsed.file_path == Path::new("-") with true in check_one_checkfile	1	batch vs serial path: `-` through Entry::File hits hash_paths_32 which falls back to hash_path_hash, and regular files through Entry::Stdin hit hash_path_hash directly
+src/main.rs	replace pool_threads -> std::num::NonZeroUsize with 1.try_into().unwrap()	1	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace resident -> bool with false	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace resident -> bool with true	1	heuristic/diagnostic: mincore residency heuristic, mmap hold window, or SIGBUS message; unmapped read fallback gives the same hash
+src/main.rs	replace threads -> std::num::NonZeroUsize with 1.try_into().unwrap()	1	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace use_pool_for -> bool with false	1	parallelism policy: thread-pool threshold or thread count; single- and multi-threaded execution produce identical hashes
+src/main.rs	replace || with && in hash_paths_32	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/main.rs	replace || with && in update_from	1	I/O strategy/retry: 64 KiB MAP_LEN mmap-vs-read threshold, pre-allocation sizing, EINTR retry, or linux_pipe fast-path vs serial fallback (same hash)
+src/uring.rs	delete ! in <impl Drop for Uring>::drop	1	kernel behavior: Linux >= 5.4 sets IORING_FEAT_SINGLE_MMAP so single_mmap is always true here; separate cq_ring munmap only runs on older kernels
+src/uring.rs	delete ! in Uring::submit_and_wait	1	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace != with == in Uring::submit_and_wait	1	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace & with ^ in Uring::submit_and_wait	1	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace & with | in Uring::submit_and_wait	1	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace && with || in Uring::submit_and_wait	2	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace << with >>	6	equivalent or fallback: 1 << 0 equals 1 >> 0 (SINGLE_MMAP, GETEVENTS); IORING_SETUP_* shifts fall back cleanly through try_flags to flags = 0
+src/uring.rs	replace == with != in Uring::submit_and_wait	5	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace > with < in Uring::submit_and_wait	1	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace > with == in Uring::submit_and_wait	1	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace > with >= in Uring::submit_and_wait	2	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
+src/uring.rs	replace || with && in Uring::submit_and_wait	1	kernel/signal path: EINTR retry loop, partial-submission to_submit loop, DEFER_TASKRUN need_getevents hint, or empty-submit early return
