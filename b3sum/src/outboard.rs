@@ -146,7 +146,10 @@ pub(crate) fn outboard_direct(mode: blake3::Mode, path: &Path, threads: usize, m
     let mut byte = 0u8;
     let iov = libc::iovec { iov_base: (&raw mut byte).cast(), iov_len: 1 };
     // Sound: one iovec over one writable byte.
-    if unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, 0, libc::RWF_NOWAIT) } == 1 {
+    // (A file system without such reads, as a tmpfs, says something else:
+    // its files are in memory.)
+    let got = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, 0, libc::RWF_NOWAIT) };
+    if !(got == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock) {
         return None;
     }
     direct(mode, path, usize::try_from(meta.len()).ok()?, threads, mine, cvs, out)
