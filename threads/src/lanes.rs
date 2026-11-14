@@ -316,13 +316,14 @@ fn with_scratch<C, T>(cut: impl FnOnce(&mut Vec<Piece>) -> C, job: impl FnOnce(C
 /// takes one), handed to `merge`.
 fn tree_cvs<T>(pool: &Pool, input: &[u8], key: &crate::CVWords, counter: u64, flags: u8, merge: impl FnOnce(&[Piece], &mut [ChainingValue]) -> T) -> T {
     let turn = crate::platform::Sme2Turn::take(Platform::detect(), true);
-    let threads = tree_threads(input.len(), pool.threads_for(input.len()), turn.platform().simd_degree());
+    let (threads, near) = pool.threads_for(input.len());
+    let threads = tree_threads(input.len(), threads, turn.platform().simd_degree());
     let prefix = prefix_for(&turn, input.len(), threads);
     with_scratch(
         |pieces| cut_with_prefix(pieces, input.len(), threads, prefix),
         |own, pieces, cvs| {
             let work = Work::Tree { input, pieces, cvs: cvs.as_mut_ptr(), key: *key, counter, flags };
-            pool.run_job(work, pieces.len(), own, turn.platform(), threads);
+            pool.run_job(work, pieces.len(), own, turn.platform(), threads, near);
             drop(turn);
             merge(pieces, cvs)
         },
@@ -367,12 +368,12 @@ fn hash_many_over_pool(input: &[u8], message_len: usize, slot: usize, key: &crat
         return crate::hash_many_serial(input, message_len, slot, key, flags, outputs);
     };
     let count = outputs.len();
-    let threads = pool.threads_for(input.len());
+    let (threads, near) = pool.threads_for(input.len());
     with_scratch(
         |pieces| cut_messages(pieces, count, slot, threads),
         |(), pieces, _| {
             let work = Work::Messages { input, message_len, slot, key: *key, flags, pieces, outputs: outputs.as_mut_ptr() };
-            pool.run_job(work, pieces.len(), 0, pool_platform(), threads);
+            pool.run_job(work, pieces.len(), 0, pool_platform(), threads, near);
         },
     )
 }
@@ -387,12 +388,12 @@ pub(crate) fn hash_each(key: &crate::CVWords, flags: u8, items: &[(&[crate::thro
         let platform = Platform::detect();
         return crate::each::hash_each_on(key, flags, items, out, platform, |item| hash_small_on(item, key, flags, platform));
     };
-    let threads = pool.threads_for(items.iter().map(|i| i.1).sum());
+    let (threads, near) = pool.threads_for(items.iter().map(|i| i.1).sum());
     with_scratch(
         |pieces| cut_items(pieces, items, threads),
         |(), pieces, _| {
             let work = Work::Each { items, key: *key, flags, pieces, outputs: out.as_mut_ptr() };
-            pool.run_job(work, pieces.len(), 0, pool_platform(), threads);
+            pool.run_job(work, pieces.len(), 0, pool_platform(), threads, near);
         },
     )
 }
@@ -994,7 +995,7 @@ impl Pool {
     /// hashes pieces `0..own` on `own_platform`, back to back (the SME2
     /// thread's prefix; the workers' pieces start after it). A caller that
     /// finds no source slot free hashes every piece itself.
-    fn run_job(&self, work: Work, pieces: usize, own: usize, own_platform: Platform, threads: usize) {
+    fn run_job(&self, work: Work, pieces: usize, own: usize, own_platform: Platform, threads: usize, near: bool) {
         crate::ran(crate::Ran::Pool);
         #[cfg(test)]
         WAKES_WANTED.with(|w| w.set(None));
@@ -1008,7 +1009,7 @@ impl Pool {
         // wait is over: nothing runs on the normal path).
         let ptr = &job as *const Job as *mut Job<'static>;
         let published = AbortOnUnwind;
-        let target = source.publish_job(ptr, pieces, own);
+        let target = source.publish_job(ptr, pieces, own, near);
         if slot.is_some() {
             // A worker for each piece past the caller's first (none for a
             // job of one past its own: a wake for none is nothing); for a
@@ -1016,7 +1017,16 @@ impl Pool {
             let wanted = (pieces - own - 1).min(threads.saturating_sub(1));
             #[cfg(test)]
             WAKES_WANTED.with(|w| w.set(Some(wanted)));
-            self.wake_for(wanted);
+            if near {
+                // The first few; each worker that takes a piece wakes the next.
+                for _ in 0..wanted.min(crate::park::FANOUT) {
+                    if !self.park.wake_one_near() {
+                        break;
+                    }
+                }
+            } else {
+                self.wake_for(wanted);
+            }
         }
         for index in 0..own {
             // Sound: the workers' pieces start past these.
@@ -1040,13 +1050,13 @@ impl Pool {
     /// The threads a job of `len` bytes is cut for and wakes, its caller
     /// among them: on a machine whose workers have places, a job under
     /// FAR_LEN stays with the workers of the caller's place.
-    fn threads_for(&self, len: usize) -> usize {
+    fn threads_for(&self, len: usize) -> (usize, bool) {
         if len < places::far_len()
             && let Some(near) = places::near_workers()
         {
-            return (near + 1).min(self.threads);
+            return ((near + 1).min(self.threads), true);
         }
-        self.threads
+        (self.threads, false)
     }
 
     /// Wake workers for `wanted` pieces of new work (crate::park).
@@ -1164,6 +1174,9 @@ pub(crate) mod sources {
         /// claimed numbers' until `finish.finished` passes them.
         job: AtomicPtr<Job<'static>>,
         base: AtomicUsize,
+        /// Whether the current job stays with the workers of its caller's
+        /// place (a job under FAR_LEN, where workers have places).
+        near: core::sync::atomic::AtomicBool,
         /// What is published and what is finished, and the handshake
         /// between the waiting caller and the worker finishing its last
         /// piece (crate::finish, which Loom checks).
@@ -1204,6 +1217,7 @@ pub(crate) mod sources {
                     .collect(),
                 job: AtomicPtr::new(core::ptr::null_mut()),
                 base: AtomicUsize::new(0),
+                near: core::sync::atomic::AtomicBool::new(false),
                 finish: crate::finish::Finish::new(),
             }
         }
@@ -1271,9 +1285,10 @@ pub(crate) mod sources {
 
         /// Make `job` the caller's current job, its pieces `0..own` the
         /// caller's own: the number `finished` must reach when it is done.
-        pub(crate) fn publish_job(&self, job: *mut Job<'static>, pieces: usize, own: usize) -> usize {
+        pub(crate) fn publish_job(&self, job: *mut Job<'static>, pieces: usize, own: usize, near: bool) -> usize {
             let base = self.finish.published.load(Ordering::Relaxed);
             debug_assert_eq!(self.finish.finished_count(), base, "the last job is finished");
+            self.near.store(near, Ordering::Relaxed);
             self.job.store(job, Ordering::Relaxed);
             self.base.store(base, Ordering::Relaxed);
             // No worker can claim a number yet (claimed == published), so
@@ -1472,7 +1487,11 @@ pub(crate) mod sources {
     fn serve(source: &'static Source, item: Item) {
         if source.waiting() >= 2 {
             noted(Noted::WakeTry);
-            pool().park.wake_one();
+            if source.near.load(Ordering::Relaxed) {
+                pool().park.wake_one_near();
+            } else {
+                pool().park.wake_one();
+            }
         }
         match item {
             Item::Action { run, context, arg } => {
@@ -1931,7 +1950,7 @@ mod test {
         // waiting forever (a broken build's every mutant hung this test).
         let _ = pool();
         let source = sources::job_source();
-        let target = source.publish_job(core::ptr::null_mut(), 1, 0);
+        let target = source.publish_job(core::ptr::null_mut(), 1, 0, false);
         // An unpark this thread received earlier would let one park()
         // return at once and hide a missing wake-up.
         std::thread::park_timeout(core::time::Duration::ZERO);
@@ -2528,7 +2547,7 @@ mod test {
         let mut cvs = std::vec![ChainingValue::default(); 3];
         let work = Work::Tree { input: &input[..24 * 1024], pieces: &pieces, cvs: cvs.as_mut_ptr(), key: *crate::IV, counter: 0, flags: 0 };
         let budget = tree_threads(24 * 1024, pool.threads, degree) - 1;
-        pool.run_job(work, 3, 0, Platform::detect(), budget + 1);
+        pool.run_job(work, 3, 0, Platform::detect(), budget + 1, false);
         assert_eq!(wanted(), Some(2.min(budget)), "three pieces: two workers, or the budget");
         assert_eq!(merge_root(&pieces, &mut cvs, crate::IV, 0), crate::convenience::hash(&input[..24 * 1024]));
         // A call the pool never sees asks for nothing (run_job clears the

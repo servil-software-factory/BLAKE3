@@ -106,6 +106,15 @@ impl Park {
         self.wake_one_of(None)
     }
 
+    /// Wake one parked worker of the waker's own place, if any (any
+    /// worker, where the workers have no places): whether one was.
+    pub(crate) fn wake_one_near(&self) -> bool {
+        match self.near.get() {
+            Some((places, here)) => places.get(here()).is_some_and(|mine| self.wake_one_of(Some(mine))),
+            None => self.wake_one_of(None),
+        }
+    }
+
     /// The workers' places, once: `places[p]` the workers of place p,
     /// `here` the asking thread's place.
     pub(crate) fn set_places(&self, places: Box<[Box<[u64]>]>, here: fn() -> usize) {
