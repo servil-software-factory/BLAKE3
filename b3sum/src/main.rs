@@ -948,84 +948,94 @@ fn hash_paths_32(args: &Args, paths: &[PathBuf], on_ordered: &mut dyn FnMut(usiz
     });
 }
 
+/// The outboards' files are created by this many threads, apart from the
+/// ones that hash: creating a file takes its directory's lock, so more
+/// threads than a few only wait for one another, and the hashing threads
+/// would wait with them.
+const OUTBOARD_WRITERS: usize = 2;
+
 /// `--outboard DIR`: each file's hash, printed as ever, and its outboard
 /// written to DIR/<hash>.obao4 (outboard.rs).
 ///
-/// A file of one chunk group or less has an empty outboard, so only its
-/// hash is work: those files go through the engine that hashes many files
-/// (`hash_paths_32`: io_uring on Linux). The longer files are shared out
-/// among threads started once for the run, each with rooms of its own for
-/// a file's bytes, chaining values and nodes; where there are fewer such
-/// files than threads, each file takes several. The threads write the
-/// outboards, the empty ones too. The lines are printed in the files'
-/// order, once all are done.
+/// The files are shared out among threads started once for the run, each
+/// with rooms of its own for a file's bytes and chaining values; where
+/// there are fewer files than threads, each file takes several. A thread
+/// hands each outboard to the writers and takes the next file. The lines
+/// are printed in the files' order, once all are done. One file is hashed
+/// and written by the caller's thread alone.
 fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
+    use std::sync::{Mutex, mpsc};
     let paths = &args.file_args;
-    let small = |path: &PathBuf| path != Path::new("-") && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= outboard::GROUP as u64);
-    let (short, long): (Vec<usize>, Vec<usize>) = (0..paths.len()).partition(|&i| small(&paths[i]));
-    let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
-    if !short.is_empty() {
-        let short_paths: Vec<PathBuf> = short.iter().map(|&i| paths[i].clone()).collect();
-        hash_paths_32(args, &short_paths, &mut |k, hash| {
-            results[short[k]] = Some(hash);
-            true
-        });
-    }
-    // The threads' work, in turn: the longer files, then the short ones'
-    // empty outboards.
-    let threads = threads().get().min(paths.len()).max(1);
-    let in_a_file = (crate::threads().get() / long.len().max(1)).max(1);
+    let workers = threads().get().min(paths.len());
+    let in_a_file = (threads().get() / paths.len().max(1)).max(1);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let done = std::sync::Mutex::new(Vec::<(usize, anyhow::Result<blake3::Hash>)>::new());
-    let short_hashes: Vec<Option<blake3::Hash>> = short.iter().map(|&i| results[i].as_ref().and_then(|r| r.as_ref().ok().copied())).collect();
-    let work = || {
-        let (mut cvs, mut nodes, mut bytes) = (Vec::new(), Vec::new(), Vec::new());
-        #[cfg(target_os = "linux")]
-        let mut piece = outboard::Piece::new();
+    let done = Mutex::new(Vec::<(usize, anyhow::Result<blake3::Hash>)>::new());
+    // To the writers: a file's index, its hash, its outboard; no more
+    // waiting than a few a writer, so that outboards are not made faster
+    // than they are written. Back from them: the outboards' buffers, for
+    // the next files.
+    type Made = (usize, blake3::Hash, Vec<u8>);
+    let (to_writers, made) = mpsc::sync_channel::<Made>(8 * OUTBOARD_WRITERS);
+    let (to_workers, spare) = mpsc::channel::<Vec<u8>>();
+    let (made, spare) = (Mutex::new(made), Mutex::new(spare));
+    let unwritten = Mutex::new(Vec::<(usize, io::Error)>::new());
+    let write = |(i, hash, nodes): Made| {
+        if let Err(e) = std::fs::write(outboard::path_in(dir, &hash), &nodes) {
+            unwritten.lock().unwrap().push((i, e));
+        }
+        if nodes.capacity() > 0 {
+            // No worker may be left to take it.
+            let _ = to_workers.send(nodes);
+        }
+    };
+    let work = |hand: &dyn Fn(Made)| {
+        let mut rooms = outboard::Rooms::new();
         let mut mine = Vec::new();
         loop {
-            let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if k < long.len() {
-                let i = long[k];
-                nodes.clear();
-                #[cfg(target_os = "linux")]
-                let direct = outboard::outboard_direct(args.mode, &paths[i], in_a_file, &mut piece, &mut cvs, &mut nodes);
-                #[cfg(not(target_os = "linux"))]
-                let direct = None;
-                let hashed = match direct {
-                    Some(hash) => std::fs::write(outboard::path_in(dir, &hash), &nodes).map(|()| hash).map_err(Into::into),
-                    None => with_file_bytes(&paths[i], &mut bytes, |data| {
-                        let hash = outboard::outboard(args.mode, data, in_a_file, &mut cvs, &mut nodes);
-                        std::fs::write(outboard::path_in(dir, &hash), &nodes)?;
-                        Ok(hash)
-                    }),
-                };
-                mine.push((i, hashed));
-            } else if k < long.len() + short.len() {
-                let k = k - long.len();
-                if let Some(hash) = short_hashes[k]
-                    && let Err(e) = std::fs::write(outboard::path_in(dir, &hash), b"")
-                {
-                    mine.push((short[k], Err(e.into())));
-                }
-            } else {
-                break;
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(path) = paths.get(i) else { break };
+            let mut nodes = spare.lock().unwrap().try_recv().unwrap_or_default();
+            nodes.clear();
+            let hashed = outboard_of(args.mode, path, in_a_file, &mut rooms, &mut nodes);
+            if let Ok(hash) = &hashed {
+                hand((i, *hash, nodes));
             }
+            mine.push((i, hashed));
         }
         done.lock().unwrap().append(&mut mine);
     };
-    if threads == 1 {
-        work();
+    if workers <= 1 {
+        work(&write);
     } else {
         std::thread::scope(|scope| {
-            for _ in 1..threads {
-                scope.spawn(work);
+            for _ in 0..OUTBOARD_WRITERS {
+                scope.spawn(|| {
+                    loop {
+                        // The lock is let go before the file is written.
+                        let next = made.lock().unwrap().recv();
+                        let Ok(next) = next else { break };
+                        write(next);
+                    }
+                });
             }
-            work();
+            let work = &work;
+            for _ in 1..workers {
+                let to_writers = to_writers.clone();
+                scope.spawn(move || work(&|made| to_writers.send(made).expect("the writers run until every sender is done")));
+            }
+            work(&|made| to_writers.send(made).expect("the writers run until every sender is done"));
+            // The writers end when the channel does: when every thread's
+            // sender is gone.
+            drop(to_writers);
         });
     }
+    let unwritten = unwritten.into_inner().unwrap();
+    let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
     for (i, result) in done.into_inner().unwrap() {
         results[i] = Some(result);
+    }
+    for (i, e) in unwritten {
+        results[i] = Some(Err(e.into()));
     }
     let mut failed = 0u64;
     for (path, result) in paths.iter().zip(results) {
@@ -1039,26 +1049,52 @@ fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
     failed
 }
 
-/// `f` over a whole input's bytes: a file mapped where it can be (the
-/// mapping then held, as every mapping b3sum makes: `hold`), else read
-/// into `buffer`; `-` is standard input.
-fn with_file_bytes<T>(path: &Path, buffer: &mut Vec<u8>, f: impl FnOnce(&[u8]) -> anyhow::Result<T>) -> anyhow::Result<T> {
-    buffer.clear();
+/// The hash of the input at `path` (`-`: standard input), and its
+/// outboard appended to `nodes`. A file under MAP_LEN is read into the
+/// thread's room by one read; a longer one that the page cache does not
+/// hold is read directly, where the system has such reads (Linux); any
+/// other is mapped where it can be (the mapping then held, as every
+/// mapping b3sum makes: `hold`), else read whole.
+fn outboard_of(mode: blake3::Mode, path: &Path, threads: usize, rooms: &mut outboard::Rooms, nodes: &mut Vec<u8>) -> anyhow::Result<blake3::Hash> {
+    let bytes = &mut rooms.bytes;
+    bytes.clear();
     if path == Path::new("-") {
-        io::stdin().lock().read_to_end(buffer)?;
-        return f(buffer);
+        io::stdin().lock().read_to_end(bytes)?;
+        return Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes));
     }
     let mut file = File::open(path)?;
+    let meta = file.metadata()?;
     #[cfg(unix)]
-    if file.metadata()?.len() > 0
+    if meta.is_file() && meta.len() < MAP_LEN as u64 {
+        // One read of the length the file has now: what a longer read
+        // or a second would say is that it has since grown.
+        let len = meta.len() as usize;
+        bytes.resize(len, 0);
+        let mut got = 0;
+        while got < len {
+            match file.read(&mut bytes[got..])? {
+                0 => break,
+                n => got += n,
+            }
+        }
+        return Ok(outboard::outboard(mode, &bytes[..got], threads, &mut rooms.cvs, nodes));
+    }
+    #[cfg(target_os = "linux")]
+    if meta.is_file()
+        && let Some(hash) = outboard::outboard_direct(mode, path, &file, meta.len(), threads, &mut rooms.piece, &mut rooms.cvs, nodes)
+    {
+        return Ok(hash);
+    }
+    #[cfg(unix)]
+    if meta.len() > 0
         && let Ok(map) = unsafe { memmap2::Mmap::map(&file) }
     {
-        let done = f(&map);
+        let hash = outboard::outboard(mode, &map, threads, &mut rooms.cvs, nodes);
         hold(map);
-        return done;
+        return Ok(hash);
     }
-    file.read_to_end(buffer)?;
-    f(buffer)
+    file.read_to_end(bytes)?;
+    Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes))
 }
 
 fn hash_inputs(args: &Args, out: &mut OutBuf) -> u64 {

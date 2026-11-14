@@ -25,6 +25,27 @@ pub(crate) const GROUP: usize = 16 * blake3::CHUNK_LEN;
 /// started for the file and a start costs what hashing a megabyte does.
 const GROUPS_A_THREAD: usize = 256;
 
+/// A thread's rooms, kept from file to file: for a file's bytes, for its
+/// tree's chaining values, and for a piece read directly.
+pub(crate) struct Rooms {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) cvs: Vec<Cv>,
+    /// Made by the first direct read: most runs have none.
+    #[cfg(target_os = "linux")]
+    pub(crate) piece: Option<Piece>,
+}
+
+impl Rooms {
+    pub(crate) fn new() -> Rooms {
+        Rooms {
+            bytes: Vec::new(),
+            cvs: Vec::new(),
+            #[cfg(target_os = "linux")]
+            piece: None,
+        }
+    }
+}
+
 /// The hash of `data` in `mode`, and its outboard appended to `out`. `cvs`
 /// is the caller's room for the tree's chaining values, kept from file to
 /// file.
@@ -104,9 +125,10 @@ impl Piece {
         Err(_) => panic!(),
     };
     pub(crate) fn new() -> Piece {
-        // Sound: the layout's size is not zero. Zeroed, so that the bytes
-        // are initialized whatever a read leaves.
-        let at = unsafe { std::alloc::alloc_zeroed(Self::LAYOUT) };
+        // Sound: the layout's size is not zero. Not zeroed: zeroing would
+        // touch every page (512 page faults, 0.7 ms on a Ryzen 7700X), and
+        // only bytes that a read has filled are ever read.
+        let at = unsafe { std::alloc::alloc(Self::LAYOUT) };
         if at.is_null() {
             std::alloc::handle_alloc_error(Self::LAYOUT);
         }
@@ -135,11 +157,19 @@ impl Drop for Piece {
 /// through the cache by a ring, at 5 GB/s through a map. The page cache
 /// does not hold the file afterwards.
 #[cfg(target_os = "linux")]
-pub(crate) fn outboard_direct(mode: blake3::Mode, path: &Path, threads: usize, mine: &mut Piece, cvs: &mut Vec<Cv>, out: &mut Vec<u8>) -> Option<blake3::Hash> {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn outboard_direct(
+    mode: blake3::Mode,
+    path: &Path,
+    file: &std::fs::File,
+    len: u64,
+    threads: usize,
+    mine: &mut Option<Piece>,
+    cvs: &mut Vec<Cv>,
+    out: &mut Vec<u8>,
+) -> Option<blake3::Hash> {
     use std::os::fd::AsRawFd;
-    let file = std::fs::File::open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() < DIRECT_MIN {
+    if len < DIRECT_MIN {
         return None;
     }
     // Is the first byte in the page cache? A read that may not wait says.
@@ -152,7 +182,7 @@ pub(crate) fn outboard_direct(mode: blake3::Mode, path: &Path, threads: usize, m
     if !(got == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock) {
         return None;
     }
-    direct(mode, path, usize::try_from(meta.len()).ok()?, threads, mine, cvs, out)
+    direct(mode, path, usize::try_from(len).ok()?, threads, mine.get_or_insert_with(Piece::new), cvs, out)
 }
 
 /// [`outboard_direct`]'s reading and hashing, for a file of `len` bytes,
@@ -345,6 +375,11 @@ mod test {
         // What is not read directly: a short file, and one the page cache holds.
         let path = dir.path().join(format!("file-{}", all.len()));
         assert!(all.len() as u64 >= DIRECT_MIN);
-        assert_eq!(outboard_direct(blake3::Mode::Plain, &path, 1, &mut piece, &mut cvs, &mut Vec::new()), None, "just written: the cache holds it");
+        let file = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            outboard_direct(blake3::Mode::Plain, &path, &file, all.len() as u64, 1, &mut None, &mut cvs, &mut Vec::new()),
+            None,
+            "just written: the cache holds it"
+        );
     }
 }
