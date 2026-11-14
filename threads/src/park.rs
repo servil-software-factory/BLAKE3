@@ -231,6 +231,55 @@ mod test {
         park
     }
 
+    #[cfg(not(shuttle))]
+    std::thread_local! {
+        /// The place the test's thread says it is in.
+        static HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Where the workers have places, a waker wakes its own place's
+    /// first, then its socket's, then any, the lowest-numbered of each;
+    /// `wake_one_near` wakes its own place's alone; a waker in a place
+    /// that is not listed wakes any. Six workers: places {0, 1}, {2, 3}
+    /// and {4, 5}, the first two places one socket.
+    #[test]
+    #[cfg(not(shuttle))]
+    fn a_waker_wakes_its_place_then_its_socket_then_any() {
+        let parked = |park: &Park| (0..6).filter(|&w| park.parked[0].load(Ordering::SeqCst) >> w & 1 == 1).collect::<Vec<_>>();
+        let with_places = || {
+            let park = park_with(6, 4, &[0, 1, 2, 3, 4, 5]);
+            let places: Box<[Box<[u64]>]> = [0b000011u64, 0b001100, 0b110000].iter().map(|&w| vec![w].into_boxed_slice()).collect();
+            let beside: Box<[Box<[u64]>]> = [0b001111u64, 0b001111, 0b110000].iter().map(|&w| vec![w].into_boxed_slice()).collect();
+            park.set_places(places, beside, || HERE.with(|h| h.get()));
+            park
+        };
+        let park = with_places();
+        HERE.with(|h| h.set(1));
+        for left in [vec![0, 1, 3, 4, 5], vec![0, 1, 4, 5], vec![1, 4, 5], vec![4, 5], vec![5], vec![]] {
+            assert!(park.wake_one());
+            assert_eq!(parked(&park), left, "place 1's, then its socket's, then the rest");
+        }
+        assert!(!park.wake_one(), "nobody parked");
+        let park = with_places();
+        HERE.with(|h| h.set(2));
+        assert!(park.wake_one_near() && park.wake_one_near());
+        assert_eq!(parked(&park), [0, 1, 2, 3]);
+        assert!(!park.wake_one_near(), "its place's workers are awake: no other is woken");
+        assert_eq!(parked(&park), [0, 1, 2, 3]);
+        assert!(park.wake_one(), "any waker wakes the others");
+        assert_eq!(parked(&park), [1, 2, 3]);
+        // A place that is not listed (a CPU the process was not on at the start).
+        HERE.with(|h| h.set(9));
+        assert!(!park.wake_one_near());
+        assert!(park.wake_one());
+        assert_eq!(parked(&park), [2, 3]);
+        // Without places, the near wake is any worker's.
+        let park = park_with(3, 4, &[1, 2]);
+        assert!(park.wake_one_near());
+        assert_eq!(park.parked_count(), 1);
+        HERE.with(|h| h.set(0));
+    }
+
     /// (Outside the Shuttle build, where park.rs is compiled again under
     /// Shuttle's threads and this thread has no handle to register.)
     /// The wakes a publisher makes and owes, exactly (BLAKE3 #219): of the

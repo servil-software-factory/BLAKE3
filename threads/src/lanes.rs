@@ -776,38 +776,143 @@ pub(crate) fn initialize(threads: usize) {
         .expect("spawning a BLAKE3 worker");
 }
 
-/// The workers' places: on a machine with more than one last-level cache
+/// The workers' places. On a machine with more than one last-level cache
 /// (several sockets, or an EPYC's cores in groups of six or eight), each
-/// worker runs on the CPUs under one of them, and a waker wakes a worker
-/// under its own first. Work a caller has just written is in its cache; a
-/// worker under another fetches it line by line across the machine (2x
-/// EPYC 7443, 64 KiB rooms through a Pipeline: 2.5 us a room with the
-/// workers under the caller's cache, 4.4 to 9.4 us with them anywhere;
-/// BLAKE3 #389). With one cache, or where the system does not say (any but
-/// Linux), nothing is set and the workers run where the system puts them.
+/// worker runs on the CPUs under one of them, its place, and a waker wakes
+/// the workers of its own place first, then its socket's, then any.
+///
+/// Work a caller has just written is in its cache, and a worker under
+/// another fetches it line by line across the machine. 2x EPYC 7443 (eight
+/// caches of six cores), 64 KiB rooms through a Pipeline: 3.0 us a room
+/// with places, 6.4 us (3.7 to 10.7 from run to run) without; a 1 MiB
+/// message through `hash_multithreaded`, read into a buffer and hashed:
+/// 74 us with places, 437 us without, 236 us on one thread (BLAKE3 #389).
+/// Both parts are needed: the wake order alone, with the workers free to
+/// move, gained nothing, and neither did the workers held in place and
+/// woken in any order.
+///
+/// With one such cache, or where the system does not say (any system but
+/// Linux), nothing is set and the workers run where the system puts
+/// them. The workers' CPUs are among those the process may run on, and the
+/// calling threads are left alone.
 pub(crate) mod places {
     use super::*;
+    use std::vec::Vec;
 
-    /// CPUs a set holds: the kernel's own limit for the calls below.
+    /// A job under this many bytes is cut for, and wakes, the workers of
+    /// its caller's place alone: 48 MiB. 2x EPYC 7443, a message read into
+    /// a buffer and hashed, its place's workers against all: 16 MiB, 1.4
+    /// against 3.0 ms; 32 MiB, 2.7 against 4.0; 64 MiB, 6.2 against 5.3;
+    /// 256 MiB, 25 against 21. A batch of 65,536 messages of 64 bytes
+    /// (4 MiB): 0.26 against 3.5 ms; of 1,048,576 (64 MiB): 6.5 against 5.2.
+    pub(crate) const FAR_LEN: usize = 48 << 20;
+
+    /// The most CPUs a set names: the kernel's own limit.
     const CPUS: usize = 1024;
     type Set = [u64; CPUS / 64];
 
-    struct Places {
-        /// Each CPU's place.
+    /// A CPU the process may run on: its number, its last-level cache
+    /// (any number that the CPUs sharing it share), its socket.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(crate) struct Cpu {
+        pub(crate) cpu: usize,
+        pub(crate) cache: usize,
+        pub(crate) socket: usize,
+    }
+
+    /// The places of a machine and of `workers` workers.
+    #[derive(Debug, PartialEq)]
+    pub(crate) struct Places {
+        /// Each CPU's place (0 for a CPU the process may not run on).
         of_cpu: Box<[u8]>,
-        /// Each place's CPUs, those this process may run on.
+        /// Each place's CPUs.
         cpus: Box<[Set]>,
         /// Each worker's place.
         of_worker: Box<[u8]>,
+        /// Each place's workers, as bits (crate::park's `parked`).
+        near: Box<[Box<[u64]>]>,
+        /// Each place's socket's workers, as bits.
+        beside: Box<[Box<[u64]>]>,
+        /// How many workers each place has.
+        count: Box<[usize]>,
     }
 
     static PLACES: OnceLock<Places> = OnceLock::new();
+
+    /// The places for `cpus` (in any order) and `workers` workers, started
+    /// by a thread on CPU `starter`: None with fewer than two caches, or
+    /// more than 256. The places are numbered from the starter's, its
+    /// socket's first; worker k is of the place of CPU k + 1 in that
+    /// order (the first CPU is the starter's own), around again where
+    /// there are more workers than CPUs.
+    pub(crate) fn assign(cpus: &[Cpu], starter: usize, workers: usize) -> Option<Places> {
+        let mut caches: Vec<usize> = cpus.iter().map(|c| c.cache).collect();
+        caches.sort_unstable();
+        caches.dedup();
+        if caches.len() < 2 || caches.len() > 256 || cpus.iter().any(|c| c.cpu >= CPUS) {
+            return None;
+        }
+        let first = cpus.iter().find(|c| c.cpu == starter).unwrap_or(&cpus[0]);
+        // The caches in order: the starter's, its socket's others, the rest.
+        caches.sort_by_key(|&cache| {
+            let socket = cpus.iter().find(|c| c.cache == cache).expect("a cache of some CPU").socket;
+            (cache != first.cache, socket != first.socket, socket, cache)
+        });
+        let place = |cache: usize| caches.iter().position(|&c| c == cache).expect("every CPU's cache is listed");
+        let mut order: Vec<(usize, Cpu)> = cpus.iter().map(|&c| (place(c.cache), c)).collect();
+        order.sort_by_key(|&(place, c)| (place, c.cpu != first.cpu, c.cpu));
+        let words = workers.div_ceil(64).max(1);
+        let mut places = Places {
+            of_cpu: std::vec![0u8; CPUS].into(),
+            cpus: std::vec![[0u64; CPUS / 64]; caches.len()].into(),
+            of_worker: (0..workers).map(|k| order[(k + 1) % order.len()].0 as u8).collect(),
+            near: std::vec![std::vec![0u64; words].into_boxed_slice(); caches.len()].into(),
+            beside: std::vec![std::vec![0u64; words].into_boxed_slice(); caches.len()].into(),
+            count: std::vec![0usize; caches.len()].into(),
+        };
+        let mut socket_of = std::vec![0usize; caches.len()];
+        for &(place, c) in &order {
+            places.of_cpu[c.cpu] = place as u8;
+            places.cpus[place][c.cpu / 64] |= 1 << (c.cpu % 64);
+            socket_of[place] = c.socket;
+        }
+        for k in 0..workers {
+            let place = places.of_worker[k] as usize;
+            places.count[place] += 1;
+            for q in 0..caches.len() {
+                if q == place {
+                    places.near[q][k / 64] |= 1 << (k % 64);
+                }
+                if socket_of[q] == socket_of[place] {
+                    places.beside[q][k / 64] |= 1 << (k % 64);
+                }
+            }
+        }
+        Some(places)
+    }
 
     #[cfg(target_os = "linux")]
     unsafe extern "C" {
         fn sched_getcpu() -> i32;
         fn sched_getaffinity(pid: i32, len: usize, set: *mut Set) -> i32;
         fn sched_setaffinity(pid: i32, len: usize, set: *const Set) -> i32;
+    }
+
+    /// The CPUs this process may run on, as the system describes them:
+    /// None where it does not (a file missing, a call refused).
+    #[cfg(target_os = "linux")]
+    fn read() -> Option<Vec<Cpu>> {
+        let mut allowed: Set = [0; CPUS / 64];
+        // Sound: the set is `len` writable bytes.
+        if unsafe { sched_getaffinity(0, core::mem::size_of::<Set>(), &mut allowed) } != 0 {
+            return None;
+        }
+        let number =
+            |cpu: usize, file: &str| std::fs::read_to_string(std::format!("/sys/devices/system/cpu/cpu{cpu}/{file}")).ok()?.trim().parse::<usize>().ok();
+        (0..CPUS)
+            .filter(|c| allowed[c / 64] >> (c % 64) & 1 == 1)
+            .map(|cpu| Some(Cpu { cpu, cache: number(cpu, "cache/index3/id")?, socket: number(cpu, "topology/physical_package_id")? }))
+            .collect()
     }
 
     /// The calling thread's place (0 where none are set).
@@ -822,81 +927,18 @@ pub(crate) mod places {
     }
 
     /// Read the machine's caches and give each of `threads - 1` workers a
-    /// place: the first worker's work, before it starts the others.
+    /// place: the first worker's work, before it starts the others (and
+    /// off the thread that called `initialize_multithreaded`: a file a
+    /// CPU, 2 ms on a machine of 96).
     pub(crate) fn settle(threads: usize) {
         #[cfg(target_os = "linux")]
-        {
-            let mut allowed: Set = [0; CPUS / 64];
-            // Sound: the set is `len` writable bytes.
-            if unsafe { sched_getaffinity(0, core::mem::size_of::<Set>(), &mut allowed) } != 0 {
-                return;
-            }
-            // Each allowed CPU's last-level cache, by the CPUs that share it.
-            let mut keys: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-            let mut of_cpu = std::vec![0u8; CPUS];
-            let mut order: std::vec::Vec<(u8, usize)> = std::vec::Vec::new();
-            let mut sockets: std::vec::Vec<usize> = std::vec::Vec::new();
-            for cpu in (0..CPUS).filter(|c| allowed[c / 64] >> (c % 64) & 1 == 1) {
-                let Ok(key) = std::fs::read_to_string(std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/shared_cpu_list")) else { return };
-                let place = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
-                    keys.push(key);
-                    keys.len() - 1
-                });
-                if place > u8::MAX as usize {
-                    return;
-                }
-                of_cpu[cpu] = place as u8;
-                order.push((place as u8, cpu));
-                // The place's socket (the last CPU's word stands).
-                let socket = std::fs::read_to_string(std::format!("/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id"))
-                    .ok()
-                    .and_then(|s| s.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                if sockets.len() <= place {
-                    sockets.resize(place + 1, 0);
-                }
-                sockets[place] = socket;
-            }
-            if keys.len() < 2 {
-                return;
-            }
-            // The places in order from this thread's on, so that the first
-            // workers share the starting thread's cache.
+        if let Some(cpus) = read()
             // Sound: no arguments, no memory.
-            let first = usize::try_from(unsafe { sched_getcpu() }).ok().map_or(0, |c| of_cpu[c.min(CPUS - 1)]) as usize;
-            // (This thread's socket's places before the others'.)
-            order.sort_by_key(|&(place, cpu)| (sockets[place as usize] != sockets[first], (place as usize + keys.len() - first) % keys.len(), cpu));
-            let mut cpus = std::vec![[0u64; CPUS / 64]; keys.len()];
-            for &(place, cpu) in &order {
-                cpus[place as usize][cpu / 64] |= 1 << (cpu % 64);
-            }
-            // Worker k beside the k+1st CPU in that order: the first CPU is
-            // the caller's.
-            let workers = threads - 1;
-            let of_worker: std::vec::Vec<u8> = (0..workers).map(|k| order[(k + 1) % order.len()].0).collect();
-            let mut near = std::vec![std::vec![0u64; workers.div_ceil(64).max(1)].into_boxed_slice(); keys.len()];
-            for (k, &place) in of_worker.iter().enumerate() {
-                near[place as usize][k / 64] |= 1 << (k % 64);
-            }
-            // EXPERIMENT: B3_PLACES = none | wake | pin (default: both).
-            let mode = std::env::var("B3_PLACES").unwrap_or_default();
-            if mode == "none" {
-                return;
-            }
-            let beside: std::vec::Vec<std::boxed::Box<[u64]>> = (0..keys.len())
-                .map(|p| {
-                    let mut words = std::vec![0u64; workers.div_ceil(64).max(1)];
-                    for q in (0..keys.len()).filter(|&q| sockets[q] == sockets[p]) {
-                        for (w, word) in words.iter_mut().enumerate() {
-                            *word |= near[q][w];
-                        }
-                    }
-                    words.into_boxed_slice()
-                })
-                .collect();
-            if PLACES.set(Places { of_cpu: of_cpu.into(), cpus: cpus.into(), of_worker: of_worker.into() }).is_ok() && mode != "pin" {
-                pool().park.set_places(near.into(), beside.into(), here);
-            }
+            && let Some(places) = assign(&cpus, usize::try_from(unsafe { sched_getcpu() }).unwrap_or(0), threads - 1)
+            && PLACES.set(places).is_ok()
+        {
+            let places = PLACES.get().expect("just set");
+            pool().park.set_places(places.near.clone(), places.beside.clone(), here);
         }
         let _ = threads;
     }
@@ -904,30 +946,105 @@ pub(crate) mod places {
     /// The workers of the calling thread's place, where workers have
     /// places and its place has any.
     pub(crate) fn near_workers() -> Option<usize> {
-        let places = PLACES.get()?;
-        let here = here() as u8;
-        let near = places.of_worker.iter().filter(|&&p| p == here).count();
+        let near = *PLACES.get()?.count.get(here())?;
         (near > 0).then_some(near)
-    }
-
-    /// EXPERIMENT: the job length from which every place's workers share a job.
-    pub(crate) fn far_len() -> usize {
-        static FAR: OnceLock<usize> = OnceLock::new();
-        *FAR.get_or_init(|| std::env::var("B3_FAR_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(48 << 20))
     }
 
     /// Worker `me` moves to its place, as it starts.
     pub(crate) fn take(me: usize) {
         #[cfg(target_os = "linux")]
-        if let Some(places) = PLACES.get()
-            && std::env::var("B3_PLACES").as_deref() != Ok("wake")
-        {
+        if let Some(places) = PLACES.get() {
             let set = &places.cpus[places.of_worker[me] as usize];
             // Sound: the set is `len` readable bytes. A failure leaves
             // the worker where the system puts it.
             unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), set) };
         }
         let _ = me;
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::*;
+
+        /// A machine of `sockets` sockets, each of `caches` caches of
+        /// `cores` cores of two CPUs, numbered as Linux numbers them:
+        /// every core's first CPU, then every core's second.
+        fn machine(sockets: usize, caches: usize, cores: usize) -> Vec<Cpu> {
+            let all = sockets * caches * cores;
+            (0..2 * all).map(|cpu| Cpu { cpu, cache: 100 + (cpu % all) / cores, socket: (cpu % all) / (caches * cores) }).collect()
+        }
+
+        fn bits(words: &[u64]) -> Vec<usize> {
+            (0..64 * words.len()).filter(|k| words[k / 64] >> (k % 64) & 1 == 1).collect()
+        }
+
+        /// One cache, or none described, has no places: the pool is as it
+        /// was. Two have.
+        #[test]
+        fn one_cache_has_no_places() {
+            assert_eq!(assign(&machine(1, 1, 8), 0, 15), None);
+            assert!(assign(&machine(1, 2, 8), 0, 31).is_some());
+            assert!(assign(&machine(2, 1, 8), 0, 31).is_some());
+        }
+
+        /// 2x EPYC 7443 (two sockets of four caches of six cores, 96
+        /// CPUs), started on CPU 30 (socket 1, its second cache): the
+        /// places are numbered from the starter's cache, its socket's
+        /// others next, the other socket's last; a place's CPUs are its
+        /// cache's twelve; the first eleven workers share the starter's
+        /// place and the others fill the places in order, twelve each;
+        /// a place's socket holds four places' workers.
+        #[test]
+        fn the_places_of_two_sockets_of_four_caches() {
+            let cpus = machine(2, 4, 6);
+            let p = assign(&cpus, 30, 95).unwrap();
+            assert_eq!(p.cpus.len(), 8);
+            // CPU 30 is of core 30: socket 1, cache 105 (cores 30..36).
+            let place_of = |cpu: usize| p.of_cpu[cpu] as usize;
+            assert_eq!(place_of(30), 0);
+            assert_eq!(place_of(30 + 48), 0, "the core's second CPU");
+            assert_eq!((30..36).chain(78..84).filter(|&c| place_of(c) == 0).count(), 12);
+            assert_eq!((0..96).filter(|&c| place_of(c) == 0).count(), 12);
+            assert_eq!(bits(&p.cpus[0]), (30..36).chain(78..84).collect::<Vec<_>>());
+            // Places 1 to 3: socket 1's other caches; 4 to 7: socket 0's.
+            for cpu in 24..48 {
+                assert!(place_of(cpu) < 4, "socket 1's CPU {cpu}");
+            }
+            for cpu in 0..24 {
+                assert!(place_of(cpu) >= 4, "socket 0's CPU {cpu}");
+            }
+            assert_eq!(p.count[..], [11, 12, 12, 12, 12, 12, 12, 12]);
+            assert_eq!(bits(&p.near[0]), (0..11).collect::<Vec<_>>());
+            assert_eq!(bits(&p.near[1]), (11..23).collect::<Vec<_>>());
+            assert_eq!(bits(&p.beside[0]), (0..47).collect::<Vec<_>>());
+            assert_eq!(bits(&p.beside[3]), (0..47).collect::<Vec<_>>());
+            assert_eq!(bits(&p.beside[4]), (47..95).collect::<Vec<_>>());
+            assert_eq!(p.of_worker.len(), 95);
+            for k in 0..95 {
+                assert!(bits(&p.near[p.of_worker[k] as usize]).contains(&k));
+            }
+        }
+
+        /// Fewer workers than a place has CPUs all share the starter's
+        /// place; more workers than CPUs go around again; a process
+        /// confined to some CPUs has places among those alone; a starter
+        /// on a CPU that is not listed starts from the first.
+        #[test]
+        fn few_workers_many_workers_and_a_confined_process() {
+            let cpus = machine(2, 4, 6);
+            let p = assign(&cpus, 0, 3).unwrap();
+            assert_eq!(p.count[..], [3, 0, 0, 0, 0, 0, 0, 0]);
+            let p = assign(&cpus, 0, 200).unwrap();
+            assert_eq!(p.count.iter().sum::<usize>(), 200);
+            assert_eq!(p.count[0], 11 + 12 + 9, "the first place again for workers 95 to 106, and for 191 to 199");
+            let confined: Vec<Cpu> = cpus.iter().copied().filter(|c| c.cpu < 12).collect();
+            let p = assign(&confined, 7, 11).unwrap();
+            assert_eq!(p.cpus.len(), 2);
+            assert_eq!(bits(&p.cpus[0]), (6..12).collect::<Vec<_>>());
+            assert_eq!(p.count[..], [5, 6]);
+            let p = assign(&cpus, 500, 95).unwrap();
+            assert_eq!(p.of_cpu[0], 0);
+        }
     }
 }
 
@@ -1073,7 +1190,7 @@ impl Pool {
     /// among them: on a machine whose workers have places, a job under
     /// FAR_LEN stays with the workers of the caller's place.
     fn threads_for(&self, len: usize) -> (usize, bool) {
-        if len < places::far_len()
+        if len < places::FAR_LEN
             && let Some(near) = places::near_workers()
         {
             return ((near + 1).min(self.threads), true);
