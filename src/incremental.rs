@@ -345,6 +345,24 @@ impl Hasher {
         Self::from_core(HasherCore::new_internal(&key, flags))
     }
 
+    /// [`new`](Hasher::new), built in `place`: for a Hasher that lives in
+    /// storage the program already has (a field, a box, a C caller's
+    /// memory). `new` returns its 18 KiB by value, and moving that into
+    /// place copies it; this writes the 2 KiB that a new Hasher holds.
+    pub fn new_in<'a>(place: &'a mut core::mem::MaybeUninit<Self>, mode: Mode<'_>, length_hint: Option<u64>) -> &'a mut Self {
+        let _ = length_hint;
+        let (key, flags) = mode.key_and_flags();
+        let p = place.as_mut_ptr();
+        // Sound: each field of the place is written once; the stage needs
+        // only its first block initialized (`first_block`).
+        unsafe {
+            core::ptr::addr_of_mut!((*p).core).write(HasherCore::new_internal(&key, flags));
+            core::ptr::addr_of_mut!((*p).staged).write(0);
+            core::ptr::addr_of_mut!((*p).stage).cast::<u8>().write_bytes(0, BLOCK_LEN);
+            &mut *p
+        }
+    }
+
     /// The `Hasher` back in its initial state, its mode kept: what
     /// `finalize_each` leaves the hashers it finishes in.
     #[cfg(any(feature = "std", test))]

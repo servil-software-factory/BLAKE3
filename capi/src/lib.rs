@@ -157,10 +157,9 @@ pub unsafe extern "C" fn b3_hasher_new(hasher: *mut B3Hasher, mode: *const B3Mod
     check_hasher(hasher);
     check_disjoint(hasher.cast(), size_of::<B3Hasher>(), mode.cast(), size_of::<B3Mode>());
     let mode = unsafe { self::mode(mode) };
-    let new = Hasher::new(mode.mode(), (has_length_hint != 0).then_some(length_hint));
     // Sound: the memory is the caller's, sized and aligned for a Hasher,
     // which owns nothing to drop.
-    unsafe { (hasher as *mut Hasher).write(new) };
+    Hasher::new_in(unsafe { &mut *(hasher as *mut core::mem::MaybeUninit<Hasher>) }, mode.mode(), (has_length_hint != 0).then_some(length_hint));
 }
 
 /// # Safety
