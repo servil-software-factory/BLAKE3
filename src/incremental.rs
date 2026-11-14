@@ -248,12 +248,6 @@ impl Hasher {
         self.core.push_group(result);
     }
 
-    /// The root's output: the core's, after the stage's bytes, finished in
-    /// place.
-    pub(crate) fn final_output(mut self) -> Output {
-        self.take_output()
-    }
-
     /// The root's output, the state finished in place: the Hasher is then
     /// finished, to be reset or dropped.
     pub(crate) fn take_output(&mut self) -> Output {
@@ -321,17 +315,25 @@ impl Hasher {
     /// costs what a reset would). A digest of a prefix, with hashing going
     /// on after it, is `hasher.clone().finalize()`, the copy where it is
     /// paid.
-    pub fn finalize(self) -> Hash {
+    // Inlined, and finished through `&mut self`. The Hasher is 18 KiB, and
+    // each call that takes it by value copies it: the caller's move into
+    // `self`, and before this a second move into `final_output(self)`. One
+    // message of 64 B took 489 ns with both copies and 304 ns with the
+    // caller's alone, against 37 ns for `hash` (Ryzen 7700X). The caller's
+    // copy is its own code's, a move the compiler makes before the call.
+    #[inline]
+    pub fn finalize(mut self) -> Hash {
         assert_eq!(self.core.initial_chunk_counter, 0, "set_input_offset must be used with finalize_non_root",);
-        self.final_output().root_hash()
+        self.take_output().root_hash()
     }
 
     /// An [`OutputReader`] over everything updated, which supplies any
     /// number of output bytes; the Hasher is finished and gone, as with
     /// [`finalize`](Hasher::finalize).
-    pub fn finalize_xof(self) -> OutputReader {
+    #[inline]
+    pub fn finalize_xof(mut self) -> OutputReader {
         assert_eq!(self.core.initial_chunk_counter, 0, "set_input_offset must be used with finalize_non_root",);
-        OutputReader::new(self.final_output())
+        OutputReader::new(self.take_output())
     }
 
     /// The number of bytes passed to [`update`](Hasher::update) so far.

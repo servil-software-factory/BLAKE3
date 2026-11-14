@@ -1637,7 +1637,7 @@ impl SubtreeHasher for crate::Hasher {
 
     fn finalize_non_root(&self) -> CVBytes {
         assert_ne!(self.count(), 0, "empty subtrees are never valid");
-        self.clone().final_output().chaining_value()
+        self.clone().take_output().chaining_value()
     }
 }
 
