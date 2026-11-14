@@ -966,6 +966,12 @@ const OUTBOARD_WRITERS: usize = 2;
 fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
     use std::sync::{Mutex, mpsc};
     let paths = &args.file_args;
+    // Before any file is hashed: a run of short files alone would write
+    // nothing, and say nothing of a directory that is not there.
+    if !dir.is_dir() {
+        eprintln!("{}: {}: not a directory", NAME, dir.to_string_lossy());
+        return paths.len().max(1) as u64;
+    }
     let workers = threads().get().min(paths.len());
     let in_a_file = (threads().get() / paths.len().max(1)).max(1);
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -983,22 +989,26 @@ fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
         if let Err(e) = std::fs::write(outboard::path_in(dir, &hash), &nodes) {
             unwritten.lock().unwrap().push((i, e));
         }
-        if nodes.capacity() > 0 {
-            // No worker may be left to take it.
-            let _ = to_workers.send(nodes);
-        }
+        // No worker may be left to take it.
+        let _ = to_workers.send(nodes);
     };
     let work = |hand: &dyn Fn(Made)| {
         let mut rooms = outboard::Rooms::new();
         let mut mine = Vec::new();
+        let mut nodes = Vec::new();
         loop {
             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let Some(path) = paths.get(i) else { break };
-            let mut nodes = spare.lock().unwrap().try_recv().unwrap_or_default();
             nodes.clear();
             let hashed = outboard_of(args.mode, path, in_a_file, &mut rooms, &mut nodes);
-            if let Ok(hash) = &hashed {
-                hand((i, *hash, nodes));
+            // An empty outboard (a file of one chunk group or less) is no
+            // file: there is nothing in it to read, and creating a file
+            // costs more than hashing a short one.
+            if let Ok(hash) = &hashed
+                && !nodes.is_empty()
+            {
+                hand((i, *hash, core::mem::take(&mut nodes)));
+                nodes = spare.lock().unwrap().try_recv().unwrap_or_default();
             }
             mine.push((i, hashed));
         }

@@ -8,7 +8,9 @@
 //! no parent, and an empty outboard. It is what bao-tree's
 //! `PreOrderMemOutboard::create(data, BlockSize::from_chunk_log(4))`
 //! holds, byte for byte (the tests compare the two), written to
-//! `DIR/<hash>.obao4`.
+//! `DIR/<hash>.obao4`; an empty outboard is no file (Zooko, November
+//! 14, 2026: creating a thousand empty files took longer than hashing
+//! the thousand short files they were for).
 //!
 //! It is built on the library's tree API alone (`throughput::TreeHasher`):
 //! each group's chaining value, on as many threads as the file has work

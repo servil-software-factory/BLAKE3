@@ -798,10 +798,16 @@ fn test_outboard_files_are_bao_trees() {
     args.extend(files.iter().map(|p| p.as_os_str().to_owned()));
     let output = cmd(b3sum_exe(), &args).read().unwrap();
     assert_eq!(output, expected.iter().map(|e| e.0.clone()).collect::<Vec<_>>().join("\n"));
+    // An empty outboard (a file of one group or less) is no file.
     for (line, at, want) in &expected {
-        assert_eq!(&fs::read(at).unwrap(), want, "the outboard of {line}");
+        if want.is_empty() {
+            assert!(!at.exists(), "no file for the empty outboard of {line}");
+        } else {
+            assert_eq!(&fs::read(at).unwrap(), want, "the outboard of {line}");
+        }
     }
-    assert_eq!(fs::read_dir(&out_dir).unwrap().count(), lens.len(), "one outboard a file");
+    assert_eq!(lens.iter().filter(|&&len| len > group).count(), 6);
+    assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 6, "one outboard a file of more than a group");
 
     // Standard input, and one thread.
     let data: Vec<u8> = (0..300_000usize).map(|j| (j * 13) as u8).collect();
@@ -857,14 +863,16 @@ fn test_outboard_files_are_bao_trees() {
         assert!(!result.status.success(), "one file is not there");
         assert_eq!(String::from_utf8_lossy(&result.stdout).trim_end(), lines.join("\n"), "threads={threads}");
         assert_eq!(String::from_utf8_lossy(&result.stderr).matches("no-such-file").count(), 1);
-        for (name, want) in &outboards {
+        for (name, want) in outboards.iter().filter(|o| !o.1.is_empty()) {
             assert_eq!(&fs::read(fresh.join(name)).unwrap(), want, "{name}, threads={threads}");
         }
-        let distinct: std::collections::HashSet<_> = outboards.iter().map(|o| &o.0).collect();
-        assert_eq!(fs::read_dir(&fresh).unwrap().count(), distinct.len(), "one outboard a hash, and no other file");
+        let distinct: std::collections::HashSet<_> = outboards.iter().filter(|o| !o.1.is_empty()).map(|o| &o.0).collect();
+        assert!(distinct.len() >= 60 && distinct.len() < outboards.len(), "long files and short");
+        assert_eq!(fs::read_dir(&fresh).unwrap().count(), distinct.len(), "one outboard a hash of a long file, and no other file");
     }
 
-    // A directory that is not there: every file fails, none is hashed in silence.
+    // A directory that is not there: nothing is hashed, though the file
+    // is a short one, whose outboard would be no file.
     let result = cmd!(b3sum_exe(), "--outboard", dir.path().join("no-such-dir"), &files[1]).stdout_capture().stderr_capture().unchecked().run().unwrap();
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());

@@ -101,7 +101,8 @@ BLAKE3 tree above its chunk groups of 16 KiB, which lets a reader verify any par
 the file against its hash as the part arrives. The bytes are those bao-tree's
 `PreOrderMemOutboard::create` makes for block size 4 (b3sum's tests compare the two):
 each parent node's two children, 64 bytes a node, the nodes in pre-order, with no length
-before them. A file of 16 KiB or less has an empty outboard. `DIR` must exist.
+before them. A file of 16 KiB or less has no node above it, and no outboard file is
+written for it: its outboard is empty. `DIR` must exist.
 
 ```bash
 $ mkdir outboards && b3sum --outboard outboards big.iso
