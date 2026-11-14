@@ -45,7 +45,7 @@ pub(crate) struct Park {
     /// last-level cache): for each place, the workers there as bits like
     /// `parked`'s, and the place of the thread that asks. A waker wakes a
     /// worker of its own place first.
-    near: OnceLock<(Box<[Box<[u64]>]>, fn() -> usize)>,
+    near: OnceLock<(Box<[Box<[u64]>]>, Box<[Box<[u64]>]>, fn() -> usize)>,
 }
 
 /// The most wakes any one waker makes, publisher or woken worker: the rest
@@ -97,11 +97,13 @@ impl Park {
     /// one load a word.
     pub(crate) fn wake_one(&self) -> bool {
         // The waker's own place first, where the workers have places.
-        if let Some((places, here)) = self.near.get()
-            && let Some(mine) = places.get(here())
-            && self.wake_one_of(Some(mine))
-        {
-            return true;
+        // The waker's own place first, then the places beside it (its
+        // socket's), where the workers have places.
+        if let Some((places, beside, here)) = self.near.get() {
+            let here = here();
+            if places.get(here).is_some_and(|mine| self.wake_one_of(Some(mine))) || beside.get(here).is_some_and(|b| self.wake_one_of(Some(b))) {
+                return true;
+            }
         }
         self.wake_one_of(None)
     }
@@ -110,15 +112,15 @@ impl Park {
     /// worker, where the workers have no places): whether one was.
     pub(crate) fn wake_one_near(&self) -> bool {
         match self.near.get() {
-            Some((places, here)) => places.get(here()).is_some_and(|mine| self.wake_one_of(Some(mine))),
+            Some((places, _, here)) => places.get(here()).is_some_and(|mine| self.wake_one_of(Some(mine))),
             None => self.wake_one_of(None),
         }
     }
 
     /// The workers' places, once: `places[p]` the workers of place p,
-    /// `here` the asking thread's place.
-    pub(crate) fn set_places(&self, places: Box<[Box<[u64]>]>, here: fn() -> usize) {
-        assert!(self.near.set((places, here)).is_ok(), "the workers' places are set once");
+    /// `beside[p]` those of p's socket, `here` the asking thread's place.
+    pub(crate) fn set_places(&self, places: Box<[Box<[u64]>]>, beside: Box<[Box<[u64]>]>, here: fn() -> usize) {
+        assert!(self.near.set((places, beside, here)).is_ok(), "the workers' places are set once");
     }
 
     /// [`Park::wake_one`] among the workers of `among` (None: all).

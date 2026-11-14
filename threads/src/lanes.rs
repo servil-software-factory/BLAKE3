@@ -835,6 +835,7 @@ pub(crate) mod places {
             let mut keys: std::vec::Vec<std::string::String> = std::vec::Vec::new();
             let mut of_cpu = std::vec![0u8; CPUS];
             let mut order: std::vec::Vec<(u8, usize)> = std::vec::Vec::new();
+            let mut sockets: std::vec::Vec<usize> = std::vec::Vec::new();
             for cpu in (0..CPUS).filter(|c| allowed[c / 64] >> (c % 64) & 1 == 1) {
                 let Ok(key) = std::fs::read_to_string(std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/shared_cpu_list")) else { return };
                 let place = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
@@ -846,6 +847,15 @@ pub(crate) mod places {
                 }
                 of_cpu[cpu] = place as u8;
                 order.push((place as u8, cpu));
+                // The place's socket (the last CPU's word stands).
+                let socket = std::fs::read_to_string(std::format!("/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if sockets.len() <= place {
+                    sockets.resize(place + 1, 0);
+                }
+                sockets[place] = socket;
             }
             if keys.len() < 2 {
                 return;
@@ -854,7 +864,8 @@ pub(crate) mod places {
             // workers share the starting thread's cache.
             // Sound: no arguments, no memory.
             let first = usize::try_from(unsafe { sched_getcpu() }).ok().map_or(0, |c| of_cpu[c.min(CPUS - 1)]) as usize;
-            order.sort_by_key(|&(place, cpu)| ((place as usize + keys.len() - first) % keys.len(), cpu));
+            // (This thread's socket's places before the others'.)
+            order.sort_by_key(|&(place, cpu)| (sockets[place as usize] != sockets[first], (place as usize + keys.len() - first) % keys.len(), cpu));
             let mut cpus = std::vec![[0u64; CPUS / 64]; keys.len()];
             for &(place, cpu) in &order {
                 cpus[place as usize][cpu / 64] |= 1 << (cpu % 64);
@@ -872,8 +883,19 @@ pub(crate) mod places {
             if mode == "none" {
                 return;
             }
+            let beside: std::vec::Vec<std::boxed::Box<[u64]>> = (0..keys.len())
+                .map(|p| {
+                    let mut words = std::vec![0u64; workers.div_ceil(64).max(1)];
+                    for q in (0..keys.len()).filter(|&q| sockets[q] == sockets[p]) {
+                        for (w, word) in words.iter_mut().enumerate() {
+                            *word |= near[q][w];
+                        }
+                    }
+                    words.into_boxed_slice()
+                })
+                .collect();
             if PLACES.set(Places { of_cpu: of_cpu.into(), cpus: cpus.into(), of_worker: of_worker.into() }).is_ok() && mode != "pin" {
-                pool().park.set_places(near.into(), here);
+                pool().park.set_places(near.into(), beside.into(), here);
             }
         }
         let _ = threads;
