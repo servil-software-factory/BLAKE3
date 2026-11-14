@@ -10,11 +10,11 @@
 //! holds, byte for byte (the tests compare the two), written to
 //! `DIR/<hash>.obao4`.
 //!
-//! It is built on the library's tree API alone (`throughput::TreeHasher`): each
-//! group's chaining value, on as many threads as the file has work for,
-//! then the parents.
+//! It is built on the library's tree API alone (`throughput::TreeHasher`):
+//! each group's chaining value, on as many threads as the file has work
+//! for, then the parents a layer at a time, side by side in the lanes.
 
-use blake3::throughput::{Cv, TreeHasher, left_len};
+use blake3::throughput::{Cv, TreeHasher};
 use std::path::Path;
 
 /// A chunk group: sixteen chunks, bao-tree's block size 4.
@@ -26,24 +26,43 @@ pub(crate) const GROUP: usize = 16 * blake3::CHUNK_LEN;
 const GROUPS_A_THREAD: usize = 256;
 
 /// The hash of `data` in `mode`, and its outboard appended to `out`. `cvs`
-/// is the caller's room for the groups' chaining values, kept from file to
+/// is the caller's room for the tree's chaining values, kept from file to
 /// file.
 pub(crate) fn outboard(mode: blake3::Mode, data: &[u8], threads: usize, cvs: &mut Vec<Cv>, out: &mut Vec<u8>) -> blake3::Hash {
     if data.len() <= GROUP {
         return blake3::convenience::hash_with(mode, data);
     }
     let tree = TreeHasher::new(mode);
-    group_cvs(&tree, data, threads, cvs);
-    let (left, right) = children(&tree, data.len(), cvs, out);
-    tree.root_hash(&left, &right)
+    let groups = data.len().div_ceil(GROUP);
+    // Every layer's values, one layer after another: the groups', then
+    // each layer of parents, down to the root's two children. A layer
+    // with an odd count passes its last value up as it is.
+    // Under two values a group in all: each layer holds half the one
+    // below, and one more where that one's count is odd.
+    cvs.clear();
+    cvs.resize(2 * groups + usize::BITS as usize, Cv::from_bytes([0; 32]));
+    group_cvs(&tree, data, threads, &mut cvs[..groups]);
+    let mut layers: Vec<(usize, usize)> = vec![(0, groups)];
+    while layers.last().unwrap().1 > 2 {
+        let (at, count) = *layers.last().unwrap();
+        let (children, parents) = cvs[at..].split_at_mut(count);
+        let pairs = count / 2;
+        tree.parent_cvs(&children[..2 * pairs], &mut parents[..pairs]);
+        if count % 2 == 1 {
+            parents[pairs] = children[count - 1];
+        }
+        layers.push((at + count, count.div_ceil(2)));
+    }
+    let (top, _) = *layers.last().unwrap();
+    out.reserve(64 * (groups - 1));
+    node(cvs, &layers, layers.len(), 0, out);
+    tree.root_hash(&cvs[top], &cvs[top + 1])
 }
 
 /// Each group's chaining value into `cvs`, the groups shared out among
 /// the threads.
-fn group_cvs(tree: &TreeHasher, data: &[u8], threads: usize, cvs: &mut Vec<Cv>) {
-    let groups = data.len().div_ceil(GROUP);
-    cvs.clear();
-    cvs.resize(groups, Cv::from_bytes([0; 32]));
+fn group_cvs(tree: &TreeHasher, data: &[u8], threads: usize, cvs: &mut [Cv]) {
+    let groups = cvs.len();
     let threads = threads.min(groups / GROUPS_A_THREAD).max(1);
     let a_thread = groups.div_ceil(threads);
     // Many of these run at once, one a core: each on its own core's kernels.
@@ -67,29 +86,23 @@ fn group_cvs(tree: &TreeHasher, data: &[u8], threads: usize, cvs: &mut Vec<Cv>) 
     }
 }
 
-/// The two children of the subtree over `len` bytes (more than a group)
-/// whose groups' chaining values are `cvs`; its node, then its subtrees'
-/// nodes, appended to `out`.
-fn children(tree: &TreeHasher, len: usize, cvs: &[Cv], out: &mut Vec<u8>) -> (Cv, Cv) {
-    let at = out.len();
-    out.extend_from_slice(&[0u8; 64]);
-    // The left subtree is whole groups: a power of two of chunks, sixteen or more.
-    let split = left_len(len as u64) as usize;
-    let left = subtree(tree, split, &cvs[..split / GROUP], out);
-    let right = subtree(tree, len - split, &cvs[split / GROUP..], out);
-    out[at..at + 32].copy_from_slice(left.as_bytes());
-    out[at + 32..at + 64].copy_from_slice(right.as_bytes());
-    (left, right)
-}
-
-/// The chaining value of the subtree over `len` bytes, its nodes appended
-/// to `out`: a group's own, or its two children's parent.
-fn subtree(tree: &TreeHasher, len: usize, cvs: &[Cv], out: &mut Vec<u8>) -> Cv {
-    if len <= GROUP {
-        return cvs[0];
+/// The node `index` of the layer under `layer` (`layers[layer - 1]`), and
+/// the nodes below it, appended to `out` in pre-order: a parent as its two
+/// children's values. A value its layer passed up as it was, and a
+/// group's own, are no parent, and write nothing of their own. The root
+/// is node 0 of the layer above the last.
+fn node(cvs: &[Cv], layers: &[(usize, usize)], layer: usize, index: usize, out: &mut Vec<u8>) {
+    if layer == 0 {
+        return;
     }
-    let (left, right) = children(tree, len, cvs, out);
-    tree.parent_cv(&left, &right)
+    let (at, count) = layers[layer - 1];
+    if 2 * index + 1 >= count {
+        return node(cvs, layers, layer - 1, 2 * index, out);
+    }
+    out.extend_from_slice(cvs[at + 2 * index].as_bytes());
+    out.extend_from_slice(cvs[at + 2 * index + 1].as_bytes());
+    node(cvs, layers, layer - 1, 2 * index, out);
+    node(cvs, layers, layer - 1, 2 * index + 1, out);
 }
 
 /// Where `hash`'s outboard goes in `dir`.

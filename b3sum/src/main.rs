@@ -949,20 +949,79 @@ fn hash_paths_32(args: &Args, paths: &[PathBuf], on_ordered: &mut dyn FnMut(usiz
 }
 
 /// `--outboard DIR`: each file's hash, printed as ever, and its outboard
-/// written to DIR/<hash>.obao4 (outboard.rs). The files go one after
-/// another, each over the threads it has work for; the rooms for a file's
-/// chaining values, its nodes and its bytes are kept from file to file.
+/// written to DIR/<hash>.obao4 (outboard.rs).
+///
+/// A file of one chunk group or less has an empty outboard, so only its
+/// hash is work: those files go through the engine that hashes many files
+/// (`hash_paths_32`: io_uring on Linux). The longer files are shared out
+/// among threads started once for the run, each with rooms of its own for
+/// a file's bytes, chaining values and nodes; where there are fewer such
+/// files than threads, each file takes several. The threads write the
+/// outboards, the empty ones too. The lines are printed in the files'
+/// order, once all are done.
 fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
-    let mut failed = 0u64;
-    let (mut cvs, mut nodes, mut bytes) = (Vec::new(), Vec::new(), Vec::new());
-    for path in &args.file_args {
-        nodes.clear();
-        let done = with_file_bytes(path, &mut bytes, |data| {
-            let hash = outboard::outboard(args.mode, data, threads().get(), &mut cvs, &mut nodes);
-            std::fs::write(outboard::path_in(dir, &hash), &nodes)?;
-            print_hash_output(hash, path, args, out)
+    let paths = &args.file_args;
+    let small = |path: &PathBuf| path != Path::new("-") && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= outboard::GROUP as u64);
+    let (short, long): (Vec<usize>, Vec<usize>) = (0..paths.len()).partition(|&i| small(&paths[i]));
+    let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
+    if !short.is_empty() {
+        let short_paths: Vec<PathBuf> = short.iter().map(|&i| paths[i].clone()).collect();
+        hash_paths_32(args, &short_paths, &mut |k, hash| {
+            results[short[k]] = Some(hash);
+            true
         });
-        if let Err(e) = done {
+    }
+    // The threads' work, in turn: the longer files, then the short ones'
+    // empty outboards.
+    let threads = threads().get().min(paths.len()).max(1);
+    let in_a_file = (crate::threads().get() / long.len().max(1)).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::Mutex::new(Vec::<(usize, anyhow::Result<blake3::Hash>)>::new());
+    let short_hashes: Vec<Option<blake3::Hash>> = short.iter().map(|&i| results[i].as_ref().and_then(|r| r.as_ref().ok().copied())).collect();
+    let work = || {
+        let (mut cvs, mut nodes, mut bytes) = (Vec::new(), Vec::new(), Vec::new());
+        let mut mine = Vec::new();
+        loop {
+            let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if k < long.len() {
+                let i = long[k];
+                nodes.clear();
+                let hashed = with_file_bytes(&paths[i], &mut bytes, |data| {
+                    let hash = outboard::outboard(args.mode, data, in_a_file, &mut cvs, &mut nodes);
+                    std::fs::write(outboard::path_in(dir, &hash), &nodes)?;
+                    Ok(hash)
+                });
+                mine.push((i, hashed));
+            } else if k < long.len() + short.len() {
+                let k = k - long.len();
+                if let Some(hash) = short_hashes[k]
+                    && let Err(e) = std::fs::write(outboard::path_in(dir, &hash), b"")
+                {
+                    mine.push((short[k], Err(e.into())));
+                }
+            } else {
+                break;
+            }
+        }
+        done.lock().unwrap().append(&mut mine);
+    };
+    if threads == 1 {
+        work();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 1..threads {
+                scope.spawn(work);
+            }
+            work();
+        });
+    }
+    for (i, result) in done.into_inner().unwrap() {
+        results[i] = Some(result);
+    }
+    let mut failed = 0u64;
+    for (path, result) in paths.iter().zip(results) {
+        let result = result.expect("every file has its result");
+        if let Err(e) = result.and_then(|hash| print_hash_output(hash, path, args, out)) {
             failed = failed.saturating_add(1);
             let _ = out.flush();
             eprintln!("{}: {}: {}", NAME, path.to_string_lossy(), e);
