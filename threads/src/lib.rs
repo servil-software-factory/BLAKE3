@@ -317,6 +317,17 @@ pub(crate) fn ran(kind: Ran) {
 /// finishes holding a small one. To leave CPUs to other work, pass fewer
 /// threads.
 ///
+/// On Linux, on a machine with more than one last-level cache (several
+/// sockets, or an EPYC, whose cores share one in groups), each worker is
+/// kept to the CPUs under one of them (`sched_setaffinity`), among the CPUs
+/// the process may run on, and a call wakes the workers under its own
+/// thread's cache first: what the caller has just written is in that
+/// cache, and a worker under another fetches it across the machine. A
+/// call of under 48 MiB stays with those workers. The calling threads'
+/// own affinity is never set. On 2x EPYC 7443 a 1 MiB message read into
+/// a buffer and hashed takes 74 us this way; with the workers wherever
+/// the system put them it took 437 us, more than the 236 us of one thread.
+///
 /// Several programs each with a full pool share the machine without
 /// trouble, and unevenly. On an i7-12700K (20 CPUs), N programs each
 /// streaming 64 KiB messages hashed 26 GB/s alone, 37-41 together at 2
