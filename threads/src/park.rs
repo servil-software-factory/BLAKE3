@@ -41,6 +41,11 @@ pub(crate) struct Park {
     owed: AtomicUsize,
     /// The most wakes any one waker makes (FANOUT; a test may choose).
     fanout: usize,
+    /// Set once the workers have places (machines with more than one
+    /// last-level cache): for each place, the workers there as bits like
+    /// `parked`'s, and the place of the thread that asks. A waker wakes a
+    /// worker of its own place first.
+    near: OnceLock<(Box<[Box<[u64]>]>, Box<[Box<[u64]>]>, fn() -> usize)>,
 }
 
 /// The most wakes any one waker makes, publisher or woken worker: the rest
@@ -69,6 +74,7 @@ impl Park {
             handles: (0..workers).map(|_| OnceLock::new()).collect(),
             owed: AtomicUsize::new(0),
             fanout,
+            near: OnceLock::new(),
         }
     }
 
@@ -90,8 +96,57 @@ impl Park {
     /// Wake one parked worker, if any: whether one was. With none parked,
     /// one load a word.
     pub(crate) fn wake_one(&self) -> bool {
+        // The waker's own place first, where the workers have places.
+        // The waker's own place first, then the places beside it (its
+        // socket's), where the workers have places.
+        if let Some((places, beside, here)) = self.near.get() {
+            let here = here();
+            if places.get(here).is_some_and(|mine| self.wake_one_of(Some(mine))) || beside.get(here).is_some_and(|b| self.wake_one_of(Some(b))) {
+                return true;
+            }
+        }
+        self.wake_one_of(None)
+    }
+
+    /// Wake every worker that is parked now, each once: how many. (A
+    /// loop of `wake_one` would wake the first ones again as they park
+    /// again, and never reach the last.)
+    pub(crate) fn wake_all(&self) -> usize {
+        let mut woken = 0;
         for (word, handles) in self.parked.iter().zip(self.handles.chunks(64)) {
-            let mut bits = word.load(Ordering::SeqCst);
+            // Every bit taken at once: this thread is then the one to
+            // unpark each of those workers.
+            let bits = word.swap(0, Ordering::SeqCst);
+            for (worker, handle) in handles.iter().enumerate() {
+                if bits >> worker & 1 == 1 {
+                    handle.get().expect("a parked worker has set its thread").unpark();
+                    woken += 1;
+                }
+            }
+        }
+        woken
+    }
+
+    /// Wake one parked worker of the waker's own place, if any (any
+    /// worker, where the workers have no places): whether one was.
+    pub(crate) fn wake_one_near(&self) -> bool {
+        match self.near.get() {
+            Some((places, _, here)) => places.get(here()).is_some_and(|mine| self.wake_one_of(Some(mine))),
+            None => self.wake_one_of(None),
+        }
+    }
+
+    /// The workers' places, once: `places[p]` the workers of place p,
+    /// `beside[p]` those of p's socket, `here` the asking thread's place.
+    pub(crate) fn set_places(&self, places: Box<[Box<[u64]>]>, beside: Box<[Box<[u64]>]>, here: fn() -> usize) {
+        assert!(self.near.set((places, beside, here)).is_ok(), "the workers' places are set once");
+    }
+
+    /// [`Park::wake_one`] among the workers of `among` (None: all).
+    fn wake_one_of(&self, among: Option<&[u64]>) -> bool {
+        for (i, (word, handles)) in self.parked.iter().zip(self.handles.chunks(64)).enumerate() {
+            let mask = among.map_or(u64::MAX, |m| m[i]);
+            let mut bits = word.load(Ordering::SeqCst) & mask;
             while bits != 0 {
                 let bit = 1u64 << bits.trailing_zeros();
                 let before = word.fetch_and(!bit, Ordering::SeqCst);
@@ -99,7 +154,7 @@ impl Park {
                     handles[bit.trailing_zeros() as usize].get().expect("a parked worker has set its thread").unpark();
                     return true;
                 }
-                bits = before & !bit;
+                bits = before & !bit & mask;
             }
         }
         false
@@ -193,6 +248,61 @@ mod test {
             word.fetch_or(bit, Ordering::SeqCst);
         }
         park
+    }
+
+    #[cfg(not(shuttle))]
+    std::thread_local! {
+        /// The place the test's thread says it is in.
+        static HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Where the workers have places, a waker wakes its own place's
+    /// first, then its socket's, then any, the lowest-numbered of each;
+    /// `wake_one_near` wakes its own place's alone; a waker in a place
+    /// that is not listed wakes any. Six workers: places {0, 1}, {2, 3}
+    /// and {4, 5}, the first two places one socket.
+    #[test]
+    #[cfg(not(shuttle))]
+    fn a_waker_wakes_its_place_then_its_socket_then_any() {
+        let parked = |park: &Park| (0..6).filter(|&w| park.parked[0].load(Ordering::SeqCst) >> w & 1 == 1).collect::<Vec<_>>();
+        let with_places = || {
+            let park = park_with(6, 4, &[0, 1, 2, 3, 4, 5]);
+            let places: Box<[Box<[u64]>]> = [0b000011u64, 0b001100, 0b110000].iter().map(|&w| vec![w].into_boxed_slice()).collect();
+            let beside: Box<[Box<[u64]>]> = [0b001111u64, 0b001111, 0b110000].iter().map(|&w| vec![w].into_boxed_slice()).collect();
+            park.set_places(places, beside, || HERE.with(|h| h.get()));
+            park
+        };
+        let park = with_places();
+        HERE.with(|h| h.set(1));
+        for left in [vec![0, 1, 3, 4, 5], vec![0, 1, 4, 5], vec![1, 4, 5], vec![4, 5], vec![5], vec![]] {
+            assert!(park.wake_one());
+            assert_eq!(parked(&park), left, "place 1's, then its socket's, then the rest");
+        }
+        assert!(!park.wake_one(), "nobody parked");
+        let park = with_places();
+        HERE.with(|h| h.set(2));
+        assert!(park.wake_one_near() && park.wake_one_near());
+        assert_eq!(parked(&park), [0, 1, 2, 3]);
+        assert!(!park.wake_one_near(), "its place's workers are awake: no other is woken");
+        assert_eq!(parked(&park), [0, 1, 2, 3]);
+        assert!(park.wake_one(), "any waker wakes the others");
+        assert_eq!(parked(&park), [1, 2, 3]);
+        // A place that is not listed (a CPU the process was not on at the start).
+        HERE.with(|h| h.set(9));
+        assert!(!park.wake_one_near());
+        assert!(park.wake_one());
+        assert_eq!(parked(&park), [2, 3]);
+        // Every parked worker, each once.
+        let park = with_places();
+        assert!(park.wake_one());
+        assert_eq!(park.wake_all(), 5);
+        assert_eq!(parked(&park), Vec::<usize>::new());
+        assert_eq!(park.wake_all(), 0);
+        // Without places, the near wake is any worker's.
+        let park = park_with(3, 4, &[1, 2]);
+        assert!(park.wake_one_near());
+        assert_eq!(park.parked_count(), 1);
+        HERE.with(|h| h.set(0));
     }
 
     /// (Outside the Shuttle build, where park.rs is compiled again under

@@ -16,10 +16,15 @@ src/lanes.rs	delete match arm 128 in Task::run_members	1	as on aarch64: survives
 src/lanes.rs	delete match arm 256 in Task::run_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	delete match arm 512 in Task::run_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	delete match arm CHUNK_LEN in Task::run_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
+src/lanes.rs	replace != with == in places::read	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
+src/lanes.rs	replace % with + in places::assign	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/lanes.rs	replace % with + in places::read	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace & with ^ in sme2_serve	1	speed: in `arg & ACTION_SME2 == 0`, `^` makes the test false for every packed action, running it under Sme2Turn instead of pool_platform() (identical digests)
+src/lanes.rs	replace & with | in places::read	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace & with | in sme2_serve	1	speed: `arg | ACTION_SME2 == 0` is always false, running every pipeline action under Sme2Turn instead of NEON (identical digests)
 src/lanes.rs	replace && with || in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace && with || in initialize	2	SME2 CPUs: the same pool (the second place differs only with one thread, where no SME2 thread starts; the first would start the SME2 thread on a CPU without SME2, a case only CI's QEMU Cortex-A72 job reaches)
+src/lanes.rs	replace && with || in places::Plan::done	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace * with +	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace * with + in merge_to_children	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace * with /	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
@@ -28,14 +33,18 @@ src/lanes.rs	replace - with + in Pool::run_job	4	OPEN: the pool's scheduling und
 src/lanes.rs	replace - with / in Pool::run_job	2	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace -= with += in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace -= with /= in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
+src/lanes.rs	replace / with % in places::read	2	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace < with <= in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with == in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with == in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with > in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with > in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
+src/lanes.rs	replace << with >>	1	no places off Linux: settle sets none here, so PLACES stays unset and FAR_LEN, the mutated constant, is never compared; the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace << with >> in sources::Source::unregister	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace == with != in Task::run_equal_members	1	speed: chooses between equally correct paths (a member length's own kernel, or the general one)
 src/lanes.rs	replace == with != in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
+src/lanes.rs	replace == with != in places::Plan::done	2	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
+src/lanes.rs	replace == with != in places::read	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace == with != in sme2_serve	1	speed: swaps which actions run under Sme2Turn vs pool_platform() on the SME2 thread (identical digests)
 src/lanes.rs	replace > with < in initialize	1	speed: whether the pool starts its SME2 thread (without it the NEON workers do its share; the same results)
 src/lanes.rs	replace > with < in sources::open	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
@@ -48,8 +57,18 @@ src/lanes.rs	replace >= with < in poll_pause	1	OPEN: the pool's scheduling under
 src/lanes.rs	replace >= with < in sources::serve	1	[cpu has sme2] speed: the chain's wake for a second waiting item (sources::serve, run_one's before #241) comes when fewer than two wait; the parked workers still wake for work by publish's own wake
 src/lanes.rs	replace >= with < in sources::serve	1	as on aarch64: survives (known-aarch64.txt): [cpu has sme2] speed: the chain's wake for a second waiting item (sources::serve, run_one's before #241) comes when fewer than two wait; the parked workers still wake for work by publish's own wake; on x86_64: survives (known-x86_64.txt): speed: the chain's wake for a second waiting item then comes when fewer than two wait; the parked workers still wake for work by publish's own wake
 src/lanes.rs	replace >= with < in tree_threads	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/lanes.rs	replace >> with << in places::read	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace Pool::wake_for with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace all_workers_parked -> bool with true	1	OPEN: the pool's scheduling: a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before; a run whose test then looks too soon catches it, as the VM's second whole run of November 12 did and its first did not
+src/lanes.rs	replace places::Plan::done with ()	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
+src/lanes.rs	replace places::Plan::near -> bool with false	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
+src/lanes.rs	replace places::here -> usize with 0	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
+src/lanes.rs	replace places::here -> usize with 1	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
+src/lanes.rs	replace places::near_workers -> Option<usize> with None	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
+src/lanes.rs	replace places::read -> Option<Vec<Cpu>> with None	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
+src/lanes.rs	replace places::read -> Option<Vec<Cpu>> with Some(vec![Default::default()])	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
+src/lanes.rs	replace places::read -> Option<Vec<Cpu>> with Some(vec![])	1	compiled out off Linux: places::read reads Linux's /sys and is cfg(target_os = "linux"); the Linux lists judge it
+src/lanes.rs	replace places::take -> bool with true	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace poll_pause with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace prefix_for -> usize with 0	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace prefix_for -> usize with 1	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)

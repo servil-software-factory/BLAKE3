@@ -11,6 +11,8 @@ src/lanes.rs	delete match arm 128 in Task::run_members	1	same code: every test b
 src/lanes.rs	delete match arm 256 in Task::run_members	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	delete match arm 512 in Task::run_members	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	delete match arm CHUNK_LEN in Task::run_members	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
+src/lanes.rs	replace % with + in places::assign	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/lanes.rs	replace % with + in places::read	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace & with ^ in sme2_serve	1	speed: in `arg & ACTION_SME2 == 0`, `^` makes the test false for every packed action, running it under Sme2Turn instead of pool_platform() (identical digests)
 src/lanes.rs	replace & with | in sme2_serve	1	speed: `arg | ACTION_SME2 == 0` is always false, running every pipeline action under Sme2Turn instead of NEON (identical digests)
 src/lanes.rs	replace && with || in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
