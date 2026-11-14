@@ -31,6 +31,7 @@ const NAME: &str = "b3sum";
 
 #[cfg(target_os = "linux")]
 mod linux_pipe;
+mod outboard;
 #[cfg(target_os = "linux")]
 mod uring;
 
@@ -115,6 +116,20 @@ struct Inner {
     /// Skip printing OK for each checked file
     #[arg(long, requires(CHECK_ARG))]
     quiet: bool,
+
+    /// Also write each file's outboard to DIR/<HASH>.obao4: its BLAKE3
+    /// tree over 16 KiB chunk groups in bao-tree's pre-order form, for
+    /// verified streaming
+    #[arg(
+        long,
+        value_name("DIR"),
+        conflicts_with(CHECK_ARG),
+        conflicts_with(DERIVE_KEY_ARG),
+        conflicts_with(LENGTH_ARG),
+        conflicts_with(RAW_ARG),
+        conflicts_with("seek")
+    )]
+    outboard: Option<PathBuf>,
 }
 
 struct Args {
@@ -164,6 +179,7 @@ impl Args {
             tag: false,
             check: false,
             quiet: false,
+            outboard: None,
         };
         Self { inner, file_args, mode: blake3::Mode::Plain, base_hasher: blake3::convenience::Hasher::new(blake3::Mode::Plain, None) }
     }
@@ -179,6 +195,10 @@ impl Args {
 
     fn check(&self) -> bool {
         self.inner.check
+    }
+
+    fn outboard(&self) -> Option<&Path> {
+        self.inner.outboard.as_deref()
     }
 
     fn raw(&self) -> bool {
@@ -928,7 +948,159 @@ fn hash_paths_32(args: &Args, paths: &[PathBuf], on_ordered: &mut dyn FnMut(usiz
     });
 }
 
+/// The outboards' files are created by this many threads, apart from the
+/// ones that hash: creating a file takes its directory's lock, so more
+/// threads than a few only wait for one another, and the hashing threads
+/// would wait with them.
+const OUTBOARD_WRITERS: usize = 2;
+
+/// `--outboard DIR`: each file's hash, printed as ever, and its outboard
+/// written to DIR/<hash>.obao4 (outboard.rs).
+///
+/// The files are shared out among threads started once for the run, each
+/// with rooms of its own for a file's bytes and chaining values; where
+/// there are fewer files than threads, each file takes several. A thread
+/// hands each outboard to the writers and takes the next file. The lines
+/// are printed in the files' order, once all are done. One file is hashed
+/// and written by the caller's thread alone.
+fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
+    use std::sync::{Mutex, mpsc};
+    let paths = &args.file_args;
+    let workers = threads().get().min(paths.len());
+    let in_a_file = (threads().get() / paths.len().max(1)).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = Mutex::new(Vec::<(usize, anyhow::Result<blake3::Hash>)>::new());
+    // To the writers: a file's index, its hash, its outboard; no more
+    // waiting than a few a writer, so that outboards are not made faster
+    // than they are written. Back from them: the outboards' buffers, for
+    // the next files.
+    type Made = (usize, blake3::Hash, Vec<u8>);
+    let (to_writers, made) = mpsc::sync_channel::<Made>(8 * OUTBOARD_WRITERS);
+    let (to_workers, spare) = mpsc::channel::<Vec<u8>>();
+    let (made, spare) = (Mutex::new(made), Mutex::new(spare));
+    let unwritten = Mutex::new(Vec::<(usize, io::Error)>::new());
+    let write = |(i, hash, nodes): Made| {
+        if let Err(e) = std::fs::write(outboard::path_in(dir, &hash), &nodes) {
+            unwritten.lock().unwrap().push((i, e));
+        }
+        if nodes.capacity() > 0 {
+            // No worker may be left to take it.
+            let _ = to_workers.send(nodes);
+        }
+    };
+    let work = |hand: &dyn Fn(Made)| {
+        let mut rooms = outboard::Rooms::new();
+        let mut mine = Vec::new();
+        loop {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(path) = paths.get(i) else { break };
+            let mut nodes = spare.lock().unwrap().try_recv().unwrap_or_default();
+            nodes.clear();
+            let hashed = outboard_of(args.mode, path, in_a_file, &mut rooms, &mut nodes);
+            if let Ok(hash) = &hashed {
+                hand((i, *hash, nodes));
+            }
+            mine.push((i, hashed));
+        }
+        done.lock().unwrap().append(&mut mine);
+    };
+    if workers <= 1 {
+        work(&write);
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 0..OUTBOARD_WRITERS {
+                scope.spawn(|| {
+                    loop {
+                        // The lock is let go before the file is written.
+                        let next = made.lock().unwrap().recv();
+                        let Ok(next) = next else { break };
+                        write(next);
+                    }
+                });
+            }
+            let work = &work;
+            for _ in 1..workers {
+                let to_writers = to_writers.clone();
+                scope.spawn(move || work(&|made| to_writers.send(made).expect("the writers run until every sender is done")));
+            }
+            work(&|made| to_writers.send(made).expect("the writers run until every sender is done"));
+            // The writers end when the channel does: when every thread's
+            // sender is gone.
+            drop(to_writers);
+        });
+    }
+    let unwritten = unwritten.into_inner().unwrap();
+    let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
+    for (i, result) in done.into_inner().unwrap() {
+        results[i] = Some(result);
+    }
+    for (i, e) in unwritten {
+        results[i] = Some(Err(e.into()));
+    }
+    let mut failed = 0u64;
+    for (path, result) in paths.iter().zip(results) {
+        let result = result.expect("every file has its result");
+        if let Err(e) = result.and_then(|hash| print_hash_output(hash, path, args, out)) {
+            failed = failed.saturating_add(1);
+            let _ = out.flush();
+            eprintln!("{}: {}: {}", NAME, path.to_string_lossy(), e);
+        }
+    }
+    failed
+}
+
+/// The hash of the input at `path` (`-`: standard input), and its
+/// outboard appended to `nodes`. A file under MAP_LEN is read into the
+/// thread's room by one read; a longer one that the page cache does not
+/// hold is read directly, where the system has such reads (Linux); any
+/// other is mapped where it can be (the mapping then held, as every
+/// mapping b3sum makes: `hold`), else read whole.
+fn outboard_of(mode: blake3::Mode, path: &Path, threads: usize, rooms: &mut outboard::Rooms, nodes: &mut Vec<u8>) -> anyhow::Result<blake3::Hash> {
+    let bytes = &mut rooms.bytes;
+    bytes.clear();
+    if path == Path::new("-") {
+        io::stdin().lock().read_to_end(bytes)?;
+        return Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes));
+    }
+    let mut file = File::open(path)?;
+    let meta = file.metadata()?;
+    #[cfg(unix)]
+    if meta.is_file() && meta.len() < MAP_LEN as u64 {
+        // One read of the length the file has now: what a longer read
+        // or a second would say is that it has since grown.
+        let len = meta.len() as usize;
+        bytes.resize(len, 0);
+        let mut got = 0;
+        while got < len {
+            match file.read(&mut bytes[got..])? {
+                0 => break,
+                n => got += n,
+            }
+        }
+        return Ok(outboard::outboard(mode, &bytes[..got], threads, &mut rooms.cvs, nodes));
+    }
+    #[cfg(target_os = "linux")]
+    if meta.is_file()
+        && let Some(hash) = outboard::outboard_direct(mode, path, &file, meta.len(), threads, &mut rooms.piece, &mut rooms.cvs, nodes)
+    {
+        return Ok(hash);
+    }
+    #[cfg(unix)]
+    if meta.len() > 0
+        && let Ok(map) = unsafe { memmap2::Mmap::map(&file) }
+    {
+        let hash = outboard::outboard(mode, &map, threads, &mut rooms.cvs, nodes);
+        hold(map);
+        return Ok(hash);
+    }
+    file.read_to_end(bytes)?;
+    Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes))
+}
+
 fn hash_inputs(args: &Args, out: &mut OutBuf) -> u64 {
+    if let Some(dir) = args.outboard() {
+        return outboard_inputs(args, dir, out);
+    }
     if args.is_standard_32() {
         let mut failed = 0u64;
         hash_paths_32(args, &args.file_args, &mut |idx, res| {
