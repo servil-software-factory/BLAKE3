@@ -179,7 +179,11 @@ pub(crate) fn outboard_direct(
     // (A file system without such reads, as a tmpfs, says something else:
     // its files are in memory.)
     let got = unsafe { libc::preadv2(file.as_raw_fd(), &iov, 1, 0, libc::RWF_NOWAIT) };
-    if !(got == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock) {
+    let cold = got == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock;
+    // The tests' seam: a file just written is in the cache.
+    #[cfg(test)]
+    let cold = cold || test::TAKE_FOR_COLD.with(|c| c.get());
+    if !cold {
         return None;
     }
     direct(mode, path, usize::try_from(len).ok()?, threads, mine.get_or_insert_with(Piece::new), cvs, out)
@@ -290,8 +294,14 @@ pub(crate) fn path_in(dir: &Path, hash: &blake3::Hash) -> std::path::PathBuf {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
+
+    std::thread_local! {
+        /// Set: this thread's `outboard_direct` takes every file for cold.
+        #[cfg(target_os = "linux")]
+        pub(crate) static TAKE_FOR_COLD: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
 
     fn painted(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 9)) as u8).collect()
@@ -376,10 +386,26 @@ mod test {
         let path = dir.path().join(format!("file-{}", all.len()));
         assert!(all.len() as u64 >= DIRECT_MIN);
         let file = std::fs::File::open(&path).unwrap();
+        let mut made = None;
         assert_eq!(
-            outboard_direct(blake3::Mode::Plain, &path, &file, all.len() as u64, 1, &mut None, &mut cvs, &mut Vec::new()),
+            outboard_direct(blake3::Mode::Plain, &path, &file, all.len() as u64, 1, &mut made, &mut cvs, &mut Vec::new()),
             None,
             "just written: the cache holds it"
         );
+        assert!(made.is_none(), "no piece is made for a file that is not read directly");
+        // Taken for cold, it is read directly, and a file under DIRECT_MIN is not.
+        TAKE_FOR_COLD.with(|c| c.set(true));
+        let mut want = Vec::new();
+        let hash = outboard(blake3::Mode::Plain, &all, 1, &mut cvs, &mut want);
+        let mut got = Vec::new();
+        assert_eq!(outboard_direct(blake3::Mode::Plain, &path, &file, all.len() as u64, 2, &mut made, &mut cvs, &mut got), Some(hash));
+        assert_eq!(got, want);
+        assert!(made.is_some());
+        let short = dir.path().join(format!("file-{}", PIECE + 1));
+        let file = std::fs::File::open(&short).unwrap();
+        assert!(((PIECE + 1) as u64) < DIRECT_MIN);
+        assert_eq!(outboard_direct(blake3::Mode::Plain, &short, &file, (PIECE + 1) as u64, 1, &mut made, &mut cvs, &mut got), None);
+        assert_eq!(outboard_direct(blake3::Mode::Plain, &path, &file, DIRECT_MIN - 1, 1, &mut made, &mut cvs, &mut got), None, "the length decides");
+        TAKE_FOR_COLD.with(|c| c.set(false));
     }
 }
