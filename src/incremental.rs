@@ -346,15 +346,28 @@ impl Hasher {
     }
 
     /// [`new`](Hasher::new), built in `place`: for a Hasher that lives in
-    /// storage the program already has (a field, a box, a C caller's
-    /// memory). `new` returns its 18 KiB by value, and moving that into
-    /// place copies it; this writes the 2 KiB that a new Hasher holds.
+    /// storage the program already has (a field, a box, an array, a C
+    /// caller's memory).
+    ///
+    /// **Speed**: `new` returns the Hasher by value, 18 KiB, and moving it
+    /// into such a place copies it; this writes the 2 KiB a new Hasher
+    /// holds.
+    ///
+    /// ```
+    /// # blake3_servil_core::initialize();
+    /// use blake3_servil_core::{Mode, convenience::Hasher};
+    /// let mut place = Box::new(core::mem::MaybeUninit::uninit());
+    /// let hasher = Hasher::new_in(&mut place, Mode::Plain, None);
+    /// hasher.update(b"foo");
+    /// assert_eq!(hasher.finalize(), blake3_servil_core::convenience::hash(b"foo"));
+    /// ```
     pub fn new_in<'a>(place: &'a mut core::mem::MaybeUninit<Self>, mode: Mode<'_>, length_hint: Option<u64>) -> &'a mut Self {
         let _ = length_hint;
         let (key, flags) = mode.key_and_flags();
         let p = place.as_mut_ptr();
-        // Sound: each field of the place is written once; the stage needs
-        // only its first block initialized (`first_block`).
+        // Sound: the core and the count of staged bytes are written whole,
+        // and the stage's first block, the part of it that is read before
+        // it is written (`first_block`); a Hasher owns nothing to drop.
         unsafe {
             core::ptr::addr_of_mut!((*p).core).write(HasherCore::new_internal(&key, flags));
             core::ptr::addr_of_mut!((*p).staged).write(0);
@@ -1027,6 +1040,32 @@ mod test {
             let _ = copies;
             assert_eq!(h.staged, staged, "after {end} bytes");
             assert_eq!(h.finalize(), crate::convenience::hash(&input[..end]), "after {end} bytes");
+        }
+    }
+
+    /// A Hasher built in place is the one `new` returns: the same digests
+    /// at every length class, in every mode, and whatever the place held
+    /// before (a place of 0xff bytes: the first block a short message is
+    /// hashed from is zeroed).
+    #[test]
+    #[cfg(feature = "std")]
+    fn a_hasher_built_in_place_is_news() {
+        crate::initialize();
+        let input = painted();
+        let key = [0x61; 32];
+        for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("built in place")] {
+            for len in [0usize, 1, 63, 64, 65, 1024, 1025, STAGE_LEN - 1, STAGE_LEN, 2 * STAGE_LEN + 9] {
+                let mut place = std::boxed::Box::new(core::mem::MaybeUninit::<Hasher>::uninit());
+                // Sound: any bytes are valid in a MaybeUninit.
+                unsafe { place.as_mut_ptr().cast::<u8>().write_bytes(0xff, core::mem::size_of::<Hasher>()) };
+                let h = Hasher::new_in(&mut place, mode, Some(len as u64));
+                assert_eq!((h.staged, h.count()), (0, 0));
+                h.update(&input[..len]);
+                assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(mode, &input[..len]), "len={len}");
+                let mut by_value = Hasher::new(mode, None);
+                by_value.update(&input[..len]);
+                assert_eq!(h.finalize(), by_value.finalize(), "len={len}");
+            }
         }
     }
 
