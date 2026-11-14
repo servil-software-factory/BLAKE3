@@ -913,7 +913,7 @@ pub(crate) mod places {
     /// EXPERIMENT: the job length from which every place's workers share a job.
     pub(crate) fn far_len() -> usize {
         static FAR: OnceLock<usize> = OnceLock::new();
-        *FAR.get_or_init(|| std::env::var("B3_FAR_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(16 << 20))
+        *FAR.get_or_init(|| std::env::var("B3_FAR_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(48 << 20))
     }
 
     /// Worker `me` moves to its place, as it starts.
