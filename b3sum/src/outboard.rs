@@ -13,6 +13,11 @@
 //! It is built on the library's tree API alone (`throughput::TreeHasher`):
 //! each group's chaining value, on as many threads as the file has work
 //! for, then the parents a layer at a time, side by side in the lanes.
+//!
+//! A long file that the page cache does not hold is read past the cache
+//! (O_DIRECT, Linux), several reads at once: a set of large files hashed
+//! once is the common case, and is too large to cache (Zooko, November
+//! 14, 2026). The cache does not hold such a file afterwards.
 
 use blake3::throughput::{Cv, TreeHasher};
 use std::path::Path;

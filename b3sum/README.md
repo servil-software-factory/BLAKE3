@@ -112,6 +112,10 @@ $ ls outboards
 
 It works in the plain and keyed modes, the two bao-tree reads.
 
+On Linux, a file of 4 MiB or more that the page cache does not hold is read past the
+cache (direct I/O), several reads at once, which is the fast way to read a large set of
+files once. The cache does not hold such a file afterwards.
+
 ## Hashes as sigils
 
 `--sigilcode` writes each hash as a [sigil](https://github.com/johnservil/sigil),
