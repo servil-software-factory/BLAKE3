@@ -980,17 +980,26 @@ fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
     let short_hashes: Vec<Option<blake3::Hash>> = short.iter().map(|&i| results[i].as_ref().and_then(|r| r.as_ref().ok().copied())).collect();
     let work = || {
         let (mut cvs, mut nodes, mut bytes) = (Vec::new(), Vec::new(), Vec::new());
+        #[cfg(target_os = "linux")]
+        let mut piece = outboard::Piece::new();
         let mut mine = Vec::new();
         loop {
             let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if k < long.len() {
                 let i = long[k];
                 nodes.clear();
-                let hashed = with_file_bytes(&paths[i], &mut bytes, |data| {
-                    let hash = outboard::outboard(args.mode, data, in_a_file, &mut cvs, &mut nodes);
-                    std::fs::write(outboard::path_in(dir, &hash), &nodes)?;
-                    Ok(hash)
-                });
+                #[cfg(target_os = "linux")]
+                let direct = outboard::outboard_direct(args.mode, &paths[i], in_a_file, &mut piece, &mut cvs, &mut nodes);
+                #[cfg(not(target_os = "linux"))]
+                let direct = None;
+                let hashed = match direct {
+                    Some(hash) => std::fs::write(outboard::path_in(dir, &hash), &nodes).map(|()| hash).map_err(Into::into),
+                    None => with_file_bytes(&paths[i], &mut bytes, |data| {
+                        let hash = outboard::outboard(args.mode, data, in_a_file, &mut cvs, &mut nodes);
+                        std::fs::write(outboard::path_in(dir, &hash), &nodes)?;
+                        Ok(hash)
+                    }),
+                };
                 mine.push((i, hashed));
             } else if k < long.len() + short.len() {
                 let k = k - long.len();

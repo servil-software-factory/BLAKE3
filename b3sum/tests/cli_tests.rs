@@ -826,6 +826,44 @@ fn test_outboard_files_are_bao_trees() {
     assert_eq!(String::from_utf8_lossy(&result.stdout).trim_end(), format!("{}\n{}", expected[1].0, expected[3].0));
     assert!(String::from_utf8_lossy(&result.stderr).contains("no-such-file"));
 
+    // Many files, short and long in turn, with one that is not there among
+    // them: the short ones are hashed by the engine for many files and the
+    // long ones on the threads, and the lines come in the files' order,
+    // on one thread and on several.
+    let many_dir = dir.path().join("many");
+    fs::create_dir(&many_dir).unwrap();
+    let mut many = Vec::new();
+    let mut lines = Vec::new();
+    let mut outboards = Vec::new();
+    for i in 0..120usize {
+        let len = [i * 139, group + 1 + i * 7919, group, 5 * group + i][i % 4];
+        let data: Vec<u8> = (0..len).map(|j| (j.wrapping_mul(41) ^ (j >> 5) ^ i) as u8).collect();
+        let path = many_dir.join(format!("f{i:03}"));
+        fs::write(&path, &data).unwrap();
+        let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create(&data, block_size);
+        lines.push(format!("{}  {}", theirs.root.to_hex(), path.to_string_lossy()));
+        outboards.push((format!("{}.obao4", theirs.root.to_hex()), theirs.data));
+        many.push(path);
+        if i == 60 {
+            many.push(missing.clone());
+        }
+    }
+    for threads in ["1", "5"] {
+        let fresh = dir.path().join(format!("outboards-{threads}"));
+        fs::create_dir(&fresh).unwrap();
+        let mut args: Vec<OsString> = vec!["--num-threads".into(), threads.into(), "--outboard".into(), fresh.clone().into()];
+        args.extend(many.iter().map(|p| p.as_os_str().to_owned()));
+        let result = cmd(b3sum_exe(), &args).stdout_capture().stderr_capture().unchecked().run().unwrap();
+        assert!(!result.status.success(), "one file is not there");
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim_end(), lines.join("\n"), "threads={threads}");
+        assert_eq!(String::from_utf8_lossy(&result.stderr).matches("no-such-file").count(), 1);
+        for (name, want) in &outboards {
+            assert_eq!(&fs::read(fresh.join(name)).unwrap(), want, "{name}, threads={threads}");
+        }
+        let distinct: std::collections::HashSet<_> = outboards.iter().map(|o| &o.0).collect();
+        assert_eq!(fs::read_dir(&fresh).unwrap().count(), distinct.len(), "one outboard a hash, and no other file");
+    }
+
     // A directory that is not there: every file fails, none is hashed in silence.
     let result = cmd!(b3sum_exe(), "--outboard", dir.path().join("no-such-dir"), &files[1]).stdout_capture().stderr_capture().unchecked().run().unwrap();
     assert!(!result.status.success());
