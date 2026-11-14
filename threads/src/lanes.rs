@@ -316,13 +316,13 @@ fn with_scratch<C, T>(cut: impl FnOnce(&mut Vec<Piece>) -> C, job: impl FnOnce(C
 /// takes one), handed to `merge`.
 fn tree_cvs<T>(pool: &Pool, input: &[u8], key: &crate::CVWords, counter: u64, flags: u8, merge: impl FnOnce(&[Piece], &mut [ChainingValue]) -> T) -> T {
     let turn = crate::platform::Sme2Turn::take(Platform::detect(), true);
-    let threads = tree_threads(input.len(), pool.threads, turn.platform().simd_degree());
+    let threads = tree_threads(input.len(), pool.threads_for(input.len()), turn.platform().simd_degree());
     let prefix = prefix_for(&turn, input.len(), threads);
     with_scratch(
         |pieces| cut_with_prefix(pieces, input.len(), threads, prefix),
         |own, pieces, cvs| {
             let work = Work::Tree { input, pieces, cvs: cvs.as_mut_ptr(), key: *key, counter, flags };
-            pool.run_job(work, pieces.len(), own, turn.platform());
+            pool.run_job(work, pieces.len(), own, turn.platform(), threads);
             drop(turn);
             merge(pieces, cvs)
         },
@@ -367,11 +367,12 @@ fn hash_many_over_pool(input: &[u8], message_len: usize, slot: usize, key: &crat
         return crate::hash_many_serial(input, message_len, slot, key, flags, outputs);
     };
     let count = outputs.len();
+    let threads = pool.threads_for(input.len());
     with_scratch(
-        |pieces| cut_messages(pieces, count, slot, pool.threads),
+        |pieces| cut_messages(pieces, count, slot, threads),
         |(), pieces, _| {
             let work = Work::Messages { input, message_len, slot, key: *key, flags, pieces, outputs: outputs.as_mut_ptr() };
-            pool.run_job(work, pieces.len(), 0, pool_platform());
+            pool.run_job(work, pieces.len(), 0, pool_platform(), threads);
         },
     )
 }
@@ -386,11 +387,12 @@ pub(crate) fn hash_each(key: &crate::CVWords, flags: u8, items: &[(&[crate::thro
         let platform = Platform::detect();
         return crate::each::hash_each_on(key, flags, items, out, platform, |item| hash_small_on(item, key, flags, platform));
     };
+    let threads = pool.threads_for(items.iter().map(|i| i.1).sum());
     with_scratch(
-        |pieces| cut_items(pieces, items, pool.threads),
+        |pieces| cut_items(pieces, items, threads),
         |(), pieces, _| {
             let work = Work::Each { items, key: *key, flags, pieces, outputs: out.as_mut_ptr() };
-            pool.run_job(work, pieces.len(), 0, pool_platform());
+            pool.run_job(work, pieces.len(), 0, pool_platform(), threads);
         },
     )
 }
@@ -871,6 +873,21 @@ pub(crate) mod places {
         let _ = threads;
     }
 
+    /// The workers of the calling thread's place, where workers have
+    /// places and its place has any.
+    pub(crate) fn near_workers() -> Option<usize> {
+        let places = PLACES.get()?;
+        let here = here() as u8;
+        let near = places.of_worker.iter().filter(|&&p| p == here).count();
+        (near > 0).then_some(near)
+    }
+
+    /// EXPERIMENT: the job length from which every place's workers share a job.
+    pub(crate) fn far_len() -> usize {
+        static FAR: OnceLock<usize> = OnceLock::new();
+        *FAR.get_or_init(|| std::env::var("B3_FAR_LEN").ok().and_then(|v| v.parse().ok()).unwrap_or(16 << 20))
+    }
+
     /// Worker `me` moves to its place, as it starts.
     pub(crate) fn take(me: usize) {
         #[cfg(target_os = "linux")]
@@ -970,7 +987,7 @@ impl Pool {
     /// hashes pieces `0..own` on `own_platform`, back to back (the SME2
     /// thread's prefix; the workers' pieces start after it). A caller that
     /// finds no source slot free hashes every piece itself.
-    fn run_job(&self, work: Work, pieces: usize, own: usize, own_platform: Platform) {
+    fn run_job(&self, work: Work, pieces: usize, own: usize, own_platform: Platform, threads: usize) {
         crate::ran(crate::Ran::Pool);
         #[cfg(test)]
         WAKES_WANTED.with(|w| w.set(None));
@@ -989,10 +1006,7 @@ impl Pool {
             // A worker for each piece past the caller's first (none for a
             // job of one past its own: a wake for none is nothing); for a
             // tree, within the wide kernel's thread budget.
-            let wanted = match &job.work {
-                Work::Tree { input, .. } => (pieces - own - 1).min(tree_threads(input.len(), self.threads, own_platform.simd_degree()).saturating_sub(1)),
-                _ => pieces - own - 1,
-            };
+            let wanted = (pieces - own - 1).min(threads.saturating_sub(1));
             #[cfg(test)]
             WAKES_WANTED.with(|w| w.set(Some(wanted)));
             self.wake_for(wanted);
@@ -1014,6 +1028,18 @@ impl Pool {
         if let Some(slot) = slot {
             sources::Source::unregister(slot);
         }
+    }
+
+    /// The threads a job of `len` bytes is cut for and wakes, its caller
+    /// among them: on a machine whose workers have places, a job under
+    /// FAR_LEN stays with the workers of the caller's place.
+    fn threads_for(&self, len: usize) -> usize {
+        if len < places::far_len()
+            && let Some(near) = places::near_workers()
+        {
+            return (near + 1).min(self.threads);
+        }
+        self.threads
     }
 
     /// Wake workers for `wanted` pieces of new work (crate::park).
@@ -2494,8 +2520,8 @@ mod test {
         assert_eq!((pieces.len(), own), (3, 0));
         let mut cvs = std::vec![ChainingValue::default(); 3];
         let work = Work::Tree { input: &input[..24 * 1024], pieces: &pieces, cvs: cvs.as_mut_ptr(), key: *crate::IV, counter: 0, flags: 0 };
-        pool.run_job(work, 3, 0, Platform::detect());
         let budget = tree_threads(24 * 1024, pool.threads, degree) - 1;
+        pool.run_job(work, 3, 0, Platform::detect(), budget + 1);
         assert_eq!(wanted(), Some(2.min(budget)), "three pieces: two workers, or the budget");
         assert_eq!(merge_root(&pieces, &mut cvs, crate::IV, 0), crate::convenience::hash(&input[..24 * 1024]));
         // A call the pool never sees asks for nothing (run_job clears the
