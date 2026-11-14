@@ -866,7 +866,12 @@ pub(crate) mod places {
             for (k, &place) in of_worker.iter().enumerate() {
                 near[place as usize][k / 64] |= 1 << (k % 64);
             }
-            if PLACES.set(Places { of_cpu: of_cpu.into(), cpus: cpus.into(), of_worker: of_worker.into() }).is_ok() {
+            // EXPERIMENT: B3_PLACES = none | wake | pin (default: both).
+            let mode = std::env::var("B3_PLACES").unwrap_or_default();
+            if mode == "none" {
+                return;
+            }
+            if PLACES.set(Places { of_cpu: of_cpu.into(), cpus: cpus.into(), of_worker: of_worker.into() }).is_ok() && mode != "pin" {
                 pool().park.set_places(near.into(), here);
             }
         }
@@ -891,7 +896,9 @@ pub(crate) mod places {
     /// Worker `me` moves to its place, as it starts.
     pub(crate) fn take(me: usize) {
         #[cfg(target_os = "linux")]
-        if let Some(places) = PLACES.get() {
+        if let Some(places) = PLACES.get()
+            && std::env::var("B3_PLACES").as_deref() != Ok("wake")
+        {
             let set = &places.cpus[places.of_worker[me] as usize];
             // Sound: the set is `len` readable bytes. A failure leaves
             // the worker where the system puts it.
