@@ -77,6 +77,9 @@ Options:
       --tag                   Output BSD-style checksums: BLAKE3 ([FILE]) = [HASH]
   -c, --check                 Read BLAKE3 sums from the [FILE]s and check them
       --quiet                 Skip printing OK for each checked file
+      --outboard <DIR>        Also write each file's outboard to DIR/<HASH>.obao4: its BLAKE3 tree
+                              over 16 KiB chunk groups in bao-tree's pre-order form, for verified
+                              streaming
   -h, --help                  Print help
   -V, --version               Print version
 
@@ -90,6 +93,24 @@ other work (or to other b3sums). On Linux, `taskset -c LIST b3sum ...` runs it o
 CPUs.
 
 [What `--check` does](what_does_check_do.md) explains checkfiles.
+
+## Outboards for verified streaming
+
+`--outboard DIR` also writes each file's outboard to `DIR/<HASH>.obao4`: the file's
+BLAKE3 tree above its chunk groups of 16 KiB, which lets a reader verify any part of
+the file against its hash as the part arrives. The bytes are those bao-tree's
+`PreOrderMemOutboard::create` makes for block size 4 (b3sum's tests compare the two):
+each parent node's two children, 64 bytes a node, the nodes in pre-order, with no length
+before them. A file of 16 KiB or less has an empty outboard. `DIR` must exist.
+
+```bash
+$ mkdir outboards && b3sum --outboard outboards big.iso
+5da5ad397cd129294c30f415b7d4e091b155a5faa37ba0b154ed10a5e5dbfca9  big.iso
+$ ls outboards
+5da5ad397cd129294c30f415b7d4e091b155a5faa37ba0b154ed10a5e5dbfca9.obao4
+```
+
+It works in the plain and keyed modes, the two bao-tree reads.
 
 ## Hashes as sigils
 

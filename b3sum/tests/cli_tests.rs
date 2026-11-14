@@ -767,3 +767,76 @@ fn test_parallel_check_preserves_line_order_across_errors_and_failures() {
     assert!(stderr_str.contains("Invalid check line format"), "{stderr_str}");
     assert!(stderr_str.contains("3 computed checksums did NOT match"), "{stderr_str}");
 }
+
+/// `--outboard DIR`: the hashes as ever, and beside them each file's
+/// outboard at DIR/<hash>.obao4, the bytes bao-tree itself makes for 16 KiB
+/// chunk groups: an empty file, files around a group and around powers of
+/// two of groups, and standard input; in the keyed mode too. A file that
+/// cannot be read fails alone, and the options an outboard cannot go with
+/// are refused.
+#[test]
+fn test_outboard_files_are_bao_trees() {
+    blake3::initialize();
+    let dir = tempfile::tempdir().unwrap();
+    let out_dir = dir.path().join("outboards");
+    fs::create_dir(&out_dir).unwrap();
+    let block_size = bao_tree::BlockSize::from_chunk_log(4);
+    let group = 16 * 1024;
+    let lens = [0usize, 1, group, group + 1, 3 * group, 100_000, 64 * group, 64 * group + 1, 2_000_000];
+    let mut files = Vec::new();
+    let mut expected = Vec::new();
+    for (i, &len) in lens.iter().enumerate() {
+        let data: Vec<u8> = (0..len).map(|j| (j.wrapping_mul(37) ^ (j >> 7) ^ i) as u8).collect();
+        let path = dir.path().join(format!("file-{i}"));
+        fs::write(&path, &data).unwrap();
+        let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create(&data, block_size);
+        assert_eq!(theirs.root.as_bytes(), blake3::convenience::hash(&data).as_bytes());
+        expected.push((format!("{}  {}", theirs.root.to_hex(), path.to_string_lossy()), out_dir.join(format!("{}.obao4", theirs.root.to_hex())), theirs.data));
+        files.push(path);
+    }
+    let mut args: Vec<OsString> = vec!["--outboard".into(), out_dir.clone().into()];
+    args.extend(files.iter().map(|p| p.as_os_str().to_owned()));
+    let output = cmd(b3sum_exe(), &args).read().unwrap();
+    assert_eq!(output, expected.iter().map(|e| e.0.clone()).collect::<Vec<_>>().join("\n"));
+    for (line, at, want) in &expected {
+        assert_eq!(&fs::read(at).unwrap(), want, "the outboard of {line}");
+    }
+    assert_eq!(fs::read_dir(&out_dir).unwrap().count(), lens.len(), "one outboard a file");
+
+    // Standard input, and one thread.
+    let data: Vec<u8> = (0..300_000usize).map(|j| (j * 13) as u8).collect();
+    let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create(&data, block_size);
+    let output = cmd!(b3sum_exe(), "--num-threads", "1", "--outboard", &out_dir).stdin_bytes(data.clone()).read().unwrap();
+    assert_eq!(output, format!("{}  -", theirs.root.to_hex()));
+    assert_eq!(fs::read(out_dir.join(format!("{}.obao4", theirs.root.to_hex()))).unwrap(), theirs.data);
+
+    // Keyed: the key on standard input, as ever.
+    let key = [0x42u8; 32];
+    let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create_keyed(&data, block_size, &key);
+    let big = dir.path().join("keyed-input");
+    fs::write(&big, &data).unwrap();
+    let output = cmd!(b3sum_exe(), "--keyed", "--no-names", "--outboard", &out_dir, &big).stdin_bytes(key.to_vec()).read().unwrap();
+    assert_eq!(output, theirs.root.to_hex().to_string());
+    assert_eq!(fs::read(out_dir.join(format!("{}.obao4", theirs.root.to_hex()))).unwrap(), theirs.data);
+
+    // A file that is not there fails alone: the others' lines and outboards are made.
+    let missing = dir.path().join("no-such-file");
+    let result = cmd!(b3sum_exe(), "--outboard", &out_dir, &files[1], &missing, &files[3]).stdout_capture().stderr_capture().unchecked().run().unwrap();
+    assert!(!result.status.success());
+    assert_eq!(String::from_utf8_lossy(&result.stdout).trim_end(), format!("{}\n{}", expected[1].0, expected[3].0));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("no-such-file"));
+
+    // A directory that is not there: every file fails, none is hashed in silence.
+    let result = cmd!(b3sum_exe(), "--outboard", dir.path().join("no-such-dir"), &files[1]).stdout_capture().stderr_capture().unchecked().run().unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+
+    // What an outboard cannot go with.
+    for refused in [vec!["--check"], vec!["--raw"], vec!["--length", "16"], vec!["--seek", "1"], vec!["--derive-key", "context"]] {
+        let mut args: Vec<OsString> = vec!["--outboard".into(), out_dir.clone().into()];
+        args.extend(refused.iter().map(OsString::from));
+        args.push(files[1].as_os_str().to_owned());
+        let result = cmd(b3sum_exe(), &args).stdout_capture().stderr_capture().unchecked().run().unwrap();
+        assert!(!result.status.success(), "--outboard with {refused:?}");
+    }
+}

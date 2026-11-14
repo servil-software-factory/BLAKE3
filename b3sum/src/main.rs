@@ -31,6 +31,7 @@ const NAME: &str = "b3sum";
 
 #[cfg(target_os = "linux")]
 mod linux_pipe;
+mod outboard;
 #[cfg(target_os = "linux")]
 mod uring;
 
@@ -115,6 +116,20 @@ struct Inner {
     /// Skip printing OK for each checked file
     #[arg(long, requires(CHECK_ARG))]
     quiet: bool,
+
+    /// Also write each file's outboard to DIR/<HASH>.obao4: its BLAKE3
+    /// tree over 16 KiB chunk groups in bao-tree's pre-order form, for
+    /// verified streaming
+    #[arg(
+        long,
+        value_name("DIR"),
+        conflicts_with(CHECK_ARG),
+        conflicts_with(DERIVE_KEY_ARG),
+        conflicts_with(LENGTH_ARG),
+        conflicts_with(RAW_ARG),
+        conflicts_with("seek")
+    )]
+    outboard: Option<PathBuf>,
 }
 
 struct Args {
@@ -164,6 +179,7 @@ impl Args {
             tag: false,
             check: false,
             quiet: false,
+            outboard: None,
         };
         Self { inner, file_args, mode: blake3::Mode::Plain, base_hasher: blake3::convenience::Hasher::new(blake3::Mode::Plain, None) }
     }
@@ -179,6 +195,10 @@ impl Args {
 
     fn check(&self) -> bool {
         self.inner.check
+    }
+
+    fn outboard(&self) -> Option<&Path> {
+        self.inner.outboard.as_deref()
     }
 
     fn raw(&self) -> bool {
@@ -928,7 +948,55 @@ fn hash_paths_32(args: &Args, paths: &[PathBuf], on_ordered: &mut dyn FnMut(usiz
     });
 }
 
+/// `--outboard DIR`: each file's hash, printed as ever, and its outboard
+/// written to DIR/<hash>.obao4 (outboard.rs). The files go one after
+/// another, each over the threads it has work for; the rooms for a file's
+/// chaining values, its nodes and its bytes are kept from file to file.
+fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
+    let mut failed = 0u64;
+    let (mut cvs, mut nodes, mut bytes) = (Vec::new(), Vec::new(), Vec::new());
+    for path in &args.file_args {
+        nodes.clear();
+        let done = with_file_bytes(path, &mut bytes, |data| {
+            let hash = outboard::outboard(args.mode, data, threads().get(), &mut cvs, &mut nodes);
+            std::fs::write(outboard::path_in(dir, &hash), &nodes)?;
+            print_hash_output(hash, path, args, out)
+        });
+        if let Err(e) = done {
+            failed = failed.saturating_add(1);
+            let _ = out.flush();
+            eprintln!("{}: {}: {}", NAME, path.to_string_lossy(), e);
+        }
+    }
+    failed
+}
+
+/// `f` over a whole input's bytes: a file mapped where it can be (the
+/// mapping then held, as every mapping b3sum makes: `hold`), else read
+/// into `buffer`; `-` is standard input.
+fn with_file_bytes<T>(path: &Path, buffer: &mut Vec<u8>, f: impl FnOnce(&[u8]) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    buffer.clear();
+    if path == Path::new("-") {
+        io::stdin().lock().read_to_end(buffer)?;
+        return f(buffer);
+    }
+    let mut file = File::open(path)?;
+    #[cfg(unix)]
+    if file.metadata()?.len() > 0
+        && let Ok(map) = unsafe { memmap2::Mmap::map(&file) }
+    {
+        let done = f(&map);
+        hold(map);
+        return done;
+    }
+    file.read_to_end(buffer)?;
+    f(buffer)
+}
+
 fn hash_inputs(args: &Args, out: &mut OutBuf) -> u64 {
+    if let Some(dir) = args.outboard() {
+        return outboard_inputs(args, dir, out);
+    }
     if args.is_standard_32() {
         let mut failed = 0u64;
         hash_paths_32(args, &args.file_args, &mut |idx, res| {
