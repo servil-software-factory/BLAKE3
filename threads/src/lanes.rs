@@ -764,12 +764,124 @@ pub(crate) fn initialize(threads: usize) {
     std::thread::Builder::new()
         .name("blake3-worker-1".into())
         .spawn(move || {
+            places::settle(threads);
             for worker in 2..threads {
                 std::thread::Builder::new().name(format!("blake3-worker-{worker}")).spawn(move || worker_main(worker - 1)).expect("spawning a BLAKE3 worker");
             }
             worker_main(0)
         })
         .expect("spawning a BLAKE3 worker");
+}
+
+/// The workers' places: on a machine with more than one last-level cache
+/// (several sockets, or an EPYC's cores in groups of six or eight), each
+/// worker runs on the CPUs under one of them, and a waker wakes a worker
+/// under its own first. Work a caller has just written is in its cache; a
+/// worker under another fetches it line by line across the machine (2x
+/// EPYC 7443, 64 KiB rooms through a Pipeline: 2.5 us a room with the
+/// workers under the caller's cache, 4.4 to 9.4 us with them anywhere;
+/// BLAKE3 #389). With one cache, or where the system does not say (any but
+/// Linux), nothing is set and the workers run where the system puts them.
+pub(crate) mod places {
+    use super::*;
+
+    /// CPUs a set holds: the kernel's own limit for the calls below.
+    const CPUS: usize = 1024;
+    type Set = [u64; CPUS / 64];
+
+    struct Places {
+        /// Each CPU's place.
+        of_cpu: Box<[u8]>,
+        /// Each place's CPUs, those this process may run on.
+        cpus: Box<[Set]>,
+        /// Each worker's place.
+        of_worker: Box<[u8]>,
+    }
+
+    static PLACES: OnceLock<Places> = OnceLock::new();
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" {
+        fn sched_getcpu() -> i32;
+        fn sched_getaffinity(pid: i32, len: usize, set: *mut Set) -> i32;
+        fn sched_setaffinity(pid: i32, len: usize, set: *const Set) -> i32;
+    }
+
+    /// The calling thread's place (0 where none are set).
+    fn here() -> usize {
+        #[cfg(target_os = "linux")]
+        if let Some(places) = PLACES.get() {
+            // Sound: no arguments, no memory.
+            let cpu = unsafe { sched_getcpu() };
+            return usize::try_from(cpu).ok().and_then(|c| places.of_cpu.get(c)).map_or(0, |&p| p as usize);
+        }
+        0
+    }
+
+    /// Read the machine's caches and give each of `threads - 1` workers a
+    /// place: the first worker's work, before it starts the others.
+    pub(crate) fn settle(threads: usize) {
+        #[cfg(target_os = "linux")]
+        {
+            let mut allowed: Set = [0; CPUS / 64];
+            // Sound: the set is `len` writable bytes.
+            if unsafe { sched_getaffinity(0, core::mem::size_of::<Set>(), &mut allowed) } != 0 {
+                return;
+            }
+            // Each allowed CPU's last-level cache, by the CPUs that share it.
+            let mut keys: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+            let mut of_cpu = std::vec![0u8; CPUS];
+            let mut order: std::vec::Vec<(u8, usize)> = std::vec::Vec::new();
+            for cpu in (0..CPUS).filter(|c| allowed[c / 64] >> (c % 64) & 1 == 1) {
+                let Ok(key) = std::fs::read_to_string(std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/shared_cpu_list")) else { return };
+                let place = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                    keys.push(key);
+                    keys.len() - 1
+                });
+                if place > u8::MAX as usize {
+                    return;
+                }
+                of_cpu[cpu] = place as u8;
+                order.push((place as u8, cpu));
+            }
+            if keys.len() < 2 {
+                return;
+            }
+            // The places in order from this thread's on, so that the first
+            // workers share the starting thread's cache.
+            // Sound: no arguments, no memory.
+            let first = usize::try_from(unsafe { sched_getcpu() }).ok().map_or(0, |c| of_cpu[c.min(CPUS - 1)]) as usize;
+            order.sort_by_key(|&(place, cpu)| ((place as usize + keys.len() - first) % keys.len(), cpu));
+            let mut cpus = std::vec![[0u64; CPUS / 64]; keys.len()];
+            for &(place, cpu) in &order {
+                cpus[place as usize][cpu / 64] |= 1 << (cpu % 64);
+            }
+            // Worker k beside the k+1st CPU in that order: the first CPU is
+            // the caller's.
+            let workers = threads - 1;
+            let of_worker: std::vec::Vec<u8> = (0..workers).map(|k| order[(k + 1) % order.len()].0).collect();
+            let mut near = std::vec![std::vec![0u64; workers.div_ceil(64).max(1)].into_boxed_slice(); keys.len()];
+            for (k, &place) in of_worker.iter().enumerate() {
+                near[place as usize][k / 64] |= 1 << (k % 64);
+            }
+            if PLACES.set(Places { of_cpu: of_cpu.into(), cpus: cpus.into(), of_worker: of_worker.into() }).is_ok() {
+                pool().park.set_places(near.into(), here);
+            }
+        }
+        let _ = threads;
+    }
+
+    /// Worker `me` moves to its place, as it starts.
+    pub(crate) fn take(me: usize) {
+        #[cfg(target_os = "linux")]
+        if let Some(places) = PLACES.get() {
+            let set = &places.cpus[places.of_worker[me] as usize];
+            // Sound: the set is `len` readable bytes. A failure leaves
+            // the worker where the system puts it.
+            unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), set) };
+        }
+        let _ = me;
+    }
 }
 
 /// The contract's check at every multithreaded call and stream: a call
@@ -1710,6 +1822,7 @@ fn worker_main(me: usize) {
     // the panic's message printed first by the panic hook.
     let _ = std::panic::catch_unwind(move || {
         let pool = pool();
+        places::take(me);
         pool.park.register(me);
         // Before the first piece: a collection's range then allocates
         // nothing here.

@@ -41,6 +41,11 @@ pub(crate) struct Park {
     owed: AtomicUsize,
     /// The most wakes any one waker makes (FANOUT; a test may choose).
     fanout: usize,
+    /// Set once the workers have places (machines with more than one
+    /// last-level cache): for each place, the workers there as bits like
+    /// `parked`'s, and the place of the thread that asks. A waker wakes a
+    /// worker of its own place first.
+    near: OnceLock<(Box<[Box<[u64]>]>, fn() -> usize)>,
 }
 
 /// The most wakes any one waker makes, publisher or woken worker: the rest
@@ -69,6 +74,7 @@ impl Park {
             handles: (0..workers).map(|_| OnceLock::new()).collect(),
             owed: AtomicUsize::new(0),
             fanout,
+            near: OnceLock::new(),
         }
     }
 
@@ -90,8 +96,27 @@ impl Park {
     /// Wake one parked worker, if any: whether one was. With none parked,
     /// one load a word.
     pub(crate) fn wake_one(&self) -> bool {
-        for (word, handles) in self.parked.iter().zip(self.handles.chunks(64)) {
-            let mut bits = word.load(Ordering::SeqCst);
+        // The waker's own place first, where the workers have places.
+        if let Some((places, here)) = self.near.get()
+            && let Some(mine) = places.get(here())
+            && self.wake_one_of(Some(mine))
+        {
+            return true;
+        }
+        self.wake_one_of(None)
+    }
+
+    /// The workers' places, once: `places[p]` the workers of place p,
+    /// `here` the asking thread's place.
+    pub(crate) fn set_places(&self, places: Box<[Box<[u64]>]>, here: fn() -> usize) {
+        assert!(self.near.set((places, here)).is_ok(), "the workers' places are set once");
+    }
+
+    /// [`Park::wake_one`] among the workers of `among` (None: all).
+    fn wake_one_of(&self, among: Option<&[u64]>) -> bool {
+        for (i, (word, handles)) in self.parked.iter().zip(self.handles.chunks(64)).enumerate() {
+            let mask = among.map_or(u64::MAX, |m| m[i]);
+            let mut bits = word.load(Ordering::SeqCst) & mask;
             while bits != 0 {
                 let bit = 1u64 << bits.trailing_zeros();
                 let before = word.fetch_and(!bit, Ordering::SeqCst);
@@ -99,7 +124,7 @@ impl Park {
                     handles[bit.trailing_zeros() as usize].get().expect("a parked worker has set its thread").unpark();
                     return true;
                 }
-                bits = before & !bit;
+                bits = before & !bit & mask;
             }
         }
         false
