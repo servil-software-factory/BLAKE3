@@ -130,6 +130,8 @@ The throughput API, for power users.
   The hashes of a `Batch`'s messages, in `mode`, on the calling thread.
 - `fn context_key(context: &str) -> ContextKey`  
   Hash a key-derivation context string and return a `ContextKey`.
+- `const fn left_len(len: u64) -> u64`  
+  The bytes of the left subtree of a message, or of a subtree, of `len` bytes.
 
 
 ### `struct Packed<const N: usize>`
@@ -181,3 +183,33 @@ Implements: `Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`.
 ### `trait Prepared`
 
 The batch calls' input.
+
+
+### `struct Cv`
+
+A subtree's chaining value.
+
+```rust
+const fn as_bytes(&self) -> &[u8; 32]
+const fn from_bytes(bytes: [u8; 32]) -> Self
+```
+
+Implements: `Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`.
+
+
+### `struct TreeHasher`
+
+A `Mode` prepared for a program that builds or verifies a BLAKE3 tree itself (verified streaming, an outboard, a tree hashed in parts on other machines).
+
+```rust
+fn new(mode: Mode<'_>) -> Self
+fn on_this_core(self) -> Self
+fn subtree_cv(&self, first_chunk: u64, input: &[u8]) -> Cv
+fn subtree_halves(&self, first_chunk: u64, input: &[u8]) -> [Cv; 2]
+fn parent_cv(&self, left: &Cv, right: &Cv) -> Cv
+fn parent_cvs(&self, children: &[Cv], out: &mut [Cv])
+fn root_hash(&self, left: &Cv, right: &Cv) -> Hash
+fn root_output(&self, left: &Cv, right: &Cv) -> OutputReader
+```
+
+Implements: `Clone`, `Zeroize`.

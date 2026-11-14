@@ -309,6 +309,7 @@ src/self_test.rs	replace chunk_values -> usize with 1	1	AArch64 only: the AArch6
 src/self_test.rs	replace compiled_features_present with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/self_test.rs	replace | with & in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/throughput.rs	replace >= with < in TreeHasher::turn	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace && with || in <impl Kernels for PlatformKernels<'_>>::children	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace && with || in <impl Kernels for PlatformKernels<'_>>::subtree	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace + with * in wide	1	SME2 only: the argument is `ahead`, consumed by the SME2 subtree path; on x86 subtree() returns None and serial calls pass 0

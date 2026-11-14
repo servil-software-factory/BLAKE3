@@ -161,6 +161,19 @@ impl Platform {
         unsafe { core::mem::transmute::<u8, Platform>(code) }
     }
 
+    /// The detected platform's kernels that are a core's own: on a CPU
+    /// whose one SME2 accelerator serves every core, the NEON hybrids,
+    /// which no other core's work slows down; elsewhere the detected
+    /// platform (throughput::TreeHasher::on_this_core, and the pool's pieces).
+    #[inline]
+    pub fn own_core() -> Self {
+        #[cfg(blake3_sme2)]
+        if matches!(Self::detect(), Platform::SME2) {
+            return Platform::NEON;
+        }
+        Self::detect()
+    }
+
     /// Make `self` what [`Platform::detect`] returns from now on, in every
     /// thread: `initialize` does, once its self-test has passed.
     pub(crate) fn record(self) {

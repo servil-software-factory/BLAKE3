@@ -1,13 +1,15 @@
 # A tree API, and the end of `hazmat` (design draft)
 
-*A draft for BLAKE3 #378, November 14, 2026. Nothing here is built yet.
-It proposes a small public API for programs that build or verify a BLAKE3
-tree themselves, and uses the library's own threads crate as its first
+*A draft for BLAKE3 #378, November 14, 2026. Layer 1 is built
+(`throughput::TreeHasher`), with one client, `b3sum --outboard`; the threads
+crate is not yet moved onto it, and layers 2 and 3 are not built. The
+draft proposes a small public API for programs that build or verify a
+BLAKE3 tree themselves, and uses the library's own threads crate as a
 client, so that the hidden `hazmat` module can be deleted.*
 
 ## Who needs it
 
-**Tree builders.** bao-tree (verified streaming, used by iroh) calls two
+**TreeHasher builders.** bao-tree (verified streaming, used by iroh) calls two
 things from official BLAKE3's `hazmat`, in the plain and keyed modes:
 
 - the hash of a subtree: `start_chunk`, its bytes, and whether it is the
@@ -26,7 +28,7 @@ hidden from the documentation. Counting its uses in `threads/src` at
 
 | Group | Items | What they are |
 |---|---|---|
-| Tree pieces | `hash_all_at_once(..).chaining_value()`, `compress_subtree_to_parent_node`, `parent_output`, `compress_parents_parallel`, `tree::left_len`, `CVBytes`, `CVWords`, `IV`, the flag constants | A subtree's chaining value, a subtree's two halves, a parent, a layer of parents, where a message splits. |
+| TreeHasher pieces | `hash_all_at_once(..).chaining_value()`, `compress_subtree_to_parent_node`, `parent_output`, `compress_parents_parallel`, `tree::left_len`, `CVBytes`, `CVWords`, `IV`, the flag constants | A subtree's chaining value, a subtree's two halves, a parent, a layer of parents, where a message splits. |
 | The key and the kernels | `Mode::key` (key words and flags), `Platform` (about 40 uses), `Sme2Turn`, `pool_platform` | The mode, prepared once, and which kernels a call runs on. |
 | Hooks into the core's own calls | `incremental::Pool` and `Hasher::update_on`, `each::update_turn`, `each::hash_each_on`, `many::hash_many_on`, `MEMBERS`, `prepare_thread`, `slot_len`, `assert_slots` | The core's Hasher, batch and collection calls with their large pieces handed to the pool. |
 
@@ -40,30 +42,30 @@ In `blake3-servil-core`, in `throughput`:
 ```rust
 /// A subtree's chaining value: 32 bytes that are not a hash of anything a
 /// program can check alone. Its own type, so that it is never taken for one.
-pub struct ChainingValue([u8; 32]);
-impl ChainingValue {
+pub struct Cv([u8; 32]);
+impl Cv {
     pub const fn as_bytes(&self) -> &[u8; 32];
     pub const fn from_bytes(bytes: [u8; 32]) -> Self;
 }
 
 /// A mode prepared for tree work: its key and flags derived once.
-pub struct Tree { /* key words, flags, kernel choice */ }
-impl Tree {
+pub struct TreeHasher { /* key words, flags, kernel choice */ }
+impl TreeHasher {
     pub fn new(mode: Mode) -> Self;
 
     /// The chaining value of the subtree whose first chunk is `first_chunk`.
-    pub fn subtree_cv(&self, first_chunk: u64, input: &[u8]) -> ChainingValue;
+    pub fn subtree_cv(&self, first_chunk: u64, input: &[u8]) -> Cv;
     /// The same subtree as its two halves' chaining values (more than one chunk).
-    pub fn subtree_halves(&self, first_chunk: u64, input: &[u8]) -> [ChainingValue; 2];
+    pub fn subtree_halves(&self, first_chunk: u64, input: &[u8]) -> [Cv; 2];
 
     /// The parent of two subtrees.
-    pub fn parent_cv(&self, left: &ChainingValue, right: &ChainingValue) -> ChainingValue;
+    pub fn parent_cv(&self, left: &Cv, right: &Cv) -> Cv;
     /// A layer of parents: `out[i]` from `children[2 * i]` and `children[2 * i + 1]`.
-    pub fn parent_cvs(&self, children: &[ChainingValue], out: &mut [ChainingValue]);
+    pub fn parent_cvs(&self, children: &[Cv], out: &mut [Cv]);
 
     /// The root, from its two children: the message's hash, or its extended output.
-    pub fn root_hash(&self, left: &ChainingValue, right: &ChainingValue) -> Hash;
-    pub fn root_output(&self, left: &ChainingValue, right: &ChainingValue) -> OutputReader;
+    pub fn root_hash(&self, left: &Cv, right: &Cv) -> Hash;
+    pub fn root_output(&self, left: &Cv, right: &Cv) -> OutputReader;
 }
 
 /// The bytes of the left subtree of a message, or a subtree, of `len` bytes
@@ -74,7 +76,7 @@ pub const fn left_len(len: u64) -> u64;
 A message of one chunk or less has no parent: its root is
 `convenience::hash_with`.
 
-**Why `Tree`, not free functions taking `Mode`.** `Mode::DeriveKey` hashes
+**Why `TreeHasher`, not free functions taking `Mode`.** `Mode::DeriveKey` hashes
 its context string to make the key. A tree builder calls these thousands
 of times a message, and the threads crate once per piece, so the mode is
 prepared once. It also keeps key words, flag constants and kernel names
@@ -117,12 +119,12 @@ depends on choosing: its workers run on each core's own kernels (the NEON
 hybrids), and one thread takes the accelerator for a share of the work
 sized to its speed. Today it says so by passing a `Platform`.
 
-A tree builder with workers of its own faces the same choice. So `Tree`
+A tree builder with workers of its own faces the same choice. So `TreeHasher`
 carries it, named by what it means and not by a kernel:
 
 ```rust
-impl Tree {
-    /// This Tree's calls keep to the calling core's own kernels: for a
+impl TreeHasher {
+    /// This TreeHasher's calls keep to the calling core's own kernels: for a
     /// program that runs many of them at once on different cores, where
     /// the chip's one shared accelerator would serve one and slow the rest.
     pub fn on_this_core(self) -> Self;
@@ -147,7 +149,7 @@ impl Hasher {
     /// `update`, with each whole subtree of `min_len` bytes or more
     /// hashed by `halves`: the call a pool makes on other threads.
     pub fn update_with(&mut self, input: &[u8], min_len: usize,
-        halves: fn(&Tree, first_chunk: u64, input: &[u8]) -> [ChainingValue; 2]) -> &mut Self;
+        halves: fn(&TreeHasher, first_chunk: u64, input: &[u8]) -> [Cv; 2]) -> &mut Self;
 }
 ```
 
@@ -159,7 +161,7 @@ caller of this.
 `hash_many_multithreaded` and `hash_each_multithreaded` cut a batch or a
 collection into ranges and run the core's kernels on each. They need the
 core's `hash_many` and `hash_each` over a range, on the calling core's
-kernels. Whether that is `Tree::on_this_core` reused, or the two calls
+kernels. Whether that is `TreeHasher::on_this_core` reused, or the two calls
 taking a range, is not designed yet. `MEMBERS`, `slot_len`,
 `assert_slots` and `prepare_thread` go with whatever that becomes.
 
@@ -184,7 +186,7 @@ module goes. Layer 1 alone removes the tree group and every `Platform`.
 
 ## Open
 
-- **Names.** `Tree`, `subtree_cv`, `subtree_halves`, `on_this_core`.
+- **Names.** `TreeHasher` and `Cv` are settled (Zooko, November 14); `subtree_halves` and `on_this_core` are open.
 - **`&[u8]` or `&[Block]`.** `throughput`'s other calls take 64-byte
   aligned `Block`s. A tree builder's subtrees sit at arbitrary places in
   a file or a network buffer, so this draft takes `&[u8]`.

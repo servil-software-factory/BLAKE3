@@ -373,6 +373,7 @@ src/self_test.rs	replace test::ours -> usize with 0	1	same code: every test bina
 src/self_test.rs	replace test::ours -> usize with 1	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace test::wide_reference with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/throughput.rs	replace >= with < in TreeHasher::turn	1	speed: moves a threshold between equally correct paths
 src/tree.rs	replace + with * in wide	1	speed: how far past its input a subtree prefetches (a prefetch never faults)
 src/tree.rs	replace + with - in wide	1	speed: how far past its input a subtree prefetches (a prefetch never faults)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	speed: subtrees then hash on the walk's one-chunk path, the same digests
