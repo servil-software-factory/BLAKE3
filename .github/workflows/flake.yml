@@ -4,49 +4,35 @@ on:
     branches: ["probe/flake"]
 jobs:
   loop:
-    name: loop ${{ matrix.ref.name }} ${{ matrix.test }}
+    name: ${{ matrix.build }} ${{ matrix.run }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        ref: [
-          { "name": "fix-a", "sha": "7127db6999cc7a392a61279ba95c583f9ae9c4b4" },
-          { "name": "fix-b", "sha": "7127db6999cc7a392a61279ba95c583f9ae9c4b4" },
-          { "name": "fix-c", "sha": "7127db6999cc7a392a61279ba95c583f9ae9c4b4" },
-          { "name": "next",  "sha": "47995e88e1ac70209bf1af25a033c750ca84aa4b" }
-        ]
-        test: ["forced_misses_take_the_cold_paths_for_every_size_class"]
+        build: ["asan", "plain"]
+        run: ["a", "b", "c"]
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: ${{ matrix.ref.sha }}
+        # next before the Pipeline's late read was fixed (80c8d525)
+        ref: 510c942fda9da480ed49ddec9bcecf6f73f4a59e
     - uses: dtolnay/rust-toolchain@master
       with:
         toolchain: stable-x86_64-unknown-linux-gnu
-    - name: tools
-      run: |
-        which gdb || (sudo apt-get update -q > /dev/null; sudo apt-get install -y -q gdb > /dev/null) || true
-        sudo sysctl -w kernel.core_pattern=/tmp/core.%p
-        nproc; uname -r; df -T . /tmp
     - name: loop
       working-directory: ./b3sum
       run: |
-        ulimit -c unlimited
-        cargo test --no-run 2>&1 | tail -3
-        BIN=$(CARGO_TERM_COLOR=never cargo test --no-run 2>&1 | sed -n 's/.*Executable unittests src\/main.rs (\(.*\))/\1/p' | head -1)
-        echo "binary: $BIN"
-        fails=0
-        for i in $(seq 1 600); do
-          if ! $BIN --exact linux_pipe::test::${{ matrix.test }} > out.txt 2>&1; then
+        if [ ${{ matrix.build }} = asan ]; then export RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Zsanitizer=address"; fi
+        BIN=$(CARGO_TERM_COLOR=never cargo test --no-run --target x86_64-unknown-linux-gnu 2>&1 | sed -n 's/.*Executable unittests src\/main.rs (\(.*\))/\1/p' | head -1)
+        echo "binary: $BIN"; nproc
+        fails=0; asan=0; n=600
+        [ ${{ matrix.build }} = asan ] && n=300
+        for i in $(seq 1 $n); do
+          if ! $BIN --exact linux_pipe::test::forced_misses_take_the_cold_paths_for_every_size_class > out.txt 2>&1; then
             fails=$((fails+1))
-            echo "=== run $i failed"; tail -5 out.txt
-            for c in /tmp/core.*; do
-              [ -f "$c" ] && gdb -batch -ex "bt 40" -ex "info registers rip rsp" -ex "thread apply all bt 12" $BIN $c 2>&1 | tail -150
-              rm -f "$c"
-            done
-            [ $fails -ge 3 ] && break
+            if grep -q "AddressSanitizer" out.txt; then asan=$((asan+1)); [ $asan = 1 ] && grep -A12 "ERROR: AddressSanitizer" out.txt | cut -c1-220; fi
+            echo "=== run $i failed: $(tail -1 out.txt | cut -c1-120)"
           fi
         done
-        echo "fails: $fails"
-        [ $fails -eq 0 ]
+        echo "RESULT ${{ matrix.build }} ${{ matrix.run }}: $fails of $n runs failed, $asan with an AddressSanitizer report"
