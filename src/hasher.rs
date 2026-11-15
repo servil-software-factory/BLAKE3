@@ -14,12 +14,10 @@ pub trait Parent {
     fn parents(&self, children: &[Cv], out: &mut [Cv]) -> usize;
 }
 
-/// The most values a row holds: the widest kernels' lanes on any target
-/// (x86-64 Linux's 32).
+/// The most values a row holds: x86-64 Linux's widest kernels' lanes. The
+/// same on every target (the C header gives a hasher's size as one
+/// number); kernels that cut wider (the SME2 unit's) make no rows.
 pub const ROW: usize = 32;
-// Every kernel's cut fits a row, on every target (the row's size is the
-// same everywhere: the C header gives a hasher's size as one number).
-const _: () = assert!(crate::MAX_SIMD_DEGREE <= ROW);
 /// The rows a stack holds at once (the sizes from a group of 16 chunks up
 /// to 2 MiB); a row past them is condensed to its one value.
 const ROWS: usize = 8;
@@ -143,6 +141,7 @@ impl CvStack {
 
     /// Entry `i`, a row, becomes the row half as wide: its values' parents.
     fn halve<P: Parent>(&mut self, p: &P, i: usize) {
+        assert!(self.row(i).len() >= 8, "a row stays 4 wide or more");
         let mut parents = [[0u8; 32]; ROW];
         let made = p.parents(self.row(i), &mut parents);
         assert_eq!(2 * made, self.row(i).len(), "a parent for every two children");
@@ -906,6 +905,34 @@ mod test {
         let (_, stack, parents, children) = fed(&input, &[GROUP], |_| 0);
         assert_eq!((stack.len(), stack.rows_in_use()), (8, 0), "the last group's two halves wait apart");
         assert_eq!((parents.len(), children.len()), (0, 64), "no rows: no layer of parents, and every group's two children");
+    }
+
+    /// A row gives up its place to the row ROWS entries above it, whatever
+    /// lies between and wherever the two stand: two single values, then
+    /// nine rows (entries 2 to 10), and the first row, entry 2, is
+    /// condensed as the ninth arrives; every entry's value is then the one
+    /// its row or value had. Three more rows (to entry 13) condense
+    /// entries 3 to 5 in turn.
+    #[test]
+    fn a_row_gives_up_its_place_to_the_row_rows_above() {
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let value = |i: usize, j: usize| -> Cv { core::array::from_fn(|b| (31 * i + 7 * j + b) as u8) };
+        // A row's one value, computed apart: four values, two parents, one.
+        let condensed = |i: usize| k.parent(&k.parent(&value(i, 0), &value(i, 1)), &k.parent(&value(i, 2), &value(i, 3)));
+        let mut stack = CvStack::new();
+        stack.push(value(0, 0));
+        stack.push(value(1, 0));
+        for i in 2..14 {
+            let row: [Cv; 4] = core::array::from_fn(|j| value(i, j));
+            stack.push_row(&k, &row);
+            // The rows are the last ROWS entries pushed as rows.
+            let first_row = 2.max(i + 1 - ROWS);
+            assert_eq!((0..=i).filter(|&e| stack.is_row(e)).collect::<std::vec::Vec<_>>(), (first_row..=i).collect::<std::vec::Vec<_>>(), "after entry {i}");
+            for e in 0..=i {
+                assert_eq!(stack.get(&k, e), if e < 2 { value(e, 0) } else { condensed(e) }, "entry {e} after entry {i}");
+            }
+        }
     }
 
     /// A stack keeps at most ROWS rows: with 1023 groups (ten subtrees,

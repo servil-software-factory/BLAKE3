@@ -142,12 +142,11 @@ impl hasher::Hooks for HasherHooks<'_> {
     }
 
     /// A whole group or more is cut, on the caller's own kernels: not
-    /// pooled, and not in a build with the SME2 unit, whose subtrees are
-    /// its own (`subtree_cv`). (A group of 16 chunks is cut 4 wide or
-    /// more by every other kernel.)
+    /// pooled, and by kernels 4 to ROW lanes wide (the SME2 unit's are
+    /// wider, and its subtrees are its own: `subtree_cv`).
     #[inline(always)]
     fn cuts(&self, len: usize) -> bool {
-        self.pooled.is_none() && len >= STAGE_LEN && !cfg!(blake3_sme2) && self.platform.simd_degree() >= 4
+        self.pooled.is_none() && len >= STAGE_LEN && (4..=hasher::ROW).contains(&self.platform.simd_degree())
     }
 
     #[inline(always)]
@@ -219,8 +218,9 @@ impl Hasher {
     /// message's).
     pub(crate) fn stage(&mut self, bytes: &[u8]) {
         crate::counted(crate::Counted::Staged);
-        if self.staged == 0 && bytes.len() < BLOCK_LEN {
-            self.stage[bytes.len()..BLOCK_LEN].fill(core::mem::MaybeUninit::new(0));
+        if self.staged == 0 {
+            // (From a block up there is nothing left of the block to zero.)
+            self.stage[bytes.len().min(BLOCK_LEN)..BLOCK_LEN].fill(core::mem::MaybeUninit::new(0));
         }
         self.stage[self.staged..self.staged + bytes.len()].write_copy_of_slice(bytes);
         self.staged += bytes.len();
@@ -1051,7 +1051,7 @@ mod test {
         crate::test::paint_test_input(&mut input);
         let count = |what: crate::Counted| crate::COUNTED.with(|c| c[what as usize].replace(0));
         let key = [0x51u8; 32];
-        let rows_here = !cfg!(blake3_sme2) && Platform::detect().simd_degree() >= 4;
+        let rows_here = (4..=hasher::ROW).contains(&Platform::detect().simd_degree());
         for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("rows and tails")] {
             let mut h = Hasher::new(mode, None);
             let (mut fed, mut rows) = (0, 0);
