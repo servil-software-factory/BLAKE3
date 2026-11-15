@@ -331,17 +331,36 @@ impl Hasher {
         &self.core.chunk_state.cv
     }
 
-    /// The root's output with the Hasher left as it is: the core's, when
-    /// nothing is staged; else that of a copy of the core (2 KiB), which
-    /// takes the staged bytes.
+    /// The root's output with the Hasher left as it is, and its core never
+    /// copied (10 KiB with the stack's rows). With nothing staged it is the
+    /// core's. Else the staged bytes are a whole subtree after the core's
+    /// groups (the core takes whole groups, and the stage is under one):
+    /// a core of their own hashes them, on this frame, and its node is
+    /// folded into the stack's entries, which are only read
+    /// (`hasher::above`).
     fn root_output(&self) -> Output {
         assert_eq!(self.core.initial_chunk_counter, 0, "set_input_offset must be used with finalize_non_root");
         if self.staged == 0 {
             return self.core.final_output();
         }
-        let mut core = self.core.clone();
-        core.update(self.staged_bytes());
-        core.final_output()
+        let core = &self.core;
+        let counter = core.chunk_state.chunk_counter;
+        assert!(
+            core.chunk_state.count() == 0 && counter % (STAGE_LEN / CHUNK_LEN) as u64 == 0 && self.staged < STAGE_LEN,
+            "the core holds whole groups, the stage under one"
+        );
+        let mut tail = HasherCore {
+            key: core.key,
+            chunk_state: ChunkState::new(&core.key, counter, core.chunk_state.flags, core.chunk_state.platform),
+            initial_chunk_counter: counter,
+            cv_stack: CvStack::new(),
+        };
+        tail.update(self.staged_bytes());
+        let node = tail.final_output();
+        if counter == 0 {
+            return node;
+        }
+        hasher::above(&core.kernels(core.chunk_state.platform, None), &core.cv_stack, hasher::ones(counter), node)
     }
 
     /// The root hash, for a caller that then resets the Hasher

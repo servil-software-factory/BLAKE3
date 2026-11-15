@@ -402,6 +402,26 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
     out
 }
 
+/// The root's node, for a message that goes on past the stack's subtrees:
+/// `out` is the node of everything after them (a whole subtree, shorter
+/// than the stack's last), and the stack's entries stand for `target`
+/// subtrees or more. Entries beyond `target` are the merges the stack
+/// has put off (it merges lazily): the top ones become one value first,
+/// folded from the top, and that value's parent with `out` is folded
+/// into the rest. The stack is only read.
+pub fn above<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, stack: &CvStack, target: usize, out: N) -> N {
+    assert!(target >= 1 && stack.len() >= target, "a subtree or more before the rest, each with its entry");
+    let mut top = stack.get(k, stack.len() - 1);
+    for i in (target - 1..stack.len() - 1).rev() {
+        top = k.parent(&stack.get(k, i), &top);
+    }
+    let mut out = k.parent_node(&top, &k.node_cv(&out));
+    for i in (0..target - 1).rev() {
+        out = k.parent_node(&stack.get(k, i), &k.node_cv(&out));
+    }
+    out
+}
+
 /// What the Hasher's kernels take from the library beyond the compression
 /// function: Feed's methods of those names, as Feed describes them.
 pub trait Hooks {
