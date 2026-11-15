@@ -328,7 +328,7 @@ pub(crate) fn ran(kind: Ran) {
 /// cannot see which it has, so each calling thread times its calls and
 /// learns, for each kind and size of call under 256 MiB, whether the
 /// workers under its own cache or all of them finish sooner: it tries
-/// each for three calls, keeps the faster, and tries the other again at
+/// each for five calls, keeps the faster, and tries the other again at
 /// the end of every 16 to 256 calls. On 2x EPYC 7443 a 1 MiB message read
 /// into a buffer and hashed takes 74 us this way; with the workers
 /// wherever the system put them it took 437 us, more than the 236 us of

@@ -842,35 +842,42 @@ pub(crate) mod places {
     /// price: after a job that reached every place, the caller's next
     /// write calls its lines back), else by the job's own time.
     ///
-    /// A reach is tried for TRIAL jobs on end and judged by the last of
-    /// them: its first job after the other reach pays for the other's
-    /// leavings, and judged by one job alone a 64 MiB batch settled on the
-    /// slower reach. The first jobs are all's (a program's only call is
-    /// then as it would be without places), the next near's. Then come
-    /// rounds: the faster reach's jobs, and last a trial of the other. A
-    /// round is ROUND jobs, and twice as many after each round whose
-    /// trial changed nothing, up to ROUND << LONGEST: where the other
-    /// reach is six times slower, a trial in every 16 jobs doubled the
-    /// thread's mean time, and in every 256 it adds a sixteenth. A round
-    /// whose trial wins is followed by a round of ROUND again.
+    /// A reach is judged by the fastest of MEASURED jobs on end: one job's
+    /// time carries whatever else the caller did before it and whatever
+    /// else the machine did during it, all of which only add (judged by
+    /// its last job alone, a 1 MiB message hashed between other work ran
+    /// 12% slower on 2x Xeon 6330: the thread kept changing its mind). A
+    /// trial is one job more, the first, which is not measured: a reach's
+    /// first job after the other's pays for the other's leavings (lines
+    /// to call back, workers asleep).
+    ///
+    /// The first TRIAL jobs are all's (a program's only call is then as
+    /// it would be without places), the next near's. Then come rounds:
+    /// the faster reach's jobs, the last MEASURED of them measured, then
+    /// a trial of the other. A round is ROUND jobs, and twice as many
+    /// after each round whose trial changed nothing, up to ROUND <<
+    /// LONGEST: where the other reach is six times slower, a trial in
+    /// every 16 jobs doubled the thread's mean time, and in every 256 it
+    /// adds a tenth. A round whose trial wins is followed by a round of
+    /// ROUND again, the other reach's.
     #[derive(Clone, Copy, Debug, Default, PartialEq)]
     pub(crate) struct Learned {
         /// The next job's number: 0 to 2 TRIAL - 1 for the first trials,
         /// then around the round from 2 TRIAL.
         job: u16,
-        /// Each reach's nanoseconds a KiB: its last trial's, or the mean
-        /// of what it was and each job's since while it is the faster.
+        /// Each reach's nanoseconds a KiB: the least of its last measured
+        /// jobs (while they are being measured, of those so far).
         rate: [u32; 2],
-        /// The last job's reach (None before the first).
-        last: Option<Reach>,
         /// This round's reach: the faster as the round began.
         round: Option<Reach>,
         /// This round is ROUND << longer jobs.
         longer: u8,
     }
 
-    /// The jobs on end that try a reach.
-    pub(crate) const TRIAL: u16 = 3;
+    /// The jobs on end by the fastest of which a reach is judged.
+    pub(crate) const MEASURED: u16 = 4;
+    /// The jobs on end that try a reach: one unmeasured, then MEASURED.
+    pub(crate) const TRIAL: u16 = MEASURED + 1;
     /// The jobs of the shortest round: the faster reach's, then TRIAL of
     /// the other.
     pub(crate) const ROUND: u16 = 16;
@@ -887,40 +894,38 @@ pub(crate) mod places {
             2 * TRIAL + (ROUND << self.longer) - 1
         }
 
-        /// Whether the next job is of a trial: the first two, or a
-        /// round's last TRIAL jobs.
-        fn trying(&self) -> bool {
-            self.job < 2 * TRIAL || self.job > self.round_end() - TRIAL
+        /// Where the next job stands: its reach, and whether it is
+        /// measured and whether it is the first of the measured.
+        fn stands(&self) -> (Reach, bool, bool) {
+            let other = |reach| match reach {
+                Reach::Near => Reach::All,
+                Reach::All => Reach::Near,
+            };
+            // The first trials: all's, then near's.
+            if self.job < 2 * TRIAL {
+                let at = self.job % TRIAL;
+                return (if self.job < TRIAL { Reach::All } else { Reach::Near }, at > 0, at == 1);
+            }
+            // A round: its reach's jobs, the last MEASURED of them
+            // measured, then a trial of the other.
+            let round = self.round.unwrap_or(Reach::All);
+            let left = self.round_end() - self.job;
+            if left < TRIAL { (other(round), left < MEASURED, left == MEASURED - 1) } else { (round, left < TRIAL + MEASURED, left == TRIAL + MEASURED - 1) }
         }
 
         /// The reach of the next job.
         pub(crate) fn choose(&self) -> Reach {
-            if self.job < TRIAL {
-                Reach::All
-            } else {
-                // The round's reach, and the other in its trial. (Before
-                // the first round, in near's first trial: as a trial in
-                // a round of all's.)
-                let round = self.round.unwrap_or(Reach::All);
-                match (self.trying(), round) {
-                    (false, _) => round,
-                    (true, Reach::Near) => Reach::All,
-                    (true, Reach::All) => Reach::Near,
-                }
-            }
+            self.stands().0
         }
 
-        /// The job [`Learned::choose`] gave `reach` took `nanos` for `len` bytes.
-        pub(crate) fn record(&mut self, reach: Reach, nanos: u64, len: usize) {
+        /// The job [`Learned::choose`] gave its reach took `nanos` for `len` bytes.
+        pub(crate) fn record(&mut self, nanos: u64, len: usize) {
             let rate = u32::try_from(nanos.saturating_mul(1024) / len.max(1) as u64).unwrap_or(u32::MAX);
-            let trying = self.trying();
-            let kept = &mut self.rate[reach as usize];
-            // A reach's first job after the other's is not counted: it
-            // pays for what the other left.
-            if self.last == Some(reach) {
-                *kept = if trying { rate } else { (*kept / 2).saturating_add(rate / 2) };
+            let (reach, measured, first) = self.stands();
+            if measured {
+                let kept = &mut self.rate[reach as usize];
+                *kept = if first { rate } else { rate.min(*kept) };
             }
-            self.last = Some(reach);
             if self.job == 2 * TRIAL - 1 {
                 // The first trials are over: the first round.
                 (self.job, self.round) = (2 * TRIAL, Some(self.faster()));
@@ -949,7 +954,7 @@ pub(crate) mod places {
     }
 
     std::thread_local! {
-        static LEARNED: core::cell::Cell<[[Learned; CLASSES]; 3]> = const { core::cell::Cell::new([[Learned { job: 0, rate: [0; 2], last: None, round: None, longer: 0 }; CLASSES]; 3]) };
+        static LEARNED: core::cell::Cell<[[Learned; CLASSES]; 3]> = const { core::cell::Cell::new([[Learned { job: 0, rate: [0; 2], round: None, longer: 0 }; CLASSES]; 3]) };
         /// The thread's last learning job: its kind and class, and when it ended.
         static LAST: core::cell::Cell<Option<(Kind, usize, std::time::Instant)>> = const { core::cell::Cell::new(None) };
     }
@@ -1004,7 +1009,7 @@ pub(crate) mod places {
 
         /// The job is done: the thread learns from it.
         pub(crate) fn done(&self) {
-            if let Some((kind, len, reach, started)) = self.learning {
+            if let Some((kind, len, _, started)) = self.learning {
                 let ended = now();
                 let nanos = cost(
                     ended - started,
@@ -1014,7 +1019,7 @@ pub(crate) mod places {
                 );
                 LEARNED.with(|l| {
                     let mut all = l.get();
-                    all[kind as usize][class(len)].record(reach, nanos, len);
+                    all[kind as usize][class(len)].record(nanos, len);
                     l.set(all);
                 });
             }
@@ -1367,27 +1372,35 @@ pub(crate) mod places {
             }
             // Each job's own time is one step of the clock (1 ms); its
             // cycle, from the last job's end, two (the plan's read and
-            // the end's). A trial's rate is its last job's: 2 ms for
-            // 3 MiB, 651 ns a KiB.
+            // the end's): 2 ms for 3 MiB, 651 ns a KiB.
             assert_eq!(learned(Kind::Tree, len).rate, [651, 651]);
-            // Another kind in between: the next tree job costs its own
-            // time, 1 ms, and the mean of 651 and 325 is 487.
-            Plan::new(Kind::Each, len, all).done();
-            assert_eq!(learned(Kind::Each, len).rate, [0, 0], "a reach's first job is not counted");
-            let plan = Plan::new(Kind::Tree, len, all);
-            assert_eq!((plan.threads, plan.near()), (all, false), "the round is all's: the rates are level");
-            plan.done();
-            assert_eq!(learned(Kind::Tree, len).rate, [651, 651], "all's first job after near's: not counted");
-            let plan = Plan::new(Kind::Tree, len, all);
-            plan.done();
-            assert_eq!(learned(Kind::Tree, len).rate[Reach::All as usize], 651 / 2 + 651 / 2, "a cycle of 2 ms again");
-            Plan::new(Kind::Each, len, all).done();
+            // The round is all's (the rates are level), and its jobs are
+            // not measured before its last MEASURED ahead of the trial.
+            for job in 0..ROUND - TRIAL - MEASURED {
+                let plan = Plan::new(Kind::Tree, len, all);
+                assert_eq!((plan.threads, plan.near()), (all, false), "the round's job {job}");
+                plan.done();
+            }
+            // The first measured: its cycle, 2 ms.
             Plan::new(Kind::Tree, len, all).done();
-            assert_eq!(learned(Kind::Tree, len).rate[Reach::All as usize], 650 / 2 + 325 / 2, "after another kind's job: its own 1 ms");
-            // Another class of the same kind is another's job too.
+            assert_eq!(learned(Kind::Tree, len).rate, [651, 651]);
+            // After another kind's job (which teaches that kind nothing
+            // yet: its first is not measured), a job costs its own time,
+            // 1 ms, and so after another class's of its own kind.
+            Plan::new(Kind::Each, len, all).done();
+            assert_eq!(learned(Kind::Each, len).rate, [0, 0]);
+            Plan::new(Kind::Tree, len, all).done();
+            assert_eq!(learned(Kind::Tree, len).rate, [325, 651]);
+            let mut other_class = learned(Kind::Tree, len);
+            other_class.rate[Reach::All as usize] = 651;
+            LEARNED.with(|l| {
+                let mut all = l.get();
+                all[Kind::Tree as usize][class(len)] = other_class;
+                l.set(all);
+            });
             Plan::new(Kind::Tree, len / 4, all).done();
             Plan::new(Kind::Tree, len, all).done();
-            assert_eq!(learned(Kind::Tree, len).rate[Reach::All as usize], 487 / 2 + 325 / 2);
+            assert_eq!(learned(Kind::Tree, len).rate, [325, 651]);
             // From FAR_LEN up: every thread's, and nothing learned.
             let before = LEARNED.with(|l| l.get());
             let plan = Plan::new(Kind::Tree, FAR_LEN, all);
@@ -1403,8 +1416,9 @@ pub(crate) mod places {
             let want = crate::convenience::hash(bytes);
             let mut nears = 0;
             for _ in 0..2 * TRIAL + ROUND {
+                let reach = learned(Kind::Tree, bytes.len()).choose();
                 assert_eq!(hash_with_key(bytes, crate::IV, 0), want);
-                if learned(Kind::Tree, bytes.len()).last == Some(Reach::Near) {
+                if reach == Reach::Near {
                     nears += 1;
                     assert!(WAKES_WANTED.with(|w| w.get()).unwrap() <= near, "a near job wakes its place's workers at most");
                 }
@@ -1425,31 +1439,44 @@ pub(crate) mod places {
         }
 
         /// A thread tries all for TRIAL jobs, then near for TRIAL, each
-        /// judged by its last job; then it runs the faster, and the other
-        /// for the last TRIAL jobs of each round; a round whose trial
-        /// changes nothing is followed by one twice as long, up to
-        /// ROUND << LONGEST; when the trial is the faster, the thread
-        /// follows from the next round, a round of ROUND again.
+        /// judged by the fastest of its last MEASURED jobs; then it runs
+        /// the faster, judged anew by the fastest of its last MEASURED
+        /// jobs before the trial, and the other for the last TRIAL jobs
+        /// of each round; a round whose trial changes nothing is followed
+        /// by one twice as long, up to ROUND << LONGEST; when the trial
+        /// is the faster, the thread follows from the next round, a
+        /// round of ROUND again.
         #[test]
         fn a_thread_keeps_the_faster_reach_and_tries_the_other_each_round() {
             let mib = 1 << 20;
             let mut l = Learned::default();
-            // What a job of a reach takes, by whether a job of that reach
-            // came just before it: a reach's first job after the other is
-            // ten times slower.
-            let mut last = None;
+            // What a job of a reach takes: its steady time, ten times
+            // that for a reach's first job after the other's, and half as
+            // much again for every third job (something else the machine
+            // did): neither is to count.
+            let (mut last, mut jobs) = (None, 0u32);
             let mut run = |l: &mut Learned, near_nanos: u64, all_nanos: u64| {
                 let reach = l.choose();
                 let steady = if reach == Reach::Near { near_nanos } else { all_nanos };
-                l.record(reach, if last == Some(reach) { steady } else { 10 * steady }, mib);
+                jobs += 1;
+                l.record(
+                    if last != Some(reach) {
+                        10 * steady
+                    } else if jobs % 3 == 0 {
+                        steady + steady / 2
+                    } else {
+                        steady
+                    },
+                    mib,
+                );
                 last = Some(reach);
                 reach
             };
             // Near is three times as fast.
             let first: Vec<Reach> = (0..2 * TRIAL).map(|_| run(&mut l, 100_000, 300_000)).collect();
-            assert_eq!(first, [Reach::All, Reach::All, Reach::All, Reach::Near, Reach::Near, Reach::Near]);
-            // Nanoseconds a KiB, each trial's last job's: its first, ten
-            // times slower, is not counted.
+            assert_eq!(first[..TRIAL as usize], [Reach::All; TRIAL as usize]);
+            assert_eq!(first[TRIAL as usize..], [Reach::Near; TRIAL as usize]);
+            // Nanoseconds a KiB, the fastest of each trial's measured jobs.
             assert_eq!(l.rate, [292, 97]);
             // Rounds of 16, 32, 64, 128, 256 and 256 jobs.
             for round in [16, 32, 64, 128, 256, 256] {
@@ -1457,11 +1484,15 @@ pub(crate) mod places {
                     let want = if job < round - TRIAL { Reach::Near } else { Reach::All };
                     assert_eq!(run(&mut l, 100_000, 300_000), want, "a round of {round}, job {job}");
                 }
-                assert_eq!(l.rate[Reach::All as usize], 292, "the trial's last job");
+                assert_eq!(l.rate, [292, 97], "the fastest of the measured jobs, each round");
             }
-            // The first near job after a trial of all, the slow one, is
-            // not counted (the mean of halves rounded down: 96).
-            assert_eq!(l.rate[Reach::Near as usize], 96);
+            // Near's rate is measured anew each round, by its last
+            // MEASURED jobs before the trial: a round of slower near jobs
+            // raises it (and all's trial, slower still, changes nothing).
+            for _ in 0..256 {
+                run(&mut l, 200_000, 300_000);
+            }
+            assert_eq!(l.rate, [292, 195]);
             // Now all is the faster by far: this round (256 jobs) is still
             // near's, its trial finds all at 9 a KiB, and the next round is
             // all's, of 16 jobs, then 32.
@@ -1469,22 +1500,21 @@ pub(crate) mod places {
                 let want = if job < 256 - TRIAL { Reach::Near } else { Reach::All };
                 assert_eq!(run(&mut l, 100_000, 10_000), want, "job {job}");
             }
-            assert_eq!(l.rate[Reach::All as usize], 9);
+            assert_eq!(l.rate, [9, 97]);
             for round in [16, 32] {
                 for job in 0..round {
                     let want = if job < round - TRIAL { Reach::All } else { Reach::Near };
                     assert_eq!(run(&mut l, 100_000, 10_000), want, "a round of {round}, job {job}");
                 }
-                assert_eq!(l.rate[Reach::Near as usize], 97, "the trial's last job");
+                assert_eq!(l.rate, [9, 97]);
             }
             // The rates do not wrap: the longest job, the shortest length.
             let mut l = Learned::default();
             for _ in 0..2 * TRIAL + 2 {
-                let reach = l.choose();
-                l.record(reach, u64::MAX, 0);
+                l.record(u64::MAX, 0);
             }
-            assert_eq!(l.rate[Reach::Near as usize], u32::MAX);
-            assert!(l.rate[Reach::All as usize] >= u32::MAX - 1);
+            assert_eq!(l.rate, [u32::MAX, u32::MAX]);
+            assert_eq!(l.choose(), Reach::All, "level: all");
         }
 
         /// A job's cost for learning: the time since the last such job
