@@ -138,7 +138,7 @@
 //!
 //! # Memory
 //!
-//! - **A [`Hasher`] is about 18 KiB**; box it where that matters.
+//! - **A [`Hasher`] is 26 KiB**; box it where that matters.
 //! - **These single-threaded calls allocate nothing**: [`convenience::hash`],
 //!   [`throughput::hash`], [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
 //!   and [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].

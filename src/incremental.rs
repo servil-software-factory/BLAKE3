@@ -12,8 +12,10 @@ use super::*;
 /// `throughput::update_multithreaded`;
 /// for many messages at once, [`throughput::update_each`](crate::throughput::update_each).
 ///
-/// A `Hasher` is about 18 KiB (it holds short pieces until it has 16 KiB
-/// to hash at once); box it where that matters.
+/// A `Hasher` is 26 KiB (it holds short pieces until it has 16 KiB to
+/// hash at once, and rows of chaining values, so that parents are hashed
+/// side by side); box it where that matters. It touches what it uses: a
+/// short message touches its first block.
 ///
 /// # Examples
 ///
@@ -56,9 +58,10 @@ impl Clone for Hasher {
 
     #[inline]
     fn clone_from(&mut self, source: &Self) {
-        // The staged bytes, and the whole first block (`first_block`); the
-        // rest of the capacity is overwritten before it becomes input.
-        let prefix = &source.stage[..source.staged.max(BLOCK_LEN)];
+        // The staged bytes, and with any staged the whole first block
+        // (`first_block`; an empty stage's is unwritten, and never read);
+        // the rest of the capacity is overwritten before it becomes input.
+        let prefix = &source.stage[..if source.staged == 0 { 0 } else { source.staged.max(BLOCK_LEN) }];
         self.core.clone_from(&source.core);
         self.staged = source.staged;
         self.stage[..prefix.len()].copy_from_slice(prefix);
@@ -138,16 +141,19 @@ impl hasher::Hooks for HasherHooks<'_> {
         [pair[..OUT_LEN].try_into().unwrap(), pair[OUT_LEN..].try_into().unwrap()]
     }
 
-    /// A whole group's or more's cut, on the caller's own kernels (not
-    /// pooled, and not where a subtree may be the SME2 unit's).
+    /// A whole group or more is cut, on the caller's own kernels: not
+    /// pooled, and not in a build with the SME2 unit, whose subtrees are
+    /// its own (`subtree_cv`). (A group of 16 chunks is cut 4 wide or
+    /// more by every other kernel.)
     #[inline(always)]
-    fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [CVBytes; hasher::ROW]) -> Option<usize> {
-        if self.pooled.is_some() || input.len() < STAGE_LEN || cfg!(blake3_sme2) {
-            return None;
-        }
+    fn cuts(&self, len: usize) -> bool {
+        self.pooled.is_none() && len >= STAGE_LEN && !cfg!(blake3_sme2) && self.platform.simd_degree() >= 4
+    }
+
+    #[inline(always)]
+    fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [CVBytes; hasher::ROW]) -> usize {
         let kernels = crate::tree::PlatformKernels { key: self.key, flags: self.flags, platform: self.platform };
-        let n = crate::tree::wide(&kernels, input, ahead, counter, out);
-        (n >= 4).then_some(n)
+        crate::tree::wide(&kernels, input, ahead, counter, out)
     }
 
     #[inline(always)]
@@ -172,23 +178,31 @@ fn kernels_on<'a>(key: &'a CVWords, chunk_state: &ChunkState, platform: Platform
 }
 
 impl Hasher {
+    #[inline(always)]
     pub(crate) fn from_core(core: HasherCore) -> Self {
-        let mut hasher = Self { core, staged: 0, stage: [core::mem::MaybeUninit::uninit(); STAGE_LEN] };
-        // The stage's first block starts as zeros (`first_block`).
-        // Sound: the stage holds BLOCK_LEN bytes and more.
-        unsafe { hasher.stage.as_mut_ptr().write_bytes(0, BLOCK_LEN) };
-        hasher
+        // One literal, with nothing written after it: a Hasher made in a
+        // local and then written to (its first block zeroed) was copied
+        // to its caller, 16 KiB of it, once the core held the stack's rows
+        // (160 ns a 64-byte message where 41 had done). The empty stage's
+        // first block is never read (`first_block`).
+        Self { core, staged: 0, stage: [core::mem::MaybeUninit::uninit(); STAGE_LEN] }
     }
 
-    /// The stage's first block. While the message is a block or less and
-    /// whole in the stage, the bytes after it here are zero, so the block
-    /// is the padded one a kernel hashes (`finalize`). Kept so by every
-    /// writer: `from_core` and `reset` zero the block, `update` stores a
-    /// first block or less padded (pad_block), later bytes only follow the
-    /// ones before, and `clone_from` copies the whole block.
+    /// The message's first block, padded with zeros, while the message is
+    /// a block or less and whole in the stage: the block a kernel hashes
+    /// (`finalize`). An empty stage's is a block of zeros apart (a new
+    /// Hasher's stage is unwritten, and a reset one's holds the last
+    /// message). Otherwise it is the stage's first block, whose bytes
+    /// after the message are zero: `update` stores a first block or less
+    /// padded (pad_block), later bytes only follow the ones before, and
+    /// `clone_from` copies the whole block.
     #[cfg(blake3_sse41_ffi)]
     pub(crate) fn first_block(&self) -> &[u8; BLOCK_LEN] {
-        // Sound: the first BLOCK_LEN bytes of the stage are always initialized (from_core).
+        static EMPTY: [u8; BLOCK_LEN] = [0; BLOCK_LEN];
+        if self.staged == 0 {
+            return &EMPTY;
+        }
+        // Sound: with bytes staged, the stage's first BLOCK_LEN bytes were written (pad_block, or more than a block of input).
         unsafe { &*(self.stage.as_ptr() as *const [u8; BLOCK_LEN]) }
     }
 
@@ -198,9 +212,15 @@ impl Hasher {
         unsafe { core::slice::from_raw_parts(self.stage.as_ptr() as *const u8, self.staged) }
     }
 
-    /// Copy `bytes` into the stage after what it holds.
+    /// Copy `bytes` into the stage after what it holds. Under a block
+    /// into an empty stage, the rest of the first block is zeroed
+    /// (`first_block`: the empty stage's block is unwritten, or the last
+    /// message's).
     pub(crate) fn stage(&mut self, bytes: &[u8]) {
         crate::counted(crate::Counted::Staged);
+        if self.staged == 0 && bytes.len() < BLOCK_LEN {
+            self.stage[bytes.len()..BLOCK_LEN].fill(core::mem::MaybeUninit::new(0));
+        }
         self.stage[self.staged..self.staged + bytes.len()].write_copy_of_slice(bytes);
         self.staged += bytes.len();
     }
@@ -368,8 +388,6 @@ impl Hasher {
     pub(crate) fn reset(&mut self) {
         self.core.reset();
         self.staged = 0;
-        // Sound: the stage holds BLOCK_LEN bytes and more (`first_block`).
-        unsafe { self.stage.as_mut_ptr().write_bytes(0, BLOCK_LEN) };
     }
 
     /// Add the message's next piece, of any length, on the calling thread.
@@ -510,12 +528,14 @@ impl Hasher {
 }
 
 impl HasherCore {
+    #[inline(always)]
     pub fn new_internal(key: &CVWords, flags: u8) -> Self {
         Self::new_from(key, flags, Platform::detect())
     }
 
     /// [`HasherCore::new_internal`] on `platform` (the self-test's way in,
     /// as [`hash_serial_from`]).
+    #[inline(always)]
     pub(crate) fn new_from(key: &CVWords, flags: u8, platform: Platform) -> Self {
         Self { key: *key, chunk_state: ChunkState::new(key, 0, flags, platform), initial_chunk_counter: 0, cv_stack: CvStack::new() }
     }
@@ -764,9 +784,10 @@ mod test {
                 for part in input[..len].chunks(17) {
                     source.update(part);
                 }
-                // The live part of the stage: the staged bytes, and the whole
-                // first block (zero past a message that ends inside it).
-                let live = source.staged.max(BLOCK_LEN);
+                // The live part of the stage: the staged bytes, and with any
+                // staged the whole first block (zero past a message that
+                // ends inside it); nothing of an empty stage.
+                let live = if source.staged == 0 { 0 } else { source.staged.max(BLOCK_LEN) };
                 source.stage[live..].fill(core::mem::MaybeUninit::new(0xbb));
                 let mut copy = Hasher::new(Mode::Keyed(&other_key), None);
                 copy.update(&input[..2 * STAGE_LEN]);

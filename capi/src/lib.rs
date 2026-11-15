@@ -37,7 +37,7 @@ pub struct B3Hasher {
     opaque: [u8; HASHER_SIZE],
 }
 
-const HASHER_SIZE: usize = 18432;
+const HASHER_SIZE: usize = 26624;
 const _: () = assert!(size_of::<Hasher>() == HASHER_SIZE && align_of::<Hasher>() <= 64, "b3.h's B3_HASHER_SIZE and alignment hold a Hasher");
 
 impl B3Mode {

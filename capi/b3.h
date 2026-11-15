@@ -80,7 +80,7 @@ b3_mode b3_mode_derive_key(const char *context);
  * 0), on the calling thread. */
 b3_digest b3_hash(const b3_mode *mode, const void *input, size_t len);
 
-/* One message fed in pieces. A b3_hasher is your memory (18 KiB; on the
+/* One message fed in pieces. A b3_hasher is your memory (26 KiB; on the
  * stack, in a struct, or allocated). It needs no library destructor; the
  * caller frees any heap storage it supplied. b3_hasher_new starts a
  * message, and starts one over; `length_hint` is the message's likely
@@ -90,7 +90,7 @@ b3_digest b3_hash(const b3_mode *mode, const void *input, size_t len);
  * ordinary malloc does not guarantee this over-alignment. Use a
  * platform-appropriate aligned allocator and its matching deallocator.
  * Use the header matching the linked library. */
-#define B3_HASHER_SIZE 18432
+#define B3_HASHER_SIZE 26624
 #ifdef __cplusplus
 #define B3_ALIGN64 alignas(64)
 #else

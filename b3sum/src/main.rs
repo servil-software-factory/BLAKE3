@@ -14,7 +14,7 @@
 //!
 //! Single small files read into a stack buffer with zero `mmap` or ring setup,
 //! and standard 32-byte digests format on the stack into a 32 KiB buffered
-//! writer without cloning an 18 KiB `Hasher` per file.
+//! writer without cloning a 26 KiB `Hasher` per file.
 
 use anyhow::{bail, ensure};
 use clap::Parser;
@@ -325,7 +325,7 @@ pub(crate) fn hash_slice_local(mode: blake3::Mode<'_>, bytes: &[u8]) -> blake3::
 }
 
 /// Fast standard-mode (`seek == 0 && len <= 32`) single-path hasher: avoids
-/// cloning an 18 KiB `Hasher` on warm mappings and small files, uses a 64 KiB
+/// cloning a 26 KiB `Hasher` on warm mappings and small files, uses a 64 KiB
 /// stack buffer for small files (zero `8 MiB` `BUFFERS` fault), and streams
 /// cold large Linux files via `io_uring` + `Pipeline`.
 pub(crate) fn hash_path_hash(args: &Args, path: &Path) -> anyhow::Result<blake3::Hash> {
