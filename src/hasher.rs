@@ -5,40 +5,112 @@ use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, PARENT, ROOT};
 use crate::{CVBytes as Cv, MAX_DEPTH};
 const DEPTH: usize = MAX_DEPTH + 1;
 
-/// The parent of two chaining values, the stack's one use of the kernels.
+/// The parents of chaining values: the stack's use of the kernels.
 pub trait Parent {
     fn parent(&self, left: &Cv, right: &Cv) -> Cv;
+    /// A layer of parents, side by side in the kernels' lanes: `out[i]`
+    /// the parent of `children[2 * i]` and `children[2 * i + 1]`, for an
+    /// even count of children from 2 to 2 * ROW. Returns their count.
+    fn parents(&self, children: &[Cv], out: &mut [Cv]) -> usize;
 }
 
-/// Chaining values bottom first: an array made at the first push (a message
-/// of one chunk pushes none) and its length.
+/// The most values a row holds: the widest kernels' lanes.
+pub const ROW: usize = crate::MAX_SIMD_DEGREE;
+/// The rows a stack holds at once (the sizes from a group of 16 chunks up
+/// to 2 MiB); a row past them is condensed to its one value.
+const ROWS: usize = 8;
+
+/// The values of the subtrees finished so far, bottom first, each one
+/// value or a row.
+///
+/// A row is a subtree's cut `n` wide (n a power of two, 4 to ROW): the
+/// values of its n equal parts, in order. Two rows of equal subtrees
+/// merge into the row of their parent in one call of n parents side by
+/// side, where two single values merge by one parent alone; a stream fed
+/// 16 KiB at a time spent a tenth of its time on parents hashed one, two,
+/// four and eight at a time (Zooko's layout: a parent has its slot before
+/// its children are known to pair, and children wait for a full batch).
+/// A row is condensed to its one value, or its two halves' (the root's
+/// children), when the output is computed.
 pub struct CvStack {
     cvs: Option<[Cv; DEPTH]>,
     len: usize,
+    /// Bit i: entry i is a row, kept in `rows[i % ROWS]`.
+    wide: u64,
+    /// Each row's width.
+    widths: [u8; ROWS],
+    rows: core::mem::MaybeUninit<[[Cv; ROW]; ROWS]>,
 }
 
 impl Clone for CvStack {
     fn clone(&self) -> CvStack {
-        CvStack { cvs: self.cvs, len: self.len }
+        CvStack { cvs: self.cvs, len: self.len, wide: self.wide, widths: self.widths, rows: self.rows }
     }
 }
 
 impl CvStack {
     pub fn new() -> CvStack {
-        CvStack { cvs: None, len: 0 }
+        CvStack { cvs: None, len: 0, wide: 0, widths: [0; ROWS], rows: core::mem::MaybeUninit::uninit() }
     }
 
     pub fn len(&self) -> usize {
         self.len
     }
 
-    /// Value `i`, below the length.
-    pub fn get(&self, i: usize) -> Cv {
+    fn is_row(&self, i: usize) -> bool {
+        self.wide >> i & 1 == 1
+    }
+
+    /// Entry `i`'s row (it is one).
+    fn row(&self, i: usize) -> &[Cv] {
+        debug_assert!(self.is_row(i));
+        let n = self.widths[i % ROWS] as usize;
+        // Sound: a row's first `width` values were written when it was pushed or merged.
+        unsafe { core::slice::from_raw_parts((self.rows.as_ptr() as *const Cv).add((i % ROWS) * ROW), n) }
+    }
+
+    fn set_row(&mut self, i: usize, row: &[Cv]) {
+        // Sound: within the rows' storage; plain bytes.
+        unsafe { core::slice::from_raw_parts_mut((self.rows.as_mut_ptr() as *mut Cv).add((i % ROWS) * ROW), row.len()) }.copy_from_slice(row);
+        self.widths[i % ROWS] = row.len() as u8;
+        self.wide |= 1 << i;
+    }
+
+    /// Entry `i` as `want` values (1, or 2 for a row's two halves): a
+    /// single entry is its own value; a row is condensed a layer at a time.
+    fn condensed<P: Parent>(&self, p: &P, i: usize, want: usize) -> [Cv; 2] {
         assert!(i < self.len, "a value below the stack's length");
-        match &self.cvs {
-            Some(cvs) => cvs[i],
-            None => panic!("a stack with values has its array"),
+        if !self.is_row(i) {
+            return match &self.cvs {
+                Some(cvs) => [cvs[i], [0; 32]],
+                None => panic!("a stack with values has its array"),
+            };
         }
+        let mut a = [[0u8; 32]; ROW];
+        let mut b = [[0u8; 32]; ROW];
+        let row = self.row(i);
+        let mut n = row.len();
+        a[..n].copy_from_slice(row);
+        while n > want {
+            n = p.parents(&a[..n], &mut b);
+            a[..n].copy_from_slice(&b[..n]);
+        }
+        [a[0], a[1]]
+    }
+
+    /// Value `i`, below the length.
+    pub fn get<P: Parent>(&self, p: &P, i: usize) -> Cv {
+        self.condensed(p, i, 1)[0]
+    }
+
+    /// Whether the top entry is a row.
+    pub fn top_is_row(&self) -> bool {
+        self.len > 0 && self.is_row(self.len - 1)
+    }
+
+    /// The top entry's two halves (it is a row).
+    pub fn top_halves<P: Parent>(&self, p: &P) -> [Cv; 2] {
+        self.condensed(p, self.len - 1, 2)
     }
 
     /// `cv` on top; the stack holds fewer than DEPTH values.
@@ -49,26 +121,70 @@ impl CvStack {
         if let Some(cvs) = &mut self.cvs {
             cvs[self.len] = cv;
         }
+        self.wide &= !(1 << self.len);
         self.len += 1;
+    }
+
+    /// `row` on top, a subtree's cut; the stack holds fewer than DEPTH
+    /// entries. A row ROWS entries below it gives up its place: it is
+    /// condensed to its one value.
+    pub fn push_row<P: Parent>(&mut self, p: &P, row: &[Cv]) {
+        assert!((4..=ROW).contains(&row.len()) && row.len().is_power_of_two(), "a row of 4 to ROW values, a power of two");
+        if self.len >= ROWS && self.is_row(self.len - ROWS) {
+            self.narrow(p, self.len - ROWS);
+        }
+        self.set_row(self.len, row);
+        self.len += 1;
+    }
+
+    /// Entry `i`, a row, becomes its one value.
+    fn narrow<P: Parent>(&mut self, p: &P, i: usize) {
+        let cv = self.get(p, i);
+        if self.cvs.is_none() {
+            self.cvs = Some([[0; 32]; DEPTH]);
+        }
+        if let Some(cvs) = &mut self.cvs {
+            cvs[i] = cv;
+        }
+        self.wide &= !(1 << i);
     }
 
     #[cfg(any(feature = "std", test))]
     pub fn clear(&mut self) {
         self.len = 0;
+        self.wide = 0;
     }
 
-    /// While the stack holds more than `target` values, its top two become
-    /// their parent (merge_cv_stack). Two are there to merge whenever
-    /// `target` is at least 1, as the Hasher's are.
+    /// While the stack holds more than `target` entries, its top two become
+    /// their parent (merge_cv_stack): two rows of one width, the row of
+    /// their parents; any other two, the parent of their values. Two are
+    /// there to merge whenever `target` is at least 1, as the Hasher's are.
     /// A loop of a count fixed at its start (no condition a change could
     /// keep true forever: a mutation test's endless loop, which only a clock
     /// stops, becomes a wrong value a test catches).
     pub fn merge<P: Parent>(&mut self, p: &P, target: usize) {
         for _ in target..self.len {
             assert!(self.len >= 2, "two values to merge");
-            if let Some(cvs) = &mut self.cvs {
-                let parent = p.parent(&cvs[self.len - 2], &cvs[self.len - 1]);
-                cvs[self.len - 2] = parent;
+            let (a, b) = (self.len - 2, self.len - 1);
+            if self.is_row(a) && self.is_row(b) && self.row(a).len() == self.row(b).len() {
+                let n = self.row(a).len();
+                let mut children = [[0u8; 32]; 2 * ROW];
+                children[..n].copy_from_slice(self.row(a));
+                children[n..2 * n].copy_from_slice(self.row(b));
+                let mut parents = [[0u8; 32]; ROW];
+                let made = p.parents(&children[..2 * n], &mut parents);
+                debug_assert_eq!(made, n);
+                self.wide &= !(1 << b);
+                self.set_row(a, &parents[..n]);
+            } else {
+                let parent = p.parent(&self.get(p, a), &self.get(p, b));
+                if self.cvs.is_none() {
+                    self.cvs = Some([[0; 32]; DEPTH]);
+                }
+                if let Some(cvs) = &mut self.cvs {
+                    cvs[a] = parent;
+                }
+                self.wide &= !(1 << a) & !(1 << b);
             }
             self.len -= 1;
         }
@@ -101,6 +217,9 @@ pub trait Feed<C: Chunk>: Parent {
     /// The chaining values of the two children of the subtree over `input`
     /// (more than one chunk), its first chunk numbered `counter`.
     fn children(&self, input: &[u8], ahead: usize, counter: u64) -> [Cv; 2];
+    /// The subtree's cut into `out`, its width returned, where the kernels
+    /// give one of 4 values or more (None: they give none for it).
+    fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [Cv; ROW]) -> Option<usize>;
 }
 
 /// The nodes a Hasher's output is computed from.
@@ -168,6 +287,7 @@ pub fn fill<'a, C: Chunk, K: Feed<C>>(k: &K, chunk: &mut C, stack: &mut CvStack,
 /// a chunk into the chunk, and the stack merged behind it.
 pub fn feed<C: Chunk, K: Feed<C>>(k: &K, chunk: &mut C, stack: &mut CvStack, initial: u64, input: &[u8]) {
     let mut input = input;
+    let mut row = [[0u8; 32]; ROW];
     while input.len() > CHUNK_LEN {
         let counter = chunk.counter();
         let len = subtree_len(counter, input.len());
@@ -180,6 +300,9 @@ pub fn feed<C: Chunk, K: Feed<C>>(k: &K, chunk: &mut C, stack: &mut CvStack, ini
             None => {
                 if len <= CHUNK_LEN {
                     push(k, stack, initial, k.whole_chunk_cv(sub, counter), counter);
+                } else if let Some(n) = k.cut(sub, ahead, counter, &mut row) {
+                    stack.merge(k, ones(counter - initial));
+                    stack.push_row(k, &row[..n]);
                 } else {
                     let [left, right] = k.children(sub, ahead, counter);
                     push(k, stack, initial, left, counter);
@@ -198,20 +321,25 @@ pub fn feed<C: Chunk, K: Feed<C>>(k: &K, chunk: &mut C, stack: &mut CvStack, ini
 
 /// The root's node: the last chunk's (or the top two values' parent),
 /// folded into the stack's values from the top.
-pub fn final_node<C: Chunk, N, K: Nodes<C, N>>(k: &K, chunk: &C, stack: &CvStack) -> N {
+pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack: &CvStack) -> N {
     if stack.len() == 0 {
         return k.chunk_node(chunk);
     }
     let mut n = stack.len();
     let mut out = if chunk.len() > 0 {
         k.chunk_node(chunk)
+    } else if stack.top_is_row() {
+        // The top subtree's two halves: the root's children, if it is all.
+        n -= 1;
+        let [left, right] = stack.top_halves(k);
+        k.parent_node(&left, &right)
     } else {
         n -= 2;
-        k.parent_node(&stack.get(n), &stack.get(n + 1))
+        k.parent_node(&stack.get(k, n), &stack.get(k, n + 1))
     };
     while n > 0 {
         n -= 1;
-        out = k.parent_node(&stack.get(n), &k.node_cv(&out));
+        out = k.parent_node(&stack.get(k, n), &k.node_cv(&out));
     }
     out
 }
@@ -221,6 +349,8 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N>>(k: &K, chunk: &C, stack: &CvStack
 pub trait Hooks {
     fn subtree_cv(&self, input: &[u8], ahead: usize, counter: u64) -> Option<Cv>;
     fn children(&self, input: &[u8], ahead: usize, counter: u64) -> [Cv; 2];
+    fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [Cv; ROW]) -> Option<usize>;
+    fn parents(&self, children: &[Cv], out: &mut [Cv]) -> usize;
 }
 
 /// The Hasher's kernels: chunks, nodes, and parents on `key`, `flags`, and
@@ -232,10 +362,15 @@ pub struct Kernels<'a, P, H> {
     pub hooks: H,
 }
 
-impl<P: Blocks + Copy, H> Parent for Kernels<'_, P, H> {
+impl<P: Blocks + Copy, H: Hooks> Parent for Kernels<'_, P, H> {
     #[inline(always)]
     fn parent(&self, left: &Cv, right: &Cv) -> Cv {
         parent_output(left, right, self.key, self.flags, self.platform).chaining_value()
+    }
+
+    #[inline(always)]
+    fn parents(&self, children: &[Cv], out: &mut [Cv]) -> usize {
+        self.hooks.parents(children, out)
     }
 }
 
@@ -266,9 +401,14 @@ impl<P: Blocks + Copy, H: Hooks> Feed<ChunkState<P>> for Kernels<'_, P, H> {
     fn children(&self, input: &[u8], ahead: usize, counter: u64) -> [Cv; 2] {
         self.hooks.children(input, ahead, counter)
     }
+
+    #[inline(always)]
+    fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [Cv; ROW]) -> Option<usize> {
+        self.hooks.cut(input, ahead, counter, out)
+    }
 }
 
-impl<P: Blocks + Copy, H> Nodes<ChunkState<P>, Output<P>> for Kernels<'_, P, H> {
+impl<P: Blocks + Copy, H: Hooks> Nodes<ChunkState<P>, Output<P>> for Kernels<'_, P, H> {
     #[inline(always)]
     fn chunk_node(&self, chunk: &ChunkState<P>) -> Output<P> {
         chunk.output()
@@ -515,6 +655,12 @@ mod test {
             self.seen.borrow_mut().push(counter);
             let node = crate::compress_subtree_to_parent_node(input, ahead, crate::IV, counter, 0, self.platform);
             [node[..32].try_into().unwrap(), node[32..].try_into().unwrap()]
+        }
+        fn cut(&self, _input: &[u8], _ahead: usize, _counter: u64, _out: &mut [Cv; ROW]) -> Option<usize> {
+            None
+        }
+        fn parents(&self, children: &[Cv], out: &mut [Cv]) -> usize {
+            crate::compress_parents_parallel(children.as_flattened(), crate::IV, 0, self.platform, out.as_flattened_mut())
         }
     }
 

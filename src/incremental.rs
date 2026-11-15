@@ -137,6 +137,23 @@ impl hasher::Hooks for HasherHooks<'_> {
         };
         [pair[..OUT_LEN].try_into().unwrap(), pair[OUT_LEN..].try_into().unwrap()]
     }
+
+    /// A whole group's or more's cut, on the caller's own kernels (not
+    /// pooled, and not where a subtree may be the SME2 unit's).
+    #[inline(always)]
+    fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [CVBytes; hasher::ROW]) -> Option<usize> {
+        if self.pooled.is_some() || input.len() < STAGE_LEN || cfg!(blake3_sme2) {
+            return None;
+        }
+        let kernels = crate::tree::PlatformKernels { key: self.key, flags: self.flags, platform: self.platform };
+        let n = crate::tree::wide(&kernels, input, ahead, counter, out);
+        (n >= 4).then_some(n)
+    }
+
+    #[inline(always)]
+    fn parents(&self, children: &[CVBytes], out: &mut [CVBytes]) -> usize {
+        compress_parents_parallel(children.as_flattened(), self.key, self.flags, self.platform, out.as_flattened_mut())
+    }
 }
 
 /// The Hasher's kernels: chunks, nodes, and parents on the chunk state's
