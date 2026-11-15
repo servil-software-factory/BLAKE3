@@ -1,0 +1,50 @@
+name: flake probe
+on:
+  push:
+    branches: ["probe/flake"]
+jobs:
+  loop:
+    name: loop ${{ matrix.ref.name }} ${{ matrix.test }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [
+          { "name": "next",   "sha": "47995e88e1ac70209bf1af25a033c750ca84aa4b" },
+          { "name": "rows",   "sha": "1364e4b3d52db8dcbcf7ee9c2ce64d8cbefdee80" },
+          { "name": "before", "sha": "118e51bcb8712391c934e2d09541d438f02bbe06" }
+        ]
+        test: ["forced_misses_take_the_cold_paths_for_every_size_class"]
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.ref.sha }}
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: stable-x86_64-unknown-linux-gnu
+    - name: tools
+      run: |
+        sudo apt-get install -y -q gdb > /dev/null
+        sudo sysctl -w kernel.core_pattern=/tmp/core.%p
+        nproc; uname -r; df -T . /tmp
+    - name: loop
+      working-directory: ./b3sum
+      run: |
+        ulimit -c unlimited
+        BIN=$(cargo test --no-run 2>&1 | grep -o "target/debug/deps/b3sum-[0-9a-f]*" | head -1)
+        echo "binary: $BIN"
+        fails=0
+        for i in $(seq 1 600); do
+          if ! $BIN --exact linux_pipe::test::${{ matrix.test }} > out.txt 2>&1; then
+            fails=$((fails+1))
+            echo "=== run $i failed"; tail -5 out.txt
+            for c in /tmp/core.*; do
+              [ -f "$c" ] && gdb -batch -ex "bt 40" -ex "info registers rip rsp" -ex "thread apply all bt 12" $BIN $c 2>&1 | tail -150
+              rm -f "$c"
+            done
+            [ $fails -ge 3 ] && break
+          fi
+        done
+        echo "fails: $fails"
+        [ $fails -eq 0 ]
