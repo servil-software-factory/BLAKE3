@@ -33,7 +33,7 @@ jobs:
       run: |
         ulimit -c unlimited
         cargo test --no-run 2>&1 | tail -3
-        BIN=$(cargo test --no-run --message-format=json 2>/dev/null | jq -r 'select(.executable != null and .target.kind[0] == "bin") | .executable' | head -1)
+        BIN=$(CARGO_TERM_COLOR=never cargo test --no-run 2>&1 | sed -n 's/.*Executable unittests src\/main.rs (\(.*\))/\1/p' | head -1)
         echo "binary: $BIN"
         fails=0
         for i in $(seq 1 600); do
