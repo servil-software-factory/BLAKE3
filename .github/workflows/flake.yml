@@ -32,7 +32,8 @@ jobs:
       working-directory: ./b3sum
       run: |
         ulimit -c unlimited
-        BIN=$(cargo test --no-run 2>&1 | grep -o "target/debug/deps/b3sum-[0-9a-f]*" | head -1)
+        cargo test --no-run 2>&1 | tail -3
+        BIN=$(cargo test --no-run --message-format=json 2>/dev/null | jq -r 'select(.executable != null and .target.kind[0] == "bin") | .executable' | head -1)
         echo "binary: $BIN"
         fails=0
         for i in $(seq 1 600); do
