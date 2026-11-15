@@ -998,6 +998,9 @@ pub(crate) mod places {
                 return Plan { threads: all, learning: None };
             }
             let reach = LEARNED.with(|l| l.get()[kind as usize][class(len)].choose());
+            // LAB ONLY.
+            static FORCED: OnceLock<Option<Reach>> = OnceLock::new();
+            let reach = FORCED.get_or_init(|| match std::env::var("B3_REACH").as_deref() { Ok("near") => Some(Reach::Near), Ok("all") => Some(Reach::All), _ => None }).unwrap_or(reach);
             let threads = if reach == Reach::Near { (near + 1).min(all) } else { all };
             Plan { threads, learning: Some((kind, len, reach, now())) }
         }
