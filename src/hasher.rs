@@ -354,7 +354,7 @@ pub fn feed<C: Chunk, K: Feed<C>>(k: &K, chunk: &mut C, stack: &mut CvStack, ini
             None => {
                 if len <= CHUNK_LEN {
                     push(k, stack, initial, k.whole_chunk_cv(sub, counter), counter);
-                } else if k.cuts(len) {
+                } else if counter > initial && k.cuts(len) {
                     // (Zeroed here, for the subtrees that are cut, not
                     // once a call for every call.)
                     let mut row = [[0u8; 32]; ROW];
@@ -876,11 +876,14 @@ mod test {
     }
 
     /// What the rows are for, counted (the digest is the same either way):
-    /// 64 groups fed a group at a time make 64 rows and merge them in 57
-    /// calls of a full layer of parents (64 less the 7 entries left: the
-    /// stack merges lazily), each of two rows' children, and no subtree
-    /// asks for its two children; the output then condenses each row left.
-    /// Without rows every group asks for its children.
+    /// 64 groups fed a group at a time. The first asks for its two
+    /// children, as a message's first subtree does (it may be the whole
+    /// message, which that path hashes fastest); the 63 after make rows.
+    /// Two rows merge in one call of a full layer of parents, 52 times;
+    /// the five subtrees beside the first's values (of 1, 2, 4, 8 and 16
+    /// groups) are each condensed to one value to merge with them, a call
+    /// a layer. Seven entries are left (the stack merges lazily), six of
+    /// them rows. Without rows every group asks for its children.
     #[test]
     fn a_stream_of_groups_merges_rows_a_full_layer_at_a_time() {
         const GROUP: usize = 16 * CHUNK_LEN;
@@ -891,10 +894,12 @@ mod test {
         }
         let (root, stack, parents, children) = fed(&input, &[GROUP], |_| width);
         assert_eq!(root, *crate::convenience::hash(&input).as_bytes());
-        assert_eq!((stack.len(), stack.rows_in_use()), (7, 7), "64 groups: the subtrees of 32, 16, 8, 4, 2, 1 and 1 groups, each a row");
-        assert_eq!(parents.len(), 57);
-        assert!(parents.iter().all(|&n| n == 2 * width), "every merge is two rows' children: {parents:?}");
-        assert_eq!(children, [0usize; 0]);
+        assert_eq!((stack.len(), stack.rows_in_use()), (7, 6), "64 groups: the subtrees of 32, 16, 8, 4, 2, 1 and 1 groups, all rows but the first");
+        assert_eq!(children, [GROUP], "the first group alone");
+        assert_eq!(parents.iter().filter(|&&n| n == 2 * width).count(), 52, "two rows' children at a time: {parents:?}");
+        // A row condensed to its two halves: layers of width, width / 2, ... 4 children.
+        let layers = width.trailing_zeros() as usize - 1;
+        assert_eq!(parents.iter().filter(|&&n| n < 2 * width).count(), 5 * layers, "five rows condensed: {parents:?}");
         let (_, stack, parents, children) = fed(&input, &[GROUP], |_| 0);
         assert_eq!((stack.len(), stack.rows_in_use()), (8, 0), "the last group's two halves wait apart");
         assert_eq!((parents.len(), children.len()), (0, 64), "no rows: no layer of parents, and every group's two children");
