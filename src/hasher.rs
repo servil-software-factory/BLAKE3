@@ -927,7 +927,7 @@ mod test {
             let row: [Cv; 4] = core::array::from_fn(|j| value(i, j));
             stack.push_row(&k, &row);
             // The rows are the last ROWS entries pushed as rows.
-            let first_row = 2.max(i + 1 - ROWS);
+            let first_row = (i + 1).saturating_sub(ROWS).max(2);
             assert_eq!((0..=i).filter(|&e| stack.is_row(e)).collect::<std::vec::Vec<_>>(), (first_row..=i).collect::<std::vec::Vec<_>>(), "after entry {i}");
             for e in 0..=i {
                 assert_eq!(stack.get(&k, e), if e < 2 { value(e, 0) } else { condensed(e) }, "entry {e} after entry {i}");
