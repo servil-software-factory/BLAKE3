@@ -326,12 +326,17 @@ pub(crate) enum Counted {
     /// One copy of bytes into a Hasher's stage (Hasher::stage): what an
     /// update's whole groups skip.
     Staged = 7,
+    /// One whole subtree cut into a row for the Hasher's stack.
+    Row = 8,
+    /// One `finalize` that hashed the staged bytes apart and read the
+    /// stack, the core not copied.
+    TailApart = 9,
 }
 
 #[cfg(all(test, feature = "std"))]
 std::thread_local! {
     /// This thread's counts since the test last cleared them, by Counted.
-    pub(crate) static COUNTED: [core::cell::Cell<u64>; 8] = const { [const { core::cell::Cell::new(0) }; 8] };
+    pub(crate) static COUNTED: [core::cell::Cell<u64>; 10] = const { [const { core::cell::Cell::new(0) }; 10] };
 }
 
 /// Count one of `what`: in the tests' record, and nothing in any other

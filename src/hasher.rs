@@ -34,8 +34,10 @@ const ROWS: usize = 8;
 /// 16 KiB at a time spent a tenth of its time on parents hashed one, two,
 /// four and eight at a time (Zooko's layout: a parent has its slot before
 /// its children are known to pair, and children wait for a full batch).
-/// A row is condensed to its one value, or its two halves' (the root's
-/// children), when the output is computed.
+/// A row is condensed to its one value when the output is computed, or
+/// when it merges with a single value. A message's first subtree is never
+/// a row: it may be the whole message, whose root needs its two halves,
+/// and the kernels have their fastest path for that (`Feed::children`).
 pub struct CvStack {
     cvs: Option<[Cv; DEPTH]>,
     len: usize,
@@ -85,42 +87,28 @@ impl CvStack {
         self.wide |= 1 << i;
     }
 
-    /// Entry `i` as `want` values (1, or 2 for a row's two halves): a
-    /// single entry is its own value; a row is condensed a layer at a time.
-    fn condensed<P: Parent>(&self, p: &P, i: usize, want: usize) -> [Cv; 2] {
+    /// Value `i`, below the length: a single entry's own, a row's
+    /// condensed a layer of parents at a time down to its two halves,
+    /// then their parent.
+    pub fn get<P: Parent>(&self, p: &P, i: usize) -> Cv {
         assert!(i < self.len, "a value below the stack's length");
         if !self.is_row(i) {
             return match &self.cvs {
-                Some(cvs) => [cvs[i], [0; 32]],
+                Some(cvs) => cvs[i],
                 None => panic!("a stack with values has its array"),
             };
         }
         let mut a = [[0u8; 32]; ROW];
-        let mut b = [[0u8; 32]; ROW / 2];
+        let mut b = [[0u8; 32]; ROW];
         let row = self.row(i);
         let mut n = row.len();
         a[..n].copy_from_slice(row);
-        // Layers of parents down to the two halves, then the one parent.
-        while n > 2 {
+        for _ in 0..n.trailing_zeros() - 1 {
             n = p.parents(&a[..n], &mut b);
             a[..n].copy_from_slice(&b[..n]);
         }
-        if want == 1 { [p.parent(&a[0], &a[1]), [0; 32]] } else { [a[0], a[1]] }
-    }
-
-    /// Value `i`, below the length.
-    pub fn get<P: Parent>(&self, p: &P, i: usize) -> Cv {
-        self.condensed(p, i, 1)[0]
-    }
-
-    /// Whether the top entry is a row.
-    pub fn top_is_row(&self) -> bool {
-        self.len > 0 && self.is_row(self.len - 1)
-    }
-
-    /// The top entry's two halves (it is a row).
-    pub fn top_halves<P: Parent>(&self, p: &P) -> [Cv; 2] {
-        self.condensed(p, self.len - 1, 2)
+        assert_eq!(n, 2, "a row's two halves");
+        p.parent(&a[0], &a[1])
     }
 
     /// `cv` on top; the stack holds fewer than DEPTH values.
@@ -131,6 +119,8 @@ impl CvStack {
         if let Some(cvs) = &mut self.cvs {
             cvs[self.len] = cv;
         }
+        // (A bit at the length or above is left from an entry merged
+        // away: each push sets its own.)
         self.wide &= !(1 << self.len);
         self.len += 1;
     }
@@ -153,14 +143,10 @@ impl CvStack {
 
     /// Entry `i`, a row, becomes the row half as wide: its values' parents.
     fn halve<P: Parent>(&mut self, p: &P, i: usize) {
-        let n = self.row(i).len();
-        let mut children = [[0u8; 32]; ROW];
-        children[..n].copy_from_slice(self.row(i));
-        // Sound: row i's place, its first n / 2 values written (they are row i's).
-        let place = unsafe { core::slice::from_raw_parts_mut((self.rows.as_mut_ptr() as *mut Cv).add((i % ROWS) * ROW), n / 2) };
-        let made = p.parents(&children[..n], place);
-        assert_eq!(made, n / 2, "a parent for every two children");
-        self.widths[i % ROWS] = (n / 2) as u8;
+        let mut parents = [[0u8; 32]; ROW];
+        let made = p.parents(self.row(i), &mut parents);
+        assert_eq!(2 * made, self.row(i).len(), "a parent for every two children");
+        self.set_row(i, &parents[..made]);
     }
 
     /// Entry `i`, a row, becomes its one value.
@@ -178,7 +164,6 @@ impl CvStack {
     #[cfg(any(feature = "std", test))]
     pub fn clear(&mut self) {
         self.len = 0;
-        self.wide = 0;
     }
 
     /// How many entries are rows.
@@ -206,8 +191,9 @@ impl CvStack {
                 // (Widths are powers of two: the wider is the other's
                 // width times two to the count of halvings.)
                 for (wide, narrow) in [(a, b), (b, a)] {
+                    // (The narrower over the wider is 0: no halving.)
                     let times = self.row(wide).len() / self.row(narrow).len();
-                    for _ in 0..if times > 1 { times.trailing_zeros() } else { 0 } {
+                    for _ in 0..times.max(1).trailing_zeros() {
                         self.halve(p, wide);
                     }
                 }
@@ -228,7 +214,6 @@ impl CvStack {
                 let place = unsafe { core::slice::from_raw_parts_mut((self.rows.as_mut_ptr() as *mut Cv).add((a % ROWS) * ROW), n) };
                 let made = p.parents(children, place);
                 assert_eq!(made, n, "a parent for every two children");
-                self.wide &= !(1 << b);
             } else {
                 let parent = p.parent(&self.get(p, a), &self.get(p, b));
                 if self.cvs.is_none() {
@@ -237,7 +222,7 @@ impl CvStack {
                 if let Some(cvs) = &mut self.cvs {
                     cvs[a] = parent;
                 }
-                self.wide &= !(1 << a) & !(1 << b);
+                self.wide &= !(1 << a);
             }
             self.len -= 1;
         }
@@ -384,13 +369,11 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
         return k.chunk_node(chunk);
     }
     let mut n = stack.len();
+    // (With an empty chunk the stack holds two entries or more: a
+    // message's first subtree goes onto it as its two halves, never as
+    // one row, so the root's two children are there to take.)
     let mut out = if chunk.len() > 0 {
         k.chunk_node(chunk)
-    } else if stack.top_is_row() {
-        // The top subtree's two halves: the root's children, if it is all.
-        n -= 1;
-        let [left, right] = stack.top_halves(k);
-        k.parent_node(&left, &right)
     } else {
         n -= 2;
         k.parent_node(&stack.get(k, n), &stack.get(k, n + 1))
@@ -925,25 +908,27 @@ mod test {
         assert_eq!((parents.len(), children.len()), (0, 64), "no rows: no layer of parents, and every group's two children");
     }
 
-    /// A stack keeps at most ROWS rows: with 511 groups (nine subtrees,
-    /// of 256 groups down to one) the largest is condensed to its one
-    /// value as the ninth row arrives. A clone holds the same entries, and
+    /// A stack keeps at most ROWS rows: with 1023 groups (ten subtrees,
+    /// of 512 groups down to one, all but the first rows) the largest row
+    /// is condensed to its one value as the ninth arrives. A clone holds the same entries, and
     /// a row's place given up is never read: the clone's root is the
     /// stack's.
     #[test]
     fn a_stack_keeps_rows_rows_and_condenses_the_one_below() {
         const GROUP: usize = 16 * CHUNK_LEN;
-        let input: std::vec::Vec<u8> = (0..511 * GROUP).map(|i| (i % 251) as u8).collect();
+        let input: std::vec::Vec<u8> = (0..1023 * GROUP).map(|i| (i % 251) as u8).collect();
         let (root, stack, _, _) = fed(&input, &[GROUP], |_| 8);
         assert_eq!(root, *crate::convenience::hash(&input).as_bytes());
-        assert_eq!((stack.len(), stack.rows_in_use()), (9, ROWS));
-        assert!(!stack.is_row(0) && (1..9).all(|i| stack.is_row(i)), "the largest subtree's row gave up its place");
+        // Ten subtrees, of 512 groups down to one: the first's entry is
+        // single values' parent, the nine after it were rows.
+        assert_eq!((stack.len(), stack.rows_in_use()), (10, ROWS));
+        assert!(!stack.is_row(0) && !stack.is_row(1) && (2..10).all(|i| stack.is_row(i)), "the largest row gave up its place to the ninth");
         let hooks = Rows { platform: Platform::detect(), width: |_| 8, parents: Default::default(), children: Default::default() };
         let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
         let clone = stack.clone();
-        assert_eq!((clone.len(), clone.rows_in_use()), (9, ROWS));
-        assert_eq!(final_node(&k, &k.new_chunk(511 * 16), &clone).root_bytes(), root);
-        for i in 0..9 {
+        assert_eq!((clone.len(), clone.rows_in_use()), (10, ROWS));
+        assert_eq!(final_node(&k, &k.new_chunk(1023 * 16), &clone).root_bytes(), root);
+        for i in 0..10 {
             assert_eq!(clone.get(&k, i), stack.get(&k, i), "entry {i}");
         }
     }

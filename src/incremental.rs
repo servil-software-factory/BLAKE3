@@ -152,6 +152,7 @@ impl hasher::Hooks for HasherHooks<'_> {
 
     #[inline(always)]
     fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [CVBytes; hasher::ROW]) -> usize {
+        crate::counted(crate::Counted::Row);
         let kernels = crate::tree::PlatformKernels { key: self.key, flags: self.flags, platform: self.platform };
         crate::tree::wide(&kernels, input, ahead, counter, out)
     }
@@ -331,13 +332,15 @@ impl Hasher {
         &self.core.chunk_state.cv
     }
 
-    /// The root's output with the Hasher left as it is, and its core never
-    /// copied (10 KiB with the stack's rows). With nothing staged it is the
-    /// core's. Else the staged bytes are a whole subtree after the core's
-    /// groups (the core takes whole groups, and the stage is under one):
-    /// a core of their own hashes them, on this frame, and its node is
-    /// folded into the stack's entries, which are only read
-    /// (`hasher::above`).
+    /// The root's output with the Hasher left as it is. With nothing
+    /// staged it is the core's. Else, where the core holds whole groups
+    /// (as `update` leaves it), the staged bytes are a whole subtree after
+    /// them: a core of their own hashes them, on this frame, and its node
+    /// is folded into the stack's entries, which are only read
+    /// (`hasher::above`); the Hasher's core is not copied (10 KiB with the
+    /// stack's rows). After a turn of many hashers that left a first
+    /// chunk in the core (`gather_part`), a copy of the core takes the
+    /// staged bytes.
     fn root_output(&self) -> Output {
         assert_eq!(self.core.initial_chunk_counter, 0, "set_input_offset must be used with finalize_non_root");
         if self.staged == 0 {
@@ -345,10 +348,12 @@ impl Hasher {
         }
         let core = &self.core;
         let counter = core.chunk_state.chunk_counter;
-        assert!(
-            core.chunk_state.count() == 0 && counter % (STAGE_LEN / CHUNK_LEN) as u64 == 0 && self.staged < STAGE_LEN,
-            "the core holds whole groups, the stage under one"
-        );
+        if core.chunk_state.count() > 0 || counter % (STAGE_LEN / CHUNK_LEN) as u64 != 0 {
+            let mut core = self.core.clone();
+            core.update(self.staged_bytes());
+            return core.final_output();
+        }
+        crate::counted(crate::Counted::TailApart);
         let mut tail = HasherCore {
             key: core.key,
             chunk_state: ChunkState::new(&core.key, counter, core.chunk_state.flags, core.chunk_state.platform),
@@ -1029,6 +1034,79 @@ mod test {
         assert_eq!(h.staged, 0, "the stage went to the core");
         assert_eq!(padded(&mut h, &input[STAGE_LEN..STAGE_LEN + 64]), 1, "an empty stage again");
         assert_eq!(h.finalize(), crate::convenience::hash(&input[..STAGE_LEN + 64]));
+    }
+
+    /// What the stack's rows and the tail's own core are for, counted
+    /// (the digests are the same without them): a message's first group
+    /// goes to the core as its two halves, every later whole group or
+    /// more as a row; `finalize` with bytes staged after whole groups
+    /// hashes them apart and reads the stack, the Hasher's core not
+    /// copied, and the Hasher goes on to the same digests after. In every
+    /// mode, at lengths around the groups.
+    #[test]
+    #[cfg(feature = "std")]
+    fn later_groups_are_rows_and_finalize_hashes_the_tail_apart() {
+        crate::initialize();
+        let mut input = std::vec![0u8; 8 * STAGE_LEN];
+        crate::test::paint_test_input(&mut input);
+        let count = |what: crate::Counted| crate::COUNTED.with(|c| c[what as usize].replace(0));
+        let key = [0x51u8; 32];
+        let rows_here = !cfg!(blake3_sme2) && Platform::detect().simd_degree() >= 4;
+        for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("rows and tails")] {
+            let mut h = Hasher::new(mode, None);
+            let (mut fed, mut rows) = (0, 0);
+            // Pieces: a group; a group and a part; the rest of that group;
+            // two groups and a part from the third boundary (the fourth
+            // group, then the fifth: two subtrees); the rest of a group.
+            for (n, new_rows) in [(STAGE_LEN, 0), (STAGE_LEN + 100, 1), (STAGE_LEN - 100, 1), (2 * STAGE_LEN + 7, 2), (STAGE_LEN - 7, 1)] {
+                count(crate::Counted::Row);
+                h.update(&input[fed..fed + n]);
+                fed += n;
+                rows += new_rows;
+                assert_eq!(count(crate::Counted::Row), if rows_here { new_rows } else { 0 }, "{fed} bytes in: the update's subtrees after the first");
+                count(crate::Counted::TailApart);
+                assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(mode, &input[..fed]), "{fed} bytes");
+                let apart = u64::from(h.staged > 0);
+                assert_eq!(count(crate::Counted::TailApart), apart, "{fed} bytes: {} staged", h.staged);
+                let mut xof = [0u8; 100];
+                h.finalize_xof().fill(&mut xof);
+                assert_eq!(xof[..32], *h.finalize().as_bytes());
+            }
+            let _ = rows;
+        }
+        // A short piece staged into a stage that held another message:
+        // the first block is the piece and zeros (`stage`), whatever was
+        // there, on the path that copies (gather_part), which a first
+        // update of a block or less on x86-64 does not take.
+        let mut h = Hasher::new(Mode::Plain, None);
+        h.update(&input[..3000]);
+        h.reset();
+        h.gather_part(&input[..5], None, false);
+        assert_eq!((h.staged, h.core.count()), (5, 0));
+        assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input[..5]));
+        h.gather_part(&input[5..70], None, false);
+        assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input[..70]));
+    }
+
+    /// After a turn of many hashers left a message's first chunk in the
+    /// core (x86-64) and later bytes in the stage, `finalize` takes the
+    /// copy of the core: the digest is right, and no tail is hashed apart.
+    #[test]
+    #[cfg(feature = "std")]
+    fn finalize_after_a_turn_that_left_a_chunk_in_the_core() {
+        crate::initialize();
+        let input = painted();
+        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        crate::throughput::update_each(&mut hashers, &[(0, &input[..700]), (1, &input[..64])]);
+        crate::throughput::update_each(&mut hashers, &[(0, &input[700..2500]), (1, &input[64..65])]);
+        crate::COUNTED.with(|c| c[crate::Counted::TailApart as usize].set(0));
+        for (h, len) in hashers.iter().zip([2500, 65]) {
+            assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input[..len]), "{len} bytes");
+        }
+        if !cfg!(blake3_neon) {
+            assert!(hashers[0].core.chunk_state.count() > 0 && hashers[0].staged > 0, "a chunk in the core, bytes in the stage");
+            assert_eq!(crate::COUNTED.with(|c| c[crate::Counted::TailApart as usize].get()), 0);
+        }
     }
 
     /// An update of 16 KiB or more from a boundary gives the core its
