@@ -11,9 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         ref: [
-          { "name": "next",   "sha": "47995e88e1ac70209bf1af25a033c750ca84aa4b" },
-          { "name": "rows",   "sha": "1364e4b3d52db8dcbcf7ee9c2ce64d8cbefdee80" },
-          { "name": "before", "sha": "118e51bcb8712391c934e2d09541d438f02bbe06" }
+          { "name": "fix-a", "sha": "7127db6999cc7a392a61279ba95c583f9ae9c4b4" },
+          { "name": "fix-b", "sha": "7127db6999cc7a392a61279ba95c583f9ae9c4b4" },
+          { "name": "fix-c", "sha": "7127db6999cc7a392a61279ba95c583f9ae9c4b4" },
+          { "name": "next",  "sha": "47995e88e1ac70209bf1af25a033c750ca84aa4b" }
         ]
         test: ["forced_misses_take_the_cold_paths_for_every_size_class"]
     steps:
