@@ -104,6 +104,10 @@
 .global _blake3_servil_hybrid_k1
 .global blake3_servil_hybrid_k1_end
 .global _blake3_servil_hybrid_k1_end
+.global blake3_servil_hybrid_k1u
+.global _blake3_servil_hybrid_k1u
+.global blake3_servil_hybrid_k1u_end
+.global _blake3_servil_hybrid_k1u_end
 .global blake3_servil_hybrid_k2
 .global _blake3_servil_hybrid_k2
 .global blake3_servil_hybrid_k2_end
@@ -230,6 +234,8 @@
 .global _blake3_servil_hybrid_x8_end
 .global blake3_servil_hybrid_c1
 .global _blake3_servil_hybrid_c1
+.global blake3_servil_hybrid_c1u
+.global _blake3_servil_hybrid_c1u
 #ifdef __APPLE__
 .text
 #else
@@ -7787,6 +7793,199 @@ blake3_servil_hybrid_k1_schedule:
 blake3_servil_hybrid_k1_schedule_end:
 _blake3_servil_hybrid_k1_end:
 blake3_servil_hybrid_k1_end:
+
+        .p2align 6
+_blake3_servil_hybrid_k1u:
+blake3_servil_hybrid_k1u:
+        ldr x0, [x0]
+        sub x6, x1, #1
+        add x6, x0, x6, lsl #6
+_blake3_servil_hybrid_c1u:
+blake3_servil_hybrid_c1u:
+        sub sp, sp, #1088
+        stp x19, x20, [sp, #0]
+        stp x21, x22, [sp, #16]
+        stp x23, x24, [sp, #32]
+        stp x25, x26, [sp, #48]
+        str x5, [sp, #176]
+        cmp x1, #1
+        csel x24, x6, x0, eq
+        mov x25, x6
+        ldp w6, w7, [x2, #0]
+        ldp w8, w9, [x2, #8]
+        ldp w10, w11, [x2, #16]
+        ldp w12, w13, [x2, #24]
+        and w2, w4, #0xff
+        ubfx w5, w4, #8, #8
+        orr w2, w2, w5
+        cmp x1, #1
+        ubfx w5, w4, #16, #8
+        csel w5, w5, wzr, eq
+        orr w2, w2, w5
+        lsr w0, w4, #24
+        mov w5, #64
+        cmp x1, #1
+        csel w0, w0, w5, eq
+blake3_servil_hybrid_k1u_loop:
+        mov w14, #58983
+        movk w14, #27145, lsl #16
+        mov w15, #44677
+        movk w15, #47975, lsl #16
+        mov w16, #62322
+        movk w16, #15470, lsl #16
+        mov w17, #62778
+        movk w17, #42319, lsl #16
+        mov w19, w3
+        lsr x20, x3, #32
+        mov w21, w0
+        mov w22, w2
+        SGA_R w6, w10, w14, w19, w23, x24, 0
+        SGA_R w7, w11, w15, w20, w23, x24, 8
+        SGA_R w8, w12, w16, w21, w23, x24, 16
+        SGA_R w9, w13, w17, w22, w23, x24, 24
+        SGB_R w6, w10, w14, w19, w23, x24, 4
+        SGB_R w7, w11, w15, w20, w23, x24, 12
+        SGB_R w8, w12, w16, w21, w23, x24, 20
+        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 32
+        SGA_R w7, w12, w17, w19, w23, x24, 40
+        SGA_R w8, w13, w14, w20, w23, x24, 48
+        SGA_R w9, w10, w15, w21, w23, x24, 56
+        SGB_R w6, w11, w16, w22, w23, x24, 36
+        SGB_R w7, w12, w17, w19, w23, x24, 44
+        SGB_R w8, w13, w14, w20, w23, x24, 52
+        SGB_R w9, w10, w15, w21, w23, x24, 60
+        SGA_R w6, w10, w14, w19, w23, x24, 8
+        SGA_R w7, w11, w15, w20, w23, x24, 12
+        SGA_R w8, w12, w16, w21, w23, x24, 28
+        SGA_R w9, w13, w17, w22, w23, x24, 16
+        SGB_R w6, w10, w14, w19, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 40
+        SGB_R w8, w12, w16, w21, w23, x24, 0
+        SGB_R w9, w13, w17, w22, w23, x24, 52
+        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGA_R w7, w12, w17, w19, w23, x24, 48
+        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGA_R w9, w10, w15, w21, w23, x24, 60
+        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGB_R w7, w12, w17, w19, w23, x24, 20
+        SGB_R w8, w13, w14, w20, w23, x24, 56
+        SGB_R w9, w10, w15, w21, w23, x24, 32
+        SGA_R w6, w10, w14, w19, w23, x24, 12
+        SGA_R w7, w11, w15, w20, w23, x24, 40
+        SGA_R w8, w12, w16, w21, w23, x24, 52
+        SGA_R w9, w13, w17, w22, w23, x24, 28
+        SGB_R w6, w10, w14, w19, w23, x24, 16
+        SGB_R w7, w11, w15, w20, w23, x24, 48
+        SGB_R w8, w12, w16, w21, w23, x24, 8
+        SGB_R w9, w13, w17, w22, w23, x24, 56
+        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGA_R w7, w12, w17, w19, w23, x24, 36
+        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGA_R w9, w10, w15, w21, w23, x24, 32
+        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGB_R w7, w12, w17, w19, w23, x24, 0
+        SGB_R w8, w13, w14, w20, w23, x24, 60
+        SGB_R w9, w10, w15, w21, w23, x24, 4
+        SGA_R w6, w10, w14, w19, w23, x24, 40
+        SGA_R w7, w11, w15, w20, w23, x24, 48
+        SGA_R w8, w12, w16, w21, w23, x24, 56
+        SGA_R w9, w13, w17, w22, w23, x24, 52
+        SGB_R w6, w10, w14, w19, w23, x24, 28
+        SGB_R w7, w11, w15, w20, w23, x24, 36
+        SGB_R w8, w12, w16, w21, w23, x24, 12
+        SGB_R w9, w13, w17, w22, w23, x24, 60
+        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGA_R w7, w12, w17, w19, w23, x24, 44
+        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGA_R w9, w10, w15, w21, w23, x24, 4
+        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGB_R w7, w12, w17, w19, w23, x24, 8
+        SGB_R w8, w13, w14, w20, w23, x24, 32
+        SGB_R w9, w10, w15, w21, w23, x24, 24
+        SGA_R w6, w10, w14, w19, w23, x24, 48
+        SGA_R w7, w11, w15, w20, w23, x24, 36
+        SGA_R w8, w12, w16, w21, w23, x24, 60
+        SGA_R w9, w13, w17, w22, w23, x24, 56
+        SGB_R w6, w10, w14, w19, w23, x24, 52
+        SGB_R w7, w11, w15, w20, w23, x24, 44
+        SGB_R w8, w12, w16, w21, w23, x24, 40
+        SGB_R w9, w13, w17, w22, w23, x24, 32
+        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGA_R w7, w12, w17, w19, w23, x24, 20
+        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGA_R w9, w10, w15, w21, w23, x24, 24
+        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGB_R w7, w12, w17, w19, w23, x24, 12
+        SGB_R w8, w13, w14, w20, w23, x24, 4
+        SGB_R w9, w10, w15, w21, w23, x24, 16
+        SGA_R w6, w10, w14, w19, w23, x24, 36
+        SGA_R w7, w11, w15, w20, w23, x24, 44
+        SGA_R w8, w12, w16, w21, w23, x24, 32
+        SGA_R w9, w13, w17, w22, w23, x24, 60
+        SGB_R w6, w10, w14, w19, w23, x24, 56
+        SGB_R w7, w11, w15, w20, w23, x24, 20
+        SGB_R w8, w12, w16, w21, w23, x24, 48
+        SGB_R w9, w13, w17, w22, w23, x24, 4
+        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGA_R w7, w12, w17, w19, w23, x24, 0
+        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGA_R w9, w10, w15, w21, w23, x24, 16
+        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGB_R w7, w12, w17, w19, w23, x24, 40
+        SGB_R w8, w13, w14, w20, w23, x24, 24
+        SGB_R w9, w10, w15, w21, w23, x24, 28
+        SGA_R w6, w10, w14, w19, w23, x24, 44
+        SGA_R w7, w11, w15, w20, w23, x24, 20
+        SGA_R w8, w12, w16, w21, w23, x24, 4
+        SGA_R w9, w13, w17, w22, w23, x24, 32
+        SGB_R w6, w10, w14, w19, w23, x24, 60
+        SGB_R w7, w11, w15, w20, w23, x24, 0
+        SGB_R w8, w12, w16, w21, w23, x24, 36
+        SGB_R w9, w13, w17, w22, w23, x24, 24
+        SGA_R w6, w11, w16, w22, w23, x24, 56
+        SGA_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 12
+        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGB_R w6, w11, w16, w22, w23, x24, 40
+        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w13, w14, w20, w23, x24, 16
+        SGB_R w9, w10, w15, w21, w23, x24, 52
+        eor w6, w6, w14
+        eor w7, w7, w15
+        eor w8, w8, w16
+        eor w9, w9, w17
+        eor w10, w10, w19
+        eor w11, w11, w20
+        eor w12, w12, w21
+        eor w13, w13, w22
+        add x24, x24, #64
+        sub x1, x1, #1
+        cmp x1, #1
+        csel x24, x25, x24, eq
+        and w2, w4, #0xff
+        cmp x1, #1
+        ubfx w5, w4, #16, #8
+        csel w5, w5, wzr, eq
+        orr w2, w2, w5
+        lsr w0, w4, #24
+        mov w5, #64
+        cmp x1, #1
+        csel w0, w0, w5, eq
+        cbnz x1, blake3_servil_hybrid_k1u_loop
+        ldr x2, [sp, #176]
+        stp w6, w7, [x2, #0]
+        stp w8, w9, [x2, #8]
+        stp w10, w11, [x2, #16]
+        stp w12, w13, [x2, #24]
+        ldp x19, x20, [sp, #0]
+        ldp x21, x22, [sp, #16]
+        ldp x23, x24, [sp, #32]
+        ldp x25, x26, [sp, #48]
+        add sp, sp, #1088
+        ret
+_blake3_servil_hybrid_k1u_end:
+blake3_servil_hybrid_k1u_end:
 
         .p2align 6
 _blake3_servil_hybrid_k2:

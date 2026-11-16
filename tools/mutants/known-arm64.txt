@@ -32,26 +32,12 @@ src/each.rs	replace | with ^ in by_blocks_at_once	4	equivalent: the mode flags h
 src/each.rs	replace | with ^ in hash_cohort	1	as on aarch64: survives (known-aarch64.txt): equivalent: | and ^ agree on flag bits that never overlap; on x86_64: survives (known-x86_64.txt): equivalent: | and ^ agree on flag bits that never overlap
 src/each.rs	replace || with && in independent_lanes	2	x86-64 only: independent_lanes is compiled for x86-64 Linux alone (its cfg), so here the mutant builds the code the unmutated source builds; the x86-64 machines catch it (BLAKE3 #344)
 src/ffi_neon_hybrid.rs	delete ! in chunk_code	1	speed: whether and what to prefetch after a pause (no effect on results)
-src/ffi_neon_hybrid.rs	replace & with | in apple_cores	1	same answer: on Apple's cores "Apple's" is right however it is come by, asked once or each time (the Arm VM's list judges the other answer)
-src/ffi_neon_hybrid.rs	replace & with | in midr_implementer	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
 src/ffi_neon_hybrid.rs	replace * with + in partial_pays	1	as on aarch64: survives (known-aarch64.txt): speed: moves a threshold between equally correct paths (the partial kernel computes every count from 1 to 15, 10 too; 10 runs faster without it)
-src/ffi_neon_hybrid.rs	replace << with >>	1	same answer: on Apple's cores "Apple's" is right however it is come by, asked once or each time (the Arm VM's list judges the other answer)
-src/ffi_neon_hybrid.rs	replace << with >> in midr_implementer	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
 src/ffi_neon_hybrid.rs	replace <= with > in partial_pays	1	same answer: on Apple's cores the partial chunk pays at every count the kernels cover, whatever this term says
-src/ffi_neon_hybrid.rs	replace == with != in midr_implementer	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
-src/ffi_neon_hybrid.rs	replace == with != in read_apple_cores	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
 src/ffi_neon_hybrid.rs	replace > with >= in partial_pays	1	as on aarch64: survives (known-aarch64.txt): speed: moves a threshold between equally correct paths (the partial kernel computes every count from 1 to 15, 10 too; 10 runs faster without it)
 src/ffi_neon_hybrid.rs	replace > with >= in prefetch_parent_code	1	as on aarch64: survives (known-aarch64.txt): speed: whether and what to prefetch after a pause (no effect on results)
 src/ffi_neon_hybrid.rs	replace > with >= in prefetch_tree_code	1	as on aarch64: survives (known-aarch64.txt): speed: whether and what to prefetch after a pause (no effect on results)
-src/ffi_neon_hybrid.rs	replace >> with << in midr_implementer	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
-src/ffi_neon_hybrid.rs	replace apple_cores -> bool with true	1	same answer: on macOS the cores are Apple's
-src/ffi_neon_hybrid.rs	replace ask_cores -> bool with true	1	same answer: on Apple's cores "Apple's" is right however it is come by, asked once or each time (the Arm VM's list judges the other answer)
-src/ffi_neon_hybrid.rs	replace midr_implementer -> Option<u8> with None	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
-src/ffi_neon_hybrid.rs	replace midr_implementer -> Option<u8> with Some(0)	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
-src/ffi_neon_hybrid.rs	replace midr_implementer -> Option<u8> with Some(1)	1	not built on macOS: the reading of the core's maker is Linux's (macOS runs on Apple's cores alone)
-src/ffi_neon_hybrid.rs	replace read_apple_cores -> bool with true	1	same answer: on Apple's cores "Apple's" is right however it is come by, asked once or each time (the Arm VM's list judges the other answer)
 src/ffi_neon_hybrid.rs	replace sha3_detected -> bool with true	1	as on aarch64: survives (known-aarch64.txt): detection, on a machine with SHA-3: a wrong no runs the NEON kernels (equally correct), a wrong yes is this machine's answer
-src/ffi_neon_hybrid.rs	replace | with & in ask_cores	1	same answer: on Apple's cores "Apple's" is right however it is come by, asked once or each time (the Arm VM's list judges the other answer)
 src/ffi_neon_hybrid.rs	replace | with ^ in compress_in_place	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/ffi_neon_hybrid.rs	replace | with ^ in xof_block	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/ffi_neon_hybrid.rs	replace | with ^ in xof_many	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

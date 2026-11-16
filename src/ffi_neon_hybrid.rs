@@ -73,6 +73,10 @@ mod asm {
         /// 0..blocks-1 come from `input`, the last from `last`.
         pub fn blake3_servil_hybrid_c1(input: *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8, last: *const u8);
         pub fn blake3_servil_hybrid_k1(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
+        /// c1 and k1 with the rounds unrolled: the kernels of cores that are
+        /// not Apple's (`one_chunk`).
+        pub fn blake3_servil_hybrid_c1u(input: *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8, last: *const u8);
+        pub fn blake3_servil_hybrid_k1u(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
         pub fn blake3_servil_hybrid_k2(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
         pub fn blake3_servil_hybrid_k3(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
         pub fn blake3_servil_hybrid_k4(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
@@ -327,7 +331,7 @@ const PARENT_PLANS: [&[usize]; 17] =
 /// alone (k1, k9, k10, p8, and p9 among them).
 const PLAIN_CHUNK_KERNELS: [Option<Kernel>; 11] = [
     None,
-    Some(asm::blake3_servil_hybrid_k1),
+    Some(asm::blake3_servil_hybrid_k1u),
     Some(asm::blake3_servil_hybrid_kn2),
     None,
     Some(asm::blake3_servil_hybrid_kn4),
@@ -341,7 +345,7 @@ const PLAIN_CHUNK_KERNELS: [Option<Kernel>; 11] = [
 
 const PLAIN_PARENT_KERNELS: [Option<Kernel>; 11] = [
     None,
-    Some(asm::blake3_servil_hybrid_k1),
+    Some(asm::blake3_servil_hybrid_k1u),
     Some(asm::blake3_servil_hybrid_pn2),
     None,
     Some(asm::blake3_servil_hybrid_pn4),
@@ -376,7 +380,7 @@ static PLAIN: Family =
 /// one scalar.
 const OTHER_CHUNK_KERNELS: [Option<Kernel>; 6] = [
     None,
-    Some(asm::blake3_servil_hybrid_k1),
+    Some(asm::blake3_servil_hybrid_k1u),
     Some(asm::blake3_servil_hybrid_k2),
     Some(asm::blake3_servil_hybrid_k3),
     Some(asm::blake3_servil_hybrid_kn4),
@@ -401,7 +405,26 @@ const OTHER_CHUNK_KERNELS: [Option<Kernel>; 6] = [
 const OTHER_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[3, 3], &[5, 2], &[5, 3], &[5, 4], &[5, 5], &[5, 3, 3], &[5, 5, 2], &[5, 5, 3], &[5, 5, 4], &[5, 5, 5], &[5, 5, 3, 3]];
 
-static OTHER: Family = Family { chunk_plans: &OTHER_PLANS, chunk_kernels: &OTHER_CHUNK_KERNELS, parent_plans: &PARENT_PLANS, parent_kernels: &PARENT_KERNELS };
+/// Apple's parent kernels with the one-input kernel unrolled.
+const OTHER_PARENT_KERNELS: [Option<Kernel>; 10] = {
+    let mut kernels = PARENT_KERNELS;
+    kernels[1] = Some(asm::blake3_servil_hybrid_k1u);
+    kernels
+};
+
+static OTHER: Family =
+    Family { chunk_plans: &OTHER_PLANS, chunk_kernels: &OTHER_CHUNK_KERNELS, parent_plans: &PARENT_PLANS, parent_kernels: &OTHER_PARENT_KERNELS };
+
+/// The kernel for one chunk or less, and for one block: rolled into a loop
+/// on Apple's cores (a call after a pause fetches a fraction of the code:
+/// 25-33% faster there, 2-4% slower nonstop), unrolled on others (an
+/// AmpereOne hashes a chunk nonstop in 1.16 ns/B unrolled and 1.32
+/// rolled, where official BLAKE3 takes 1.22).
+type OneChunk = unsafe extern "C" fn(*const u8, u64, *const u32, u64, u64, *mut u8, *const u8);
+#[inline]
+fn one_chunk() -> OneChunk {
+    if apple_cores() { asm::blake3_servil_hybrid_c1 } else { asm::blake3_servil_hybrid_c1u }
+}
 
 /// This CPU's family: without SHA-3 the scalars and quads; with it,
 /// Apple's cores the plans measured on them, and other cores theirs.
@@ -427,6 +450,7 @@ mod ends {
         pub static blake3_servil_hybrid_p8_end: u8;
         pub static blake3_servil_hybrid_p9_end: u8;
         pub static blake3_servil_hybrid_k1_end: u8;
+        pub static blake3_servil_hybrid_k1u_end: u8;
         pub static blake3_servil_hybrid_k2_end: u8;
         pub static blake3_servil_hybrid_k3_end: u8;
         pub static blake3_servil_hybrid_k4_end: u8;
@@ -455,7 +479,7 @@ mod ends {
 /// the q kernel for `n` whole chunks and a partial one (1 to 9): start
 /// and end addresses.
 fn chunk_code(n: usize, partial: bool) -> (usize, usize) {
-    if !apple_cores() && !partial && (4..=5).contains(&n) {
+    if !apple_cores() && !partial && matches!(n, 1 | 4 | 5) {
         return other_code(n);
     }
     macro_rules! code {
@@ -488,8 +512,8 @@ fn chunk_code(n: usize, partial: bool) -> (usize, usize) {
 }
 
 #[cfg(feature = "std")]
-/// The code of the quad kernels that cores not Apple's run for four and
-/// five chunks, kn4 and kn5, where Apple's run a hybrid
+/// The code of the kernels that cores not Apple's run for one, four and
+/// five chunks (k1u, kn4, kn5), where Apple's run others
 /// (OTHER_CHUNK_KERNELS; its other sizes are the kernels Apple's run).
 fn other_code(n: usize) -> (usize, usize) {
     macro_rules! code {
@@ -498,6 +522,7 @@ fn other_code(n: usize) -> (usize, usize) {
         };
     }
     match n {
+        1 => code!(blake3_servil_hybrid_k1u, blake3_servil_hybrid_k1u_end),
         4 => code!(blake3_servil_hybrid_kn4, blake3_servil_hybrid_kn4_end),
         5 => code!(blake3_servil_hybrid_kn5, blake3_servil_hybrid_kn5_end),
         _ => unreachable!("no quad kernel of its own for {n} chunks"),
@@ -507,6 +532,9 @@ fn other_code(n: usize) -> (usize, usize) {
 #[cfg(feature = "std")]
 /// The code of the parent kernel for `n` parents (PARENT_KERNELS).
 fn parent_code(n: usize) -> (usize, usize) {
+    if !apple_cores() && n == 1 {
+        return other_code(1);
+    }
     macro_rules! code {
         ($kernel:ident, $end:ident) => {
             (asm::$kernel as *const () as usize, &raw const ends::$end as usize)
@@ -568,17 +596,29 @@ pub fn prefetch_parent_code(mut values: usize) {
 /// that, not Apple's.
 #[inline]
 pub fn apple_cores() -> bool {
-    let detected = crate::platform::DETECTED.load(core::sync::atomic::Ordering::Relaxed);
-    if detected & CORES_ASKED == 0 {
-        return ask_cores();
+    // macOS runs on no other, and its code asks nothing: what Apple's
+    // cores run stays what was measured on them.
+    #[cfg(target_vendor = "apple")]
+    {
+        true
     }
-    detected & APPLE_CORES != 0
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let detected = crate::platform::DETECTED.load(core::sync::atomic::Ordering::Relaxed);
+        if detected & CORES_ASKED == 0 {
+            return ask_cores();
+        }
+        detected & APPLE_CORES != 0
+    }
 }
 
 /// platform::DETECTED's bits for the cores: Apple's, and asked.
+#[cfg(not(target_vendor = "apple"))]
 const APPLE_CORES: u16 = 1 << 8;
+#[cfg(not(target_vendor = "apple"))]
 const CORES_ASKED: u16 = 1 << 9;
 
+#[cfg(not(target_vendor = "apple"))]
 #[cold]
 #[inline(never)]
 fn ask_cores() -> bool {
@@ -589,16 +629,13 @@ fn ask_cores() -> bool {
 
 /// [`apple_cores`], read from the system: asked once and kept beside the
 /// platform (on Linux the read is a trap the kernel emulates).
+#[cfg(not(target_vendor = "apple"))]
 fn read_apple_cores() -> bool {
-    #[cfg(target_vendor = "apple")]
-    {
-        true
-    }
-    #[cfg(all(not(target_vendor = "apple"), target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     {
         midr_implementer() == Some(0x61)
     }
-    #[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+    #[cfg(not(target_os = "linux"))]
     {
         false
     }
@@ -655,8 +692,9 @@ pub unsafe fn compress_blocks(cv: &mut CVWords, blocks: *const u8, count: usize,
     let cv_ptr = cv.as_mut_ptr();
     unsafe {
         let last = blocks.add((count - 1) * BLOCK_LEN);
-        crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
-        asm::blake3_servil_hybrid_c1(blocks, count as u64, cv_ptr, counter, packed, cv_ptr as *mut u8, last);
+        let c1 = one_chunk();
+        crate::ran_kernel(c1 as *const ());
+        c1(blocks, count as u64, cv_ptr, counter, packed, cv_ptr as *mut u8, last);
     }
 }
 
@@ -681,8 +719,9 @@ pub fn compress_in_place(cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u
     // Safe: the block is 64 readable bytes and the count is 1.
     unsafe {
         let block = block.as_ptr();
-        crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
-        asm::blake3_servil_hybrid_c1(block, 1, cv_ptr, counter, packed, cv_ptr as *mut u8, block);
+        let c1 = one_chunk();
+        crate::ran_kernel(c1 as *const ());
+        c1(block, 1, cv_ptr, counter, packed, cv_ptr as *mut u8, block);
     }
 }
 
@@ -714,8 +753,9 @@ pub unsafe fn hash_chunk(
     debug_assert!(last_len as usize <= BLOCK_LEN);
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (last_len as u64) << 24;
     unsafe {
-        crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
-        asm::blake3_servil_hybrid_c1(input, blocks as u64, key.as_ptr(), counter, packed, out.as_mut_ptr(), last.as_ptr());
+        let c1 = one_chunk();
+        crate::ran_kernel(c1 as *const ());
+        c1(input, blocks as u64, key.as_ptr(), counter, packed, out.as_mut_ptr(), last.as_ptr());
     }
 }
 
@@ -746,7 +786,7 @@ pub(crate) fn entries() -> std::vec::Vec<(std::string::String, *const ())> {
             out.push((std::format!("q{n}"), partial_kernel(n) as *const ()));
         }
     }
-    out.push(("c1".into(), asm::blake3_servil_hybrid_c1 as *const ()));
+    out.push(("c1".into(), one_chunk() as *const ()));
     out.push(("x1".into(), asm::blake3_servil_hybrid_x1 as *const ()));
     out.push(("x4".into(), asm::blake3_servil_hybrid_x4 as *const ()));
     out.push(("x8".into(), asm::blake3_servil_hybrid_x8 as *const ()));
@@ -1026,8 +1066,9 @@ pub unsafe fn hash_last_lanes(
     if count == 1 {
         // Sound: the caller's contract; c1 reads its last block from `last`.
         unsafe {
-            crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
-            asm::blake3_servil_hybrid_c1(inputs[0], blocks as u64, key.as_ptr(), 0, packed | (lens[0] as u64) << 24, out.as_mut_ptr(), lasts[0]);
+            let c1 = one_chunk();
+            crate::ran_kernel(c1 as *const ());
+            c1(inputs[0], blocks as u64, key.as_ptr(), 0, packed | (lens[0] as u64) << 24, out.as_mut_ptr(), lasts[0]);
         }
         return;
     }
@@ -1189,6 +1230,41 @@ mod test {
         }
     }
 
+    /// The rolled and the unrolled one-chunk kernels give one answer:
+    /// every block count, last blocks of every length class, the chunk's
+    /// flags and a root's, at a counter. (A machine runs one of the two;
+    /// the other would otherwise run in no test here.)
+    #[test]
+    fn test_the_two_one_chunk_kernels_agree() {
+        let key: CVWords = core::array::from_fn(|i| 0x0bad_5eedu32.wrapping_mul(i as u32 + 7));
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let input: [u8; CHUNK_LEN] = core::array::from_fn(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        });
+        for blocks in 1..=16usize {
+            for last_len in [1usize, 31, 63, 64] {
+                for (flags, start, end) in
+                    [(0u8, crate::CHUNK_START, crate::CHUNK_END), (crate::KEYED_HASH, crate::CHUNK_START, crate::CHUNK_END | crate::ROOT)]
+                {
+                    let mut last = [0u8; BLOCK_LEN];
+                    last[..last_len].copy_from_slice(&input[(blocks - 1) * BLOCK_LEN..][..last_len]);
+                    let packed = flags as u64 | (start as u64) << 8 | (end as u64) << 16 | (last_len as u64) << 24;
+                    let (mut rolled, mut unrolled) = ([0u8; OUT_LEN], [0u8; OUT_LEN]);
+                    // Sound: blocks - 1 whole blocks of input, a last block of 64 bytes, 32 bytes of output.
+                    unsafe {
+                        asm::blake3_servil_hybrid_c1(input.as_ptr(), blocks as u64, key.as_ptr(), 5, packed, rolled.as_mut_ptr(), last.as_ptr());
+                        asm::blake3_servil_hybrid_c1u(input.as_ptr(), blocks as u64, key.as_ptr(), 5, packed, unrolled.as_mut_ptr(), last.as_ptr());
+                    }
+                    assert_eq!(rolled, unrolled, "blocks {blocks}, last {last_len}, flags {flags:#x}");
+                    assert_ne!(rolled, [0u8; OUT_LEN]);
+                }
+            }
+        }
+    }
+
     /// The family is the CPU's, as the system describes it apart from our
     /// reading (/proc/cpuinfo's implementer and features): Apple's cores
     /// their plans, other cores with SHA-3 theirs, and
@@ -1231,7 +1307,7 @@ mod test {
     #[test]
     #[cfg(target_vendor = "apple")]
     fn test_a_mac_runs_apples_plans() {
-        assert!(read_apple_cores() && apple_cores() && apple_cores(), "read, asked, and kept");
+        assert!(apple_cores());
         assert!(core::ptr::eq(family(), &WITH_SHA3));
     }
 
@@ -1249,7 +1325,7 @@ mod test {
             let (start, end) = parent_code(n);
             assert!(start < end && end - start < 32 * 1024, "parent kernel {n}: {start:#x}..{end:#x}");
         }
-        for n in [4, 5] {
+        for n in [1, 4, 5] {
             let (start, end) = other_code(n);
             assert!(start < end && (1024..32 * 1024).contains(&(end - start)), "the quad kernel for {n} chunks: {start:#x}..{end:#x}");
         }

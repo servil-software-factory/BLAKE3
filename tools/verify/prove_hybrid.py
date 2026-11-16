@@ -109,8 +109,8 @@ def byte_symbols(name, n):
     return [BitVec(f"{name}{i}", 8) for i in range(n)]
 
 
-def prove_c1(obj, blocks, alias):
-    """c1(input, blocks, key, counter, packed, out, last): the chaining
+def prove_c1(obj, blocks, alias, unrolled=False):
+    """c1, or with `unrolled` c1u (input, blocks, key, counter, packed, out, last): the chaining
     value of `blocks` blocks, the first blocks-1 from `input`, the last
     from `last`, every block at `counter`, the first with flags | start,
     the last with flags | end and block length last_len (packed =
@@ -125,7 +125,8 @@ def prove_c1(obj, blocks, alias):
     }
     if not alias:
         regions["out"] = Region("out", 32, True, None)
-    s = Setup(obj, "blake3_servil_hybrid_c1", "blake3_servil_hybrid_k1_end", regions)
+    u = "u" if unrolled else ""
+    s = Setup(obj, f"blake3_servil_hybrid_c1{u}", f"blake3_servil_hybrid_k1{u}_end", regions)
     counter = BitVec("counter", 64)
     flags, start, end, last_len = (BitVec(n, 8) for n in ("flags", "start", "end", "last_len"))
     m = s.m
@@ -347,14 +348,16 @@ def prove_last(obj, n, blocks):
 
 
 def cases(only):
-    """Every (kernel, block count) case: c1 apart from and equal to key,
-    the k and p kernels, the q kernels at every partial chunk, and the l
+    """Every (kernel, block count) case: c1 and c1u apart from and equal to
+    key, the k and p kernels (k1 and k1u, the table forms of those two,
+    among them), the q kernels at every partial chunk, and the l
     kernels at every block count with independent last blocks and lengths."""
     out = []
     for blocks in range(1, 17):
         for alias in (False, True):
             out.append(("c1", blocks, alias))
-    for name in ([f"k{n}" for n in range(2, 11)] + [f"p{n}" for n in (2, 3, 4, 5, 7, 8, 9)]
+            out.append(("c1u", blocks, alias))
+    for name in (["k1", "k1u"] + [f"k{n}" for n in range(2, 11)] + [f"p{n}" for n in (2, 3, 4, 5, 7, 8, 9)]
                  + [f"kn{n}" for n in (2, 4, 5, 6, 8)] + [f"pn{n}" for n in (2, 4, 5, 6, 10)]):
         for blocks in (range(1, 17) if name[0] == "k" else [1]):
             out.append((name, blocks, False))
@@ -378,8 +381,8 @@ def prove_case(case):
     name, blocks, alias = case
     t = time.time()
     try:
-        if name == "c1":
-            steps = prove_c1(OBJ, blocks, alias)
+        if name in ("c1", "c1u"):
+            steps = prove_c1(OBJ, blocks, alias, unrolled=name == "c1u")
         elif name[0] == "q":
             steps = prove_partial(OBJ, int(name[1:]), blocks)
         elif name[0] == "x":
@@ -387,7 +390,7 @@ def prove_case(case):
         elif name[0] == "l":
             steps = prove_last(OBJ, int(name[1:]), blocks)
         else:
-            steps = prove_table(OBJ, f"blake3_servil_hybrid_{name}", int(name.lstrip("kpn")), blocks, name[0] == "k")
+            steps = prove_table(OBJ, f"blake3_servil_hybrid_{name}", int(name.lstrip("kpn").rstrip("u")), blocks, name[0] == "k")
     except Unproved as e:
         return case, f"NOT PROVED: {e}"
     what = f"partial chunk of {blocks} blocks" if name[0] == "q" else f"{blocks} blocks" + (", out = key" if alias else "")
@@ -401,7 +404,7 @@ def main():
     aarch64.symbols(OBJ)
     aarch64.text_bytes(OBJ)
     todo = sorted(cases(set(sys.argv[1:])),
-                  key=lambda c: -(int(c[0].lstrip("ckpqnxl") or 1) * (16 if c[0][0] == "q" else c[1])))
+                  key=lambda c: -(int(c[0].lstrip("ckpqnxl").rstrip("u") or 1) * (16 if c[0][0] == "q" else c[1])))
     failed = 0
     # Every CPU: a case holds under 400 MB (CPython, October 22).
     for (name, _, _), verdict in workers.each(prove_case, todo, len(todo)):

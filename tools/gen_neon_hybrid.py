@@ -884,7 +884,7 @@ def block_len(dst, packed, tmp):
     ]
 
 
-def lean_kernel(name, sc, last):
+def lean_kernel(name, sc, last, rolled):
     """One scalar chunk with every per-block value in a register. The
     packed flags stay in x4 and the counter in x3 for the whole call; the
     block's flags (w2) and length (w0) are computed for the first block in
@@ -901,10 +901,16 @@ def lean_kernel(name, sc, last):
     assert not sc.spill_d
     cname = name.replace("_k1", "_c1")
     GLOBALS.extend([cname, f"_{cname}"])
-    # Rolled: one round in a loop, each word's offset from a table of the
-    # schedule (x26 its row, x27 its end), so a call after a pause fetches
-    # a fraction of the code.
-    x_pairs, _ = callee_saved([sc], [], extra=[last] + (["x27"] if ROLLED_K1 else []))
+    # Rolled (k1, c1): one round in a loop, each word's offset from a table
+    # of the schedule (x26 its row, x27 its end), so a call after a pause
+    # fetches a fraction of the code: Apple's cores' choice. Each message
+    # word then costs two loads, its offset and itself. Unrolled (k1u,
+    # c1u), a word is one load at an offset the instruction holds: 16
+    # instructions a G where the rolled has 18 and the loop's own. On a
+    # core that runs about as many instructions a cycle whatever they are
+    # (an AmpereOne) a chunk takes 1.16 ns/B so and 1.32 rolled (official
+    # BLAKE3: 1.22), and 64 bytes 1.38 against 1.55.
+    x_pairs, _ = callee_saved([sc], [], extra=[last] + (["x27"] if rolled else []))
     L = []
     e = L.append
     e(f"{name}:")
@@ -924,11 +930,11 @@ def lean_kernel(name, sc, last):
     L += sc.prologue(ctr="x3")
     L += block_flags("w2", "w4", "w5", first=True)
     L += block_len("w0", "w4", "w5")
-    if ROLLED_K1:
+    if rolled:
         e(f"adr x27, {name}_schedule_end")
     e(f"{name}_loop:")
     L += sc.block_start("w2", "w0", ctr="x3")
-    if ROLLED_K1:
+    if rolled:
         e(f"adr x26, {name}_schedule")
         e(f"{name}_round:")
         for quads, base in ((COLS, 0), (DIAGS, 8)):
@@ -959,7 +965,7 @@ def lean_kernel(name, sc, last):
         e(f"ldp x{lo}, x{hi}, [sp, #{F_X19 + 8 * (lo - 19)}]")
     e(f"add sp, sp, #{FRAME}")
     e("ret")
-    if ROLLED_K1:
+    if rolled:
         e(f"{name}_schedule:")
         for row in SCHEDULE:
             e(".byte " + ", ".join(str(4 * w) for w in row))
@@ -1008,11 +1014,12 @@ def xof1_kernel(name, sc):
 # cache), 2-4% slower nonstop. Unrolled, llvm-mca predicts 13% fewer cycles
 # on the Cortex-A72 and 10% on the N1 back to back, the pattern SUPERCOP
 # measures, but it models no instruction cache; rolled stays (Zooko,
-# October 13, 2026).
-ROLLED_K1 = True
+# October 13, 2026). That is Apple's cores' kernel (k1, c1). Cores that
+# are not Apple's run the unrolled one (k1u, c1u), by measurement on an
+# AmpereOne (lean_kernel has the numbers).
 
 
-def kernel(name, scalars, units, partial=False, xof=False, last=False):
+def kernel(name, scalars, units, partial=False, xof=False, last=False, rolled=True):
     """A kernel over whole chunks. With `partial`, the last scalar hashes a
     partial chunk: its block count and final block length arrive in x6 as
     `blocks | last_len << 8` (blocks in 1..=the others' count, last_len in
@@ -1032,7 +1039,7 @@ def kernel(name, scalars, units, partial=False, xof=False, last=False):
         return xof1_kernel(name, scalars[0])
     if not units and len(scalars) == 1:
         assert not partial
-        return lean_kernel(name, scalars[0], last="x25")
+        return lean_kernel(name, scalars[0], last="x25", rolled=rolled)
     n_inputs = len(scalars) + sum(len(u.slots) for u in units)
     assert n_inputs <= MAX_INPUTS
     x_pairs, d_pairs = callee_saved(scalars, units)
@@ -1333,6 +1340,7 @@ def build():
         "l8": kernel("blake3_servil_hybrid_l8", [], [pquad(0, (0, 1, 2, 3)), pquad(1, (4, 5, 6, 7))], last=True),
         "l9": kernel("blake3_servil_hybrid_l9", psc1(0), [pquad(0, (1, 2, 3, 4)), pquad(1, (5, 6, 7, 8))], last=True),
         "k1": kernel("blake3_servil_hybrid_k1", sc1(0), []),
+        "k1u": kernel("blake3_servil_hybrid_k1u", sc1(0), [], rolled=False),
         "k2": kernel("blake3_servil_hybrid_k2", [], [lone_pair((0, 1))]),
         "k3": kernel("blake3_servil_hybrid_k3", sc1(0), [lone_pair((1, 2))]),
         "k4": kernel("blake3_servil_hybrid_k4", sc2(0, 1), [lone_pair((2, 3))]),
