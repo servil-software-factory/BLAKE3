@@ -1453,15 +1453,23 @@ impl OutputReader {
     /// through the vectorized output path. For streaming throughput, prefer
     /// a slice length that's a multiple of [`BLOCK_LEN`] (64 bytes).
     ///
-    /// The maximum output size of BLAKE3 is 2<sup>64</sup>-1 bytes. If you try
-    /// to extract more than that, for example by seeking near the end and
-    /// reading further, the behavior is unspecified.
+    /// The maximum output size of BLAKE3 is 2<sup>64</sup>-1 bytes.
+    ///
+    /// # Panics
+    ///
+    /// If `buf` asks for bytes past that end (after seeking near it), in
+    /// every build: the position cannot count them. [`Read::read`] reads
+    /// up to the end instead, and then gives 0 bytes.
     ///
     /// [`Read::read`]: #method.read
     pub fn fill(&mut self, mut buf: &mut [u8]) {
         if buf.is_empty() {
             return;
         }
+        // Past the end the block counter would overflow: the position
+        // wrapped to 0 in a release build, and a seek relative to it then
+        // gave the output's first bytes again (BLAKE3 #423).
+        assert!(buf.len() as u64 <= self.remaining(), "BLAKE3's output ends at 2^64 - 1 bytes");
 
         // If we're partway through a block, try to get to a block boundary.
         if self.position_within_block != 0 {
@@ -1508,6 +1516,12 @@ impl OutputReader {
         self.inner.counter * BLOCK_LEN as u64 + self.position_within_block as u64
     }
 
+    /// The output bytes left from the position to the output's end.
+    #[inline]
+    fn remaining(&self) -> u64 {
+        u64::MAX - self.position()
+    }
+
     /// Seek to a new read position in the output stream. This is equivalent to
     /// calling [`Seek::seek`] with [`SeekFrom::Start`], except that it doesn't
     /// return a `Result`.
@@ -1532,8 +1546,11 @@ impl fmt::Debug for OutputReader {
 impl std::io::Read for OutputReader {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.fill(buf);
-        Ok(buf.len())
+        // Up to the output's end, where a read gives 0 bytes as a file's
+        // does.
+        let len = cmp::min(buf.len() as u64, self.remaining()) as usize;
+        self.fill(&mut buf[..len]);
+        Ok(len)
     }
 }
 

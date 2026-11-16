@@ -695,6 +695,51 @@ fn test_xof_seek() {
     }
 }
 
+/// The output's last bytes are read, and none past them: the position
+/// stays at the end, where it wrapped to 0 before and a seek relative to
+/// it gave the first bytes again (BLAKE3 #423).
+#[test]
+fn test_xof_ends_at_its_last_byte() {
+    crate::initialize();
+    let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
+    hasher.update(b"foo");
+    let mut reader = hasher.finalize_xof();
+    // The last 70 bytes: a block's end and the last, partial block.
+    reader.set_position(u64::MAX - 70);
+    let mut last = [0u8; 70];
+    reader.fill(&mut last);
+    assert_eq!(reader.position(), u64::MAX);
+    reader.fill(&mut []);
+    // The same bytes in two reads that meet inside them.
+    reader.set_position(u64::MAX - 70);
+    let mut again = [0u8; 70];
+    let (a, b) = again.split_at_mut(33);
+    reader.fill(a);
+    reader.fill(b);
+    assert_eq!(last, again);
+    assert_eq!(reader.position(), u64::MAX);
+    #[cfg(feature = "std")]
+    {
+        use std::io::prelude::*;
+        assert_eq!(reader.read(&mut [0u8; 9]).unwrap(), 0, "the end, as a file's");
+        assert_eq!(reader.seek(std::io::SeekFrom::Current(0)).unwrap(), u64::MAX, "and no way back to the start");
+        reader.set_position(u64::MAX - 5);
+        let mut tail = [0u8; 9];
+        assert_eq!(reader.read(&mut tail).unwrap(), 5);
+        assert_eq!(tail[..5], last[65..]);
+        assert_eq!(reader.stream_position().unwrap(), u64::MAX);
+    }
+}
+
+#[test]
+#[should_panic(expected = "BLAKE3's output ends at 2^64 - 1 bytes")]
+fn test_xof_fill_past_its_end_panics() {
+    crate::initialize();
+    let mut reader = crate::Hasher::new(crate::Mode::Plain, None).finalize_xof();
+    reader.set_position(u64::MAX - 5);
+    reader.fill(&mut [0u8; 6]);
+}
+
 #[test]
 fn test_reset() {
     let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
