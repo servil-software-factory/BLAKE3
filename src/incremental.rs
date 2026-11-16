@@ -767,7 +767,7 @@ impl std::io::Write for Hasher {
 impl Zeroize for Hasher {
     fn zeroize(&mut self) {
         self.core.zeroize();
-        self.stage.fill(core::mem::MaybeUninit::new(0));
+        crate::hasher::wipe(&mut self.stage);
         self.staged = 0;
     }
 }
