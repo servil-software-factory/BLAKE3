@@ -165,7 +165,12 @@
 //! # Panics
 //!
 //! A broken precondition of a call panics on the calling thread, and
-//! unwinds as usual.
+//! unwinds as usual. Two breaches stop the whole process instead, since
+//! worker threads may be reading memory that the unwinding would free: a
+//! [`Pipeline`](throughput::Pipeline) dropped while its messages are
+//! still being hashed, and a [`Lent`](throughput::Lent) guard dropped
+//! before its message's event. A server keeps both from happening when
+//! a client goes away: see "Giving up a message" on the Pipeline.
 //!
 //! # Startup self-test
 //!
