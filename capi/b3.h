@@ -117,7 +117,9 @@ b3_digest b3_hasher_finalize(b3_hasher *hasher);
 
 /* Extended output: `len` bytes of the output from byte `offset` on, into
  * `out`. Its first 32 bytes are the digest. The hasher is left as it was,
- * as with `b3_hasher_finalize`. */
+ * as with `b3_hasher_finalize`. BLAKE3's output ends at 2^64 - 1 bytes:
+ * `offset + len` must not pass that, and a call that does stops the
+ * process. */
 void b3_hasher_finalize_xof(b3_hasher *hasher, uint64_t offset, void *out, size_t len);
 
 #ifdef __cplusplus
