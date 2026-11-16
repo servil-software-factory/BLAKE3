@@ -184,7 +184,9 @@ fn stream_fd_into_rooms(
             let off = next_issue_seq * (ROOM_LEN as u64);
             let user_data = USER_LARGE_BIT | next_issue_seq;
             let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, user_data) };
-            debug_assert!(ok);
+            // In every build: a read the full ring did not take would be
+            // counted in flight and waited for without end.
+            assert!(ok, "the ring has room for every read in flight");
             window[slot_idx] = Some(WindowSlot::Reading(room));
             in_flight_uring += 1;
             next_issue_seq += 1;
@@ -193,7 +195,7 @@ fn stream_fd_into_rooms(
         let commit_ready = matches!(window[(next_commit_seq as usize) % LARGE_WINDOW], Some(WindowSlot::Ready(..) | WindowSlot::Eof));
         if ring.unsubmitted() > 0 || (!commit_ready && in_flight_uring > 0) {
             let min_wait = if commit_ready || in_flight_uring == 0 { 0 } else { 1 };
-            ring.submit_and_wait(min_wait)?;
+            ring.submit_and_wait(min_wait);
         }
 
         while let Some(cqe) = ring.pop_cqe() {
@@ -213,7 +215,7 @@ fn stream_fd_into_rooms(
                 if errno == libc::EINTR && first_err.is_none() {
                     let off = seq * (ROOM_LEN as u64);
                     while ring.sq_space_left() == 0 {
-                        ring.submit_and_wait(0)?;
+                        ring.submit_and_wait(0);
                     }
                     unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, USER_LARGE_BIT | seq) };
                     window[idx] = Some(WindowSlot::Reading(room));
@@ -299,7 +301,7 @@ fn stream_fd_into_rooms(
 
         if finished {
             while in_flight_uring > 0 {
-                ring.submit_and_wait(1)?;
+                ring.submit_and_wait(1);
                 while let Some(cqe) = ring.pop_cqe() {
                     if (cqe.user_data & USER_LARGE_BIT) == 0 {
                         deferred_small_cqes.push_back(cqe);
@@ -359,7 +361,11 @@ impl WarmBatch {
 
     #[inline]
     fn push_raw(&mut self, file_idx: usize, src_ptr: *const u8, byte_len: usize, mode: blake3::Mode<'_>, sink: &mut Sink<'_>) {
-        debug_assert!(byte_len <= WARM_BATCH_MAX_FILE);
+        // In every build: the copy below is into the slot. A file can have
+        // grown past WARM_BATCH_MAX_FILE since its size was read (its
+        // bytes come to here by a read into a slot's room), and no
+        // further than the slot.
+        assert!(byte_len <= WARM_SLOT_BLOCKS * 64, "a batched file fits its slot");
         let slot = self.len;
         let (dst, _) = self.slot_ptr_and_cap(slot);
         if byte_len > 0 {
@@ -607,7 +613,8 @@ impl ColdRingState {
         let rlen = (buf.capacity() - partial_at) as u32;
         self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at, hint });
         let ok = unsafe { self.ring.push_read(fd, ptr, rlen, partial_at as u64, 0, sid as u64) };
-        debug_assert!(ok);
+        // In every build, as the large file's read above.
+        assert!(ok, "the ring has room for every read in flight");
         self.ring_in_flight += 1;
     }
 
@@ -617,16 +624,7 @@ impl ColdRingState {
             if min_wait == 0 && self.ring.unsubmitted() == 0 {
                 return;
             }
-            if let Err(e) = self.ring.submit_and_wait(min_wait) {
-                let errno = e.raw_os_error().unwrap_or(libc::EIO);
-                for slot in &mut self.slots {
-                    if let Some(st) = slot.take() {
-                        self.ring_in_flight -= 1;
-                        sink.put(st.file_idx, Err(io::Error::from_raw_os_error(errno).into()));
-                    }
-                }
-                return;
-            }
+            self.ring.submit_and_wait(min_wait);
         }
 
         let mode = args.mode;
@@ -646,7 +644,7 @@ impl ColdRingState {
                 let errno = -cqe.res;
                 if errno == libc::EINTR {
                     while self.ring.sq_space_left() == 0 {
-                        let _ = self.ring.submit_and_wait(0);
+                        self.ring.submit_and_wait(0);
                     }
                     let fd = st.file.as_raw_fd();
                     let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
@@ -715,7 +713,7 @@ impl ColdRingState {
                     unsafe { st.buf.set_len(0) };
                 }
                 while self.ring.sq_space_left() == 0 {
-                    let _ = self.ring.submit_and_wait(0);
+                    self.ring.submit_and_wait(0);
                 }
                 let fd = st.file.as_raw_fd();
                 let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
@@ -991,7 +989,7 @@ fn run_hybrid_worker(
 
         // 3. Large files `>= 512 KiB`: check `resident(&map)` BEFORE creating any `Uring`!
         warm_batch.flush(args.mode, &mut sink);
-        if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+        if let Some(map) = args.map(&file) {
             if !force_miss() && crate::resident(&map) {
                 if size < (4 << 20) {
                     let h = crate::hash_slice_32(args.mode, &map);
@@ -1161,6 +1159,26 @@ mod test {
             assert_eq!(h, blake3::convenience::hash(&vec![(k + 1) as u8; k * 13 + 1]));
         }
 
+        // A file that grew past the batch's 16 KiB after its size was
+        // read, and still fits its slot, hashes as its bytes do: alone in
+        // a batch and beside others.
+        let slot = super::WARM_SLOT_BLOCKS * 64;
+        for lens in [&[super::WARM_BATCH_MAX_FILE + 1][..], &[slot][..], &[7, super::WARM_BATCH_MAX_FILE + 1, slot - 1, slot, 0][..]] {
+            wb_out.clear();
+            let mut collect = |i, r: anyhow::Result<blake3::Hash>| {
+                wb_out.push((i, r.unwrap()));
+                true
+            };
+            let mut sink = super::Sink { done: &mut collect, open: true };
+            let messages: Vec<Vec<u8>> = lens.iter().map(|&len| (0..len).map(|i| (i * 5 + len) as u8).collect()).collect();
+            for (k, msg) in messages.iter().enumerate() {
+                wb.push_raw(k, msg.as_ptr(), msg.len(), blake3::Mode::Plain, &mut sink);
+            }
+            wb.flush(blake3::Mode::Plain, &mut sink);
+            let want: Vec<_> = messages.iter().enumerate().map(|(k, msg)| (k, blake3::convenience::hash(msg))).collect();
+            assert_eq!(wb_out, want, "{lens:?}");
+        }
+
         // Fault injection: exercise `force_no_uring = true` across cold evicted files of all size classes!
         let mut paths: Vec<PathBuf> = Vec::new();
         let mut want: Vec<blake3::Hash> = Vec::new();
@@ -1312,5 +1330,18 @@ mod test {
         let (paths, want) = files_of_every_size(dir.path(), 34);
         super::FORCE_MISS.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(hashes_in_order(&paths), want);
+    }
+
+    /// More bytes than a batch's slot holds are refused before they are
+    /// copied into it, in every build.
+    #[test]
+    #[should_panic(expected = "a batched file fits its slot")]
+    fn a_file_beyond_its_slot_is_refused_before_the_copy() {
+        blake3::initialize();
+        let mut wb = super::WarmBatch::new();
+        let mut collect = |_, _: anyhow::Result<blake3::Hash>| true;
+        let mut sink = super::Sink { done: &mut collect, open: true };
+        let msg = vec![0u8; super::WARM_SLOT_BLOCKS * 64 + 1];
+        wb.push_raw(0, msg.as_ptr(), msg.len(), blake3::Mode::Plain, &mut sink);
     }
 }

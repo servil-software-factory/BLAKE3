@@ -14,6 +14,26 @@ overview, read [QUALITY.md](../QUALITY.md) first.
 | x86-64: Linux | BLAKE3-Servil's generated assembly: whole chunks with a partial one, the chunk root, and on AVX-512 32 whole chunks or 16 parent nodes at once (dispatched on AMD Zen 5 and later) | **proved** for every input, and tested |
 | | upstream's assembly, its symbols renamed and its batch kernels' loads kept within each input (bug 8, below) | **proved** at every shape the crate calls (below), and tested |
 
+## Protections and their limits
+
+The preferred order is to eliminate a dangerous state, express the
+remaining obligations in types, and fail stop on a cheaply detectable
+violation. Tests then attack those specific obligations with bounded,
+reproducible cases. Running successful hashing for longer is not the
+release's measure of assurance.
+
+| Hazard | Protection | What the evidence does not establish |
+|---|---|---|
+| Wrong kernel output, out-of-bounds access, secret-dependent branch/address | proofs over assembled kernels under stated contracts; planted bad kernels rejected | correctness of all Rust callers, every toolchain's output, or the processor |
+| Worker reads state after its owner frees it | Pipeline worker-visible state lives for the process | correct reuse or synchronization of that state |
+| A wait loses a wake or races on a waker | Shuttle checks the production finish/park/waker modules | every possible schedule, weak-memory execution, or the whole Pipeline |
+| Kernel still writes an I/O buffer after error recovery frees it | failed `io_uring_enter` aborts before recovery or unwind | every other lifetime or cancellation path |
+| File name replaced between ordinary open and direct open | direct reads reopen the original descriptor through procfs | a coherent snapshot against concurrent writes to that inode |
+| Incomplete output, or empty verification input, reported as success | output errors propagated; each checkfile must contain a line, and each invalid line fails | complete directory verification or authentication of the expected digests |
+
+The I/O protections in the last three rows are additions for 0.10.0.
+They change production behavior; their fault controls are described below.
+
 ## What is new, and so where the risk is
 
 Most of the risk is in what this implementation adds to the published
@@ -39,6 +59,9 @@ algorithm:
 - batches of many messages in one call (`hash_many`, `src/many.rs`),
   collections of messages and many hashers at once (`throughput::hash_each`,
   `throughput::update_each`, `src/each.rs`);
+- the Pipeline's message/room/loan lifetimes (`threads/src/pipeline.rs`);
+- `b3sum`'s direct and asynchronous reads, checkfile parser and outboard
+  writer (`b3sum/src/`);
 - the startup self-test (`src/self_test.rs`);
 - the C API (`capi/b3.h` over the crate, `capi/src/lib.rs`), tested
   through every call against the official test vectors, and from a C
@@ -87,9 +110,11 @@ coverage; the tests also check calls into them and the other platforms.
   change between equally correct paths (a speed threshold, listed as
   such), or code that does nothing (removed).
 
-**Contracts and hangs.** Contract checks use `debug_assert!`. If a caller
-breaks a precondition, a debug build stops. A release build omits the
-check and pays nothing for it.
+**Contracts and hangs.** Types enforce preconditions first. Ordinary
+contract checks use `debug_assert!`; release builds omit those checks.
+Checks that cheaply prevent memory mismanagement or a silently wrong
+result run in every build. A failed safety check stops the call or the
+process, rather than selecting an unchecked continuation.
 
 A mistake that would give a wrong digest with no error is made
 impossible where a type can: the batch calls take a `Batch`, which lets
@@ -158,7 +183,9 @@ CPU), a choice between equally correct paths (what to prefetch, a speed
 threshold, how work is cut among threads, how long an idle worker
 spins), or an equivalent change (`|` made `^` on flag bits that never
 overlap). One group stays open: the thread pool's scheduling under
-interleavings the tests leave to chance (Loom would force them). The assembly kernels are the proofs'.
+interleavings the ordinary tests leave to chance. Shuttle checks the
+finish, park and waker handshakes, not all the pool's scheduling. The
+assembly kernels are the proofs'.
 
 A mutant that changes only speed is work to finish (Zooko, November 3;
 BLAKE3 #219). Either a test catches it at once and the same way on every
@@ -201,24 +228,27 @@ flags, a counter whose low word overflows mid-batch, pointer tables
 forward, reversed, and strided), against fixed values;
 the pool's cuts and merges, its thread caps, and 32 callers at once.
 
-**Every process checks itself before its first hash.** The tests prove
-the code on our machines; a user's machine may have a compiler that
-miscompiles, a linker that mislinks, or a CPU with a faulty vector or
-matrix unit. So the first call in a process (or `initialize()`) hashes a
-platform-specific set of fixed inputs and compares each result with official BLAKE3's answer,
-checked into the source (`src/self_test.rs`) and generated there by a
-unit test. The inputs are chosen so that together they run every one
-of the AArch64 assembly kernels, every entry point, which a unit test
-checks on every run (`test_self_test_runs_every_kernel`, from the code's
-own kernel tables), along with the batch,
-keyed, key-derivation, incremental, and extended-output paths. As Niels
-Ferguson suggested, each case's output feeds the next case's input, so
-a fault anywhere changes every result after it, and the inputs use
-unusual alignments, lengths, and padding, where platform, compiler, and
-hardware faults hide from ordinary tests. A wrong result stops the
-process; builds with the standard library name the failing path. The check costs about
-0.2 ms once per process; most of it is the first fetch of 500 KB of
-unrolled kernel code.
+**Every process checks itself before its first hash.** Every program
+calls `initialize()` (or `initialize_multithreaded`) before hashing. It
+hashes platform-specific fixed inputs and compares their folded outputs
+with constants derived from official BLAKE3 (`src/self_test.rs`). A
+mismatch aborts with std, or traps without it; a caller cannot catch the
+failure and keep hashing. Tests plant a wrong last output byte in each
+case and require that stop. The fold is FNV-1a, not a cryptographic
+integrity check.
+
+The cases exercise the selected kernel entries and public hashing paths.
+AArch64's `l` kernels (short messages of unequal lengths) are deliberately
+excluded from startup because of their cost; proofs and tests cover
+them. `test_self_test_runs_every_kernel` checks the remaining entries
+against the kernel tables. x86's wide and independent-output kernels
+have additional cases and corruption controls. Each case's output feeds
+the next input, following Niels Ferguson's suggestion; inputs use unusual
+alignments and padding. Startup cost depends on the architecture and
+cold code fetches; measurements are recorded beside `src/self_test.rs`.
+This catches some build and hardware faults, not every later fault. A
+malicious build can change the self-test too, so passing it does not
+authenticate a binary.
 
 ## Memory safety
 
@@ -254,6 +284,149 @@ unrolled kernel code.
   guard-page tests among them). The rest is code for platforms the test
   machine lacks (x86, AArch64 without the SHA-3 extension) and
   fail-stop branches.
+
+## Bounded checks of I/O failures
+
+These tests exercise the actual CLI or the production syscall wrapper,
+not an independent model of them. Run on Linux, with cargo-nextest:
+
+```sh
+cargo nextest run --release --manifest-path b3sum/Cargo.toml --tests \
+  -E 'test(test_output_error_is_failure) | test(test_empty_checkfile_is_failure) | test(direct_reads_keep_the_open_file) | test(failed_enter_stops_before_unwinding)'
+```
+
+- `test_output_error_is_failure`: `/dev/full` returns `ENOSPC`. Plain,
+  raw, extended output and checkfile modes must exit unsuccessfully and
+  report an error. The plain case previously returned success. Control:
+  ignore `out.flush()`'s error in `main`; the test must fail.
+- `test_empty_checkfile_is_failure`: an empty named checkfile or stdin
+  must fail, also with `--quiet` or after a valid checkfile. The valid
+  fixture uses the published empty-input digest. Previously these runs
+  exited successfully. Control: remove `ensure!(saw_line, ...)` in
+  `check_one_checkfile`; the test must fail.
+- `direct_reads_keep_the_open_file_when_its_path_is_replaced`: open A,
+  rename it, create different bytes of the same length at A's old name,
+  then hash the open handle on the direct-read path. Rename orders the
+  steps; there is no race to get lucky on. Before the fix the result was
+  the replacement's hash. Requires multiple available CPUs and direct
+  reads on the test filesystem; the test returns early without them.
+- `failed_enter_stops_before_unwinding`: call the actual `io_uring_enter`
+  wrapper with an invalid descriptor in a subprocess inside
+  `catch_unwind`. A refused syscall also takes this path, so permission
+  to create rings is unnecessary. The child must die of `SIGABRT` and
+  name the buffer-lifetime reason. Control: replace the abort in
+  `uring::enter` with `None`; the child exits 0 and the test must fail.
+
+The output, empty-checkfile and pathname tests failed on the old code.
+The enter test rejected the planted continuation. These are checks of
+specific faults, not evidence that all I/O failures are safe.
+
+`Uring::new` can fail before reads exist: then an ordinary read is safe.
+Once SQEs have been published, a failed submission/wait may leave some
+reads in flight. Returning an error previously let the callers drop
+rooms or vectors those reads could still write. `submit_and_wait` now
+returns no error to recover from: `EINTR` resumes with the kernel's SQ
+head, and any other enter error aborts before destructors. A completion
+with a negative read result is different: that read has completed and
+released its buffer, so its file error is handled normally. The existing
+`uring_reads_offsets_saturation_and_error_cqes` test checks successful
+reads and an error CQE where the host permits rings.
+
+Direct I/O opens `/proc/self/fd/N`, referring to the held file descriptor,
+with independent flags and offset. It neither looks up the original
+pathname nor changes stdin's shared flags. If that open fails (for
+example, without procfs), hashing continues through the original handle.
+This preserves file identity, not file contents. Concurrent writes and
+truncation still require a stable input or a filesystem snapshot.
+
+## Deep security audits before stable releases
+
+Each stable release gets deep security audits by at least two separate
+AI agents, using different leading-edge models. This is a release
+practice, in addition to the executable checks above, not a claim that
+any revision with passing tests has been audited.
+
+The agents first review independently, without the other agent's
+conclusions. Give each the exact source revision, the previous stable
+release, the contracts and build instructions. Ask each to inspect the
+implementation and changes, not merely summarize these documents. The
+scope includes:
+
+- `unsafe` code, aliasing, initialization and arithmetic bounds;
+- ownership and publication across workers, loans and kernel I/O;
+- wrong hashes or false verification success on errors, malformed input
+  and resource exhaustion;
+- secret-dependent behavior, untrusted paths, release provenance,
+  dependencies and the build chain.
+
+Retain each report with the release evidence and link it from the
+release's public record. A report names the agent and full model
+identifier and provider, date, full audited commit, scope and methods,
+and limitations. Keep the audit prompt and relevant tool commands with
+it, excluding credentials and private machine details. Model responses
+are not deterministic; readers should be able to repeat the inspection
+and concrete checks, not expect identical model prose. Each finding names the path and violated contract, a concrete trigger
+or argument, and its disposition: fix and regression check, rejection
+with a reason, or an explicitly accepted residual risk. Verify claims
+against the code; model agreement is not verification. Handle disclosure
+of vulnerabilities affecting released versions before publishing
+reproduction details.
+
+Re-review affected findings when code changes after the audit. Review
+the diff to the final version commit as well; a review of an earlier
+candidate is not silently carried forward. A release with missing
+reports, or unresolved credible memory-safety, wrong-result or security
+findings, is not ready. The release record lists which reviews completed
+and which findings were settled; a statement of this practice is not
+itself audit evidence.
+
+AI agents can share training data, errors and blind spots even when the
+models differ. These reviews are not a formal proof or an independent
+human security audit. We claim no such human audit.
+
+## Source and release integrity
+
+The full version string identifies a source commit; it does not identify
+who authorized it. The release procedure keeps evidence on the exact
+version commit and retains packaged sources and dependency resolution
+from the publish dry-run. Install binaries from an authenticated source;
+verify SHA-256 with a trusted implementation before executing a downloaded
+hasher, then verify BLAKE3 too. An attacker who can replace a binary and
+both checksum files can pass both checks.
+
+Two programs check a release's artifacts against its version commit
+(`CONTRIBUTING.md`, "Every artifact is a clean build of the version
+commit"). `tools/release_artifacts.py` compares each crate with the
+commit file by file, and reads each program's build version. `b3sum`'s
+Linux binaries are also reproducible: `tools/b3sum-release.sh` gives the
+same bytes on any machine from the same commit and the toolchain it
+names. Before a release our build must equal GitHub's, byte for byte;
+after it a workflow rebuilds the tag and compares what was published.
+You can do the same with Docker (`b3sum/README.md`). A binary that
+differs from your rebuild was not built from the source, whatever its
+checksums say. 0.9.0's binaries predate this: they were built in
+checkouts that held untracked files (#435).
+
+What this does not cover: the C library's archive is checked by its
+build version alone, and a crate's `Cargo.toml` and `Cargo.lock` are
+Cargo's rewriting and are not compared (#436). A rebuild trusts the
+compiler, the C library and the container image it starts from.
+Releases are not signed.
+
+Reproducing a proof checks the machine code assembled by that run's
+toolchain under its harness. A user's compiler or assembler may emit
+different bytes. Startup checks exercise the user's resulting build on
+fixed inputs, not all inputs, and cannot defeat a compiler or binary that
+deliberately lies. Keep the source, toolchain and dependency origins in
+the trust assessment. `cargo tree -e normal` (and `-e build`) in each
+crate shows which packages enter that build; a dependency inventory is
+not a security review of those packages.
+
+For `b3sum --check`, expected digests must arrive through a trusted
+channel. It checks listed files, not absence of additional files or
+presence of omitted entries. An empty checkfile now fails, but a
+partially deleted manifest may still pass. See
+[`what_does_check_do.md`](../b3sum/what_does_check_do.md).
 
 ## Proofs
 
@@ -428,7 +601,9 @@ SME2 (clang 17 or later; set `CC=clang-19` or similar):
 
 ```sh
 git clone -b main https://github.com/servil-software-factory/BLAKE3 && cd BLAKE3
-cargo nextest run --release --lib --tests         # each test in its own process
+cargo nextest run --release --lib --tests         # the one-thread crate
+cargo nextest run --release --manifest-path threads/Cargo.toml --lib --tests
+cargo nextest run --release --manifest-path b3sum/Cargo.toml --tests
 cargo test --release --doc                        # each doc example in its own process
 cargo nextest run --release --manifest-path test_vectors/Cargo.toml
 cargo nextest run --release --manifest-path capi/Cargo.toml   # the C API
@@ -445,9 +620,10 @@ measures this implementation against the official crate and others on your machi
 
 ## The bugs these steps found
 
-Eight, all fixed. Three could have given wrong digests (1, 2, and 6),
-and one could crash a program from a safe call (8). Tests, coverage,
-review, CI, Miri (before 0.8), and the x86 proofs' model found them. The proofs have
+The following bugs are fixed. Tests, coverage, review, CI, Miri (before
+0.8), and the x86 proofs' model found them. Some were found during
+development and never shipped. Items 9–13 concern the development of
+0.10.0, including the inspection and fault controls described above. The proofs have
 found none in the Arm kernels: what they found were faults in the
 checking itself (an addition's carry flag modelled wrongly in the
 executor, the machine-code proofs run on a build without the standard
@@ -497,6 +673,69 @@ each bug are in `git log`.
    only its 16 bytes. The x86 proofs' model found it; guard-page tests
    reproduce it as a crash.
 
+9. **A worker could read freed Pipeline state** (`Shared` in
+   `threads/src/pipeline.rs`, #399). An unexplained test crash led to the
+   cause: a worker read the state after publishing completion, when the
+   owner could already have freed it. The state now lives with its
+   process-lifetime storage. No release shipped that Pipeline code.
+10. **A final output error could exit successfully** (`b3sum`'s `main`).
+    The buffered writer's final flush error was ignored; some check-output
+    errors were ignored too. They are propagated now. `/dev/full` makes
+    the failure deterministic.
+11. **An empty checkfile could exit successfully** (`check_one_checkfile`).
+    A file truncated to zero bytes checked nothing and still passed.
+    Each checkfile must now contain at least a line; an invalid line
+    also fails. This does not detect partial removal of a manifest.
+12. **A direct read could hash another file at the same name**
+    (`direct::read`). It opened the pathname after ordinary open and
+    metadata checks. A rename and replacement between the two opens
+    switched the input. Direct reads now open the original descriptor
+    through procfs; outboard reads use the same mechanism.
+13. **A ring error could release buffers still owned by kernel reads**
+    (`Uring::submit_and_wait` and `linux_pipe`). Some callers returned or
+    discarded slots on an enter failure, without confirming every read
+    had completed. The wrapper now aborts there before recovery or
+    unwind. The fault control verifies that stop, not a triggered
+    kernel write into freed memory.
+14. **A file's size could decide where it ends** (`direct::read` and
+    `outboard_of`, #424). A direct read of a file whose size was a
+    multiple of 2 MiB asked for no byte past it, and an outboard's small
+    file was read for exactly its size. A file that had grown gave the
+    hash of its first bytes. Both now take the end from a read: one more
+    read after a last whole piece, and room for one more byte. 0.9.0 had
+    this rule and a test of it; the 0.10 reads dropped both.
+15. **`--keyed --outboard -` hashed nothing** (#424). The key had been
+    all of standard input, and the outboard of no bytes was made in
+    silence. It is an error now, as without `--outboard`.
+16. **An outboard was written through whatever stood at its name**
+    (`outboard_inputs`, #425). A link there led the write out of the
+    directory, and an outboard others were reading was emptied first.
+    An outboard is now written whole under a new name and renamed into
+    place.
+17. **A wrong call could crash or run the wrong kernels** (`hash_many_on`
+    and `Platform`, #419). The hidden slot check ran in debug builds
+    only: two bytes named as a 64-byte message crashed 0.9.0. Another
+    crate could write a `Platform` the CPU lacks. The check runs in every
+    build, and a `Platform` can no longer be written outside the crate.
+18. **`finalize_each` gave the empty message's hash for an index named
+    twice** (#420, first #310). The check was debug-only. Each hasher
+    now carries a mark, and a second naming panics in every build.
+19. **Safe code could free bytes the Pipeline's workers were reading,
+    or get two Rooms over the same bytes** (#417, #418). An owner could
+    be a borrowed slice, and a Room that took 2^30 empty commits was
+    counted free while held. Owners must be `'static`, and a Room takes
+    new credits before it gives out its last. The second has a test that
+    starts a Room four credits from its end.
+
+20. **`--no-mmap` did nothing** (#432). It was accepted, and files were
+    mapped all the same, so a file shortened during the run could still
+    stop it. Every map now goes through one function, which the option
+    turns off. A test counts the maps on each path.
+
+Bugs 14 to 20 were found by the AI security audit of the first 0.10.0
+candidate, not by the checks above. 17 and 18 are in 0.9.0, reachable
+only outside its documented contract.
+
 ## What each check would catch
 
 | Check | Catches | Evidence | Cannot see |
@@ -507,6 +746,24 @@ each bug are in `git log`.
 | Test vectors and official BLAKE3's fixed values | any wrong digest at the lengths and shapes tested, on any platform | found bugs 1 and 2 below | untested lengths and shapes |
 | Startup self-test | a miscompiled, mislinked, or faulty-hardware kernel on the user's machine | its inputs run every kernel entry point but the ARM64 kernels for short messages of unequal lengths (a unit test checks it each run), and each case's output feeds the next, so one wrong result changes every later one | faults that appear only after startup |
 | Guard pages | out-of-bounds access in the paths tested, assembly included | a byte planted past a buffer crashes the guard-page tests | paths not exercised; data races |
+
+Shuttle's models compile the production `finish.rs`, `park.rs` and
+`waker.rs` against its concurrency primitives. `check-builds.sh` runs
+all three before each landing; `--cfg shuttle` is required to enable
+them. To reproduce:
+
+```sh
+(cd threads && RUSTFLAGS="--cfg shuttle" cargo test --release \
+  --test shuttle_finish --test shuttle_park --test shuttle_waker)
+```
+
+The current tests use bounded scenarios and probabilistic schedule
+selection (`check_pct`), not exhaustive enumeration of arbitrary callers.
+Shuttle does not model all hardware weak-memory behaviors. A passing run
+is evidence about the tested scenarios and schedules, not a theorem of
+all thread safety. Unlike repeated wall-clock tests, it can report and
+replay a specific schedule. The ordinary suites remain under nextest;
+these model tests are run with Shuttle's own scheduling.
 
 ## Formal verification: what we tried and considered
 

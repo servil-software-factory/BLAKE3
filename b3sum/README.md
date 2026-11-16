@@ -82,7 +82,8 @@ Options:
       --seek <SEEK>           The starting output byte offset, before hex or sigil encoding
                               [default: 0]
       --num-threads <NUM>     The most threads hashing at once [default: as fast as b3sum can]
-      --no-mmap               No effect: b3sum chooses between reading and mapping each file
+      --no-mmap               Read every file and map none: a file that another program shortens
+                              while b3sum hashes it then cannot stop the run
       --no-names              Omit filenames in the output
       --raw                   Write raw output bytes to stdout, rather than hex
       --sigilcode             Write each hash as a sigil (25 characters for 32 bytes; see
@@ -98,7 +99,7 @@ Options:
   -V, --version               Print version
 
 More information: b3sum/README.md at
-https://github.com/servil-software-factory/BLAKE3/blob/servil/b3sum/README.md
+https://github.com/servil-software-factory/BLAKE3/blob/main/b3sum/README.md
 ```
 
 By default b3sum uses every CPU: several files at once, and a large file over several
@@ -138,7 +139,7 @@ It works in the plain and keyed modes, the two bao-tree reads.
 ## Hashes as sigils
 
 `--sigilcode` writes each hash as a [sigil](https://github.com/johnservil/sigil),
-one word of 26 characters for a 32-byte hash. A double-click selects it
+one word of 25 characters for a 32-byte hash. A double-click selects it
 whole, and no two of its characters look alike. With `--check`, the same
 flag reads sigils as well as hex, so a checkfile may mix the two:
 
