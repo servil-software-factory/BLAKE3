@@ -32,7 +32,6 @@ src/lib.rs	replace __all_workers_parked -> bool with false	1	a test-only hook (_
 src/pipeline.rs	delete match arm SlotKind::WaitSingle{group, ..} | SlotKind::WaitBatch{group, ..} | SlotKind::WaitAborted{group, ..} in Pipeline<T, B>::front_uses_open_group	1	hang: front_uses_open_group returns false for an unsealed front group, so poll_ready parks without publishing open_group
 src/pipeline.rs	replace != with == in Shared::run_group	1	hang: run_group releases room credits only for NONE instead of real rooms, so rooms never return to zero credits
 src/pipeline.rs	replace += with *= in Shared::run_group	1	hang: `0 *= 1` never advances `i` in run_group's member loop
-src/pipeline.rs	replace += with -= in Pipeline<T, B>::commit	1	hang: room offset wraps or underflows instead of advancing
 src/pipeline.rs	replace += with -= in Pipeline<T, B>::commit_multi	1	hang: room_pieces underflows, so merged_pieces == room_pieces is never reached
 src/pipeline.rs	replace += with -= in Pipeline<T, B>::drain_slot_pieces	1	hang: merged_pieces / stack_len underflows, so merged_pieces == room_pieces is never reached
 src/pipeline.rs	replace += with -= in Ring<X>::push_back	1	hang: `len -= 1` on a push: Ring::len no longer counts what the ring holds. Applied by hand on the Apple M6 (BLAKE3 #380): 4 tests crash and the clock stops in 27; a run that stops at the first failure sees one or the other first, so machines can differ
