@@ -864,6 +864,7 @@ pub(crate) fn initialize(threads: usize) {
 /// calling threads are left alone.
 pub(crate) mod places {
     use super::*;
+    #[cfg(any(target_os = "linux", test))]
     use std::vec::Vec;
 
     /// Which workers a job uses: its caller's place's alone, or all.
@@ -1120,6 +1121,10 @@ pub(crate) mod places {
 
     /// A CPU the process may run on: its number, its last-level cache
     /// (any number that the CPUs sharing it share), its socket.
+    // Linux reads the machine's caches and places its workers; elsewhere
+    // only the tests call this (BLAKE3 #428: unused, it failed the Apple
+    // build under -D warnings).
+    #[cfg(any(target_os = "linux", test))]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub(crate) struct Cpu {
         pub(crate) cpu: usize,
@@ -1161,6 +1166,7 @@ pub(crate) mod places {
     /// socket's first; worker k is of the place of CPU k + 1 in that
     /// order (one CPU of the starter's place is left for the starter),
     /// around again where there are more workers than CPUs.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn assign(cpus: &[Cpu], starter: usize, workers: usize) -> Option<Places> {
         let mut caches: Vec<usize> = cpus.iter().map(|c| c.cache).collect();
         caches.sort_unstable();
