@@ -184,7 +184,9 @@ fn stream_fd_into_rooms(
             let off = next_issue_seq * (ROOM_LEN as u64);
             let user_data = USER_LARGE_BIT | next_issue_seq;
             let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, user_data) };
-            debug_assert!(ok);
+            // In every build: a read the full ring did not take would be
+            // counted in flight and waited for without end.
+            assert!(ok, "the ring has room for every read in flight");
             window[slot_idx] = Some(WindowSlot::Reading(room));
             in_flight_uring += 1;
             next_issue_seq += 1;
@@ -193,7 +195,7 @@ fn stream_fd_into_rooms(
         let commit_ready = matches!(window[(next_commit_seq as usize) % LARGE_WINDOW], Some(WindowSlot::Ready(..) | WindowSlot::Eof));
         if ring.unsubmitted() > 0 || (!commit_ready && in_flight_uring > 0) {
             let min_wait = if commit_ready || in_flight_uring == 0 { 0 } else { 1 };
-            ring.submit_and_wait(min_wait)?;
+            ring.submit_and_wait(min_wait);
         }
 
         while let Some(cqe) = ring.pop_cqe() {
@@ -213,7 +215,7 @@ fn stream_fd_into_rooms(
                 if errno == libc::EINTR && first_err.is_none() {
                     let off = seq * (ROOM_LEN as u64);
                     while ring.sq_space_left() == 0 {
-                        ring.submit_and_wait(0)?;
+                        ring.submit_and_wait(0);
                     }
                     unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, USER_LARGE_BIT | seq) };
                     window[idx] = Some(WindowSlot::Reading(room));
@@ -299,7 +301,7 @@ fn stream_fd_into_rooms(
 
         if finished {
             while in_flight_uring > 0 {
-                ring.submit_and_wait(1)?;
+                ring.submit_and_wait(1);
                 while let Some(cqe) = ring.pop_cqe() {
                     if (cqe.user_data & USER_LARGE_BIT) == 0 {
                         deferred_small_cqes.push_back(cqe);
@@ -359,7 +361,11 @@ impl WarmBatch {
 
     #[inline]
     fn push_raw(&mut self, file_idx: usize, src_ptr: *const u8, byte_len: usize, mode: blake3::Mode<'_>, sink: &mut Sink<'_>) {
-        debug_assert!(byte_len <= WARM_BATCH_MAX_FILE);
+        // In every build: the copy below is into the slot. A file can have
+        // grown past WARM_BATCH_MAX_FILE since its size was read (its
+        // bytes come to here by a read into a slot's room), and no
+        // further than the slot.
+        assert!(byte_len <= WARM_SLOT_BLOCKS * 64, "a batched file fits its slot");
         let slot = self.len;
         let (dst, _) = self.slot_ptr_and_cap(slot);
         if byte_len > 0 {
@@ -440,8 +446,15 @@ fn force_miss() -> bool {
     false
 }
 
+/// Read the file at `fd` from byte `at` into the `dst_cap` bytes at
+/// `dst_ptr`, from the page cache alone: how far it got, and whether that
+/// is the file's end. Only a read that gives no byte says it is: the size
+/// a file reports chooses the buffer, never where the file ends (0.9.0's
+/// rule, which a shortcut here broke: it took a read that stopped at the
+/// reported size for the end, BLAKE3 #424). False where the buffer is
+/// full or the cache lacks the next bytes: the caller reads on.
 #[inline]
-fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize, hint: usize) -> io::Result<(usize, bool)> {
+fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize) -> io::Result<(usize, bool)> {
     if force_miss() {
         return Ok((at, false));
     }
@@ -462,9 +475,6 @@ fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize, 
             return Ok((at, false));
         }
         at += rc as usize;
-        if hint > 0 && at == hint && at < dst_cap {
-            return Ok((at, true));
-        }
     }
 }
 
@@ -473,7 +483,6 @@ struct SmallSlot {
     file: File,
     buf: Vec<u8>,
     at: usize,
-    hint: usize,
 }
 
 #[inline]
@@ -605,9 +614,10 @@ impl ColdRingState {
         let fd = file.as_raw_fd();
         let ptr = unsafe { buf.as_mut_ptr().add(partial_at) };
         let rlen = (buf.capacity() - partial_at) as u32;
-        self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at, hint });
+        self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at });
         let ok = unsafe { self.ring.push_read(fd, ptr, rlen, partial_at as u64, 0, sid as u64) };
-        debug_assert!(ok);
+        // In every build, as the large file's read above.
+        assert!(ok, "the ring has room for every read in flight");
         self.ring_in_flight += 1;
     }
 
@@ -617,16 +627,7 @@ impl ColdRingState {
             if min_wait == 0 && self.ring.unsubmitted() == 0 {
                 return;
             }
-            if let Err(e) = self.ring.submit_and_wait(min_wait) {
-                let errno = e.raw_os_error().unwrap_or(libc::EIO);
-                for slot in &mut self.slots {
-                    if let Some(st) = slot.take() {
-                        self.ring_in_flight -= 1;
-                        sink.put(st.file_idx, Err(io::Error::from_raw_os_error(errno).into()));
-                    }
-                }
-                return;
-            }
+            self.ring.submit_and_wait(min_wait);
         }
 
         let mode = args.mode;
@@ -646,7 +647,7 @@ impl ColdRingState {
                 let errno = -cqe.res;
                 if errno == libc::EINTR {
                     while self.ring.sq_space_left() == 0 {
-                        let _ = self.ring.submit_and_wait(0);
+                        self.ring.submit_and_wait(0);
                     }
                     let fd = st.file.as_raw_fd();
                     let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
@@ -690,8 +691,9 @@ impl ColdRingState {
 
             let n = cqe.res as usize;
             st.at += n;
-            let reached_eof = n == 0 || (st.hint > 0 && st.at == st.hint && st.at < st.buf.capacity());
-            if reached_eof {
+            // The file's end is where a read gives no byte, and nowhere
+            // its size said (b3sum/README.md, "What b3sum reads").
+            if n == 0 {
                 let total_len = st.at;
                 drop(st.file);
                 self.free_slot_ids.push(slot_id);
@@ -715,7 +717,7 @@ impl ColdRingState {
                     unsafe { st.buf.set_len(0) };
                 }
                 while self.ring.sq_space_left() == 0 {
-                    let _ = self.ring.submit_and_wait(0);
+                    self.ring.submit_and_wait(0);
                 }
                 let fd = st.file.as_raw_fd();
                 let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
@@ -910,7 +912,7 @@ fn run_hybrid_worker(
                 (probe_stack.as_mut_ptr().cast::<u8>(), probe_stack.len(), false)
             };
 
-            match try_pread_cached(file.as_raw_fd(), slot_ptr, slot_cap, 0, hint) {
+            match try_pread_cached(file.as_raw_fd(), slot_ptr, slot_cap, 0) {
                 Ok((n, true)) => {
                     drop(file);
                     if in_arena {
@@ -955,7 +957,7 @@ fn run_hybrid_worker(
         if size < SMALL {
             let hint = size as usize;
             ensure_spare_cap(&mut medium_buf, hint + 1);
-            match try_pread_cached(file.as_raw_fd(), medium_buf.as_mut_ptr(), medium_buf.capacity(), 0, hint) {
+            match try_pread_cached(file.as_raw_fd(), medium_buf.as_mut_ptr(), medium_buf.capacity(), 0) {
                 Ok((n, true)) => {
                     drop(file);
                     unsafe { medium_buf.set_len(n) };
@@ -991,7 +993,7 @@ fn run_hybrid_worker(
 
         // 3. Large files `>= 512 KiB`: check `resident(&map)` BEFORE creating any `Uring`!
         warm_batch.flush(args.mode, &mut sink);
-        if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+        if let Some(map) = args.map(&file) {
             if !force_miss() && crate::resident(&map) {
                 if size < (4 << 20) {
                     let h = crate::hash_slice_32(args.mode, &map);
@@ -1161,6 +1163,26 @@ mod test {
             assert_eq!(h, blake3::convenience::hash(&vec![(k + 1) as u8; k * 13 + 1]));
         }
 
+        // A file that grew past the batch's 16 KiB after its size was
+        // read, and still fits its slot, hashes as its bytes do: alone in
+        // a batch and beside others.
+        let slot = super::WARM_SLOT_BLOCKS * 64;
+        for lens in [&[super::WARM_BATCH_MAX_FILE + 1][..], &[slot][..], &[7, super::WARM_BATCH_MAX_FILE + 1, slot - 1, slot, 0][..]] {
+            wb_out.clear();
+            let mut collect = |i, r: anyhow::Result<blake3::Hash>| {
+                wb_out.push((i, r.unwrap()));
+                true
+            };
+            let mut sink = super::Sink { done: &mut collect, open: true };
+            let messages: Vec<Vec<u8>> = lens.iter().map(|&len| (0..len).map(|i| (i * 5 + len) as u8).collect()).collect();
+            for (k, msg) in messages.iter().enumerate() {
+                wb.push_raw(k, msg.as_ptr(), msg.len(), blake3::Mode::Plain, &mut sink);
+            }
+            wb.flush(blake3::Mode::Plain, &mut sink);
+            let want: Vec<_> = messages.iter().enumerate().map(|(k, msg)| (k, blake3::convenience::hash(msg))).collect();
+            assert_eq!(wb_out, want, "{lens:?}");
+        }
+
         // Fault injection: exercise `force_no_uring = true` across cold evicted files of all size classes!
         let mut paths: Vec<PathBuf> = Vec::new();
         let mut want: Vec<blake3::Hash> = Vec::new();
@@ -1312,5 +1334,50 @@ mod test {
         let (paths, want) = files_of_every_size(dir.path(), 34);
         super::FORCE_MISS.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(hashes_in_order(&paths), want);
+    }
+
+    /// More bytes than a batch's slot holds are refused before they are
+    /// copied into it, in every build.
+    #[test]
+    #[should_panic(expected = "a batched file fits its slot")]
+    fn a_file_beyond_its_slot_is_refused_before_the_copy() {
+        blake3::initialize();
+        let mut wb = super::WarmBatch::new();
+        let mut collect = |_, _: anyhow::Result<blake3::Hash>| true;
+        let mut sink = super::Sink { done: &mut collect, open: true };
+        let msg = vec![0u8; super::WARM_SLOT_BLOCKS * 64 + 1];
+        wb.push_raw(0, msg.as_ptr(), msg.len(), blake3::Mode::Plain, &mut sink);
+    }
+
+    /// A file is read to where a read gives no byte, whatever room its
+    /// reported size chose: room for less than the file is filled and
+    /// not called the end, and room for more ends at the file's last
+    /// byte. (0.9.0's test of the rule, for the read that replaced
+    /// that release's.)
+    #[test]
+    fn a_cached_read_ends_only_where_a_read_gives_no_byte() {
+        // Beside the test's executable: a temporary directory in memory
+        // (a tmpfs) has no reads from the page cache alone to test.
+        let dir = tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
+        let path = dir.path().join("f");
+        let content: Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut byte = 0u8;
+        if super::try_pread_cached(std::os::fd::AsRawFd::as_raw_fd(&file), &mut byte, 1, 0).unwrap().0 == 0 {
+            eprintln!("no reads from the page cache alone in {}", dir.path().display());
+            return;
+        }
+        for room in [1usize, 4095, 4096, 99_999, 100_000, 100_001, 300_000] {
+            let mut buffer = vec![0u8; room];
+            let (n, end) = super::try_pread_cached(std::os::fd::AsRawFd::as_raw_fd(&file), buffer.as_mut_ptr(), room, 0).unwrap();
+            assert_eq!((n, end), (room.min(content.len()), room > content.len()), "room={room}");
+            assert_eq!(buffer[..n], content[..n]);
+            // From where a first read stopped, as a file that grew is read on.
+            let mut rest = vec![0u8; content.len() + 1];
+            let (m, end) = super::try_pread_cached(std::os::fd::AsRawFd::as_raw_fd(&file), rest.as_mut_ptr(), rest.len(), n).unwrap();
+            assert_eq!((m, end), (content.len(), true), "room={room}");
+            assert_eq!(rest[n..m], content[n..]);
+        }
     }
 }

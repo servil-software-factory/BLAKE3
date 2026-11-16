@@ -298,7 +298,10 @@ impl Uring {
     }
 
     /// Submit all queued SQEs and wait for at least `min_complete` CQEs.
-    pub(crate) fn submit_and_wait(&mut self, min_complete: u32) -> io::Result<()> {
+    /// A failed enter stops the process: some reads may already have been
+    /// submitted, so unwinding could free buffers the kernel still writes.
+    /// A read's error CQE, in contrast, has finished using that read's buffer.
+    pub(crate) fn submit_and_wait(&mut self, min_complete: u32) {
         if self.unsubmitted > 0 {
             unsafe { (*self.sq_tail).store(self.local_sq_tail, Ordering::Release) };
         }
@@ -307,40 +310,24 @@ impl Uring {
 
         let need_getevents = min_complete > 0 || (self.ring_flags & IORING_SETUP_DEFER_TASKRUN) != 0;
         if to_submit == 0 && min_complete == 0 && !need_getevents {
-            return Ok(());
+            return;
         }
         let enter_flags = if need_getevents { IORING_ENTER_GETEVENTS } else { 0 };
 
         loop {
-            let rc = unsafe {
-                libc::syscall(
-                    libc::SYS_io_uring_enter,
-                    self.fd,
-                    to_submit,
-                    min_complete,
-                    enter_flags,
-                    ptr::null::<libc::sigset_t>(),
-                    size_of::<libc::sigset_t>(),
-                )
-            };
-            if rc >= 0 {
-                let submitted = rc as u32;
+            if let Some(submitted) = enter(self.fd, to_submit, min_complete, enter_flags) {
                 to_submit = to_submit.saturating_sub(submitted);
                 if to_submit == 0 {
-                    return Ok(());
+                    return;
                 }
-                continue;
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
+            } else {
+                // Interrupted: the kernel may have consumed some SQEs.
                 let head = unsafe { (*self.sq_head).load(Ordering::Acquire) };
                 to_submit = self.local_sq_tail.wrapping_sub(head);
                 if min_complete == 0 && to_submit == 0 {
-                    return Ok(());
+                    return;
                 }
-                continue;
             }
-            return Err(err);
         }
     }
 
@@ -356,6 +343,23 @@ impl Uring {
         unsafe { (*self.cq_head).store(head.wrapping_add(1), Ordering::Release) };
         Some(cqe)
     }
+}
+
+/// None means interrupted; every other error is fatal. Keep this decision
+/// at the syscall, before any caller can release an in-flight buffer.
+#[inline]
+fn enter(fd: RawFd, to_submit: u32, min_complete: u32, flags: u32) -> Option<u32> {
+    let rc = unsafe { libc::syscall(libc::SYS_io_uring_enter, fd, to_submit, min_complete, flags, ptr::null::<libc::sigset_t>(), size_of::<libc::sigset_t>()) };
+    if rc >= 0 {
+        return Some(rc as u32);
+    }
+    let err = io::Error::last_os_error();
+    if err.kind() == io::ErrorKind::Interrupted {
+        return None;
+    }
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "b3sum: io_uring_enter failed: {err}; stopping before pending reads' buffers can be released");
+    std::process::abort()
 }
 
 impl Drop for Uring {
@@ -375,6 +379,26 @@ impl Drop for Uring {
 mod test {
     use super::Uring;
     use std::os::fd::AsRawFd;
+
+    /// A real failed syscall must abort, even inside catch_unwind. This
+    /// needs no io_uring permission: an invalid fd (or a denied syscall)
+    /// deterministically takes the production error path.
+    #[test]
+    fn failed_enter_stops_before_unwinding() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "B3SUM_TEST_FAILED_ENTER";
+        if std::env::var_os(CHILD).is_some() {
+            let _ = std::panic::catch_unwind(|| super::enter(-1, 1, 0, 0));
+            std::process::exit(0);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "uring::test::failed_enter_stops_before_unwinding", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{:?}: {:?}", output.status, output.stderr);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stopping before pending reads' buffers can be released"));
+    }
 
     #[test]
     fn uring_reads_offsets_saturation_and_error_cqes() {
@@ -402,7 +426,7 @@ mod test {
         let mut extra = [0u8; 16];
         assert!(!unsafe { ring.push_read(f.as_raw_fd(), extra.as_mut_ptr(), 16, 0, 0, 999) }, "ring must report full");
 
-        ring.submit_and_wait(cap).unwrap();
+        ring.submit_and_wait(cap);
         assert_eq!(ring.unsubmitted(), 0);
         assert_eq!(ring.sq_space_left(), cap);
 
@@ -420,11 +444,11 @@ mod test {
         // 2. Fault injection: invalid fd `-1` produces `-EBADF` CQE without corrupting ring state,
         // and `acquire` / `release` recycles the idle ring cleanly.
         assert!(unsafe { ring.push_read(-1, extra.as_mut_ptr(), 16, 0, 0, 0xDEAD_BEEF) });
-        ring.submit_and_wait(1).unwrap();
+        ring.submit_and_wait(1);
         let err_cqe = ring.pop_cqe().expect("error CQE");
         assert_eq!(err_cqe.user_data, 0xDEAD_BEEF);
         assert_eq!(err_cqe.res, -libc::EBADF);
-        ring.submit_and_wait(0).unwrap();
+        ring.submit_and_wait(0);
 
         let saved_fd = ring.fd;
         ring.release();
