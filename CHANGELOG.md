@@ -26,6 +26,37 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
   where official BLAKE3 with rayon and bao-tree take 222 and 584 (Ryzen
   9700X).
 
+## Safety and assurance
+
+- `b3sum` reports failure on output errors and empty checkfiles.
+- Direct reads keep the originally opened file, including if its
+  pathname has been replaced. Hashing still requires stable contents.
+- A file is read to where its reads end, whatever its size said.
+- `b3sum --no-mmap` maps no file (it was accepted and ignored). A file
+  that another program shortens during the run then cannot stop it.
+  `--check` refuses `--seek`.
+- `--outboard` writes each outboard under a new name and renames it into
+  place: a link at that name is replaced, not followed, and a reader
+  never sees a partial outboard. `--keyed --outboard -` is an error.
+- `throughput::finalize_each` panics on an index named twice, in every
+  build. 0.9 gave the second the empty message's hash in release builds.
+- `Pipeline::with_owners` and `owned` need an owner that borrows nothing
+  (`B: 'static`): a `Vec<u8>`, not a `&[u8]`.
+- `b3sum`'s Linux release binaries are reproducible: anyone can rebuild
+  one from the tag and compare its bytes ([how](b3sum/README.md)).
+- A failed `io_uring` submission/wait stops the process before pending
+  reads' buffers can be released. A completed read error remains a
+  file error.
+- The build check runs Shuttle's finish, park and wake-up models on each
+  candidate. The development branch requires explicit checks or waivers
+  on the exact commit before it can move.
+- Before each stable release, separate AI agents using different
+  leading-edge models perform deep security audits. Reports and finding
+  dispositions accompany the release evidence; this is not a claim of
+  an independent human audit. [QUALITY.md](QUALITY.md) and the
+  [quality manual](docs/quality-manual.md) describe the protections and
+  their limits.
+
 ## What a program on 0.9 changes
 
 - **`Hasher::finalize` and `finalize_xof` take `&self`** (0.9 took the

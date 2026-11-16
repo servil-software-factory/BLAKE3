@@ -193,7 +193,7 @@ fn stream_fd_into_rooms(
         let commit_ready = matches!(window[(next_commit_seq as usize) % LARGE_WINDOW], Some(WindowSlot::Ready(..) | WindowSlot::Eof));
         if ring.unsubmitted() > 0 || (!commit_ready && in_flight_uring > 0) {
             let min_wait = if commit_ready || in_flight_uring == 0 { 0 } else { 1 };
-            ring.submit_and_wait(min_wait)?;
+            ring.submit_and_wait(min_wait);
         }
 
         while let Some(cqe) = ring.pop_cqe() {
@@ -213,7 +213,7 @@ fn stream_fd_into_rooms(
                 if errno == libc::EINTR && first_err.is_none() {
                     let off = seq * (ROOM_LEN as u64);
                     while ring.sq_space_left() == 0 {
-                        ring.submit_and_wait(0)?;
+                        ring.submit_and_wait(0);
                     }
                     unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, USER_LARGE_BIT | seq) };
                     window[idx] = Some(WindowSlot::Reading(room));
@@ -299,7 +299,7 @@ fn stream_fd_into_rooms(
 
         if finished {
             while in_flight_uring > 0 {
-                ring.submit_and_wait(1)?;
+                ring.submit_and_wait(1);
                 while let Some(cqe) = ring.pop_cqe() {
                     if (cqe.user_data & USER_LARGE_BIT) == 0 {
                         deferred_small_cqes.push_back(cqe);
@@ -617,16 +617,7 @@ impl ColdRingState {
             if min_wait == 0 && self.ring.unsubmitted() == 0 {
                 return;
             }
-            if let Err(e) = self.ring.submit_and_wait(min_wait) {
-                let errno = e.raw_os_error().unwrap_or(libc::EIO);
-                for slot in &mut self.slots {
-                    if let Some(st) = slot.take() {
-                        self.ring_in_flight -= 1;
-                        sink.put(st.file_idx, Err(io::Error::from_raw_os_error(errno).into()));
-                    }
-                }
-                return;
-            }
+            self.ring.submit_and_wait(min_wait);
         }
 
         let mode = args.mode;
@@ -646,7 +637,7 @@ impl ColdRingState {
                 let errno = -cqe.res;
                 if errno == libc::EINTR {
                     while self.ring.sq_space_left() == 0 {
-                        let _ = self.ring.submit_and_wait(0);
+                        self.ring.submit_and_wait(0);
                     }
                     let fd = st.file.as_raw_fd();
                     let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
@@ -715,7 +706,7 @@ impl ColdRingState {
                     unsafe { st.buf.set_len(0) };
                 }
                 while self.ring.sq_space_left() == 0 {
-                    let _ = self.ring.submit_and_wait(0);
+                    self.ring.submit_and_wait(0);
                 }
                 let fd = st.file.as_raw_fd();
                 let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
@@ -991,7 +982,7 @@ fn run_hybrid_worker(
 
         // 3. Large files `>= 512 KiB`: check `resident(&map)` BEFORE creating any `Uring`!
         warm_batch.flush(args.mode, &mut sink);
-        if let Ok(map) = unsafe { memmap2::Mmap::map(&file) } {
+        if let Some(map) = args.map(&file) {
             if !force_miss() && crate::resident(&map) {
                 if size < (4 << 20) {
                     let h = crate::hash_slice_32(args.mode, &map);

@@ -1,146 +1,163 @@
-# How blake3-servil is checked
+# How BLAKE3-Servil protects your results
 
-blake3-servil is a fast BLAKE3 implementation. It aims to produce
-exactly the official digests.
+BLAKE3-Servil aims to produce exactly the official BLAKE3 digests, without
+reading or writing outside your buffers. A wrong hash reported as right
+can be worse than a crash. Our first choice is to make a dangerous state
+impossible; the next is to stop before returning a result from it.
 
-Most of the extra speed comes from code written for specific processors
-and from splitting work across processor cores. That is also where
-mistakes are most likely, so the code is checked in several different
-ways.
+This page is for users. The [quality manual](docs/quality-manual.md) gives
+experts and maintainers the contracts, commands, evidence and limitations.
 
-## Proofs of the kernels
+## Prevent mistakes, then check the remaining cases
 
-The fastest parts are small routines called kernels, every one of them
-written in assembly.
+Rust's safe interfaces enforce ownership and borrowing. The throughput
+API's `Block` type supplies alignment; a `Batch` lets you write only the
+message bytes, keeping the padding the kernels require intact. These
+restrictions apply in release builds as well as development builds.
 
-For the assembly kernels, the project uses formal verification:
-symbolic execution compares the assembled instructions with a written
-specification of BLAKE3. Each completed proof covers every input value
-within its stated contract. The checks also examine memory accesses,
-the calling convention, and whether input bytes or keys affect
+Some of the code is `unsafe` Rust or assembly. Its safety depends on
+contracts the compiler cannot check. We reduce that responsibility where
+we can:
+
+- The Pipeline's shared state lives as long as the process. Workers
+  cannot read it after its owner has freed it. It is reused between
+  Pipelines, which still requires correct synchronization.
+- Dropping a Pipeline loan's guard before its work completes stops the
+  process. The unsafe lending call still requires the caller to keep
+  the loaned memory valid.
+- In `b3sum`, direct reads use the already-open file, rather than looking
+  up its pathname again. Replacing the name after open cannot switch
+  that read to another file.
+- An `io_uring` submission/wait failure stops `b3sum` without unwinding:
+  the kernel might still be writing into its buffers. An individual
+  read's completed error is reported as a file error instead.
+- `b3sum` reports failure if it cannot write its output, or if a checkfile
+  is empty. Success cannot mean that no checks were supplied.
+
+The last three protections are added for 0.10.0. They address specific
+failure paths, not every possible I/O or concurrency bug.
+
+## Proofs of the assembly
+
+The fastest routines, called kernels, are written in assembly. Symbolic
+execution compares assembled instructions with a written BLAKE3
+specification. A completed proof covers every input value within its
+stated contract, rather than a sample of messages. The proofs also check
+memory accesses, the calling convention, and whether secret bytes affect
 branches or addresses.
 
-The Arm kernels are covered at every block count they support. The
-SME2 kernels process data in groups of sixteen chunks, and their
-proofs cover any number of groups. In those proofs, each group's bytes
-are separate symbols. So if a kernel read the wrong group's bytes, its
-output would not match the specification, and the proof would fail.
+Arm kernels are proved at every supported block count; induction covers
+the SME2 kernels' group loops. Intel and AMD kernels have proofs over the
+input shapes the library calls. The manual lists the exact coverage.
 
-The Intel and AMD assembly kernels are checked the same way. The
-fork's own kernels there are generated and proved for every input. One
-hashes whole chunks and a partial one in one pass, and one hashes a
-message of one chunk or less to its root in one call. On AMD Zen 5 and
-later, the wide AVX-512 kernels hash 32 chunks or 16 parent nodes at
-once, proved at every block count from 1 to 16. Single
-compressions and extended output at 1 to 32 blocks are proved. For
-batch hashing, an induction proof covers every input count in the
-stated range for each instruction set, at block
-lengths 1 to 16 with a fixed counter and at 16 blocks with an
-incrementing counter. Each proof uses one symbolic entry-stack
-alignment covering the four legal ABI alignments.
+The proof tools are checked too. Instruction models are compared with
+processors and, where supported, Arm's specification. Planted mistakes
+in kernels must be rejected: for example, a wrong rotation, an incorrect
+stride, or a write outside the allowed memory.
 
-Two further checks test the prover itself. The instruction models are
-run against real processors on random states, including memory
-instructions and deliberate unaligned-address controls. We also plant
-mistakes in the assembly (a wrong stride, a wrong rotation, a loop
-that cannot finish, a write into the caller's stack) and require the
-proof to reject every one.
+**These are kernel proofs, not a proof of the whole library.** The Rust
+that chooses work, builds the tree, and shares it among threads is tested
+and reviewed. A user's assembler and compiler also remain part of the
+trusted build chain.
 
-The proofs cover every kernel. The Rust code that prepares work and
-combines results is covered by tests.
+## Small checks with a known reason to fail
 
-## Tests, and tests of the tests
+Tests use published BLAKE3 vectors and fixed answers generated with
+official BLAKE3. Cases are chosen from the code's boundaries and distinct
+paths. Mutation testing asks whether the core and thread-library tests
+reject deliberately changed code. Each surviving mutation has an
+explanation; a survivor is not automatically harmless. The normal
+mutation gate does not yet cover `b3sum`.
 
-Everything else is tested.
+For failures that ordinary successful hashing would miss, we arrange the
+failure directly:
 
-The test suites compare outputs with published BLAKE3 examples, called
-test vectors, and with fixed answers that official BLAKE3 generated.
-They run these checks on the operating systems and processor types the
-project supports.
+- **Memory bounds:** inaccessible guard pages sit immediately beside
+  buffers. A stray access in an exercised path faults, assembly included.
+- **Thread handshakes:** Shuttle runs the production finish, park and
+  wake-up code under many chosen schedules. It reports a deadlock with
+  the schedule that caused it. These checks run before a change lands;
+  they do not cover the entire Pipeline or every possible schedule.
+- **I/O failures:** bounded tests use a full output device, an empty
+  checkfile, a pathname replaced after open, a file longer than its
+  size said, a link where an output file goes, and a failed `io_uring`
+  syscall. They check the error or stop, not just the digest.
+- **Wrong calls:** a call that breaks a rule whose breach would corrupt
+  memory or give a wrong hash stops in every build, not only in debug
+  builds. Where the compiler can refuse the call instead, it does.
 
-The project also uses mutation testing to check the tests themselves.
-It introduces one small mistake at a time (changing a comparison, say,
-or skipping a step) and requires at least one test to fail. If no test
-catches the newly introduced bug, the developers add a test to catch
-that bug, or figure out why it isn't actually a bug.
+The new I/O tests were seen to fail with the protections removed. The
+manual gives commands to repeat both the checks and their controls.
 
-Each program also runs a startup self-test. Before doing real work, it
-hashes a few inputs with known answers. This can catch a broken build
-or a processor that does not execute the code as expected.
+## Your build checks itself
 
-## Memory and thread safety
+Call `initialize()` before using the library (`b3sum` does this for you).
+It hashes fixed inputs with known answers on your machine, and stops the
+process on a mismatch. The cases cover the selected kernels, apart from
+the Arm kernels for short messages of unequal lengths; those are proved
+and tested, but deliberately excluded from startup for its cost.
 
-Some performance-critical Rust code is `unsafe`: there the programmer
-keeps Rust's memory rules, which the compiler checks everywhere else.
+This can detect some broken builds and faulty processors. It cannot
+certify a hostile binary: an attacker can change the check as well as
+the hashing code. It also cannot detect every hardware fault or a fault
+that occurs later.
 
-- **A model checker (Shuttle)** runs the small pieces of threaded code
-  where one thread waits for another under thousands of thread
-  schedules. A wait that could hang shows up immediately as a deadlock
-  with the schedule that caused it. Every change runs these models
-  before it lands.
-- **Shared memory that is never freed.** The Pipeline's state that
-  worker threads can reach lives as long as the process, so no worker
-  can touch memory its owner gave back (see the next section for why).
-- **Guard pages** cover every call. Tests place an inaccessible page
-  of memory immediately beside each input, output, key and context of
-  every public call, in Rust and in C. If the code reads or writes even
-  one byte outside the caller's memory, the processor faults and the
-  test crashes. This reaches inside the assembly, where the other
-  checks cannot see.
+## Security reviews before each stable release
 
-## What the checks found
+Our release practice includes deep security audits by multiple separate
+AI agents using different leading-edge models. Each examines the source
+and its trust boundaries; we retain reports naming the audited revision
+and models, and resolve findings before publication. The manual specifies
+what a report records and how findings are checked.
 
-The checks found eight bugs. All are fixed. Examples:
+Different models can still share blind spots. Their agreement is not a
+proof, and AI review is not a substitute for an independent human
+security audit. We claim no such human audit. A release's reports, not
+this statement of practice, are the evidence that its reviews occurred.
 
-- an Arm kernel produced the wrong digest for the shortest messages;
-- a function silently ignored a partial final block of input;
-- a reading helper could lose bytes it had already read when a later
-  operation failed;
-- Miri found an unsafe pattern in code shared between threads;
-- batch assembly on Intel and AMD processors read beyond the end of
-  an input, which could crash a program.
+## What you can verify, and what remains your responsibility
 
-One more bug was found by luck, not by a check built to find it. In
-development, before any release held the code, a worker thread could
-read a Pipeline's memory after the Pipeline had been dropped. It showed
-as one crashed test in about 1,200 runs on a 4-CPU machine. A build
-with a memory sanitizer crashed about as rarely as a plain one. The fix
-removed the possibility rather than the instance: that memory is no
-longer freed.
+A full release version includes a source commit hash. Release binaries
+come with SHA-256 and BLAKE3 checksums. Obtain the expected checksums from
+a source you trust, and check them before running a downloaded binary.
+Checksums detect changed bytes; they do not identify a publisher if an
+attacker can replace the file and its checksums together.
 
-The proofs have not found a bug in the Arm kernels. They did find
-mistakes in some of the tools and models used to construct the proofs.
+You need not trust a Linux `b3sum` binary we publish: its build is
+reproducible, so you can build it again from the release's tag and
+compare the bytes ([how](b3sum/README.md)). We do so ourselves on
+GitHub's machines before and after each release, and a program compares
+each published crate with the tagged source file by file. The manual
+states what this leaves out. Releases through 0.9.0 predate it.
 
-## What remains uncertain
+For file verification, obtain the expected hash through a trusted
+channel. `b3sum --check` checks the named files, not a directory's complete
+contents: an added file can go unnoticed. An empty checkfile now fails,
+but deleting some entries can still hide those missing checks.
 
-No human has carefully reviewed every line, and nobody outside the
-project has audited the code. The proofs trust the written
-specification, the instruction models, the automated prover (Z3),
-and each kernel's stated
-memory and calling convention. Tests cover the Rust code around the
-assembly. Nothing checks that the `unsafe` Rust keeps Rust's rules on
-shared memory (aliasing) under every thread interleaving. Miri
-checked this until 0.8, on Rust kernels users never ran, and found one
-such bug. These checks reduce risk, but they cannot guarantee that no bug
-remains.
+Hash stable files or a filesystem snapshot. Keeping the same open file
+protects against pathname replacement, not writes to that file while it
+is being hashed. A hash is not a snapshot or a lock.
 
-## How a change lands
+The proofs trust their specification, instruction models and proof
+tools. Nothing establishes memory safety for all Rust thread
+interleavings. The manual also explains hardware timing channels beyond
+the code's control. These protections reduce risk; none certifies the
+absence of bugs or establishes the security of the BLAKE3 algorithm
+itself.
 
-The development line accepts only a commit on which every check has
-passed, each recorded against that exact commit: the tests and the
-mutation testing on x86-64, an Arm server and a Mac; every benchmark
-cell against the commit before; the builds; and the long proofs when a
-kernel or its proof changed. A tool posts the final status, and GitHub
-refuses a push without it, from anyone.
+## Repeat the checks
 
-## Run the checks
+From a checkout of the release you intend to use, with Rust, a supported
+C assembler and [cargo-nextest](https://nexte.st):
 
 ```sh
-git clone -b main https://github.com/servil-software-factory/BLAKE3
-cd BLAKE3
-cargo nextest run --release --lib --tests   # with cargo-nextest (https://nexte.st)
+cargo nextest run --release --lib --tests
+cargo nextest run --release --manifest-path threads/Cargo.toml --lib --tests
+cargo nextest run --release --manifest-path b3sum/Cargo.toml --tests
 ```
 
-The [quality manual](docs/quality-manual.md) gives details for
-experts and maintainers, including the limits of each check and how
-to run the proofs.
+Some checks are platform-specific. The [manual](docs/quality-manual.md)
+names their prerequisites and expected failures, and explains how to run
+the proofs. Development commits land through a protected gate with checks
+recorded on the exact commit; exceptions are recorded as explicit waivers.

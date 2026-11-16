@@ -344,13 +344,20 @@ lists what it takes and ticks each step:
 5. The packages' dry-run (below), all four together: the core needs its
    version crate, the thread library needs the core, and the CLI needs the
    thread library, at versions crates.io does not have yet.
-6. The pages, read as a newcomer would: the README's servil preface,
+6. Deep security audits by at least two separate AI agents using different
+   leading-edge models. Each starts independently and names the exact
+   audited revision. Retain reports and finding dispositions with the
+   release evidence; re-review affected code and the final version diff
+   after changes. Resolve credible memory-safety, wrong-result and security
+   findings before publishing. The [quality manual](docs/quality-manual.md#deep-security-audits-before-stable-releases)
+   defines the scope, evidence and limits; AI review is not a human audit.
+7. The pages, read as a newcomer would: the README's servil preface,
    `QUALITY.md` and `docs/quality-manual.md`, `CHANGELOG.md` (what
    changed for users, in their terms), the supported-platforms table
    (exactly what CI runs).
-7. A full bench-hashes run on the version commit on the Mac, its results
+8. A full bench-hashes run on the version commit on the Mac, its results
    retained for publication with the release and named on the map.
-8. Once the gates and human reviews accept that exact version commit,
+9. Once the gates and reviews accept that exact version commit,
    publish its tag and artifacts:
    - the crates: publish all four from the same staged checkout and lock
      used for the dry-run, with `--locked` and the same explicit `-p` names.
@@ -365,7 +372,7 @@ lists what it takes and ticks each step:
      in `capi/`: the static and shared libraries, `b3.h`, and the
      pkg-config file (`capi/README.md`);
    - the GitHub release, its text the CHANGELOG entry.
-9. The eBASH submission, pinned to the tag (`supercop/README.md`).
+10. The eBASH submission, pinned to the tag (`supercop/README.md`).
 
 ### The packages' dry-run, before any crate is published
 
