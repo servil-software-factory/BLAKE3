@@ -1041,6 +1041,18 @@ pub(crate) mod places {
     /// faster (2x EPYC 7443, 256 MiB written and hashed: 25 against 21 ms).
     pub(crate) const FAR_LEN: usize = 1 << 28;
 
+    /// A job of this many bytes or more is every thread's too, untried,
+    /// where the caller's place holds under half the pool's threads: 8 MiB.
+    /// So large a job is bound by its threads' throughput, and the reach
+    /// with under half of them cannot win; trying it cost a process's
+    /// first large calls (BLAKE3 #401). 2x EPYC 7443, the place 13 threads
+    /// of 97, one message, microseconds on every thread and on the place:
+    /// 0.5 MiB 39 and 27, 2 MiB 86 and 71, 4 MiB 109 and 131, 8 MiB 125
+    /// and 250, 32 MiB 238 and 1120, 128 MiB 3700 and 5000 to 6900. A
+    /// thread learning there took 403 where every thread took 260 at
+    /// 32 MiB (65 calls), and 6300 for 3700 at 128 MiB (25 calls).
+    pub(crate) const BIG_LEN: usize = 1 << 23;
+
     fn class(len: usize) -> usize {
         ((usize::BITS - 1 - len.max(1).leading_zeros()) as usize).clamp(19, 19 + CLASSES - 1) - 19
     }
@@ -1083,10 +1095,11 @@ pub(crate) mod places {
     impl Plan {
         /// The plan for a job of `len` bytes of `kind` in a pool of `all`
         /// threads: all of them, where the workers have no places, where
-        /// the caller's place has none, and from FAR_LEN up.
+        /// the caller's place has none, from FAR_LEN up, and from BIG_LEN up
+        /// where the place holds under half of them.
         pub(crate) fn new(kind: Kind, len: usize, all: usize) -> Plan {
             let Some(near) = near_workers() else { return Plan { threads: all, learning: None } };
-            if len >= FAR_LEN {
+            if len >= FAR_LEN || (len >= BIG_LEN && 2 * (near + 1) < all) {
                 return Plan { threads: all, learning: None };
             }
             let reach = LEARNED.with(|l| l.get()[kind as usize][class(len)].choose());
@@ -1521,7 +1534,16 @@ pub(crate) mod places {
             assert_eq!((plan.threads, plan.near(), plan.learning.is_none()), (all, false, true));
             plan.done();
             assert_eq!(LEARNED.with(|l| l.get()), before);
-            assert!(Plan::new(Kind::Tree, FAR_LEN - 1, all).learning.is_some());
+            // Under FAR_LEN a place with half the threads or more learns
+            // at any length; with fewer, under BIG_LEN alone.
+            let (half, most) = (2 * (near + 1), 2 * (near + 1) + 1);
+            assert!(Plan::new(Kind::Tree, FAR_LEN - 1, half).learning.is_some());
+            assert!(Plan::new(Kind::Tree, BIG_LEN - 1, most).learning.is_some());
+            let before = LEARNED.with(|l| l.get());
+            let plan = Plan::new(Kind::Tree, BIG_LEN, most);
+            assert_eq!((plan.threads, plan.near(), plan.learning.is_none()), (most, false, true));
+            plan.done();
+            assert_eq!(LEARNED.with(|l| l.get()), before);
             TEST_CLOCK.with(|c| c.set(None));
             // Real jobs, of both reaches: the digests are right, and a
             // near job asks for no more workers than its place has.
