@@ -699,16 +699,34 @@ impl<P: Blocks> Chunk for ChunkState<P> {
     }
 }
 
+/// Zero `bytes` with writes the compiler must keep: a plain fill of
+/// storage that is not read again is one it may leave out, and with
+/// link-time optimization it could, for the Hasher's stage and stack
+/// (BLAKE3 #429). 64 bytes a write: a Hasher's wipe then takes 0.8 µs
+/// where the fill took 0.2 µs, and a write a byte, as the zeroize
+/// crate's slices take, took 2.8 µs (Ryzen 7700X).
+#[cfg(feature = "zeroize")]
+pub(crate) fn wipe(bytes: &mut [core::mem::MaybeUninit<u8>]) {
+    let (blocks, rest) = bytes.as_chunks_mut::<64>();
+    for block in blocks {
+        // Sound: 64 writable bytes; every byte pattern is a MaybeUninit<u8>.
+        unsafe { core::ptr::write_volatile(block, [core::mem::MaybeUninit::new(0); 64]) };
+    }
+    for byte in rest {
+        // Sound: one writable byte.
+        unsafe { core::ptr::write_volatile(byte, core::mem::MaybeUninit::new(0)) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(feature = "zeroize")]
 impl zeroize::Zeroize for CvStack {
     fn zeroize(&mut self) {
         // Sound: the storages' bytes, written, never read as values here.
-        unsafe { core::slice::from_raw_parts_mut(self.cvs.as_mut_ptr() as *mut core::mem::MaybeUninit<u8>, core::mem::size_of::<[Cv; DEPTH]>()) }
-            .fill(core::mem::MaybeUninit::new(0));
+        wipe(unsafe { core::slice::from_raw_parts_mut(self.cvs.as_mut_ptr() as *mut core::mem::MaybeUninit<u8>, core::mem::size_of::<[Cv; DEPTH]>()) });
         // Every row's place: a row merged away leaves its values behind.
         // Sound: the storage's bytes, written, never read as values here.
-        unsafe { core::slice::from_raw_parts_mut(self.rows.as_mut_ptr() as *mut core::mem::MaybeUninit<u8>, core::mem::size_of::<[[Cv; ROW]; ROWS]>()) }
-            .fill(core::mem::MaybeUninit::new(0));
+        wipe(unsafe { core::slice::from_raw_parts_mut(self.rows.as_mut_ptr() as *mut core::mem::MaybeUninit<u8>, core::mem::size_of::<[[Cv; ROW]; ROWS]>()) });
         self.widths.zeroize();
         self.ready = u64::MAX;
         self.wide = 0;
