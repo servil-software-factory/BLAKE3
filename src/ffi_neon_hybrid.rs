@@ -568,17 +568,29 @@ pub fn prefetch_parent_code(mut values: usize) {
 /// that, not Apple's.
 #[inline]
 pub fn apple_cores() -> bool {
-    let detected = crate::platform::DETECTED.load(core::sync::atomic::Ordering::Relaxed);
-    if detected & CORES_ASKED == 0 {
-        return ask_cores();
+    // macOS runs on no other, and its code asks nothing: what Apple's
+    // cores run stays what was measured on them.
+    #[cfg(target_vendor = "apple")]
+    {
+        true
     }
-    detected & APPLE_CORES != 0
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let detected = crate::platform::DETECTED.load(core::sync::atomic::Ordering::Relaxed);
+        if detected & CORES_ASKED == 0 {
+            return ask_cores();
+        }
+        detected & APPLE_CORES != 0
+    }
 }
 
 /// platform::DETECTED's bits for the cores: Apple's, and asked.
+#[cfg(not(target_vendor = "apple"))]
 const APPLE_CORES: u16 = 1 << 8;
+#[cfg(not(target_vendor = "apple"))]
 const CORES_ASKED: u16 = 1 << 9;
 
+#[cfg(not(target_vendor = "apple"))]
 #[cold]
 #[inline(never)]
 fn ask_cores() -> bool {
@@ -589,16 +601,13 @@ fn ask_cores() -> bool {
 
 /// [`apple_cores`], read from the system: asked once and kept beside the
 /// platform (on Linux the read is a trap the kernel emulates).
+#[cfg(not(target_vendor = "apple"))]
 fn read_apple_cores() -> bool {
-    #[cfg(target_vendor = "apple")]
-    {
-        true
-    }
-    #[cfg(all(not(target_vendor = "apple"), target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     {
         midr_implementer() == Some(0x61)
     }
-    #[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+    #[cfg(not(target_os = "linux"))]
     {
         false
     }
@@ -1231,7 +1240,7 @@ mod test {
     #[test]
     #[cfg(target_vendor = "apple")]
     fn test_a_mac_runs_apples_plans() {
-        assert!(read_apple_cores() && apple_cores() && apple_cores(), "read, asked, and kept");
+        assert!(apple_cores());
         assert!(core::ptr::eq(family(), &WITH_SHA3));
     }
 
