@@ -47,13 +47,16 @@ pub struct Hasher {
     /// The message's bytes from its last 16 KiB boundary, gathered while
     /// they arrive in shorter updates: the first `staged`.
     pub(crate) staged: usize,
+    /// Set while one `finalize_each` call finishes this hasher, so that
+    /// the call sees an index it is given twice (`each::name_each`).
+    pub(crate) finishing: bool,
     pub(crate) stage: [core::mem::MaybeUninit<u8>; STAGE_LEN],
 }
 
 impl Clone for Hasher {
     #[inline]
     fn clone(&self) -> Self {
-        Self { core: self.core.clone(), staged: self.staged, stage: self.stage }
+        Self { core: self.core.clone(), staged: self.staged, finishing: self.finishing, stage: self.stage }
     }
 
     #[inline]
@@ -64,6 +67,7 @@ impl Clone for Hasher {
         let prefix = &source.stage[..if source.staged == 0 { 0 } else { source.staged.max(BLOCK_LEN) }];
         self.core.clone_from(&source.core);
         self.staged = source.staged;
+        self.finishing = source.finishing;
         self.stage[..prefix.len()].copy_from_slice(prefix);
     }
 }
@@ -207,7 +211,7 @@ impl Hasher {
         // (one more byte in the stack cost 13 ns; the stack aligned to 64
         // bytes, 68 ns), and no test of ours can see it: after any change
         // to these types, time `new` on x86-64 and on AArch64.
-        Self { core, staged: 0, stage: [core::mem::MaybeUninit::uninit(); STAGE_LEN] }
+        Self { core, staged: 0, finishing: false, stage: [core::mem::MaybeUninit::uninit(); STAGE_LEN] }
     }
 
     /// The message's first block, padded with zeros, while the message is
@@ -434,6 +438,7 @@ impl Hasher {
     pub(crate) fn reset(&mut self) {
         self.core.reset();
         self.staged = 0;
+        self.finishing = false;
     }
 
     /// Add the message's next piece, of any length, on the calling thread.

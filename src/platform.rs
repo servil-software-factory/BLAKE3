@@ -20,17 +20,52 @@ cfg_if::cfg_if! {
 /// Each platform's discriminant is fixed, the same in every build (0 means
 /// "not yet recorded" to [`Platform::detect`]); tools/verify's whole-call
 /// proofs start from the value `initialize` records.
+///
+/// A Platform is permission to run its kernels' instructions, so only
+/// this crate makes one, and only after asking the CPU (`detect`,
+/// `own_core`, a turn's, and the tests' `sse41()` to `sme2()`). Each
+/// variant is `non_exhaustive`, which keeps another crate from writing
+/// one: `Platform::AVX512` there does not compile (BLAKE3 #419: with it,
+/// safe code ran AVX-512 or SME2 kernels on a CPU without them).
+///
+/// Another crate can ask which platform it was given:
+///
+/// ```
+/// # #[cfg(feature = "std")] {
+/// use blake3_servil_core::hazmat::platform::Platform;
+/// blake3_servil_core::initialize();
+/// #[cfg(target_arch = "x86_64")]
+/// let _ = matches!(Platform::detect(), Platform::AVX2 { .. });
+/// #[cfg(target_arch = "aarch64")]
+/// let _ = matches!(Platform::detect(), Platform::NEON { .. });
+/// # }
+/// ```
+///
+/// and cannot make one (the same names, so this fails for that reason):
+///
+/// ```compile_fail
+/// use blake3_servil_core::hazmat::platform::Platform;
+/// #[cfg(target_arch = "x86_64")]
+/// let _ = Platform::AVX2;
+/// #[cfg(target_arch = "aarch64")]
+/// let _ = Platform::NEON;
+/// ```
 pub enum Platform {
     #[cfg(blake3_sse41_ffi)]
+    #[non_exhaustive]
     SSE41 = 3,
     #[cfg(blake3_avx2_ffi)]
+    #[non_exhaustive]
     AVX2 = 4,
     #[cfg(blake3_avx512_ffi)]
     #[cfg(target_arch = "x86_64")]
+    #[non_exhaustive]
     AVX512 = 5,
     #[cfg(blake3_neon)]
+    #[non_exhaustive]
     NEON = 6,
     #[cfg(blake3_sme2)]
+    #[non_exhaustive]
     SME2 = 7,
 }
 

@@ -38,10 +38,13 @@ pub fn slot_len(len: usize) -> usize {
 /// or the message itself, packed (`packed`).
 #[inline]
 pub fn assert_slots(input: &[u8], len: usize, slot: usize, count: usize) {
-    debug_assert!(slot == slot_len(len) || packed(len, slot), "a slot is whole blocks or a packed message");
-    // In every build: the kernels read `slot * count` bytes from `input`,
-    // so a wrong length would be read past its end (AGENTS: a check of a
-    // mistake that would mismanage memory, at the cost of a comparison).
+    // In every build, both: the kernels take a slot's size from `len` and
+    // read `slot * count` bytes from `input`. A slot of another size, or
+    // an input of another length, would be read past its end, or leave
+    // the kernels' table of slots unwritten (BLAKE3 #419: a 2-byte input
+    // called a 64-byte message crashed 0.9.0). AGENTS: a check of a
+    // mistake that would mismanage memory, at the cost of a comparison.
+    assert!(slot == slot_len(len) || packed(len, slot), "a slot is whole blocks or a packed message");
     assert_eq!(Some(input.len()), slot.checked_mul(count), "input holds one slot per output");
     // Every caller's slots come from a Batch (throughput's calls, the
     // stream's batches) or from the crate's own buffers, which keep them
@@ -1261,6 +1264,15 @@ mod test {
     fn test_a_short_input_is_refused_before_the_kernels() {
         crate::initialize();
         hash_many_on(&[0u8; 64], 64, 64, crate::IV, 0, &mut [[0u8; OUT_LEN]; 2], crate::platform::Platform::detect());
+    }
+
+    /// The slot check too, in every build: this call crashed 0.9.0's
+    /// release build, its two bytes named a 64-byte message (BLAKE3 #419).
+    #[test]
+    #[should_panic(expected = "a slot is whole blocks or a packed message")]
+    fn test_a_slot_of_another_size_is_refused_before_the_kernels() {
+        crate::initialize();
+        hash_many_on(&[0u8; 2], 64, 1, crate::IV, 0, &mut [[0u8; OUT_LEN]; 2], crate::platform::Platform::detect());
     }
 
     #[test]

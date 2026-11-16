@@ -595,11 +595,7 @@ impl Job<'_> {
 /// an SME2 CPU the NEON hybrids, which no other core slows down; elsewhere
 /// the detected one.
 pub(crate) fn pool_platform() -> Platform {
-    #[cfg(blake3_sme2)]
-    if matches!(Platform::detect(), Platform::SME2) {
-        return Platform::NEON;
-    }
-    Platform::detect()
+    Platform::own_core()
 }
 
 /// One piece of the input: a whole subtree (bytes), or for a batch a
@@ -653,7 +649,7 @@ fn cut_with_prefix(pieces: &mut Vec<Piece>, len: usize, threads: usize, prefix: 
 /// when the turn gave it SME2, else nothing.
 fn prefix_for(turn: &crate::platform::Sme2Turn, len: usize, threads: usize) -> usize {
     #[cfg(blake3_sme2)]
-    if matches!(turn.platform(), Platform::SME2) {
+    if matches!(turn.platform(), Platform::SME2 { .. }) {
         return sme2_prefix(len, threads);
     }
     let _ = (turn, len, threads);

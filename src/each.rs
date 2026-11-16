@@ -48,10 +48,24 @@ pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
     update_turn(hashers, pieces, None);
 }
 
+/// Mark each hasher `which` names, and panic on one named twice. In every
+/// build: the second naming would find the hasher reset and give the
+/// empty message's hash for a message that had bytes, a wrong digest with
+/// no sign of it (BLAKE3 #420). One byte read and written per message, in
+/// the hasher the call reads next; the reset that ends each finish clears
+/// the mark.
+#[inline]
+fn name_each(hashers: &mut [Hasher], which: &[usize]) {
+    for &i in which {
+        assert!(!core::mem::replace(&mut hashers[i].finishing, true), "each finalized index is distinct");
+    }
+}
+
 /// The hash of each message `which` names: `out[k]` is what
 /// `hashers[which[k]].finalize()` would give, and that hasher is then
 /// reset for its next message (no length hint). Requires
-/// `out.len() == which.len()`, each index `< hashers.len()`, and distinct indices.
+/// `out.len() == which.len()`, each index `< hashers.len()`, and distinct
+/// indices: it panics on an index named twice, in every build.
 /// Messages that finish in one call hash side by side where the CPU has
 /// the lanes: sixteen at once on AVX-512, and on AArch64 the plain
 /// messages of up to 1024 bytes fed by [`update_each`].
@@ -63,7 +77,7 @@ pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
 /// See the [key-independence contract](crate#key-dependent-timing).
 pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     assert_eq!(which.len(), out.len(), "one digest per message named");
-    debug_assert!(which.iter().enumerate().all(|(at, i)| !which[..at].contains(i)), "each finalized index is distinct");
+    name_each(hashers, which);
     #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     if which.len() >= 16 && matches!(Platform::detect(), Platform::AVX512) {
         #[cfg(all(test, feature = "std"))]
@@ -830,7 +844,6 @@ mod test {
         }
     }
 
-    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "each finalized index is distinct")]
     fn finalize_each_rejects_repeated_indices() {
@@ -839,7 +852,28 @@ mod test {
         finalize_each(&mut hashers, &[0, 0], &mut [[0; OUT_LEN]; 2]);
     }
 
-    #[cfg(debug_assertions)]
+    /// Every path out of a finish clears the mark: a hasher can be named
+    /// again in the next call, and one left marked would panic there.
+    #[test]
+    fn finalize_each_leaves_no_hasher_marked() {
+        crate::initialize();
+        for n in [1, 2, 3, 15, 16, 17, 33] {
+            for len in [0, 1, 64, 1024, 1025, 5000, 40_000] {
+                let mut hashers: Vec<_> = (0..n).map(|k| Hasher::new(if k % 3 == 2 { Mode::Keyed(&[7; 32]) } else { Mode::Plain }, None)).collect();
+                let which: Vec<_> = (0..n).rev().collect();
+                let mut out = vec![[0u8; OUT_LEN]; n];
+                for round in 0..2 {
+                    let message = vec![round as u8; len];
+                    let pieces: Vec<(usize, &[u8])> = (0..n).map(|i| (i, &message[..])).collect();
+                    update_each(&mut hashers, &pieces);
+                    finalize_each(&mut hashers, &which, &mut out);
+                    assert!(hashers.iter().all(|h| !h.finishing), "n={n} len={len}");
+                    assert_eq!(out[n - 1], *crate::convenience::hash(&message).as_bytes(), "n={n} len={len}");
+                }
+            }
+        }
+    }
+
     #[test]
     #[should_panic(expected = "each finalized index is distinct")]
     fn finalize_each_rejects_repeats_across_groups() {
