@@ -27,7 +27,6 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 use std::sync::Arc;
-use std::sync::atomic::AtomicPtr;
 
 /// Bytes in each [`Room`]: sixty-four chunks (64 KiB), a whole BLAKE3
 /// subtree on a 64-byte boundary. Chosen by empirical measurement across
@@ -267,44 +266,45 @@ struct PipeStorage {
     /// The workers' view of the Pipeline that holds this storage, kept for
     /// the next one (the owner's alone to read and write: `create`).
     shared: UnsafeCell<*mut Shared>,
+    /// Who holds this storage: its Pipeline, and each Room the caller has.
+    holders: OwnLine<AtomicUsize>,
 }
 
 unsafe impl Send for PipeStorage {}
 unsafe impl Sync for PipeStorage {}
 
-const FREE_STORAGES_CAP: usize = 16;
-static FREE_STORAGES: [AtomicPtr<PipeStorage>; FREE_STORAGES_CAP] = [const { AtomicPtr::new(core::ptr::null_mut()) }; FREE_STORAGES_CAP];
+/// Every storage no Pipeline or Room holds, for the next Pipeline: all of
+/// them, however many. A storage is never freed (workers may still read
+/// one), so one that is not kept here is lost for good: a list of 16 lost
+/// every storage past the sixteenth, and a server with a Pipeline per
+/// connection grew by one at each connection beyond 16 at once (BLAKE3
+/// #427). The process now holds as many as its most Pipelines at once.
+static FREE_STORAGES: std::sync::Mutex<Vec<&'static PipeStorage>> = std::sync::Mutex::new(Vec::new());
+
+/// The storages made so far in this process.
+#[cfg(test)]
+static STORAGES_MADE: AtomicUsize = AtomicUsize::new(0);
 
 impl PipeStorage {
+    /// Give up one hold on `st` (its Pipeline's, or a Room's): the last
+    /// one puts it on the free list. A Room may outlive its Pipeline, so
+    /// either may be the last.
     fn release(st: &'static PipeStorage) {
-        let raw = st as *const PipeStorage as *mut PipeStorage;
-        for slot in &FREE_STORAGES {
-            if slot.load(Ordering::Relaxed).is_null() && slot.compare_exchange(core::ptr::null_mut(), raw, Ordering::Release, Ordering::Relaxed).is_ok() {
-                return;
-            }
+        if st.holders.fetch_sub(1, Ordering::AcqRel) == 1 {
+            FREE_STORAGES.lock().unwrap().push(st);
         }
     }
 
     fn acquire(actions: usize, messages: usize, rooms: usize, groups: usize, key: &CVWords, flags: u8) -> &'static PipeStorage {
-        let mut skipped: arrayvec::ArrayVec<&'static PipeStorage, FREE_STORAGES_CAP> = arrayvec::ArrayVec::new();
-        let mut chosen: Option<&'static PipeStorage> = None;
-        for slot in &FREE_STORAGES {
-            if !slot.load(Ordering::Relaxed).is_null() {
-                let p = slot.swap(core::ptr::null_mut(), Ordering::AcqRel);
-                if !p.is_null() {
-                    let st = unsafe { &*p };
-                    if st.source.actions_len() >= actions && st.loan_completed.len() >= messages && st.rooms.count == rooms && st.groups.len() >= groups {
-                        chosen = Some(st);
-                        break;
-                    }
-                    skipped.push(st);
-                }
-            }
-        }
-        for st in skipped {
-            Self::release(st);
-        }
+        let chosen = {
+            let mut free = FREE_STORAGES.lock().unwrap();
+            let fits = |st: &&'static PipeStorage| {
+                st.source.actions_len() >= actions && st.loan_completed.len() >= messages && st.rooms.count == rooms && st.groups.len() >= groups
+            };
+            free.iter().position(fits).map(|at| free.swap_remove(at))
+        };
         if let Some(st) = chosen {
+            st.holders.store(1, Ordering::Release);
             for g in &st.groups[..groups] {
                 let t = unsafe { &mut *g.task.get() };
                 t.key = *key;
@@ -316,6 +316,8 @@ impl PipeStorage {
         let messages = messages.max(64);
         let groups = groups.max(64);
         let dummy = GroupMemberMeta { room: NONE };
+        #[cfg(test)]
+        STORAGES_MADE.fetch_add(1, Ordering::Relaxed);
         Box::leak(Box::new(PipeStorage {
             source: Source::with_actions(actions),
             waker: WakerSlot::new(),
@@ -332,6 +334,7 @@ impl PipeStorage {
             saved_loan_epoch: UnsafeCell::new(1),
             saved_group_epoch: UnsafeCell::new(1),
             shared: UnsafeCell::new(core::ptr::null_mut()),
+            holders: OwnLine(AtomicUsize::new(1)),
         }))
     }
 }
@@ -408,6 +411,7 @@ impl Drop for Room {
         if self.storage.rooms.release_n(self.index, unused) {
             self.storage.waker.notify_after_seqcst();
         }
+        PipeStorage::release(self.storage);
     }
 }
 
@@ -644,6 +648,17 @@ static NEXT_PIPELINE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Streaming multithreaded hasher with bounded memory and pull-based
 /// [`Event`] delivery.
+///
+/// # Memory
+///
+/// A Pipeline's storage (its Rooms, about 64 KiB each, and its queues) is
+/// kept when the Pipeline is dropped and given to the next Pipeline with
+/// the same `Limits`: it is never returned to the system, so a process
+/// holds as much as its most Pipelines alive at once. The storage is not
+/// cleared: a keyed Pipeline's key and the bytes last written to its
+/// Rooms stay in the process's memory until another Pipeline writes over
+/// them. Where that matters, hash with a `Hasher` and the `zeroize`
+/// feature.
 pub struct Pipeline<T, B = ()> {
     id: u64,
     limits: Limits,
@@ -987,6 +1002,7 @@ impl<T, B> Pipeline<T, B> {
     #[inline(always)]
     fn make_room(&self, index: u32) -> Room {
         let storage = self.shared().storage;
+        storage.holders.fetch_add(1, Ordering::Relaxed);
         Room { pipeline_id: self.id, index, offset: 0, commits: 0, ptr: storage.rooms.room_ptr(index as usize), storage }
     }
 
@@ -1671,9 +1687,7 @@ impl<T, B> Drop for Pipeline<T, B> {
                 _ => {}
             }
         }
-        if storage.rooms.caller_held.load(Ordering::Acquire) == 0 {
-            PipeStorage::release(storage);
-        }
+        PipeStorage::release(storage);
     }
 }
 
@@ -2609,6 +2623,39 @@ mod test {
             let (a, b, c) = (pipe.room().await, pipe.room().await, pipe.room().await);
             assert!(a.index != b.index && b.index != c.index && a.index != c.index);
         });
+    }
+
+    /// Storage is reused however many Pipelines were alive at once, and
+    /// whichever of a Pipeline and its Rooms is dropped last: a second
+    /// wave of as many Pipelines makes no new storage. (BLAKE3 #427: the
+    /// free list kept 16, and a Room dropped after its Pipeline kept its
+    /// storage from the list. Either way the storage was lost for good.)
+    /// The Limits are ones no other test uses, so the storages counted
+    /// are this test's.
+    #[test]
+    fn storage_is_reused_past_sixteen_pipelines_and_after_a_late_room() {
+        crate::initialize_multithreaded(None);
+        let limits = Limits { messages: 3, rooms: 5 };
+        let wave = |late_rooms: bool| {
+            let mut pipes: Vec<Pipeline<u32>> = (0..40).map(|_| Pipeline::new(Mode::Plain, limits)).collect();
+            let rooms: Vec<Room> = if late_rooms { pipes.iter_mut().map(|p| block_on(p.room())).collect() } else { Vec::new() };
+            drop(pipes);
+            drop(rooms);
+        };
+        let before = STORAGES_MADE.load(Ordering::Relaxed);
+        wave(false);
+        assert_eq!(STORAGES_MADE.load(Ordering::Relaxed) - before, 40, "one each, the first time");
+        wave(false);
+        wave(true);
+        wave(true);
+        assert_eq!(STORAGES_MADE.load(Ordering::Relaxed) - before, 40, "and none after");
+        // A storage back on the list is whole: its Rooms are all free.
+        let mut pipe = Pipeline::<u32>::new(Mode::Plain, limits);
+        let rooms: Vec<Room> = (0..4).map(|_| block_on(pipe.room())).collect();
+        let mut seen: Vec<u32> = rooms.iter().map(|r| r.index).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 4);
     }
 
     #[test]
