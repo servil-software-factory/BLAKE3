@@ -111,6 +111,7 @@ impl Park {
     /// Wake every worker that is parked now, each once: how many. (A
     /// loop of `wake_one` would wake the first ones again as they park
     /// again, and never reach the last.)
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn wake_all(&self) -> usize {
         let mut woken = 0;
         for (word, handles) in self.parked.iter().zip(self.handles.chunks(64)) {
@@ -138,6 +139,7 @@ impl Park {
 
     /// The workers' places, once: `places[p]` the workers of place p,
     /// `beside[p]` those of p's socket, `here` the asking thread's place.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn set_places(&self, places: Box<[Box<[u64]>]>, beside: Box<[Box<[u64]>]>, here: fn() -> usize) {
         assert!(self.near.set((places, beside, here)).is_ok(), "the workers' places are set once");
     }
