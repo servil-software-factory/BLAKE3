@@ -151,6 +151,11 @@ pub enum Event<T, B = ()> {
 }
 
 /// An open message on a [`Pipeline`].
+///
+/// Every `Message` goes back to its Pipeline: to [`Pipeline::end`], or to
+/// [`Pipeline::abort`] when its bytes will not all come. Dropping one
+/// panics. In async code an early return through `?` drops what the task
+/// holds, so give the message to `abort` before returning the error.
 #[must_use = "end, abort, or hand the message's bytes over; dropping an unfinished Message stops the program"]
 pub struct Message {
     pipeline_id: u64,
@@ -761,6 +766,65 @@ process_static! {
 /// Rooms stay in the process's memory until another Pipeline writes over
 /// them. Where that matters, hash with a `Hasher` and the `zeroize`
 /// feature.
+///
+/// # Giving up a message
+///
+/// The contract is the caller's, and a server's peers must not be able to
+/// break it for the server:
+///
+/// - A message whose bytes will not all come (its client went away) goes
+///   to [`abort`](Pipeline::abort). The Pipeline forgets it, gives its
+///   [`Event::Aborted`], and goes on with the others. A `Message` that is
+///   dropped instead panics.
+/// - A Pipeline is dropped only when it has nothing left to hash: every
+///   message ended or aborted, and every message's event taken with
+///   [`next_event`](Pipeline::next_event). Dropped earlier, it stops the
+///   whole process: its workers may still be reading its buffers.
+///
+/// So keep a Pipeline in a task that outlives its clients (one for a
+/// thread's connections, not one a connection), and do not let a
+/// time-out or a cancelled task drop it mid-message.
+///
+/// ```
+/// # blake3_servil::initialize_multithreaded(None);
+/// use blake3_servil::{Mode, convenience, throughput::{Event, Limits, Pipeline, block_on}};
+/// // A client's next bytes, or the error of one that went away.
+/// async fn read(client: u32, into: &mut [u8]) -> std::io::Result<usize> {
+///     if client == 1 {
+///         return Err(std::io::ErrorKind::ConnectionReset.into());
+///     }
+///     into[..5].copy_from_slice(b"hello");
+///     Ok(5)
+/// }
+///
+/// let mut pipeline = Pipeline::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+/// block_on(async {
+///     for client in [0u32, 1, 2] {
+///         let mut message = pipeline.message(client, None).await;
+///         let mut room = pipeline.room().await;
+///         match read(client, room.bytes_mut()).await {
+///             Ok(n) => {
+///                 pipeline.commit(&mut message, &mut room, n);
+///                 pipeline.end(message);
+///             }
+///             // Not `?`: the message goes back first.
+///             Err(_) => pipeline.abort(message),
+///         }
+///     }
+///     // Every event taken: the Pipeline may then be dropped.
+///     let mut seen = Vec::new();
+///     while seen.len() < 3 {
+///         match pipeline.next_event() {
+///             Some(Event::Hashed { tag, hash, .. }) => seen.push((tag, Some(hash))),
+///             Some(Event::Aborted { tag, .. }) => seen.push((tag, None)),
+///             Some(_) => unreachable!(),
+///             None => pipeline.ready().await,
+///         }
+///     }
+///     let hello = Some(convenience::hash(b"hello"));
+///     assert_eq!(seen, [(0, hello), (1, None), (2, hello)]);
+/// });
+/// ```
 pub struct Pipeline<T, B = ()> {
     id: u64,
     limits: Limits,
