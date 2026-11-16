@@ -8,6 +8,44 @@ pub fn b3sum_exe() -> PathBuf {
     env!("CARGO_BIN_EXE_b3sum").into()
 }
 
+/// A full output device is a failed run, even when the final flush is the
+/// only write. A successful exit must mean that the output was delivered.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_output_error_is_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("empty"), b"").unwrap();
+    // Published BLAKE3 test vector for the empty input, not this binary's output.
+    fs::write(dir.path().join("sums"), b"af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262  empty\n").unwrap();
+    for args in [&[][..], &["--raw"][..], &["--length", "64"][..], &["--check", "sums"][..]] {
+        let output = std::process::Command::new(b3sum_exe())
+            .args(args)
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(fs::OpenOptions::new().write(true).open("/dev/full").unwrap())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}: exit 0 after an output error");
+        assert!(!output.stderr.is_empty(), "{args:?}: the error is reported");
+    }
+}
+
+/// A truncated-to-empty checkfile has checked nothing. Each checkfile
+/// must hold at least one entry, including when another checkfile passed.
+#[test]
+fn test_empty_checkfile_is_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("empty"), b"").unwrap();
+    fs::write(dir.path().join("sums"), b"af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262  empty\n").unwrap();
+    fs::write(dir.path().join("no-sums"), b"").unwrap();
+    for args in [&["--check"][..], &["--check", "--quiet", "no-sums"][..], &["--check", "sums", "no-sums"][..]] {
+        let output = std::process::Command::new(b3sum_exe()).args(args).current_dir(dir.path()).stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(!output.status.success(), "{args:?}: exit 0 after checking no entries");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("no checksum entries"), "{args:?}: {:?}", output.stderr);
+    }
+}
+
 /// A reader that goes away ends b3sum at once and quietly (SIGPIPE), as
 /// it ends GNU's tools: more results than a pipe holds, the reader gone
 /// after one line.
@@ -211,6 +249,18 @@ fn test_derive_key() {
     let expected = hex::encode(*blake3::convenience::hash_with(blake3::Mode::DeriveKey(context), b"key material").as_bytes());
     let output = cmd!(b3sum_exe(), "--derive-key", context, "--no-names", f.path()).read().unwrap();
     assert_eq!(&*expected, &*output);
+}
+
+/// --check reads hashes of whole outputs: with --seek it is refused, as
+/// with --length (it was accepted, and the offset ignored).
+#[test]
+fn test_check_with_seek_is_an_error() {
+    let f = tempfile::NamedTempFile::new().unwrap();
+    for option in [["--seek", "1"], ["--length", "16"]] {
+        let result = cmd!(b3sum_exe(), "--check", option[0], option[1], f.path()).stdout_capture().stderr_capture().unchecked().run().unwrap();
+        assert!(!result.status.success(), "{option:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("cannot be used with"), "{option:?}");
+    }
 }
 
 #[test]
@@ -824,6 +874,39 @@ fn test_outboard_files_are_bao_trees() {
     let output = cmd!(b3sum_exe(), "--keyed", "--no-names", "--outboard", &out_dir, &big).stdin_bytes(key.to_vec()).read().unwrap();
     assert_eq!(output, theirs.root.to_hex().to_string());
     assert_eq!(fs::read(out_dir.join(format!("{}.obao4", theirs.root.to_hex()))).unwrap(), theirs.data);
+
+    // An outboard's place is taken by name, never written through. A link
+    // there is replaced, and its target left as it was. An outboard
+    // already there stays whole under its other name, as a reader that
+    // had it open would go on seeing it. No other file is left.
+    let (k, (_, place, want)) = expected.iter().enumerate().find(|(_, e)| !e.2.is_empty()).unwrap();
+    for entry in fs::read_dir(&out_dir).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let victim = dir.path().join("victim");
+    fs::write(&victim, b"not an outboard").unwrap();
+    std::os::unix::fs::symlink(&victim, place).unwrap();
+    cmd!(b3sum_exe(), "--outboard", &out_dir, &files[k]).read().unwrap();
+    assert_eq!(fs::read(&victim).unwrap(), b"not an outboard");
+    assert!(fs::symlink_metadata(place).unwrap().is_file());
+    assert_eq!(&fs::read(place).unwrap(), want);
+    fs::write(place, b"an older outboard, longer or shorter").unwrap();
+    let held = out_dir.join("held-by-a-reader");
+    fs::hard_link(place, &held).unwrap();
+    cmd!(b3sum_exe(), "--outboard", &out_dir, &files[k], &files[k]).read().unwrap();
+    assert_eq!(fs::read(&held).unwrap(), b"an older outboard, longer or shorter");
+    assert_eq!(&fs::read(place).unwrap(), want);
+    fs::remove_file(&held).unwrap();
+    let left: Vec<_> = fs::read_dir(&out_dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left, [place.file_name().unwrap()]);
+
+    // Keyed, standard input cannot also be the message: the key was all
+    // of it. An error, as without --outboard, and no hash of nothing.
+    let result =
+        cmd!(b3sum_exe(), "--keyed", "--outboard", &out_dir, "-").stdin_bytes(key.to_vec()).stdout_capture().stderr_capture().unchecked().run().unwrap();
+    assert!(!result.status.success());
+    assert_eq!(result.stdout, b"");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Cannot open `-` in keyed mode"));
 
     // A file that is not there fails alone: the others' lines and outboards are made.
     let missing = dir.path().join("no-such-file");
