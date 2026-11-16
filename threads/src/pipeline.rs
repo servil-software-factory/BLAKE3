@@ -370,6 +370,34 @@ impl Room {
     pub fn len(&self) -> usize {
         ROOM_LEN - self.offset as usize
     }
+
+    /// Take one of this Room's credits for a commit: the pool counts a
+    /// Room free when all ROOM_CREDITS are back, each commit's from the
+    /// worker that finishes it and the rest from the Room's drop. A Room
+    /// never gives out its last: before that it takes a new set, so the
+    /// pool cannot count it free while the caller holds it. An empty
+    /// commit moves the Room on by nothing, so one Room can take them
+    /// without end (BLAKE3 #418: after ROOM_CREDITS of them a second Room
+    /// was made over the same bytes).
+    #[inline(always)]
+    fn take_credit(&mut self) {
+        if self.commits as usize == ROOM_CREDITS - 1 {
+            self.storage.rooms.refs[self.index as usize].fetch_add(ROOM_CREDITS - 1, Ordering::Relaxed);
+            self.commits = 0;
+        }
+        self.commits += 1;
+    }
+}
+
+#[cfg(test)]
+impl Room {
+    /// Leave this Room `left` of its credits, as that many short of
+    /// ROOM_CREDITS commits would.
+    fn spend_all_but(&mut self, left: u32) {
+        let spent = ROOM_CREDITS as u32 - left;
+        self.storage.rooms.release_n(self.index, spent as usize);
+        self.commits += spent;
+    }
 }
 
 impl Drop for Room {
@@ -661,9 +689,36 @@ impl<T> Pipeline<T, ()> {
     }
 }
 
-impl<T, B: AsRef<[u8]>> Pipeline<T, B> {
+// `B: 'static`: the workers read an owner's bytes until its message is
+// hashed, and a Pipeline can be forgotten (`core::mem::forget`) while they
+// do, which no borrow outlives soundly. An owner that borrows nothing
+// keeps its bytes for as long as the forgotten Pipeline holds it: for
+// good (BLAKE3 #417: a `&[u8]` was an owner, and safe code could free the
+// bytes under the workers). Borrowed bytes are [`Pipeline::lent`]'s, which
+// is unsafe for that reason.
+impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
     /// Create a pipeline that also accepts owned message buffers of type `B`
-    /// ([`Pipeline::owned`]).
+    /// ([`Pipeline::owned`]): a type that owns its bytes, such as `Vec<u8>`
+    /// or `Box<[u8]>`.
+    ///
+    /// ```
+    /// use blake3_servil::{Mode, throughput::{Limits, Pipeline}};
+    /// fn pipeline_of<B: AsRef<[u8]> + 'static>(_first: B) -> Pipeline<(), B> {
+    ///     Pipeline::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 })
+    /// }
+    /// # blake3_servil::initialize_multithreaded(None);
+    /// let _ = pipeline_of(vec![0u8; 64]);
+    /// ```
+    ///
+    /// A borrowed slice is no owner (the same code but for the borrow, so
+    /// this fails for that reason):
+    ///
+    /// ```compile_fail
+    /// use blake3_servil::{Mode, throughput::{Limits, Pipeline}};
+    /// fn pipeline_of<'a>(_first: &'a [u8]) -> Pipeline<(), &'a [u8]> {
+    ///     Pipeline::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 })
+    /// }
+    /// ```
     pub fn with_owners(mode: Mode, limits: Limits) -> Self {
         Self::create(mode, limits)
     }
@@ -958,7 +1013,7 @@ impl<T, B> Pipeline<T, B> {
         if matches!(self.slots[s].kind, SlotKind::OpenEmpty) && written < ROOM_LEN {
             let start_offset = room.offset;
             room.offset = ((start_offset as usize + written).div_ceil(64) * 64).min(ROOM_LEN) as u32;
-            room.commits += 1;
+            room.take_credit();
             self.slots[s].kind = SlotKind::OpenShort { room: room.index, offset: start_offset, len: written as u32 };
             return;
         }
@@ -996,7 +1051,7 @@ impl<T, B> Pipeline<T, B> {
             _ => unreachable!("Message token refers to a non-open slot"),
         }
 
-        room.commits += 1;
+        room.take_credit();
         let counter = self.room_streams[s].room_pieces * (ROOM_LEN / CHUNK_LEN) as u64;
         self.room_streams[s].room_pieces += 1;
 
@@ -2506,6 +2561,54 @@ mod test {
         let b = block_on(pipe.message(2, None));
         pipe.end(b);
         let _ = poll_once(pipe.message(3, None));
+    }
+
+    /// A Room that takes empty commits never gives out its last credit:
+    /// while the caller holds it, no second Room is made over its bytes
+    /// (BLAKE3 #418: an empty commit moves the Room on by nothing, so one
+    /// Room can take them without end, and after ROOM_CREDITS of them the
+    /// pool counted it free). The Room here starts a few credits from the
+    /// end, where a billion commits would bring it.
+    #[test]
+    fn a_room_held_through_its_last_credits_is_not_handed_out_again() {
+        crate::initialize_multithreaded(None);
+        let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 3 });
+        block_on(async {
+            let mut room = pipe.room().await;
+            room.spend_all_but(4);
+            // At each count of empty commits around the last credit: the
+            // other two Rooms, taken and given back until the pool has
+            // looked again at which are free.
+            for n in 0..12u32 {
+                let mut m = pipe.message(n, None).await;
+                pipe.commit(&mut m, &mut room, 0);
+                pipe.end(m);
+                loop {
+                    match pipe.next_event() {
+                        Some(Event::Hashed { tag, hash, .. }) => {
+                            assert_eq!((tag, hash), (n, crate::convenience::hash(b"")));
+                            break;
+                        }
+                        Some(_) => {}
+                        None => pipe.ready().await,
+                    }
+                }
+                // Its commits all finished: the pool holds what the Room
+                // has yet to give out, no more and no less (with more, the
+                // Room would never be free again once dropped).
+                let held = room.storage.rooms.refs[room.index as usize].load(Ordering::SeqCst);
+                assert_eq!(held, ROOM_CREDITS - room.commits as usize, "after {} empty commits", n + 1);
+                for _ in 0..4 {
+                    let (a, b) = (pipe.room().await, pipe.room().await);
+                    assert!(a.index != room.index && b.index != room.index, "two Rooms over the same bytes, after {} empty commits", n + 1);
+                }
+            }
+            assert_eq!(room.len(), ROOM_LEN, "empty commits use none of it");
+            drop(room);
+            // All three are free again, each one Room.
+            let (a, b, c) = (pipe.room().await, pipe.room().await, pipe.room().await);
+            assert!(a.index != b.index && b.index != c.index && a.index != c.index);
+        });
     }
 
     #[test]
