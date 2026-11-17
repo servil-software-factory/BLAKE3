@@ -351,7 +351,8 @@ lists what it takes and ticks each step:
 7. A full bench-hashes run on the version commit on the Mac, its results
    retained for publication with the release and named on the map.
 8. Once the gates and human reviews accept that exact version commit,
-   publish its tag and artifacts:
+   move `main` to it, then publish its tag and artifacts (a release's
+   commit is in `main`'s history, and the published check asks it):
    - the crates: publish all four from the same staged checkout and lock
      used for the dry-run, with `--frozen` and the same explicit `-p` names.
      Cargo publishes each dependency first: `blake3-servil-version`
@@ -364,7 +365,10 @@ lists what it takes and ticks each step:
    - the C library, staged by `cargo cinstall --release --destdir=STAGE`
      in `capi/`: the static and shared libraries, `b3.h`, and the
      pkg-config file (`capi/README.md`);
-   - the GitHub release, its text the CHANGELOG entry.
+   - the GitHub release, its text the CHANGELOG entry: made as a draft,
+     every file attached, then published. Published, its files and its
+     tag are frozen (the repository's immutable releases), so nothing is
+     added or replaced afterwards.
 9. The eBASH submission, pinned to the tag (`supercop/README.md`).
 
 ### The packages' dry-run, before any crate is published
@@ -417,6 +421,15 @@ checks what users download the same way, as anyone can:
 `python3 tools/release_artifacts.py TAG --published`. (0.9.0's two b3sum
 binaries were built in checkouts that held untracked files and say
 "dirty", BLAKE3 #435: that command fails on them.)
+
+The tag's name is the release's source: the 40 hex digits in it, which
+`b3sum --version` prints too, are the code commit's hash, and the check
+holds the version commit to that commit with the version written in and
+nothing else (`tools/gen-ver.py` makes it so). A moved tag, or a version
+commit that carries anything more, is no release to it. Release tags
+cannot be moved or deleted on GitHub either (the `release tags` ruleset,
+which no one bypasses). Take the checker from the code commit or from
+`main`, not from the tag's own commit.
 
 A program's build version is its own word, which shows a mistake and
 not a forgery. So b3sum's Linux binary is also built reproducibly:

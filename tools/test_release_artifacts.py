@@ -224,6 +224,65 @@ class Releases(Repository):
             ra.Release(self.tag, self.repo, self.code)
 
 
+class TheNameIsTheSource(Repository):
+    """The tag's name holds the code commit's hash, and the version commit
+    is that commit with the version written in: nothing else. Each test
+    makes a version commit of its own on the fixture's code commit."""
+
+    def version_commit(self, change):
+        """A tag on a version commit made as the fixture's, then changed
+        by `change`: whether it is a release, and why not."""
+        self.git("checkout", "-q", "--detach", self.code)
+        for manifest in ("Cargo.toml", "sub/Cargo.toml"):
+            self.write(manifest, self.read(manifest).replace("0.3.0+dev", self.version))
+        change()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "another version commit")
+        try:
+            ra.Release(self.tag, self.repo, self.git("rev-parse", "HEAD"))
+        except ra.NotARelease as e:
+            return str(e)
+        return None
+
+    def test_the_version_written_in_and_nothing_else_is_a_release(self):
+        self.assertIsNone(self.version_commit(lambda: None))
+
+    def test_a_changed_line_of_code_is_refused(self):
+        why = self.version_commit(lambda: self.write("src/lib.rs", "pub fn top() { /* and more */ }\n"))
+        self.assertIn("which is not its parent with the version written in: src/lib.rs line 1 changes more than a version to this release's", why)
+
+    def test_an_added_file_and_a_removed_one_are_refused(self):
+        self.assertIn("build.rs is added, removed, or of another kind", self.version_commit(lambda: self.write("build.rs", "fn main() {}\n")))
+        self.assertIn("LICENSE is added, removed, or of another kind", self.version_commit(lambda: os.remove(os.path.join(self.repo, "LICENSE"))))
+
+    def test_an_added_line_is_refused(self):
+        why = self.version_commit(lambda: self.write("Cargo.toml", self.read("Cargo.toml") + 'build = "other.rs"\n'))
+        self.assertIn("Cargo.toml has lines added or removed", why)
+
+    def test_more_than_the_version_on_a_versions_line_is_refused(self):
+        why = self.version_commit(lambda: self.write("Cargo.toml", self.read("Cargo.toml").replace(f'version = "{self.version}"', f'version = "{self.version}" # more')))
+        self.assertIn("Cargo.toml line 3 changes more than a version to this release's", why)
+
+    def test_another_version_than_the_releases_is_refused(self):
+        other = "0.3.0+" + "5" * 40
+        why = self.version_commit(lambda: self.write("sub/Cargo.toml", self.read("sub/Cargo.toml").replace(self.version, other)))
+        self.assertIn("sub/Cargo.toml line 3 changes more than a version to this release's", why)
+
+    def test_a_file_made_executable_is_refused(self):
+        why = self.version_commit(lambda: os.chmod(os.path.join(self.repo, "src/lib.rs"), 0o755))
+        self.assertIn("src/lib.rs is added, removed, or of another kind", why)
+
+    def test_main_holds_a_published_releases_commit(self):
+        self.assertIsNone(self.release.on_main(), "no origin/main in this clone")
+        self.git("update-ref", "refs/remotes/origin/main", self.code)
+        self.assertIs(self.release.on_main(), False, "main is still at the code commit")
+        self.git("update-ref", "refs/remotes/origin/main", self.commit)
+        self.assertIs(self.release.on_main(), True)
+        self.git("commit", "--allow-empty", "-qm", "the development line after the release")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertIs(self.release.on_main(), True, "and in its history later")
+
+
 @patch.object(ra, "CRATE_DIRS", ("", "sub"))
 @patch.object(ra, "B3SUM_TARGETS", ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"))
 class Gathered(Repository):
@@ -406,6 +465,21 @@ class CommandLine(Repository):
             self.assertEqual(self.run_main(self.tag, path, "--commit", self.code)[0], f"release_artifacts: {self.tag} names commit {self.code}, whose parent is not {self.code}: not a version commit")
             self.assertEqual(self.run_main(self.tag, path, "--rebuilt")[0], 2, "an option without its value")
             self.assertEqual(self.run_main(self.tag, path, "--rebuild", second)[0], 2, "an option this does not know")
+
+    def test_published_needs_the_commit_in_mains_history(self):
+        def nothing_published(release):
+            return iter(())
+
+        with patch.object(ra, "published", nothing_published):
+            code, said = self.run_main(self.tag, "--published")
+            self.assertEqual(code, 1)
+            self.assertIn("MISSING    origin/main in this clone", said)
+            self.git("update-ref", "refs/remotes/origin/main", self.code)
+            code, said = self.run_main(self.tag, "--published")
+            self.assertEqual(code, 1)
+            self.assertIn(f"NOT CLEAN  the tag: its commit {self.commit} is not in origin/main's history", said)
+            self.git("update-ref", "refs/remotes/origin/main", self.commit)
+            self.assertEqual(self.run_main(self.tag, "--published")[0], 0)
 
     def test_no_artifact_named_is_a_usage_error(self):
         self.assertEqual(self.run_main(self.tag)[0], 2)

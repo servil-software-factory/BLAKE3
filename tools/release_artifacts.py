@@ -13,6 +13,19 @@ that has the tag; anyone can. It prints one line an artifact. Exit status
 0: every artifact is a clean build of the version commit; 1: one is not,
 or one a release has is missing.
 
+The tag's name is the release's source. The 40 hex digits in it (which a
+program's --version prints too) are the code commit's hash, and this
+check holds the version commit to that commit: the same files, but for
+the release's version written where a version stood. So a tag that was
+moved, or a version commit with anything else in it, is no release here,
+and every check below is then of the source the name commits to. With
+--published the version commit must also be in the history of the
+remote's main branch, which only a release moves.
+
+Take this checker from a commit you trust, not from the tag's own: the
+code commit the name gives (git checkout <those 40 digits>) or main. A
+forged version commit could carry a checker that passes it.
+
 What makes an artifact clean, by its kind:
 
   A program or a library (b3sum-*, *.so, *.a, *.dylib, and the libraries
@@ -71,6 +84,9 @@ CRATE_DIRS = ("version", "", "threads", "b3sum")
 # The machines a release has a b3sum program for (b3sum/README.md,
 # "Installation").
 B3SUM_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
+# A version as tools/gen-ver.py writes one: a release's, or the
+# development line's.
+STAMP = re.compile(rb"\d+\.\d+\.\d+\+(?:[0-9a-f]{40}|dev)")
 LIBRARY = re.compile(r"\.(so|a|dylib)(\.[0-9.]+)?$")
 # Cargo's own files in a .crate: not the commit's.
 CARGOS = (".cargo_vcs_info.json", "Cargo.toml", "Cargo.lock")
@@ -100,6 +116,47 @@ class Release:
         self.commit = commit
         if self.found(commit + "^") != named.group(1):
             raise NotARelease(f"{tag} names commit {commit}, whose parent is not {named.group(1)}: not a version commit")
+        more = self.stamp_problems(named.group(1))
+        if more:
+            raise NotARelease(f"{tag} names commit {commit}, which is not its parent with the version written in: {more[0]}"
+                              + (f" (and {len(more) - 1} more)" if len(more) > 1 else "") + ": not a version commit")
+
+    def stamp_problems(self, code):
+        """Why the version commit is not the code commit `code` with the
+        release's version written in: nothing where each file is the
+        same but for lines in which a version (X.Y.Z+<commit>, or
+        X.Y.Z+dev) became this release's. tools/gen-ver.py makes it so,
+        and nothing else belongs in a version commit: its hash is not in
+        the tag's name, and the code commit's is."""
+        problems = []
+        raw = subprocess.run(["git", "-C", self.repo, "diff-tree", "-r", "--raw", "--no-renames", "-z", code, self.commit], capture_output=True, check=True).stdout
+        fields = raw.split(b"\0")
+        for entry, path in zip(fields[0::2], fields[1::2]):
+            old_mode, new_mode, old, new, status = entry.decode().lstrip(":").split()
+            path = path.decode(errors="replace")
+            if status != "M" or old_mode != new_mode:
+                problems.append(f"{path} is added, removed, or of another kind")
+                continue
+            before, after = (subprocess.run(["git", "-C", self.repo, "cat-file", "blob", blob], capture_output=True, check=True).stdout.split(b"\n") for blob in (old, new))
+            if len(before) != len(after):
+                problems.append(f"{path} has lines added or removed")
+                continue
+            for number, (was, now) in enumerate(zip(before, after), 1):
+                if was == now:
+                    continue
+                written = [n for w, n in zip(STAMP.findall(was), STAMP.findall(now)) if w != n]
+                if STAMP.sub(b"", was) != STAMP.sub(b"", now) or any(n != self.version.encode() for n in written):
+                    problems.append(f"{path} line {number} changes more than a version to this release's")
+                    break
+        return problems
+
+    def on_main(self):
+        """Whether the version commit is in the history of the remote's
+        main branch: True or False, or None where this clone has no
+        origin/main to ask."""
+        if self.found("refs/remotes/origin/main") is None:
+            return None
+        return subprocess.run(["git", "-C", self.repo, "merge-base", "--is-ancestor", self.commit, "refs/remotes/origin/main"]).returncode == 0
 
     def found(self, revision):
         """The commit `revision` names here, or None."""
@@ -335,11 +392,18 @@ def main(argv):
         sys.exit(2)
     try:
         release = Release(argv[0], commit=options.get("--commit"))
+        bad = 0
         if paths == ["--published"]:
             items = published(release)
+            # Published from main: the branch only a release moves.
+            on_main = release.on_main()
+            if on_main is not True:
+                bad = 1
+                print(f"NOT CLEAN  the tag: its commit {release.commit} is not in origin/main's history" if on_main is False
+                      else "MISSING    origin/main in this clone, whose history a release's commit is in (git fetch origin main)")
         else:
             items = ((path, os.path.basename(path), read(path)) for path in paths)
-        bad = check(items, release, rebuilt=options.get("--rebuilt"))
+        bad += check(items, release, rebuilt=options.get("--rebuilt"))
     except NotARelease as e:
         sys.exit(f"release_artifacts: {e}")
     print(f"release_artifacts: {release.tag} is commit {release.commit}: " + (f"{bad} artifacts are not clean builds of it, or are missing" if bad else "every artifact is a clean build of it"))

@@ -6,7 +6,8 @@ name: release artifacts
 # commit (tools/release_artifacts.py). And each b3sum program is, byte for
 # byte, what these machines build from the tag (tools/b3sum-release.sh,
 # whose build is reproducible): a program with other code in it fails
-# here whatever it says of itself. Run when a release is published,
+# here whatever it says of itself. The tag itself is held to the code
+# commit its name gives and to main's history: a moved tag fails. Run when a release is published,
 # and by hand for any release's tag. 0.9.0's two b3sum programs say
 # "dirty" (BLAKE3 #435): dispatched with its tag, this fails on them.
 on:
@@ -53,6 +54,17 @@ jobs:
         ref: ${{ github.event.release.tag_name || inputs.tag }}
         # The tag and its commit's files, to compare the crates with.
         fetch-depth: 0
+    # The checker is the code commit's, which the tag's name gives by its
+    # hash: the tag's own commit is what is being checked, and a forged one
+    # could bring a checker that passes it. The check then holds the tag's
+    # commit to that code commit with the version written in, so what the
+    # jobs above built with was the code commit's too.
+    - name: Take the checker from the code commit in the tag's name
+      env:
+        TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      run: |
+        git checkout --quiet --detach "${TAG#*+}"
+        test -f tools/release_artifacts.py || { echo "this release is from before the check (0.9.0 and earlier): run a later commit's checker on its tag by hand"; exit 1; }
     - uses: actions/download-artifact@v4
       with:
         pattern: b3sum-*
