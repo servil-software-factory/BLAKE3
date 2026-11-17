@@ -19,12 +19,14 @@ use crate::lanes::{MEMBERS, Member, OwnLine, TASK_LEN, Task, pool_platform};
 use crate::platform::Platform;
 use crate::throughput::{Batch, Prepared};
 use crate::{CHUNK_LEN, CVBytes, CVWords, Hash, Mode, OUT_LEN};
-use core::cell::UnsafeCell;
 use core::future::Future;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+// The primitives the Pipeline runs on: the standard library's here, and
+// Shuttle's in tests/shuttle_pipeline.rs, which compiles this same file
+// beside its own `pipeline_sync` and a stand-in for the pool.
+use crate::pipeline_sync::{AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, UnsafeCell, process_static, thread};
 use core::task::{Context, Poll, Waker};
 use std::sync::Arc;
 
@@ -207,6 +209,11 @@ use crate::waker::WakerSlot;
 #[repr(align(128))]
 struct Rooms {
     buf: *mut u8,
+    /// The model's alone (tests/shuttle_pipeline.rs): the allocation, to
+    /// free at a run's end.
+    #[cfg(shuttle)]
+    #[allow(dead_code)]
+    backing: (*mut u8, usize),
     count: usize,
     refs: Box<[OwnLine<AtomicUsize>]>,
     caller_held: OwnLine<AtomicUsize>,
@@ -225,16 +232,29 @@ impl Rooms {
         // alone: callers and workers write and read them through pointers
         // made from this one, which a Box held beside it would claim to
         // own alone.
+        #[cfg(shuttle)]
+        let mut whole = (core::ptr::null_mut(), 0);
         let buf = if count == 0 {
             core::ptr::NonNull::<u8>::dangling().as_ptr()
         } else {
             let backing: &'static mut [u8] = Box::leak(vec![0u8; count * ROOM_LEN + 64].into_boxed_slice());
+            #[cfg(shuttle)]
+            {
+                whole = (backing.as_mut_ptr(), backing.len());
+            }
             let align = backing.as_ptr().align_offset(64);
             // Sound: the allocation has 64 spare bytes, so the first 64-byte
             // boundary and `count` rooms after it are inside it.
             unsafe { backing.as_mut_ptr().add(align) }
         };
-        Rooms { buf, count, refs: (0..count).map(|_| OwnLine(AtomicUsize::new(0))).collect(), caller_held: OwnLine(AtomicUsize::new(0)) }
+        Rooms {
+            buf,
+            #[cfg(shuttle)]
+            backing: whole,
+            count,
+            refs: (0..count).map(|_| OwnLine(AtomicUsize::new(0))).collect(),
+            caller_held: OwnLine(AtomicUsize::new(0)),
+        }
     }
 
     #[inline(always)]
@@ -298,17 +318,50 @@ struct PipeStorage {
 unsafe impl Send for PipeStorage {}
 unsafe impl Sync for PipeStorage {}
 
-/// Every storage no Pipeline or Room holds, for the next Pipeline: all of
-/// them, however many. A storage is never freed (workers may still read
-/// one), so one that is not kept here is lost for good: a list of 16 lost
-/// every storage past the sixteenth, and a server with a Pipeline per
-/// connection grew by one at each connection beyond 16 at once (BLAKE3
-/// #427). The process now holds as many as its most Pipelines at once.
-static FREE_STORAGES: std::sync::Mutex<Vec<&'static PipeStorage>> = std::sync::Mutex::new(Vec::new());
+process_static! {
+    /// Every storage no Pipeline or Room holds, for the next Pipeline: all of
+    /// them, however many. A storage is never freed (workers may still read
+    /// one), so one that is not kept here is lost for good: a list of 16 lost
+    /// every storage past the sixteenth, and a server with a Pipeline per
+    /// connection grew by one at each connection beyond 16 at once (BLAKE3
+    /// #427). The process now holds as many as its most Pipelines at once.
+    static FREE_STORAGES: Mutex<Vec<&'static PipeStorage>> = Mutex::new(Vec::new());
+}
 
-/// The storages made so far in this process.
-#[cfg(test)]
-static STORAGES_MADE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, shuttle))]
+process_static! {
+    /// The storages made so far in this process.
+    static STORAGES_MADE: AtomicUsize = AtomicUsize::new(0);
+}
+
+/// The model's alone (tests/shuttle_pipeline.rs): at the end of one run,
+/// every storage made in it is free again (returned: how many), and is
+/// freed here. A program never frees one; a model that ran thousands of
+/// schedules without freeing would hold them all, and Shuttle's atomics
+/// must not pass from one run to the next.
+#[cfg(shuttle)]
+#[allow(dead_code)]
+pub(crate) fn free_storages_for_model() -> (usize, usize) {
+    let free: Vec<&'static PipeStorage> = FREE_STORAGES.lock().unwrap().drain(..).collect();
+    let made = STORAGES_MADE.swap(0, Ordering::SeqCst);
+    let back = free.len();
+    for st in free {
+        // Sound: the model's threads have all ended, and nothing holds a
+        // storage that is on the free list.
+        unsafe {
+            let shared = *st.shared.get();
+            if !shared.is_null() {
+                drop(Box::from_raw(shared));
+            }
+            let (at, len) = st.rooms.backing;
+            if !at.is_null() {
+                drop(Box::from_raw(core::ptr::slice_from_raw_parts_mut(at, len)));
+            }
+            drop(Box::from_raw(st as *const PipeStorage as *mut PipeStorage));
+        }
+    }
+    (made, back)
+}
 
 impl PipeStorage {
     /// Give up one hold on `st` (its Pipeline's, or a Room's): the last
@@ -344,7 +397,7 @@ impl PipeStorage {
         let messages = messages.max(64);
         let groups = groups.max(64);
         let dummy = GroupMemberMeta { room: NONE };
-        #[cfg(test)]
+        #[cfg(any(test, shuttle))]
         STORAGES_MADE.fetch_add(1, Ordering::Relaxed);
         Box::leak(Box::new(PipeStorage {
             source: Source::with_actions(actions),
@@ -712,7 +765,9 @@ struct SlotMeta<T> {
     kind: SlotKind,
 }
 
-static NEXT_PIPELINE_ID: AtomicU64 = AtomicU64::new(1);
+process_static! {
+    static NEXT_PIPELINE_ID: AtomicU64 = AtomicU64::new(1);
+}
 
 /// Streaming multithreaded hasher with bounded memory and pull-based
 /// [`Event`] delivery.
@@ -1881,7 +1936,7 @@ impl<T, B> Future for ReadyFut<'_, T, B> {
     }
 }
 
-struct ThreadPark(std::thread::Thread);
+struct ThreadPark(thread::Thread);
 
 impl std::task::Wake for ThreadPark {
     fn wake(self: Arc<Self>) {
@@ -1892,8 +1947,8 @@ impl std::task::Wake for ThreadPark {
     }
 }
 
-std::thread_local! {
-    static BLOCK_ON_WAKER: Waker = Waker::from(Arc::new(ThreadPark(std::thread::current())));
+crate::pipeline_sync::thread_local! {
+    static BLOCK_ON_WAKER: Waker = Waker::from(Arc::new(ThreadPark(thread::current())));
     static BLOCK_ON_STATE: core::cell::Cell<u8> = const { core::cell::Cell::new(0) };
 }
 
@@ -2084,7 +2139,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
                 BLOCK_ON_STATE.with(|f| f.set(2));
                 match future.as_mut().poll(&mut cx) {
                     Poll::Ready(output) => return output,
-                    Poll::Pending => std::thread::park(),
+                    Poll::Pending => thread::park(),
                 }
             } else if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                 return output;
@@ -2093,7 +2148,9 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     })
 }
 
-#[cfg(test)]
+// The standard library's tests alone: under Shuttle
+// (tests/shuttle_pipeline.rs) this file is compiled without them.
+#[cfg(all(test, not(shuttle)))]
 mod test {
     use super::*;
 
