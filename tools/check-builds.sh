@@ -31,7 +31,9 @@ step sh -c 'cd threads && taskset -c 0 cargo nextest run --cargo-quiet --release
 # the model checker, every schedule Shuttle explores: seconds. Until
 # November 15, 2026 they ran only inside the mutation check, so a change
 # that broke one could pass every gate that was not about its own lines.
-step sh -c 'cd threads && RUSTFLAGS="--cfg shuttle" cargo test -q --release --test shuttle_finish --test shuttle_park --test shuttle_waker'
+step sh -c 'cd threads && RUSTFLAGS="--cfg shuttle" cargo test -q --release --test shuttle_finish --test shuttle_park --test shuttle_waker --test shuttle_pipeline'
+# The Pipeline's model fails for each planted fault (a build of it each).
+step python3 tools/pipeline_model_controls.py
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --tests'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --tests --target x86_64-unknown-linux-gnu'
 RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path b3sum/Cargo.toml

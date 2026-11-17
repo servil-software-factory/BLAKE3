@@ -250,6 +250,24 @@ mod waker_sync {
         f(unsafe { &mut *cell.get() })
     }
 }
+/// The primitives src/pipeline.rs runs on: the standard library's here,
+/// and Shuttle's in tests/shuttle_pipeline.rs, which compiles that file
+/// beside its own `pipeline_sync`.
+mod pipeline_sync {
+    pub use core::cell::UnsafeCell;
+    pub use std::sync::Mutex;
+    pub use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    pub use std::thread;
+    pub use std::thread_local;
+    /// A static for the life of the process. (The model's is for one run.)
+    macro_rules! process_static {
+        ($(#[$attribute:meta])* static $name:ident: $kind:ty = $first:expr;) => {
+            $(#[$attribute])*
+            static $name: $kind = $first;
+        };
+    }
+    pub(crate) use process_static;
+}
 mod lanes;
 mod park;
 mod pipeline;

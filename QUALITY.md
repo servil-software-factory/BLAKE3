@@ -73,11 +73,17 @@ or a processor that does not execute the code as expected.
 Some performance-critical Rust code is `unsafe`: there the programmer
 keeps Rust's memory rules, which the compiler checks everywhere else.
 
-- **A model checker (Shuttle)** runs the small pieces of threaded code
-  where one thread waits for another under thousands of thread
-  schedules. A wait that could hang shows up immediately as a deadlock
-  with the schedule that caused it. Every change runs these models
-  before it lands.
+- **A model checker (Shuttle)** runs the threaded code under thousands
+  of thread schedules: the small pieces where one thread waits for
+  another, and the whole Pipeline with stand-in worker threads. A wait
+  that could hang shows up as a deadlock with the schedule that caused
+  it, and a result handed over too early as a wrong digest. For the
+  Pipeline, eight faults planted in its code one at a time (a result
+  published before it is written, a wake left out, a buffer given back
+  while a worker reads it, and others) each make the model fail. Every
+  change runs the models and the planted faults before it lands. The
+  model checker treats every atomic operation as the strictest kind, so
+  a fault that needs a weaker ordering to show is outside it.
 - **Shared memory that is never freed.** The Pipeline's state that
   worker threads can reach lives as long as the process, so no worker
   can touch memory its owner gave back (see the next section for why).
