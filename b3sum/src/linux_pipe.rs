@@ -134,6 +134,7 @@ enum WindowSlot {
 fn pread_fill_rest(fd: RawFd, mut dst: &mut [u8], mut offset: u64) -> io::Result<usize> {
     let mut total = 0usize;
     while !dst.is_empty() {
+        // Sound: the read is into `dst`, a slice this function holds alone.
         let rc = unsafe { libc::pread(fd, dst.as_mut_ptr().cast(), dst.len(), offset as libc::off_t) };
         if rc == 0 {
             break;
@@ -190,6 +191,10 @@ fn stream_fd_into_rooms(
             };
             let off = next_issue_seq * (ROOM_LEN as u64);
             let user_data = USER_LARGE_BIT | next_issue_seq;
+            // Sound: the read's buffer stays where it is, written by no one
+            // else, until its completion is reaped: the room sits in `window`
+            // as Reading until then, and the ring stops the process if it is
+            // dropped with a read in flight.
             let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, user_data) };
             // In every build: a read the full ring did not take would be
             // counted in flight and waited for without end.
@@ -224,6 +229,8 @@ fn stream_fd_into_rooms(
                     while ring.sq_space_left() == 0 {
                         ring.submit_and_wait(0);
                     }
+                    // Sound: as the first read of this room, above; it goes
+                    // back into `window`.
                     let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, USER_LARGE_BIT | seq) };
                     assert!(ok, "the ring has room for every read in flight");
                     window[idx] = Some(WindowSlot::Reading(room));
@@ -373,6 +380,8 @@ impl WarmBatch {
     fn slot_ptr_and_cap(&mut self, slot: usize) -> (*mut u8, usize) {
         let arena = self.arena.get_or_insert_with(|| Box::new_uninit_slice(WARM_BATCH_SLOTS * WARM_SLOT_BLOCKS));
         let start = slot * WARM_SLOT_BLOCKS;
+        // Sound: `slot` is below WARM_BATCH_SLOTS (push_raw flushes at that
+        // count), so the slot is inside the arena.
         let ptr = unsafe { arena.as_mut_ptr().add(start).cast::<u8>() };
         (ptr, WARM_SLOT_BLOCKS * 64)
     }
@@ -387,6 +396,9 @@ impl WarmBatch {
         let slot = self.len;
         let (dst, _) = self.slot_ptr_and_cap(slot);
         if byte_len > 0 {
+            // Sound: the slot has room for `byte_len` bytes (checked above),
+            // and `src_ptr` is that many bytes outside the arena (a caller's
+            // buffer or the stack probe).
             unsafe { core::ptr::copy_nonoverlapping(src_ptr, dst, byte_len) };
         }
         self.entries[slot] = (file_idx, byte_len);
@@ -409,6 +421,8 @@ impl WarmBatch {
         if count == 1 {
             let (file_idx, byte_len) = self.entries[0];
             let ptr = arena.as_ptr().cast::<u8>();
+            // Sound: the first `byte_len` bytes of slot 0 were written by a
+            // read or by push_raw.
             let bytes = unsafe { core::slice::from_raw_parts(ptr, byte_len) };
             let h = crate::hash_slice_32(mode, bytes);
             sink.put(file_idx, Ok(h));
@@ -419,6 +433,9 @@ impl WarmBatch {
             let blocks_needed = byte_len.div_ceil(64);
             let padded = blocks_needed * 64;
             if padded > byte_len {
+                // Sound: slot k is inside the arena, and `padded` is at most
+                // the slot's length (`byte_len` is, and the slot is whole
+                // blocks).
                 let start_ptr = unsafe { arena.as_mut_ptr().add(k * WARM_SLOT_BLOCKS).cast::<u8>() };
                 unsafe { start_ptr.add(byte_len).write_bytes(0, padded - byte_len) };
             }
@@ -430,6 +447,9 @@ impl WarmBatch {
             let (_, byte_len) = self.entries[k];
             let blocks_needed = byte_len.div_ceil(64);
             let start = k * WARM_SLOT_BLOCKS;
+            // Sound: the slot's first `blocks_needed` blocks are written:
+            // `byte_len` bytes by the read or copy, zeros to the block's end
+            // just above. A Block is 64 plain bytes.
             let slice = unsafe { core::slice::from_raw_parts(arena_ref.as_ptr().add(start).cast::<Block>(), blocks_needed) };
             items[k] = (slice, byte_len);
         }
@@ -480,6 +500,9 @@ fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize) 
         if at == dst_cap {
             return Ok((at, false));
         }
+        // Sound: `at` is below `dst_cap` here, and the callers give `dst_cap`
+        // writable bytes at `dst_ptr`; the kernel writes at most the rest of
+        // them.
         let iov = libc::iovec { iov_base: unsafe { dst_ptr.add(at).cast() }, iov_len: dst_cap - at };
         let rc = unsafe { libc::preadv2(fd, &iov, 1, at as libc::off_t, libc::RWF_NOWAIT) };
         if rc == 0 {
@@ -534,14 +557,20 @@ fn buffer_with_start(buf: &mut Vec<u8>, hint: usize, start: Option<(*const u8, u
 fn read_rest_sync_uninit(file: &File, buf: &mut Vec<u8>, mut at: usize) -> io::Result<usize> {
     loop {
         if at == buf.capacity() {
+            // Sound: every byte below `at` was written by a read (`at` counts
+            // them), and `at` is the capacity here; the length goes back to 0
+            // once the buffer has grown, as the callers expect.
             unsafe { buf.set_len(at) };
             buf.reserve(at.max(4096));
             unsafe { buf.set_len(0) };
         }
         let avail = buf.capacity() - at;
+        // Sound: `avail` bytes from `at` are inside the capacity; the kernel
+        // writes at most that many.
         let ptr = unsafe { buf.as_mut_ptr().add(at) };
         let rc = unsafe { libc::pread(file.as_raw_fd(), ptr.cast(), avail, at as libc::off_t) };
         if rc == 0 {
+            // Sound: the reads wrote every byte below `at`.
             unsafe { buf.set_len(at) };
             return Ok(at);
         }
@@ -584,6 +613,12 @@ impl WarmLargePipe {
     fn submit_lent(&mut self, idx: usize, size: u64, map: memmap2::Mmap, sink: &mut Sink<'_>) {
         self.drain(sink);
         let m = block_on(self.pipe.message(idx, Some(size)));
+        // Sound: the map is kept beside the guard in `maps` until the
+        // message's event (drain), where the guard goes first; a guard dropped
+        // before its message is hashed stops the process (Lent), and so does a
+        // panic. The mapping is of a file: if another program cuts the file
+        // short meanwhile, the read faults and the process stops (README,
+        // --no-mmap).
         let slice: &'static [u8] = unsafe { core::slice::from_raw_parts(map.as_ptr(), map.len()) };
         let guard = unsafe { self.pipe.lent(m, slice) };
         self.maps.push((idx, guard, map));
@@ -643,9 +678,13 @@ impl ColdRingState {
         let partial_at = buffer_with_start(&mut buf, hint, partial_src);
         let sid = self.free_slot_ids.pop().unwrap();
         let fd = file.as_raw_fd();
+        // Sound: `partial_at` is inside the capacity (buffer_with_start).
         let ptr = unsafe { buf.as_mut_ptr().add(partial_at) };
         let rlen = (buf.capacity() - partial_at) as u32;
         self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at });
+        // Sound: the read's buffer stays where it is, written by no one else,
+        // until its completion is reaped: the buffer goes into `slots[sid]`
+        // and is not touched until then.
         let ok = unsafe { self.ring.push_read(fd, ptr, rlen, partial_at as u64, 0, sid as u64) };
         // In every build, as the large file's read above.
         assert!(ok, "the ring has room for every read in flight");
@@ -681,10 +720,14 @@ impl ColdRingState {
                         self.ring.submit_and_wait(0);
                     }
                     let fd = st.file.as_raw_fd();
+                    // Sound: `st.at` is below the capacity (the read that
+                    // failed had room).
                     let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
                     let len = (st.buf.capacity() - st.at) as u32;
                     let off = st.at as u64;
                     self.slots[slot_id] = Some(st);
+                    // Sound: as queue_file's read; the slot goes back into
+                    // `slots`.
                     let ok = unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
                     assert!(ok, "the ring has room for every read in flight");
                     self.ring_in_flight += 1;
@@ -730,6 +773,7 @@ impl ColdRingState {
                 drop(st.file);
                 self.free_slot_ids.push(slot_id);
                 if sink.open {
+                    // Sound: the reads wrote every byte below `st.at`.
                     unsafe { st.buf.set_len(total_len) };
                     if total_len <= WARM_BATCH_MAX_FILE {
                         warm_batch.push_raw(st.file_idx, st.buf.as_ptr(), total_len, mode, sink);
@@ -744,6 +788,8 @@ impl ColdRingState {
                 }
             } else {
                 if st.at == st.buf.capacity() {
+                    // Sound: as read_rest_sync_uninit's: all `st.at` bytes are
+                    // written, kept across the growth.
                     unsafe { st.buf.set_len(st.at) };
                     st.buf.reserve(st.buf.capacity().max(8192));
                     unsafe { st.buf.set_len(0) };
@@ -752,10 +798,14 @@ impl ColdRingState {
                     self.ring.submit_and_wait(0);
                 }
                 let fd = st.file.as_raw_fd();
+                // Sound: `st.at` is below the capacity (grown above if it was
+                // full).
                 let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
                 let len = (st.buf.capacity() - st.at) as u32;
                 let off = st.at as u64;
                 self.slots[slot_id] = Some(st);
+                // Sound: as queue_file's read; the slot goes back into
+                // `slots`.
                 let ok = unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
                 assert!(ok, "the ring has room for every read in flight");
                 self.ring_in_flight += 1;
@@ -991,6 +1041,7 @@ fn run_hybrid_worker(
             match try_pread_cached(file.as_raw_fd(), medium_buf.as_mut_ptr(), medium_buf.capacity(), 0) {
                 Ok((n, true)) => {
                     drop(file);
+                    // Sound: try_pread_cached wrote the first `n` bytes.
                     unsafe { medium_buf.set_len(n) };
                     let h = crate::hash_slice_32(args.mode, &medium_buf);
                     medium_buf.clear();
