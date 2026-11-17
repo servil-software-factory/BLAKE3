@@ -66,8 +66,10 @@ Tests use published BLAKE3 vectors and fixed answers generated with
 official BLAKE3. Cases are chosen from the code's boundaries and distinct
 paths. Mutation testing asks whether the core and thread-library tests
 reject deliberately changed code. Each surviving mutation has an
-explanation; a survivor is not automatically harmless. The normal
-mutation gate does not yet cover `b3sum`.
+explanation; a survivor is not automatically harmless. The mutation
+gate does not cover `b3sum`. In its place a program takes ten of
+`b3sum`'s protections out one at a time and requires the test for each
+to fail.
 
 For failures that ordinary successful hashing would miss, we arrange the
 failure directly:
@@ -75,9 +77,20 @@ failure directly:
 - **Memory bounds:** inaccessible guard pages sit immediately beside
   buffers. A stray access in an exercised path faults, assembly included.
 - **Thread handshakes:** Shuttle runs the production finish, park and
-  wake-up code under many chosen schedules. It reports a deadlock with
-  the schedule that caused it. These checks run before a change lands;
-  they do not cover the entire Pipeline or every possible schedule.
+  wake-up code, and the whole Pipeline with stand-in worker threads,
+  under thousands of chosen schedules. A wait that could hang shows as
+  a deadlock with the schedule that caused it, and a result handed
+  over too early as a wrong digest. Nine faults planted in the
+  Pipeline's code one at a time (a result published before it is
+  written, a wake left out, a buffer given back while a worker reads
+  it, and others) each make its model fail. These checks run before a
+  change lands. They cover the schedules tried, not every one, and
+  Shuttle treats every atomic operation as the strictest kind, so a
+  fault that needs a weaker ordering to show is outside them.
+- **Unsafe code states its reason:** every `unsafe` block of the
+  Pipeline and of `b3sum` has a comment saying why it is sound, and a
+  check refuses a block there without one. Writing them found three
+  bugs in `b3sum`.
 - **I/O failures:** bounded tests use a full output device, an empty
   checkfile, a pathname replaced after open, a file longer than its
   size said, a link where an output file goes, and a failed `io_uring`
@@ -86,8 +99,7 @@ failure directly:
   memory or give a wrong hash stops in every build, not only in debug
   builds. Where the compiler can refuse the call instead, it does.
 
-The new I/O tests were seen to fail with the protections removed. The
-manual gives commands to repeat both the checks and their controls.
+The manual gives commands to repeat both the checks and their controls.
 
 ## Your build checks itself
 
@@ -118,17 +130,20 @@ this statement of practice, are the evidence that its reviews occurred.
 ## What you can verify, and what remains your responsibility
 
 A full release version includes a source commit hash. Release binaries
-come with SHA-256 and BLAKE3 checksums. Obtain the expected checksums from
-a source you trust, and check them before running a downloaded binary.
-Checksums detect changed bytes; they do not identify a publisher if an
-attacker can replace the file and its checksums together.
+come with SHA-256 checksums. Obtain the expected checksum from a source
+you trust, and check it before running a downloaded binary. A checksum
+detects changed bytes; it does not identify a publisher if an attacker
+can replace the file and its checksum together.
 
-You need not trust a Linux `b3sum` binary we publish: its build is
-reproducible, so you can build it again from the release's tag and
-compare the bytes ([how](b3sum/README.md)). We do so ourselves on
-GitHub's machines before and after each release, and a program compares
-each published crate with the tagged source file by file. The manual
-states what this leaves out. Releases through 0.9.0 predate it.
+You need not trust a Linux `b3sum` binary or a crate we publish: their
+builds are reproducible, so you can build one again from the release's
+tag and compare the bytes ([how](b3sum/README.md)). We do so ourselves
+on GitHub's machines before and after each release, and a program
+compares each published crate with the tagged source file by file. A
+release's tag names its source by hash and cannot be moved. The C
+library's archive is not reproducible: build it from source. Releases
+are not signed. The manual states what else this leaves out. Releases
+through 0.9.0 predate it.
 
 For file verification, obtain the expected hash through a trusted
 channel. `b3sum --check` checks the named files, not a directory's complete
