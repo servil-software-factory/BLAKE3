@@ -9,7 +9,7 @@
 //! file afterwards: a large set of files hashed once is the common case,
 //! and is too large to cache (Zooko, November 14, 2026).
 
-use blake3::throughput::{Cv, TreeHasher};
+use blake3::throughput::{Cv, TreeHasher, level_of};
 
 /// A cold file is read in pieces of this many bytes, each by one direct
 /// read: 128 groups, so a piece starts on a group and its groups'
@@ -156,26 +156,39 @@ pub(crate) fn hash(mode: blake3::Mode, file: &std::fs::File, len: usize, threads
     assert!(len > PIECE, "two pieces or more");
     #[cfg(test)]
     HASHED.with(|h| h.set(h.get() + 1));
+    // Checked when this compiles: a piece is a whole subtree's size.
+    const LEVEL: u32 = level_of(PIECE as u64);
     let tree = TreeHasher::new(mode);
     let pieces = len.div_ceil(PIECE);
-    let mut cvs = vec![Cv::from_bytes([0; 32]); pieces];
+    // A slot a piece, as `read` shares them out. The last piece is the
+    // message's last subtree, a value of its own kind: its slot stays unset.
+    let mut cvs = vec![Cv::unset(); pieces];
+    let last = std::sync::OnceLock::new();
     {
         let tree = tree.clone().on_this_core();
-        read(file, len, threads, mine, &mut cvs, 1, |i, bytes, cv| cv[0] = tree.subtree_cv((i * PIECE / blake3::CHUNK_LEN) as u64, bytes))?;
+        read(file, len, threads, mine, &mut cvs, 1, |i, bytes, cv| {
+            if i + 1 == pieces {
+                last.set(tree.last_cv((i << LEVEL) as u64, bytes)).expect("one thread reads the last piece");
+            } else {
+                cv[0] = tree.subtree_cv(LEVEL, i as u64, bytes);
+            }
+        })?;
     }
-    // A layer's last value, with no sibling, goes up as it is.
-    let mut next = vec![Cv::from_bytes([0; 32]); pieces.div_ceil(2)];
-    let mut count = pieces;
-    while count > 2 {
-        let pairs = count / 2;
+    let mut last = last.into_inner().expect("the last piece was read");
+    cvs.truncate(pieces - 1);
+    // A layer's whole values pair up. An odd one out is the last
+    // subtree's left sibling.
+    let mut next = vec![Cv::unset(); cvs.len() / 2];
+    while cvs.len() > 1 {
+        let pairs = cvs.len() / 2;
         tree.parent_cvs(&cvs[..2 * pairs], &mut next[..pairs]);
-        if count % 2 == 1 {
-            next[pairs] = cvs[count - 1];
+        if cvs.len() % 2 == 1 {
+            last = tree.last_parent_cv(&cvs[2 * pairs], &last);
         }
-        count = count.div_ceil(2);
-        cvs[..count].copy_from_slice(&next[..count]);
+        cvs.truncate(pairs);
+        cvs.copy_from_slice(&next[..pairs]);
     }
-    Some(tree.root_hash(&cvs[0], &cvs[1]))
+    Some(tree.root_hash(&cvs[0], &last, len as u64))
 }
 
 #[cfg(test)]
