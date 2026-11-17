@@ -268,14 +268,9 @@ fn stream_fd_into_rooms(
             }
         }
 
-        if first_err.is_some() {
-            if in_flight_uring == 0 {
-                for slot in &mut window {
-                    *slot = None;
-                }
-                return Err(first_err.unwrap());
-            }
-            continue;
+        if let Some(e) = first_err {
+            wait_out_large_reads(ring, deferred_small_cqes, &mut window, &mut in_flight_uring);
+            return Err(e);
         }
 
         let mut finished = false;
@@ -308,23 +303,38 @@ fn stream_fd_into_rooms(
         }
 
         if finished {
-            while in_flight_uring > 0 {
-                ring.submit_and_wait(1);
-                while let Some(cqe) = ring.pop_cqe() {
-                    if (cqe.user_data & USER_LARGE_BIT) == 0 {
-                        deferred_small_cqes.push_back(cqe);
-                        continue;
-                    }
-                    let seq = cqe.user_data & !USER_LARGE_BIT;
-                    let _ = window[(seq as usize) % LARGE_WINDOW].take();
-                    in_flight_uring -= 1;
-                }
-            }
-            for slot in &mut window {
-                *slot = None;
-            }
+            wait_out_large_reads(ring, deferred_small_cqes, &mut window, &mut in_flight_uring);
             return Ok(());
         }
+    }
+}
+
+/// Waits for every large read still in flight and lets its room go: the
+/// one way out of `stream_fd_into_rooms`, at the file's end and after an
+/// error alike. Each turn enters the kernel and waits for a completion.
+/// (The error's way out once looped without entering, and with
+/// `IORING_SETUP_DEFER_TASKRUN` no completion arrives unless the thread
+/// enters: it spun for ever. BLAKE3 #437.)
+fn wait_out_large_reads(
+    ring: &mut Uring,
+    deferred_small_cqes: &mut VecDeque<IoUringCqe>,
+    window: &mut [Option<WindowSlot>; LARGE_WINDOW],
+    in_flight: &mut usize,
+) {
+    while *in_flight > 0 {
+        ring.submit_and_wait(1);
+        while let Some(cqe) = ring.pop_cqe() {
+            if (cqe.user_data & USER_LARGE_BIT) == 0 {
+                deferred_small_cqes.push_back(cqe);
+                continue;
+            }
+            let seq = cqe.user_data & !USER_LARGE_BIT;
+            let _ = window[(seq as usize) % LARGE_WINDOW].take();
+            *in_flight -= 1;
+        }
+    }
+    for slot in window {
+        *slot = None;
     }
 }
 
