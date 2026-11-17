@@ -702,8 +702,13 @@ each bug are in `git log`.
     multiple of 2 MiB asked for no byte past it, and an outboard's small
     file was read for exactly its size. A file that had grown gave the
     hash of its first bytes. Both now take the end from a read: one more
-    read after a last whole piece, and room for one more byte. 0.9.0 had
-    this rule and a test of it; the 0.10 reads dropped both.
+    read after a last whole piece, and room for one more byte. The many
+    small files' reads from the page cache took a read that stopped at
+    the reported size for the end, to save a system call a file; they
+    now read until a read gives no byte, as every other path does. 0.9.0
+    had this rule and a test of it, in a source comment alone; the 0.10
+    reads dropped both. The rule is now in `b3sum`'s README, where a
+    user can find it and rely on it.
 15. **`--keyed --outboard -` hashed nothing** (#424). The key had been
     all of standard input, and the outboard of no bytes was made in
     silence. It is an error now, as without `--outboard`.

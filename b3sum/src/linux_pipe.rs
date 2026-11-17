@@ -446,8 +446,15 @@ fn force_miss() -> bool {
     false
 }
 
+/// Read the file at `fd` from byte `at` into the `dst_cap` bytes at
+/// `dst_ptr`, from the page cache alone: how far it got, and whether that
+/// is the file's end. Only a read that gives no byte says it is: the size
+/// a file reports chooses the buffer, never where the file ends (0.9.0's
+/// rule, which a shortcut here broke: it took a read that stopped at the
+/// reported size for the end, BLAKE3 #424). False where the buffer is
+/// full or the cache lacks the next bytes: the caller reads on.
 #[inline]
-fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize, hint: usize) -> io::Result<(usize, bool)> {
+fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize) -> io::Result<(usize, bool)> {
     if force_miss() {
         return Ok((at, false));
     }
@@ -468,9 +475,6 @@ fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize, 
             return Ok((at, false));
         }
         at += rc as usize;
-        if hint > 0 && at == hint && at < dst_cap {
-            return Ok((at, true));
-        }
     }
 }
 
@@ -479,7 +483,6 @@ struct SmallSlot {
     file: File,
     buf: Vec<u8>,
     at: usize,
-    hint: usize,
 }
 
 #[inline]
@@ -611,7 +614,7 @@ impl ColdRingState {
         let fd = file.as_raw_fd();
         let ptr = unsafe { buf.as_mut_ptr().add(partial_at) };
         let rlen = (buf.capacity() - partial_at) as u32;
-        self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at, hint });
+        self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at });
         let ok = unsafe { self.ring.push_read(fd, ptr, rlen, partial_at as u64, 0, sid as u64) };
         // In every build, as the large file's read above.
         assert!(ok, "the ring has room for every read in flight");
@@ -688,8 +691,9 @@ impl ColdRingState {
 
             let n = cqe.res as usize;
             st.at += n;
-            let reached_eof = n == 0 || (st.hint > 0 && st.at == st.hint && st.at < st.buf.capacity());
-            if reached_eof {
+            // The file's end is where a read gives no byte, and nowhere
+            // its size said (b3sum/README.md, "What b3sum reads").
+            if n == 0 {
                 let total_len = st.at;
                 drop(st.file);
                 self.free_slot_ids.push(slot_id);
@@ -908,7 +912,7 @@ fn run_hybrid_worker(
                 (probe_stack.as_mut_ptr().cast::<u8>(), probe_stack.len(), false)
             };
 
-            match try_pread_cached(file.as_raw_fd(), slot_ptr, slot_cap, 0, hint) {
+            match try_pread_cached(file.as_raw_fd(), slot_ptr, slot_cap, 0) {
                 Ok((n, true)) => {
                     drop(file);
                     if in_arena {
@@ -953,7 +957,7 @@ fn run_hybrid_worker(
         if size < SMALL {
             let hint = size as usize;
             ensure_spare_cap(&mut medium_buf, hint + 1);
-            match try_pread_cached(file.as_raw_fd(), medium_buf.as_mut_ptr(), medium_buf.capacity(), 0, hint) {
+            match try_pread_cached(file.as_raw_fd(), medium_buf.as_mut_ptr(), medium_buf.capacity(), 0) {
                 Ok((n, true)) => {
                     drop(file);
                     unsafe { medium_buf.set_len(n) };
@@ -1343,5 +1347,37 @@ mod test {
         let mut sink = super::Sink { done: &mut collect, open: true };
         let msg = vec![0u8; super::WARM_SLOT_BLOCKS * 64 + 1];
         wb.push_raw(0, msg.as_ptr(), msg.len(), blake3::Mode::Plain, &mut sink);
+    }
+
+    /// A file is read to where a read gives no byte, whatever room its
+    /// reported size chose: room for less than the file is filled and
+    /// not called the end, and room for more ends at the file's last
+    /// byte. (0.9.0's test of the rule, for the read that replaced
+    /// that release's.)
+    #[test]
+    fn a_cached_read_ends_only_where_a_read_gives_no_byte() {
+        // Beside the test's executable: a temporary directory in memory
+        // (a tmpfs) has no reads from the page cache alone to test.
+        let dir = tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
+        let path = dir.path().join("f");
+        let content: Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut byte = 0u8;
+        if super::try_pread_cached(std::os::fd::AsRawFd::as_raw_fd(&file), &mut byte, 1, 0).unwrap().0 == 0 {
+            eprintln!("no reads from the page cache alone in {}", dir.path().display());
+            return;
+        }
+        for room in [1usize, 4095, 4096, 99_999, 100_000, 100_001, 300_000] {
+            let mut buffer = vec![0u8; room];
+            let (n, end) = super::try_pread_cached(std::os::fd::AsRawFd::as_raw_fd(&file), buffer.as_mut_ptr(), room, 0).unwrap();
+            assert_eq!((n, end), (room.min(content.len()), room > content.len()), "room={room}");
+            assert_eq!(buffer[..n], content[..n]);
+            // From where a first read stopped, as a file that grew is read on.
+            let mut rest = vec![0u8; content.len() + 1];
+            let (m, end) = super::try_pread_cached(std::os::fd::AsRawFd::as_raw_fd(&file), rest.as_mut_ptr(), rest.len(), n).unwrap();
+            assert_eq!((m, end), (content.len(), true), "room={room}");
+            assert_eq!(rest[n..m], content[n..]);
+        }
     }
 }

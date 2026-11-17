@@ -109,6 +109,20 @@ CPUs.
 
 [What `--check` does](what_does_check_do.md) explains checkfiles.
 
+## What b3sum reads
+
+`b3sum` hashes each file from its first byte to its end, and the end is
+where the system gives no more bytes. The size a file reports chooses
+how `b3sum` reads it and never where it ends. So a file that reports
+0 bytes and has some (as under `/proc`), or one that has grown since
+`b3sum` looked, is hashed whole. You can rely on this: the hash is of
+every byte the file had when its last read came back.
+
+A file that another program changes while `b3sum` reads it has no one
+content to hash. Hash files that hold still, or a snapshot of them.
+`b3sum` keeps the file it opened: replacing the name with another file
+during the run does not change which file is hashed.
+
 ## Large files the cache does not hold
 
 On Linux, a file of 4 MiB or more that the page cache does not hold is read past the
