@@ -113,8 +113,13 @@ pub(crate) struct Uring {
     cq_tail: *const AtomicU32,
     cq_mask: u32,
     cqes: *const IoUringCqe,
+    /// Reads queued and not yet reaped: the kernel may still write their
+    /// buffers. The ring is not dropped or set aside while there are any.
+    in_flight: u32,
 }
 
+// Sound: the pointers are into this ring's own mappings, which go where
+// the Uring goes and are unmapped by its drop alone.
 unsafe impl Send for Uring {}
 
 thread_local! {
@@ -138,6 +143,7 @@ impl Uring {
     /// Cache an idle `Uring` on the thread that created it so subsequent
     /// `--check` batches on this thread reuse it without `io_uring_setup`.
     pub(crate) fn release(self) {
+        assert_eq!(self.in_flight, 0, "a ring is set aside with no read in flight");
         LOCAL_URING.with(|c| {
             c.set(Some(self));
         });
@@ -251,6 +257,7 @@ impl Uring {
             cq_tail,
             cq_mask,
             cqes,
+            in_flight: 0,
         })
     }
 
@@ -294,6 +301,7 @@ impl Uring {
         }
         self.local_sq_tail = self.local_sq_tail.wrapping_add(1);
         self.unsubmitted += 1;
+        self.in_flight += 1;
         true
     }
 
@@ -341,6 +349,7 @@ impl Uring {
         let idx = (head & self.cq_mask) as usize;
         let cqe = unsafe { *self.cqes.add(idx) };
         unsafe { (*self.cq_head).store(head.wrapping_add(1), Ordering::Release) };
+        self.in_flight -= 1;
         Some(cqe)
     }
 }
@@ -364,6 +373,21 @@ fn enter(fd: RawFd, to_submit: u32, min_complete: u32, flags: u32) -> Option<u32
 
 impl Drop for Uring {
     fn drop(&mut self) {
+        // Closing a ring does not wait for its reads: the kernel may write
+        // a queued read's buffer after this returns, and whoever drops the
+        // ring frees those buffers next. So a ring dropped with a read in
+        // flight (a return or a panic past it) stops the process here.
+        if self.in_flight != 0 {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "b3sum: an io_uring was dropped with {} reads in flight; stopping before their buffers can be released",
+                self.in_flight
+            );
+            std::process::abort()
+        }
+        // Sound: the three mappings and the descriptor are this ring's own
+        // (new), each released once, here.
         unsafe {
             libc::munmap(self.sqes_ptr.cast(), self.sqes_len);
             if !self.single_mmap {
@@ -379,6 +403,35 @@ impl Drop for Uring {
 mod test {
     use super::Uring;
     use std::os::fd::AsRawFd;
+
+    /// A ring dropped while a read is in flight stops the process: the
+    /// read here is of a pipe no one writes, so it stays in flight.
+    #[test]
+    fn a_ring_dropped_with_a_read_in_flight_stops_the_process() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "B3SUM_TEST_RING_DROPPED";
+        if std::env::var_os(CHILD).is_some() {
+            let Ok(mut ring) = Uring::new(8) else { std::process::exit(77) };
+            let mut ends = [0i32; 2];
+            assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+            let mut buffer = [0u8; 64];
+            assert!(unsafe { ring.push_read(ends[0], buffer.as_mut_ptr(), 64, 0, 0, 1) });
+            ring.submit_and_wait(0);
+            drop(ring);
+            std::process::exit(0);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "uring::test::a_ring_dropped_with_a_read_in_flight_stops_the_process", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        if output.status.code() == Some(77) {
+            eprintln!("no io_uring here");
+            return;
+        }
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{:?}: {:?}", output.status, output.stderr);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("dropped with 1 reads in flight"));
+    }
 
     /// A real failed syscall must abort, even inside catch_unwind. This
     /// needs no io_uring permission: an invalid fd (or a denied syscall)
