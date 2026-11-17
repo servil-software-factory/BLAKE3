@@ -224,7 +224,8 @@ fn stream_fd_into_rooms(
                     while ring.sq_space_left() == 0 {
                         ring.submit_and_wait(0);
                     }
-                    unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, USER_LARGE_BIT | seq) };
+                    let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, USER_LARGE_BIT | seq) };
+                    assert!(ok, "the ring has room for every read in flight");
                     window[idx] = Some(WindowSlot::Reading(room));
                     in_flight_uring += 1;
                     continue;
@@ -500,6 +501,26 @@ fn ensure_spare_cap(buf: &mut Vec<u8>, needed: usize) {
     }
 }
 
+/// Makes `buf` an empty buffer with room for a file of `hint` bytes, whose
+/// first `n` bytes (`start`) were read already, and copies those in. The
+/// room is for what was read and more, whatever the hint: the file may
+/// have grown since its size was read. (One fallback sized its buffer by
+/// the hint alone and copied 16,448 bytes into 4,096.)
+fn buffer_with_start(buf: &mut Vec<u8>, hint: usize, start: Option<(*const u8, usize)>) -> usize {
+    let n = start.map_or(0, |(_, n)| n);
+    ensure_spare_cap(buf, (hint + 1).max(n + 4096));
+    // In every build: the copy below is within the buffer.
+    assert!(buf.capacity() >= n, "the buffer holds what was read");
+    if let Some((src, n)) = start
+        && n > 0
+    {
+        // Sound: `src` is `n` bytes read just now into a slot or buffer
+        // that is not `buf` (the callers'), and `buf` has room for them.
+        unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), n) };
+    }
+    n
+}
+
 fn read_rest_sync_uninit(file: &File, buf: &mut Vec<u8>, mut at: usize) -> io::Result<usize> {
     loop {
         if at == buf.capacity() {
@@ -608,15 +629,8 @@ impl ColdRingState {
         while self.free_slot_ids.is_empty() || self.ring.sq_space_left() == 0 {
             self.step_ring(true, args, warm_batch, sink);
         }
-        let partial_at = partial_src.map_or(0, |(_, n)| n);
         let mut buf = self.free_bufs.pop().unwrap_or_default();
-        let cap = (hint + 1).max(partial_at + 4096);
-        ensure_spare_cap(&mut buf, cap);
-        if let Some((src_ptr, n)) = partial_src
-            && n > 0
-        {
-            unsafe { core::ptr::copy_nonoverlapping(src_ptr, buf.as_mut_ptr(), n) };
-        }
+        let partial_at = buffer_with_start(&mut buf, hint, partial_src);
         let sid = self.free_slot_ids.pop().unwrap();
         let fd = file.as_raw_fd();
         let ptr = unsafe { buf.as_mut_ptr().add(partial_at) };
@@ -661,7 +675,8 @@ impl ColdRingState {
                     let len = (st.buf.capacity() - st.at) as u32;
                     let off = st.at as u64;
                     self.slots[slot_id] = Some(st);
-                    unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
+                    let ok = unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
+                    assert!(ok, "the ring has room for every read in flight");
                     self.ring_in_flight += 1;
                     continue;
                 }
@@ -731,7 +746,8 @@ impl ColdRingState {
                 let len = (st.buf.capacity() - st.at) as u32;
                 let off = st.at as u64;
                 self.slots[slot_id] = Some(st);
-                unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
+                let ok = unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
+                assert!(ok, "the ring has room for every read in flight");
                 self.ring_in_flight += 1;
             }
         }
@@ -944,10 +960,8 @@ fn run_hybrid_worker(
                     if let Some(ref mut c) = cold {
                         c.queue_file(i, file, hint, Some((slot_ptr, partial_at)), args, &mut warm_batch, &mut sink);
                     } else {
-                        let mut buf = Vec::with_capacity((hint + 1).max(4096));
-                        if partial_at > 0 {
-                            unsafe { core::ptr::copy_nonoverlapping(slot_ptr, buf.as_mut_ptr(), partial_at) };
-                        }
+                        let mut buf = Vec::new();
+                        buffer_with_start(&mut buf, hint, Some((slot_ptr, partial_at)));
                         let res = read_rest_sync_uninit(&file, &mut buf, partial_at).map(|n| crate::hash_slice_32(args.mode, &buf[..n])).map_err(Into::into);
                         sink.put(i, res);
                     }
@@ -1401,5 +1415,21 @@ mod test {
         let still = unsafe { libc::fcntl(255, libc::F_GETFD) };
         unsafe { libc::close(255) };
         assert_ne!(still, -1, "the caller's descriptor 255 was closed");
+    }
+
+    /// A file that grew after its size was read: the bytes already read
+    /// are more than the size said, and the buffer holds them all.
+    #[test]
+    fn a_buffer_holds_what_was_read_whatever_the_size_said() {
+        let read: Vec<u8> = (0..super::WARM_SLOT_BLOCKS * 64).map(|i| i as u8).collect();
+        let mut buf = Vec::new();
+        let n = super::buffer_with_start(&mut buf, 10, Some((read.as_ptr(), read.len())));
+        assert_eq!(n, read.len());
+        assert!(buf.capacity() >= n + 4096 && buf.is_empty());
+        unsafe { buf.set_len(n) };
+        assert_eq!(buf, read);
+        let mut none = vec![1u8; 7];
+        assert_eq!(super::buffer_with_start(&mut none, 10_000, None), 0);
+        assert!(none.capacity() > 10_000 && none.is_empty());
     }
 }
