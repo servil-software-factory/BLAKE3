@@ -43,7 +43,7 @@ cfg_if::cfg_if! {
 ///
 /// and cannot make one (the same names, so this fails for that reason):
 ///
-/// ```compile_fail
+/// ```compile_fail,E0603
 /// use blake3_servil_core::hazmat::platform::Platform;
 /// #[cfg(target_arch = "x86_64")]
 /// let _ = Platform::AVX2;

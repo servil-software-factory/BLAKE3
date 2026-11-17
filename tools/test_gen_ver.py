@@ -90,6 +90,34 @@ class Versions(unittest.TestCase):
         self.assertEqual((self.root / "CHANGELOG.md").read_text(), notes)
         self.assertEqual(self.git("status", "--porcelain"), "")
 
+    def test_the_release_check_takes_the_version_commit_gen_ver_makes(self):
+        # The two tools agree on what a version commit is: the stamp
+        # check of the release's artifacts finds nothing in the commit
+        # gen-ver makes, from a title in either form it can replace.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("release_artifacts", SCRIPT.with_name("release_artifacts.py"))
+        release_artifacts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(release_artifacts)
+        for title in ("0.8.0+dev", "0.8.0+" + "a" * 40):
+            with self.subTest(title=title):
+                (self.root / "CHANGELOG.md").write_text(f"# blake3-servil {title}, against official BLAKE3\n")
+                self.git("commit", "-qam", "the notes' title", "--allow-empty")
+                code = self.git("rev-parse", "HEAD")
+                number = "99.1." + str(len(title))
+                self.stamp(number)
+                release = release_artifacts.Release(f"v{number}+{code}", repo=str(self.root))
+                self.assertEqual(release.stamp_problems(code), [])
+                self.stamp("--dev")
+
+    def test_check_rejects_a_title_no_release_can_stamp(self):
+        # The 0.10.0 candidate's: "+SHA" where the commit or "dev" goes.
+        notes = self.root / "CHANGELOG.md"
+        notes.write_text("# blake3-servil 0.8.0+SHA, against official BLAKE3\n")
+        self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+        notes.write_text("# blake3-servil 0.8.0+dev, against official BLAKE3\n")
+        self.stamp("--check")
+
     def test_check_rejects_each_stale_copy(self):
         cases = [(path, f'version = "{DEV}"') for path in MANIFESTS if path != "Cargo.toml"]
         cases += [(path, f'version = "={DEV}"') for path in ("Cargo.toml", "threads/Cargo.toml", "b3sum/Cargo.toml")]

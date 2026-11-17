@@ -19,6 +19,12 @@ Some of the code is `unsafe` Rust or assembly. Its safety depends on
 contracts the compiler cannot check. We reduce that responsibility where
 we can:
 
+- A program that builds a BLAKE3 tree itself (`TreeHasher`) cannot build
+  one of another shape. Parts of a size the tree does not have, or a
+  short part inside it, do not compile. Parts joined in the wrong order
+  or place, and a root that leaves out the message's end, stop the
+  process. `b3sum` and the library's own thread pool build their trees
+  through the same calls.
 - The Pipeline's shared state is never freed, so a worker cannot read
   it after its owner has given it up. It is reused between Pipelines,
   which still requires correct synchronization.
@@ -35,8 +41,9 @@ we can:
 - A panic in `b3sum` stops the process at once. Nothing unwinds past a
   read the kernel still has in flight.
 
-The last four protections are added for 0.10.0. They address specific
-failure paths, not every possible I/O or concurrency bug.
+The first and the last four protections are added for 0.10.0. They
+address specific failure paths, not every possible I/O or concurrency
+bug.
 
 ## Proofs of the assembly
 

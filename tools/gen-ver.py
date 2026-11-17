@@ -90,6 +90,14 @@ def check_copies(full):
             sys.exit(f"{path}: expected {name} {full}")
         if path in PINS and manifest["dependencies"][PINS[path]]["version"] != "=" + full:
             sys.exit(f"{path}: {PINS[path]} must require ={full}")
+    # The release's notes are titled with a version a release's stamp can
+    # replace: the release check (tools/release_artifacts.py) allows a
+    # version commit to change a line only from X.Y.Z+dev, or
+    # X.Y.Z+<commit>, to the release's. A title such as "0.10.0+SHA"
+    # made the 0.10.0 candidate's version commit one that check refused.
+    title = Path("CHANGELOG.md").read_text().splitlines()[0]
+    if not re.fullmatch(r"# blake3-servil \d+\.\d+\.\d+\+(?:[0-9a-f]{40}|dev)\b.*", title):
+        sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> (found {title!r})")
     if f'#define B3_VERSION "{full}"' not in Path("capi/b3.h").read_text().splitlines():
         sys.exit(f"capi/b3.h: B3_VERSION must be {full}")
     lock = tomllib.loads(Path("b3sum/Cargo.lock").read_text())

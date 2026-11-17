@@ -3,6 +3,16 @@
 A plan (November 16, 2026); the names at its end are decided. `docs/tree-api.md` was layer 1 and is landed: `throughput::TreeHasher`,
 `Cv`, `left_len`. This is the rest.
 
+**November 17 (BLAKE3 #421).** The public tree calls now take and give
+values that carry their places (`Cv`, `LastCv`), and refuse a tree that is
+not BLAKE3's. The threads crate's pool builds its trees with them: its
+cut's rules, which were `debug_assert`s in the merge, are now kept by the
+calls in every build. Two hidden items remain of the first form, both for
+the Hasher's large updates (C below): `BareCv`, 32 bytes with no place,
+and `TreeHasher::bare_subtree_halves`, what the pool's hook returns and
+falls back to. `subtree_cv_on` takes a level and an index like
+`subtree_cv`.
+
 `blake3_servil_core::hazmat` is hidden (`#[doc(hidden)]`) and has one user,
 the threads crate (`threads/`). It exists because that crate carries a
 message's mode as a bare `(key, flags)` pair and names the kernels'

@@ -22,6 +22,11 @@ step python3 tools/unsafe_reasons.py
 step cargo nextest run --cargo-quiet --release --no-default-features
 # nextest skips doc tests: the examples without std too, where Batch is absent.
 step cargo test -q --release --doc --no-default-features
+# An example that must not compile names the compiler's reason
+# (compile_fail,E0308) where the compiler gives one a code. Stable
+# rustdoc takes any failure for it; with
+# this switch it holds each such example to its reason, in both crates.
+step sh -c 'RUSTC_BOOTSTRAP=1 cargo test -q --doc --features serde,zeroize && cd threads && RUSTC_BOOTSTRAP=1 cargo test -q --doc'
 RUSTFLAGS="-D warnings" step cargo check -q --release --tests --examples
 # The crate with the pool (threads/). One CPU, as in a one-CPU container:
 # the pool has no worker thread, and the caller hashes everything (the

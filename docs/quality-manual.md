@@ -32,6 +32,7 @@ release's measure of assurance.
 | Kernel still writes an I/O buffer after error recovery frees it | failed `io_uring_enter` aborts before recovery or unwind; a ring dropped with reads in flight aborts; a panic in `b3sum` aborts | every other lifetime or cancellation path |
 | File name replaced after the file is opened | every path hashes the file already open; direct reads reopen that descriptor through procfs | a coherent snapshot against concurrent writes to that inode: a file changed while it is hashed can give the hash of bytes it never held (`b3sum/README.md`, #443) |
 | Incomplete output, or empty verification input, reported as success | output errors propagated; each checkfile must contain a line, and each invalid line fails | complete directory verification or authentication of the expected digests |
+| A tree built from parts that are not BLAKE3's subtrees, or joined in the wrong place, gives a hash that is no BLAKE3 hash | `TreeHasher` names a whole subtree by level and index and types the message's last subtree apart (`Cv`, `LastCv`); each value carries its place, and every join and the root compare places and the message's length in every build. `tests/tree_shape.rs`: 4,032 trees equal official BLAKE3, each wrong shape refused; within 16 chunks, every pairing of values (9,889) is taken if and only if a rule written apart from the library's makes the two children of one parent; three examples must fail to compile, each for its named reason | that the bytes handed over are the message's bytes at the place named; a place a program gives a stored value itself (`Cv::at`) |
 | A `b3sum` protection lost in a later change | `tools/b3sum_controls.py` takes eleven of them out one at a time; the test for each must fail | protections it does not list; `b3sum` is outside the mutation gate |
 
 The rows from the Pipeline's model on are additions for 0.10.0. The I/O
@@ -779,8 +780,18 @@ each bug are in `git log`.
     complete. The error's way out is now the same code as the file's
     end. No test: it needs a device that fails a read after serving one.
 
-Bugs 14 to 20 were found by the AI security audit of the first 0.10.0
-candidate, and 24 by the second, not by the checks above. 21 to 23 were
+25. **A tree built from parts gave a wrong hash with no error**
+    (`TreeHasher`, #421). The first tree calls took any two chaining
+    values as a pair, and at chunk 0 any length as a subtree, so a
+    5.5 MiB message in parts of 5 MiB hashed to something that is no
+    BLAKE3 hash. The calls were new and never released. They now carry
+    each value's place and refuse a wrong shape, at compile time where
+    Rust can and in every build otherwise; the library's pool, whose
+    cut's rules were checked in debug builds alone, goes through them
+    too.
+
+Bugs 14 to 20 and 25 were found by the AI security audit of the first
+0.10.0 candidate, and 24 by the second, not by the checks above. 21 to 23 were
 found by reading every `unsafe` block of `b3sum`'s Linux reads and of
 the Pipeline and writing its reason beside it;
 `tools/unsafe_reasons.py` now fails a block there without one. 17 and
