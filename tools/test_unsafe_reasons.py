@@ -29,6 +29,10 @@ class Reasons(unittest.TestCase):
     def test_unsafe_fn_and_comments_are_not_blocks_and_tests_are_not_held(self):
         text = "// unsafe { in a comment }\npub unsafe fn f() {}\n#[cfg(test)]\nmod test {\n    fn t() { unsafe { g() } }\n}\n"
         self.assertEqual(ur.without_reason(text), [])
+        text = "#[cfg(all(test, not(shuttle)))]\nmod test {\n    fn t() { unsafe { g() } }\n}\n"
+        self.assertEqual(ur.without_reason(text), [])
+        text = "#[cfg(feature = \"std\")]\nmod tests {\n    fn t() { unsafe { g() } }\n}\n"
+        self.assertEqual([n for n, _ in ur.without_reason(text)], [3], "a module that is not the tests' is held to it")
 
     def test_the_listed_files_pass(self):
         for path in ur.FILES:

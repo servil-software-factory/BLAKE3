@@ -32,7 +32,9 @@ def without_reason(text):
     lines = text.split("\n")
     found = []
     for i, line in enumerate(lines):
-        if re.match(r"\s*(#\[cfg\(test\)\]\s*)?mod tests?\b", line) and i and "cfg(test)" in lines[i - 1] + line:
+        # The file's test module: `mod test` under a cfg that names test
+        # (`#[cfg(test)]`, `#[cfg(all(test, not(shuttle)))]`).
+        if re.match(r"\s*mod tests?\b", line) and i and re.match(r"\s*#\[cfg\(.*\btest\b", lines[i - 1]):
             break
         if line.lstrip().startswith("//") or not UNSAFE.search(line):
             continue
