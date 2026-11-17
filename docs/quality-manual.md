@@ -391,27 +391,34 @@ who authorized it. The release procedure keeps evidence on the exact
 version commit and retains packaged sources and dependency resolution
 from the publish dry-run. Install binaries from an authenticated source;
 verify SHA-256 with a trusted implementation before executing a downloaded
-hasher, then verify BLAKE3 too. An attacker who can replace a binary and
-both checksum files can pass both checks.
+hasher. An attacker who can replace a binary and its checksum file passes
+that check; the rebuild below is the check that does not rest on the
+release's own files.
 
 Two programs check a release's artifacts against its version commit
 (`CONTRIBUTING.md`, "Every artifact is a clean build of the version
 commit"). `tools/release_artifacts.py` compares each crate with the
-commit file by file, and reads each program's build version. `b3sum`'s
-Linux binaries are also reproducible: `tools/b3sum-release.sh` gives the
-same bytes on any machine from the same commit and the toolchain it
-names. Before a release our build must equal GitHub's, byte for byte;
-after it a workflow rebuilds the tag and compares what was published.
+commit file by file, reads each program's build version, and holds each
+`.sha256` file to the artifact beside it. `b3sum`'s Linux binaries and
+the four crates are also reproducible: `tools/b3sum-release.sh` and
+`tools/crates-release.sh` give the same bytes on any machine from the
+same commit, the toolchain it names and the dependency lock it holds
+(`tools/release/Cargo.lock`; a dependency changes only by a commit).
+Before a release our build must equal GitHub's, byte for byte; after it
+a workflow rebuilds the tag and compares what was published. The tag's
+name holds the code commit's hash, the tag's commit must be that commit
+with the version written in and nothing else, and on GitHub a release
+tag can be neither moved nor deleted.
 You can do the same with Docker (`b3sum/README.md`). A binary that
 differs from your rebuild was not built from the source, whatever its
 checksums say. 0.9.0's binaries predate this: they were built in
 checkouts that held untracked files (#435).
 
-What this does not cover: the C library's archive is checked by its
-build version alone, and a crate's `Cargo.toml` and `Cargo.lock` are
-Cargo's rewriting and are not compared (#436). A rebuild trusts the
-compiler, the C library and the container image it starts from.
-Releases are not signed.
+What this does not cover: the C library's archive is not reproducible
+and is checked by its build version alone (#436), so for the C library
+build from source. A rebuild trusts the compiler, the C library and the
+container image it starts from. Releases are not signed: what a release
+is rests on GitHub's and crates.io's accounts and on the rebuild.
 
 Reproducing a proof checks the machine code assembled by that run's
 toolchain under its harness. A user's compiler or assembler may emit
@@ -779,15 +786,35 @@ the Pipeline and writing its reason beside it;
 | Startup self-test | a miscompiled, mislinked, or faulty-hardware kernel on the user's machine | its inputs run every kernel entry point but the ARM64 kernels for short messages of unequal lengths (a unit test checks it each run), and each case's output feeds the next, so one wrong result changes every later one | faults that appear only after startup |
 | Guard pages | out-of-bounds access in the paths tested, assembly included | a byte planted past a buffer crashes the guard-page tests | paths not exercised; data races |
 
-Shuttle's models compile the production `finish.rs`, `park.rs` and
-`waker.rs` against its concurrency primitives. `check-builds.sh` runs
-all three before each landing; `--cfg shuttle` is required to enable
-them. To reproduce:
+Shuttle's models compile the production `finish.rs`, `park.rs`,
+`waker.rs` and `pipeline.rs` against its concurrency primitives.
+`check-builds.sh` runs all four before each landing; `--cfg shuttle` is
+required to enable them. To reproduce:
 
 ```sh
 (cd threads && RUSTFLAGS="--cfg shuttle" cargo test --release \
-  --test shuttle_finish --test shuttle_park --test shuttle_waker)
+  --test shuttle_finish --test shuttle_park --test shuttle_waker \
+  --test shuttle_pipeline)
+python3 tools/pipeline_model_controls.py
 ```
+
+The Pipeline's model (`threads/tests/shuttle_pipeline.rs`) runs the
+whole of `pipeline.rs` with a stand-in for the pool: a queue of actions
+served by the model's worker threads. Its seven scenarios cover
+messages through Rooms, owned and lent messages, batches, an abort, one
+Pipeline after another on one storage, and a Room that outlives its
+Pipeline. Every digest is compared with the one-thread library's, a
+caller no one wakes is a deadlock, and each run ends with every storage
+free again. The second command plants nine faults in `pipeline.rs` one
+at a time (a result published before it is written, a wake left out, a
+Room given back while a worker reads it, a storage reused while held,
+and others) and requires the model to fail for each. What the model
+cannot see: Shuttle treats every atomic ordering as SeqCst; it tries
+thousands of schedules, not all; and the pool itself is the stand-in.
+
+`tools/b3sum_controls.py` does the same for `b3sum`, which the mutation
+gate does not cover: it takes ten protections out one at a time and
+requires the test for each to fail.
 
 The current tests use bounded scenarios and probabilistic schedule
 selection (`check_pct`), not exhaustive enumeration of arbitrary callers.
