@@ -1,57 +1,61 @@
 # b3sum
 
-A command-line tool that prints [BLAKE3](https://blake3.io) hashes of files or standard
-input, like `sha256sum` or `md5sum`. This is `blake3-servil`'s `b3sum` (see the repository's [README](../README.md)).
+A command-line tool that prints [BLAKE3](https://blake3.io) hashes of files or
+standard input, like `sha256sum` or `md5sum`. This is `blake3-servil`'s
+`b3sum` (see the repository's [README](../README.md)).
 
 <img src="../docs/images/b3sum-epyc-1000-files.svg" alt="Hashing a tree of 1000 files on an AMD EPYC 9255: b3sum on every core and on one thread, beside sha1sum, sha256sum and md5sum, in GB/s" width="720">
 
 # Installation
 
-On Linux, download the binary for your machine from the
-[releases page](https://github.com/servil-software-factory/BLAKE3/releases):
-`b3sum-VERSION-x86_64-unknown-linux-gnu` or
-`b3sum-VERSION-aarch64-unknown-linux-gnu`, each beside its SHA-256 and
-BLAKE3 digests. They are statically linked, so each run starts in about
-two thirds of the time a dynamically linked build takes, which matters
-where `b3sum` runs once per file. Check both digests, then put it on
-your `PATH` as `b3sum`:
+## Prebuilt Linux binaries
 
-```
+Download `b3sum-VERSION-x86_64-unknown-linux-gnu` or
+`b3sum-VERSION-aarch64-unknown-linux-gnu` and its `.sha256` file from the
+[releases page](https://github.com/servil-software-factory/BLAKE3/releases).
+These binaries are statically linked, so they start faster when invoked many
+times (for example, once per file). Check the digest, make the binary executable,
+and move it to a directory on your `PATH` as `b3sum`:
+
+```bash
 sha256sum -c b3sum-VERSION-TARGET.sha256
-chmod +x b3sum-VERSION-TARGET && ./b3sum-VERSION-TARGET -c b3sum-VERSION-TARGET.b3
+chmod +x b3sum-VERSION-TARGET
 ```
 
-To build it yourself on Linux, with [Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html),
-link it statically too, giving your machine's target
-(`aarch64-unknown-linux-gnu` on 64-bit Arm):
+## Verify a Linux binary by rebuilding it
 
-```
-RUSTFLAGS="-C target-feature=+crt-static" cargo install b3sums --target x86_64-unknown-linux-gnu
-```
-
-On macOS, `cargo install b3sums`. The package is `b3sums` (`b3sum` on
-crates.io is official BLAKE3's); the program it installs is `b3sum`, in
-`~/.cargo/bin`. (`cargo install b3sum` and the prebuilt binaries on
-[official BLAKE3's releases page](https://github.com/BLAKE3-team/BLAKE3/releases)
-give official BLAKE3's `b3sum`.)
-
-**For packagers:** build the release binary with `sh tools/b3sum-release.sh`
-in a checkout of a release tag: it builds a fresh clone of the tag's
-commit, so nothing else the checkout holds reaches the binary. On Linux
-it links statically, as above, and it writes the binary's SHA-256 and
-BLAKE3 digests beside it.
-
-**The Linux binaries are reproducible.** You need not trust the file we
-published: build it again from the tag and compare. From a clone at the
-release's tag, with Docker or Podman:
+The Linux release binaries are reproducible (for releases after 0.9.0). From a
+checkout of a release tag, you can rebuild them in Docker or Podman and verify
+that your build matches the published file byte for byte:
 
 ```sh
 docker run --rm -v "$PWD":/src -w /src ubuntu:26.04 sh tools/b3sum-release-container.sh
 sha256sum dist/b3sum-*
 ```
 
-The digest is the published binary's, or the published binary was not
-built from that source. (Releases after 0.9.0.)
+## Build from source
+
+With [Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html):
+
+- On Linux (recommended static build; use `aarch64-unknown-linux-gnu` on 64-bit
+  Arm):
+
+  ```bash
+  RUSTFLAGS="-C target-feature=+crt-static" cargo install b3sums --target x86_64-unknown-linux-gnu
+  ```
+
+- On macOS:
+
+  ```bash
+  cargo install b3sums
+  ```
+
+The package name on crates.io is **`b3sums`** (the `b3sum` package is official
+upstream BLAKE3). Installing `b3sums` puts the `b3sum` binary in `~/.cargo/bin`.
+
+Packagers building a release binary from a tag checkout can run
+`sh tools/b3sum-release.sh`. It builds from a fresh clone of the tag's commit
+and writes a `.sha256` file beside the binary.
 
 # Example
 
@@ -59,7 +63,7 @@ built from that source. (Releases after 0.9.0.)
 b3sum foo.txt
 ```
 
-Time hashing a gigabyte, to see how fast it is on your machine:
+To time hashing a 1 GB file on your machine:
 
 ```bash
 head -c 1000000000 /dev/zero > /tmp/bigfile
@@ -102,44 +106,65 @@ More information: b3sum/README.md at
 https://github.com/servil-software-factory/BLAKE3/blob/main/b3sum/README.md
 ```
 
-By default b3sum uses every CPU: several files at once, and a large file over several
-threads. `--num-threads 1` hashes on one thread, file by file, leaving the other cores to
-other work (or to other b3sums). On Linux, `taskset -c LIST b3sum ...` runs it on chosen
-CPUs.
+By default, `b3sum` uses all CPU cores: it hashes multiple files in parallel and
+splits large files across threads. Pass `--num-threads 1` to use a single
+thread. On Linux, `taskset -c LIST b3sum ...` pins `b3sum` to specific CPUs.
 
-[What `--check` does](what_does_check_do.md) explains checkfiles.
+See [What `--check` does](what_does_check_do.md) for checkfile rules.
 
 ## What b3sum reads
 
-`b3sum` hashes each file from its first byte to its end, and the end is
-where the system gives no more bytes. The size a file reports chooses
-how `b3sum` reads it and never where it ends. So a file that reports
-0 bytes and has some (as under `/proc`), or one that has grown since
-`b3sum` looked, is hashed whole. You can rely on this: the hash is of
-every byte the file had when its last read came back.
+`b3sum` reads each file from byte 0 until the operating system reports
+end-of-file (`0` bytes). Initial file metadata helps choose the read path, but
+never decides where the file ends—so `/proc` files that report 0 bytes are still
+hashed completely.
 
-A file that another program changes while `b3sum` reads it has no one
-content to hash. Hash files that hold still, or a snapshot of them.
-`b3sum` keeps the file it opened: replacing the name with another file
-during the run does not change which file is hashed.
+Once `b3sum` opens a file, it keeps using that open file handle. Moving or
+replacing the file at that path does not switch which file is hashed.
 
-## Large files the cache does not hold
+**Files modified while `b3sum` is reading them:** `b3sum` does not lock files or
+take a filesystem snapshot. If another program modifies a file while `b3sum`
+reads it, the output is **not** guaranteed to be the hash of any single version
+of the file that existed (for example, `b3sum` can read old bytes from the first
+part and new bytes from the rest). Only hash files that are not changing, or hash
+a snapshot.
 
-On Linux, a file of 4 MiB or more that the page cache does not hold is read past the
-cache (direct I/O), several reads at once: for one file given alone, and for every file
-with `--outboard`. It is the fast way to read a large set of files once: a cold 1 GiB
-file hashes in 0.10 s where it took 0.22 s through the cache (a Ryzen 9700X's NVMe
-drives). The cache does not hold such a file afterwards.
+Specifically, if a file grows or shrinks mid-read:
+
+- **If the file grows:** Paths that read sequentially (small files, cold files,
+  standard input, or `--no-mmap`) read until end-of-file, so they include bytes
+  appended before `b3sum` reaches the end. Paths that memory-map the file
+  (by default, cached files of 512 KiB or more) only map its size at open, so
+  bytes appended afterward are not hashed. Direct I/O reads on cold files
+  detect trailing bytes and fall back to reading or mapping.
+- **If the file shrinks (is truncated):** When `b3sum` memory-maps the file,
+  reading past the new end causes a `SIGBUS` error and `b3sum` aborts without
+  printing a hash. When `b3sum` reads sequentially (small files, cold files, or
+  `--no-mmap`), hitting the shorter end reports end-of-file early, and `b3sum`
+  currently prints the hash of the prefix it had read so far rather than
+  detecting that the file shrank.
+
+## Direct I/O for large cold files
+
+On Linux, `b3sum` reads cold files of 4 MiB or more with direct I/O (bypassing
+the page cache) when hashing a single file, or when hashing any file with
+`--outboard`. Bypassing the cache avoids extra memory copies and leaves the page
+cache undisturbed when hashing large sets of files once. On a Ryzen 9700X with
+NVMe storage, hashing a cold 1 GiB file drops from 0.22 s through the page cache
+to 0.10 s with direct I/O.
 
 ## Outboards for verified streaming
 
-`--outboard DIR` also writes each file's outboard to `DIR/<HASH>.obao4`: the file's
-BLAKE3 tree above its chunk groups of 16 KiB, which lets a reader verify any part of
-the file against its hash as the part arrives. The bytes are those bao-tree's
-`PreOrderMemOutboard::create` makes for block size 4 (b3sum's tests compare the two):
-each parent node's two children, 64 bytes a node, the nodes in pre-order, with no length
-before them. A file of 16 KiB or less has no node above it, and no outboard file is
-written for it: its outboard is empty. `DIR` must exist.
+`--outboard DIR` writes each file's outboard tree to `DIR/<HASH>.obao4`. This
+lets a streaming receiver verify any part of the file against its root hash as
+that part arrives.
+
+- The format matches `bao-tree`'s `PreOrderMemOutboard::create` with block size
+  4 (16 KiB chunk groups): 64-byte parent nodes in pre-order, with no length
+  prefix.
+- Files of 16 KiB or less have no parent nodes, so no `.obao4` file is written.
+- `DIR` must already exist.
+- Works in plain mode and `--keyed` mode.
 
 ```bash
 $ mkdir outboards && b3sum --outboard outboards big.iso
@@ -148,14 +173,14 @@ $ ls outboards
 5da5ad397cd129294c30f415b7d4e091b155a5faa37ba0b154ed10a5e5dbfca9.obao4
 ```
 
-It works in the plain and keyed modes, the two bao-tree reads.
-
 ## Hashes as sigils
 
-`--sigilcode` writes each hash as a [sigil](https://github.com/johnservil/sigil),
-one word of 25 characters for a 32-byte hash. A double-click selects it
-whole, and no two of its characters look alike. With `--check`, the same
-flag reads sigils as well as hex, so a checkfile may mix the two:
+`--sigilcode` prints each 32-byte hash as a 25-character
+[sigil](https://github.com/johnservil/sigil) instead of hex. A sigil is a
+single word (easy to double-click to select), uses visually distinct characters,
+and includes its own error check so typos or swapped adjacent characters fail
+before hashing begins. With `--check --sigilcode`, checkfiles may mix sigils and
+hex.
 
 ```
 $ b3sum --sigilcode empty
@@ -164,7 +189,5 @@ $ b3sum --sigilcode empty > sums.b3 && b3sum --sigilcode --check sums.b3
 empty: OK
 ```
 
-Without the flag, `b3sum` writes and reads hex alone, as every other
-BLAKE3 tool does. A sigil carries its own check: a changed character, or
-two neighbours swapped, makes its line fail to read before the file is
-hashed. Without the flag, `--check` says when a line's digest looks like a sigil.
+Without `--sigilcode`, `b3sum` expects hex only, and `--check` will tell you if
+a line looks like a sigil.
