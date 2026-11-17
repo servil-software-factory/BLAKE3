@@ -21,7 +21,7 @@
 //! once is the common case, and is too large to cache (Zooko, November
 //! 14, 2026). The cache does not hold such a file afterwards.
 
-use blake3::throughput::{Cv, TreeHasher};
+use blake3::throughput::{Cv, LastCv, TreeHasher, level_of};
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
@@ -31,6 +31,9 @@ pub(crate) use crate::direct::Piece;
 
 /// A chunk group: sixteen chunks, bao-tree's block size 4.
 pub(crate) const GROUP: usize = 16 * blake3::CHUNK_LEN;
+
+/// Checked when this compiles: a group is a whole subtree's size.
+const LEVEL: u32 = level_of(GROUP as u64);
 
 /// A thread takes at least this many groups (4 MiB): a file with less
 /// work than that a thread is hashed by fewer, since the threads are
@@ -65,50 +68,61 @@ pub(crate) fn outboard(mode: blake3::Mode, data: &[u8], threads: usize, cvs: &mu
     if data.len() <= GROUP {
         return blake3::convenience::hash_with(mode, data);
     }
-    let done: Result<_, core::convert::Infallible> = build(mode, data.len(), cvs, out, |tree, cvs| {
-        group_cvs(tree, data, threads, cvs);
-        Ok(())
-    });
+    let done: Result<_, core::convert::Infallible> = build(mode, data.len(), cvs, out, |tree, cvs| Ok(group_cvs(tree, data, threads, cvs)));
     match done {
         Ok(hash) => hash,
     }
 }
 
-/// The hash and outboard of a message of `len` bytes, more than a group,
-/// whose groups' chaining values `fill` writes.
+/// A layer of the tree: its whole subtrees' values, `whole` of them from
+/// `cvs[at]`, and beside them the value of the message's last subtree at
+/// that layer.
+#[derive(Clone, Copy)]
+struct Layer {
+    at: usize,
+    whole: usize,
+    last: LastCv,
+}
+
+/// The hash and outboard of a message of `len` bytes, more than a group.
+/// `fill` is given a slot a group: it writes the whole groups' chaining
+/// values (every group's but the last, whose slot it leaves) and returns
+/// the last group's.
 fn build<E>(
     mode: blake3::Mode,
     len: usize,
     cvs: &mut Vec<Cv>,
     out: &mut Vec<u8>,
-    fill: impl FnOnce(&TreeHasher, &mut [Cv]) -> Result<(), E>,
+    fill: impl FnOnce(&TreeHasher, &mut [Cv]) -> Result<LastCv, E>,
 ) -> Result<blake3::Hash, E> {
     assert!(len > GROUP);
     let tree = TreeHasher::new(mode);
     let groups = len.div_ceil(GROUP);
-    // Every layer's values, one layer after another: the groups', then
-    // each layer of parents, down to the root's two children. A layer
-    // with an odd count passes its last value up as it is.
-    // Under two values a group in all: each layer holds half the one
-    // below, and one more where that one's count is odd.
+    // Every layer's whole values, one layer after another: the groups',
+    // then each layer of parents, down to the root's left child. Each
+    // layer holds half the one below, so under two values a group in all.
+    // Every slot starts unset, so one that no call fills is refused.
     cvs.clear();
-    cvs.resize(2 * groups + usize::BITS as usize, Cv::from_bytes([0; 32]));
-    fill(&tree, &mut cvs[..groups])?;
-    let mut layers: Vec<(usize, usize)> = vec![(0, groups)];
-    while layers.last().unwrap().1 > 2 {
-        let (at, count) = *layers.last().unwrap();
-        let (children, parents) = cvs[at..].split_at_mut(count);
-        let pairs = count / 2;
-        tree.parent_cvs(&children[..2 * pairs], &mut parents[..pairs]);
-        if count % 2 == 1 {
-            parents[pairs] = children[count - 1];
+    cvs.resize(2 * groups, Cv::unset());
+    let last = fill(&tree, &mut cvs[..groups])?;
+    let mut layers: Vec<Layer> = vec![Layer { at: 0, whole: groups - 1, last }];
+    loop {
+        let Layer { at, whole, last } = *layers.last().unwrap();
+        if whole == 1 {
+            break;
         }
-        layers.push((at + count, count.div_ceil(2)));
+        let (children, parents) = cvs[at..].split_at_mut(whole);
+        let pairs = whole / 2;
+        tree.parent_cvs(&children[..2 * pairs], &mut parents[..pairs]);
+        // An odd whole one out is the last subtree's left sibling; with
+        // none, the last goes up as it is.
+        let last = if whole % 2 == 1 { tree.last_parent_cv(&children[whole - 1], &last) } else { last };
+        layers.push(Layer { at: at + whole, whole: pairs, last });
     }
-    let (top, _) = *layers.last().unwrap();
+    let top = *layers.last().unwrap();
     out.reserve(64 * (groups - 1));
     node(cvs, &layers, layers.len(), 0, out);
-    Ok(tree.root_hash(&cvs[top], &cvs[top + 1]))
+    Ok(tree.root_hash(&cvs[top.at], &top.last, len as u64))
 }
 
 /// The hash and outboard of the open `file`, read past the page cache
@@ -146,16 +160,24 @@ fn direct(
     out: &mut Vec<u8>,
 ) -> Option<blake3::Hash> {
     let before = out.len();
-    let done = build(mode, len, cvs, out, |tree, cvs| {
+    let done: Result<_, ()> = build(mode, len, cvs, out, |tree, cvs| {
         // Many of these run at once, one a core: each on its own core's kernels.
         let tree = tree.clone().on_this_core();
+        let groups = cvs.len();
+        let last = std::sync::OnceLock::new();
         crate::direct::read(file, len, threads, mine, cvs, PIECE / GROUP, |i, bytes, cvs| {
             for (g, cv) in cvs.iter_mut().enumerate() {
-                let group = &bytes[g * GROUP..bytes.len().min((g + 1) * GROUP)];
-                *cv = tree.subtree_cv(((i * PIECE + g * GROUP) / blake3::CHUNK_LEN) as u64, group);
+                let group = i * (PIECE / GROUP) + g;
+                let bytes = &bytes[g * GROUP..bytes.len().min((g + 1) * GROUP)];
+                if group + 1 == groups {
+                    last.set(tree.last_cv((group << LEVEL) as u64, bytes)).expect("one thread reads the last group");
+                } else {
+                    *cv = tree.subtree_cv(LEVEL, group as u64, bytes);
+                }
             }
         })
-        .ok_or(())
+        .ok_or(())?;
+        Ok(last.into_inner().expect("the last group was read"))
     });
     if done.is_err() {
         out.truncate(before);
@@ -163,48 +185,55 @@ fn direct(
     done.ok()
 }
 
-/// Each group's chaining value into `cvs`, the groups shared out among
-/// the threads.
-fn group_cvs(tree: &TreeHasher, data: &[u8], threads: usize, cvs: &mut [Cv]) {
-    let groups = cvs.len();
-    let threads = threads.min(groups / GROUPS_A_THREAD).max(1);
-    let a_thread = groups.div_ceil(threads);
+/// Each whole group's chaining value into its slot of `cvs` (a slot a
+/// group; the last group's is left), the groups shared out among the
+/// threads; and the last group's, returned.
+fn group_cvs(tree: &TreeHasher, data: &[u8], threads: usize, cvs: &mut [Cv]) -> LastCv {
+    let whole = cvs.len() - 1;
+    let threads = threads.min(cvs.len() / GROUPS_A_THREAD).max(1);
+    let a_thread = cvs.len().div_ceil(threads);
     // Many of these run at once, one a core: each on its own core's kernels.
     let tree = tree.clone().on_this_core();
     let hash = |first: usize, cvs: &mut [Cv]| {
         for (i, cv) in cvs.iter_mut().enumerate() {
             let group = first + i;
-            let bytes = &data[group * GROUP..data.len().min((group + 1) * GROUP)];
-            *cv = tree.subtree_cv((group * GROUP / blake3::CHUNK_LEN) as u64, bytes);
+            *cv = tree.subtree_cv(LEVEL, group as u64, &data[group * GROUP..(group + 1) * GROUP]);
         }
     };
     if threads == 1 {
-        hash(0, cvs);
+        hash(0, &mut cvs[..whole]);
     } else {
         std::thread::scope(|scope| {
-            for (t, part) in cvs.chunks_mut(a_thread).enumerate() {
+            for (t, part) in cvs[..whole].chunks_mut(a_thread).enumerate() {
                 let hash = &hash;
                 scope.spawn(move || hash(t * a_thread, part));
             }
         });
     }
+    tree.last_cv((whole << LEVEL) as u64, &data[whole * GROUP..])
+}
+
+/// The bytes of value `j` of a layer: a whole subtree's, or after them
+/// the last one's.
+fn value<'a>(cvs: &'a [Cv], layer: &'a Layer, j: usize) -> &'a [u8; 32] {
+    if j < layer.whole { cvs[layer.at + j].as_bytes() } else { layer.last.as_bytes() }
 }
 
 /// The node `index` of the layer under `layer` (`layers[layer - 1]`), and
 /// the nodes below it, appended to `out` in pre-order: a parent as its two
-/// children's values. A value its layer passed up as it was, and a
+/// children's values. A last value its layer passed up as it was, and a
 /// group's own, are no parent, and write nothing of their own. The root
-/// is node 0 of the layer above the last.
-fn node(cvs: &[Cv], layers: &[(usize, usize)], layer: usize, index: usize, out: &mut Vec<u8>) {
+/// is node 0 of the layer above the top.
+fn node(cvs: &[Cv], layers: &[Layer], layer: usize, index: usize, out: &mut Vec<u8>) {
     if layer == 0 {
         return;
     }
-    let (at, count) = layers[layer - 1];
-    if 2 * index + 1 >= count {
+    let below = &layers[layer - 1];
+    if 2 * index + 1 > below.whole {
         return node(cvs, layers, layer - 1, 2 * index, out);
     }
-    out.extend_from_slice(cvs[at + 2 * index].as_bytes());
-    out.extend_from_slice(cvs[at + 2 * index + 1].as_bytes());
+    out.extend_from_slice(value(cvs, below, 2 * index));
+    out.extend_from_slice(value(cvs, below, 2 * index + 1));
     node(cvs, layers, layer - 1, 2 * index, out);
     node(cvs, layers, layer - 1, 2 * index + 1, out);
 }

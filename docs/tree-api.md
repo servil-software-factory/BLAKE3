@@ -37,6 +37,58 @@ the threads crate tests it before any outside program depends on it.
 
 ## Layer 1: the tree's pieces
 
+**Changed on November 17 (BLAKE3 #421), before any release held it.**
+The calls below took any two 32-byte values as a pair, so parts of a
+wrong size gave a hash that is no BLAKE3 hash, with no error. Zooko
+asked for calls that put the tree's shape on the caller and check it at
+compile time where Rust can. Devon Jonte's compiled sketch (bench-hashes
+`2026-11-17/tree-api-shape-421`) is what the library now has:
+
+```rust
+pub const fn level_of(len: u64) -> u32;      // 1024 << level == len; in a const, another size stops the build
+pub struct Cv;                                // a whole subtree's value, with its level and index
+pub struct LastCv;                            // the message's last subtree's value, with its first chunk and length
+impl From<Cv> for LastCv                      // a whole subtree that ends the message
+
+impl TreeHasher {
+    pub fn subtree_cv(&self, level: u32, index: u64, input: &[u8]) -> Cv;
+    pub fn last_cv(&self, first_chunk: u64, input: &[u8]) -> LastCv;
+    pub fn parent_cv(&self, left: &Cv, right: &Cv) -> Cv;
+    pub fn last_parent_cv(&self, left: &Cv, right: &LastCv) -> LastCv;
+    pub fn parent_cvs(&self, children: &[Cv], out: &mut [Cv]);
+    pub fn root_hash(&self, left: &Cv, right: &LastCv, len: u64) -> Hash;
+    pub fn root_output(&self, left: &Cv, right: &LastCv, len: u64) -> OutputReader;
+}
+```
+
+The choices the sketch left open, as decided:
+
+1. **The root takes the message's length.** A loop that stops a piece
+   early would otherwise return the hash of a prefix, which is a real
+   BLAKE3 hash of the wrong message.
+2. **Each value carries its place** (40 bytes for a `Cv`, 48 for a
+   `LastCv`). A layer type over bare values would keep 32 bytes a value,
+   and is one more type for every caller to learn.
+3. **`parent_cvs` gathers** its children's bytes for the kernels, 32 at a
+   time on the stack. Measured by the sketch: a parent costs 3.0 ns more
+   (EPYC 9275F) or 4.6 ns more (EPYC 7443), and a whole tree 0.5% or
+   less. A kernel that reads children at a stride would end the gather.
+   In `b3sum --outboard`, a parent for every 16 KiB, a 1 GiB file in
+   memory took 29.9 ms where the unchecked calls took 29.4 ms (medians of
+   24 runs each, Ryzen 9700X, bench-hashes 0.23's builds).
+4. **No input sized by its type.** The callers there are hold slices.
+5. **The unset value is all zero bits**, so zeroed memory is refused too.
+6. **Names:** `Cv`, `LastCv`, `level_of`; a whole subtree becomes the last
+   one by `From`. `subtree_halves` is not public: the pool's merge gives
+   the two halves itself, and no program needs the call yet.
+
+The library's own pool (`threads/src/lanes.rs`) is the second client,
+after `b3sum`: each whole piece is `subtree_cv(level_of(len), place, ..)`,
+the last piece is `last_cv`, and the merge pairs each size's values with
+`parent_cvs` and joins an odd one to the last with `last_parent_cv`.
+
+The first form, as it was drafted:
+
 In `blake3-servil-core`, in `throughput`:
 
 ```rust

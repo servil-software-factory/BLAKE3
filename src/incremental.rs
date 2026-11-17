@@ -124,7 +124,7 @@ struct HasherHooks<'a> {
 #[derive(Clone, Copy)]
 pub struct Pool {
     pub min_len: usize,
-    pub halves: fn(tree: &crate::throughput::TreeHasher, first_chunk: u64, input: &[u8]) -> [crate::throughput::Cv; 2],
+    pub halves: fn(tree: &crate::throughput::TreeHasher, first_chunk: u64, input: &[u8]) -> [crate::throughput::BareCv; 2],
 }
 
 impl hasher::Hooks for HasherHooks<'_> {
