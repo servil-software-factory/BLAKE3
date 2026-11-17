@@ -85,6 +85,8 @@ pub(crate) fn hash_single_cold_large_file_1t(args: &Args, file: &File, hint_size
 /// the table at 64 and caused four 10 ms `synchronize_rcu` stalls across threads).
 fn grow_descriptor_table(descriptors: usize) {
     let want = descriptors.next_power_of_two().max(64) as libc::rlim_t;
+    // Sound: system calls on plain values and on descriptors this function
+    // opened itself, each closed once.
     unsafe {
         let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         let cap = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
@@ -101,10 +103,15 @@ fn grow_descriptor_table(descriptors: usize) {
         };
         let target = want.min(cap).saturating_sub(1) as i32;
         if target >= 63 {
+            // F_DUPFD takes the lowest free number from `target` up, so it
+            // never lands on a descriptor the caller gave this process
+            // (`b3sum /dev/fd/255 ...`). dup2 did: it closed that file
+            // without a word, and a later open could take its number.
             let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
             if fd >= 0 {
-                if libc::dup2(fd, target) == target {
-                    libc::close(target);
+                let high = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, target);
+                if high >= 0 {
+                    libc::close(high);
                 }
                 libc::close(fd);
             }
@@ -1379,5 +1386,20 @@ mod test {
             assert_eq!((m, end), (content.len(), true), "room={room}");
             assert_eq!(rest[n..m], content[n..]);
         }
+    }
+
+    /// Growing the descriptor table leaves a descriptor the caller holds
+    /// at the very number it aims for open (`b3sum /dev/fd/255 other`).
+    #[test]
+    fn growing_the_descriptor_table_closes_no_descriptor() {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open("/dev/null").unwrap();
+        // 200 descriptors ask for a table of 256: the aim is number 255.
+        let held = unsafe { libc::dup2(file.as_raw_fd(), 255) };
+        assert_eq!(held, 255);
+        super::grow_descriptor_table(200);
+        let still = unsafe { libc::fcntl(255, libc::F_GETFD) };
+        unsafe { libc::close(255) };
+        assert_ne!(still, -1, "the caller's descriptor 255 was closed");
     }
 }
