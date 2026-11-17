@@ -10,8 +10,8 @@ Speed depends on your machine and on how your program hashes.
 [bench-hashes](https://github.com/servil-software-factory/bench-hashes) measures both on your own
 computer; its published maps cover an [Apple M4 Max](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AppleM4Max.darwin25/bench-hashes.map.html),
 an [AMD EPYC 9255](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AMDEPYC925524CoreProcessor.linux70038generic/bench-hashes.map.html),
-and an [Intel i7-12700K](https://devonjonte.github.io/bench-hashes/benchmark-results/12thGenIntelRCoreTMi712700K.linux70038generic/bench-hashes.map.html);
-[an overview](https://devonjonte.github.io/bench-hashes/) sets every machine side by side.
+and an [Intel i7-12700K](https://servil-software-factory.github.io/bench-hashes/benchmark-results/12thGenIntelRCoreTMi712700K.linux70042generic/bench-hashes.map.html);
+[an overview](https://servil-software-factory.github.io/bench-hashes/) sets every machine side by side.
 
 ## How it is checked
 
