@@ -113,8 +113,13 @@ pub(crate) struct Uring {
     cq_tail: *const AtomicU32,
     cq_mask: u32,
     cqes: *const IoUringCqe,
+    /// Reads queued and not yet reaped: the kernel may still write their
+    /// buffers. The ring is not dropped or set aside while there are any.
+    in_flight: u32,
 }
 
+// Sound: the pointers are into this ring's own mappings, which go where
+// the Uring goes and are unmapped by its drop alone.
 unsafe impl Send for Uring {}
 
 thread_local! {
@@ -138,6 +143,7 @@ impl Uring {
     /// Cache an idle `Uring` on the thread that created it so subsequent
     /// `--check` batches on this thread reuse it without `io_uring_setup`.
     pub(crate) fn release(self) {
+        assert_eq!(self.in_flight, 0, "a ring is set aside with no read in flight");
         LOCAL_URING.with(|c| {
             c.set(Some(self));
         });
@@ -176,9 +182,13 @@ impl Uring {
 
         // Sound: mapping the ring descriptor at kernel-defined offsets.
         let sq_ring_ptr =
+            // Sound: a new mapping of the ring's descriptor at the kernel's
+            // offset for it; the kernel chooses the address.
             unsafe { libc::mmap(ptr::null_mut(), sq_ring_len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, ring_fd, IORING_OFF_SQ_RING) };
         if sq_ring_ptr == libc::MAP_FAILED {
             let err = io::Error::last_os_error();
+            // Sound: the descriptor is this function's, closed once on each
+            // way out.
             unsafe { libc::close(ring_fd) };
             return Err(err);
         }
@@ -186,9 +196,12 @@ impl Uring {
         let (cq_ring_ptr, cq_ring_len) = if single_mmap {
             (sq_ring_ptr, 0)
         } else {
+            // Sound: as the first mapping.
             let p = unsafe { libc::mmap(ptr::null_mut(), cq_size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, ring_fd, IORING_OFF_CQ_RING) };
             if p == libc::MAP_FAILED {
                 let err = io::Error::last_os_error();
+                // Sound: this function's own mapping and descriptor, released
+                // once.
                 unsafe {
                     libc::munmap(sq_ring_ptr, sq_ring_len);
                     libc::close(ring_fd);
@@ -199,9 +212,12 @@ impl Uring {
         };
 
         let sqes_len = (params.sq_entries as usize) * size_of::<IoUringSqe>();
+        // Sound: as the first mapping.
         let sqes_raw = unsafe { libc::mmap(ptr::null_mut(), sqes_len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, ring_fd, IORING_OFF_SQES) };
         if sqes_raw == libc::MAP_FAILED {
             let err = io::Error::last_os_error();
+            // Sound: this function's own mappings and descriptor, released
+            // once.
             unsafe {
                 if !single_mmap {
                     libc::munmap(cq_ring_ptr, cq_ring_len);
@@ -216,14 +232,19 @@ impl Uring {
         let cq_base = cq_ring_ptr.cast::<u8>();
         let sqes_ptr = sqes_raw.cast::<IoUringSqe>();
 
+        // Sound: each offset is one the kernel gave for this ring (`params`),
+        // inside the mapping of the length it also gave; the heads and tails
+        // are u32s the kernel reads and writes atomically, as AtomicU32 does.
         let sq_head = unsafe { sq_base.add(params.sq_off.head as usize).cast::<AtomicU32>() };
         let sq_tail = unsafe { sq_base.add(params.sq_off.tail as usize).cast::<AtomicU32>() };
         let sq_mask = unsafe { *sq_base.add(params.sq_off.ring_mask as usize).cast::<u32>() };
         let sq_array = unsafe { sq_base.add(params.sq_off.array as usize).cast::<u32>() };
         for i in 0..params.sq_entries {
+            // Sound: the array has `sq_entries` slots.
             unsafe { *sq_array.add(i as usize) = i };
         }
 
+        // Sound: as the submission ring's, above.
         let cq_head = unsafe { cq_base.add(params.cq_off.head as usize).cast::<AtomicU32>() };
         let cq_tail = unsafe { cq_base.add(params.cq_off.tail as usize).cast::<AtomicU32>() };
         let cq_mask = unsafe { *cq_base.add(params.cq_off.ring_mask as usize).cast::<u32>() };
@@ -251,11 +272,14 @@ impl Uring {
             cq_tail,
             cq_mask,
             cqes,
+            in_flight: 0,
         })
     }
 
     #[inline]
     pub(crate) fn sq_space_left(&self) -> u32 {
+        // Sound: `sq_head` points into the ring's mapping, which lives as long
+        // as the Uring.
         let head = unsafe { (*self.sq_head).load(Ordering::Acquire) };
         self.sq_entries - (self.local_sq_tail.wrapping_sub(head))
     }
@@ -274,6 +298,9 @@ impl Uring {
             return false;
         }
         let idx = (self.local_sq_tail & self.sq_mask) as usize;
+        // Sound: `idx` is below `sq_entries` (masked), so both writes are
+        // inside the ring's array and its SQEs; the kernel reads an SQE only
+        // after the tail moves past it (submit_and_wait).
         unsafe {
             *self.sq_array.add(idx) = idx as u32;
             *self.sqes_ptr.add(idx) = IoUringSqe {
@@ -294,12 +321,17 @@ impl Uring {
         }
         self.local_sq_tail = self.local_sq_tail.wrapping_add(1);
         self.unsubmitted += 1;
+        self.in_flight += 1;
         true
     }
 
     /// Submit all queued SQEs and wait for at least `min_complete` CQEs.
-    pub(crate) fn submit_and_wait(&mut self, min_complete: u32) -> io::Result<()> {
+    /// A failed enter stops the process: some reads may already have been
+    /// submitted, so unwinding could free buffers the kernel still writes.
+    /// A read's error CQE, in contrast, has finished using that read's buffer.
+    pub(crate) fn submit_and_wait(&mut self, min_complete: u32) {
         if self.unsubmitted > 0 {
+            // Sound: into the ring's mapping, as sq_space_left's.
             unsafe { (*self.sq_tail).store(self.local_sq_tail, Ordering::Release) };
         }
         let mut to_submit = self.unsubmitted;
@@ -307,59 +339,81 @@ impl Uring {
 
         let need_getevents = min_complete > 0 || (self.ring_flags & IORING_SETUP_DEFER_TASKRUN) != 0;
         if to_submit == 0 && min_complete == 0 && !need_getevents {
-            return Ok(());
+            return;
         }
         let enter_flags = if need_getevents { IORING_ENTER_GETEVENTS } else { 0 };
 
         loop {
-            let rc = unsafe {
-                libc::syscall(
-                    libc::SYS_io_uring_enter,
-                    self.fd,
-                    to_submit,
-                    min_complete,
-                    enter_flags,
-                    ptr::null::<libc::sigset_t>(),
-                    size_of::<libc::sigset_t>(),
-                )
-            };
-            if rc >= 0 {
-                let submitted = rc as u32;
+            if let Some(submitted) = enter(self.fd, to_submit, min_complete, enter_flags) {
                 to_submit = to_submit.saturating_sub(submitted);
                 if to_submit == 0 {
-                    return Ok(());
+                    return;
                 }
-                continue;
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
+            } else {
+                // Interrupted: the kernel may have consumed some SQEs.
+                // Sound: as above.
                 let head = unsafe { (*self.sq_head).load(Ordering::Acquire) };
                 to_submit = self.local_sq_tail.wrapping_sub(head);
                 if min_complete == 0 && to_submit == 0 {
-                    return Ok(());
+                    return;
                 }
-                continue;
             }
-            return Err(err);
         }
     }
 
     #[inline]
     pub(crate) fn pop_cqe(&mut self) -> Option<IoUringCqe> {
+        // Sound: into the ring's mapping. Only this thread moves the head.
         let head = unsafe { (*self.cq_head).load(Ordering::Relaxed) };
         let tail = unsafe { (*self.cq_tail).load(Ordering::Acquire) };
         if head == tail {
             return None;
         }
         let idx = (head & self.cq_mask) as usize;
+        // Sound: `idx` is masked to the CQEs' count, and the kernel has
+        // finished writing the entry before it moved the tail past it.
         let cqe = unsafe { *self.cqes.add(idx) };
         unsafe { (*self.cq_head).store(head.wrapping_add(1), Ordering::Release) };
+        self.in_flight -= 1;
         Some(cqe)
     }
 }
 
+/// None means interrupted; every other error is fatal. Keep this decision
+/// at the syscall, before any caller can release an in-flight buffer.
+#[inline]
+fn enter(fd: RawFd, to_submit: u32, min_complete: u32, flags: u32) -> Option<u32> {
+    // Sound: a system call with plain values; no signal mask is passed.
+    let rc = unsafe { libc::syscall(libc::SYS_io_uring_enter, fd, to_submit, min_complete, flags, ptr::null::<libc::sigset_t>(), size_of::<libc::sigset_t>()) };
+    if rc >= 0 {
+        return Some(rc as u32);
+    }
+    let err = io::Error::last_os_error();
+    if err.kind() == io::ErrorKind::Interrupted {
+        return None;
+    }
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "b3sum: io_uring_enter failed: {err}; stopping before pending reads' buffers can be released");
+    std::process::abort()
+}
+
 impl Drop for Uring {
     fn drop(&mut self) {
+        // Closing a ring does not wait for its reads: the kernel may write
+        // a queued read's buffer after this returns, and whoever drops the
+        // ring frees those buffers next. So a ring dropped with a read in
+        // flight (a return or a panic past it) stops the process here.
+        if self.in_flight != 0 {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "b3sum: an io_uring was dropped with {} reads in flight; stopping before their buffers can be released",
+                self.in_flight
+            );
+            std::process::abort()
+        }
+        // Sound: the three mappings and the descriptor are this ring's own
+        // (new), each released once, here.
         unsafe {
             libc::munmap(self.sqes_ptr.cast(), self.sqes_len);
             if !self.single_mmap {
@@ -375,6 +429,55 @@ impl Drop for Uring {
 mod test {
     use super::Uring;
     use std::os::fd::AsRawFd;
+
+    /// A ring dropped while a read is in flight stops the process: the
+    /// read here is of a pipe no one writes, so it stays in flight.
+    #[test]
+    fn a_ring_dropped_with_a_read_in_flight_stops_the_process() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "B3SUM_TEST_RING_DROPPED";
+        if std::env::var_os(CHILD).is_some() {
+            let Ok(mut ring) = Uring::new(8) else { std::process::exit(77) };
+            let mut ends = [0i32; 2];
+            assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+            let mut buffer = [0u8; 64];
+            assert!(unsafe { ring.push_read(ends[0], buffer.as_mut_ptr(), 64, 0, 0, 1) });
+            ring.submit_and_wait(0);
+            drop(ring);
+            std::process::exit(0);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "uring::test::a_ring_dropped_with_a_read_in_flight_stops_the_process", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        if output.status.code() == Some(77) {
+            eprintln!("no io_uring here");
+            return;
+        }
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{:?}: {:?}", output.status, output.stderr);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("dropped with 1 reads in flight"));
+    }
+
+    /// A real failed syscall must abort, even inside catch_unwind. This
+    /// needs no io_uring permission: an invalid fd (or a denied syscall)
+    /// deterministically takes the production error path.
+    #[test]
+    fn failed_enter_stops_before_unwinding() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "B3SUM_TEST_FAILED_ENTER";
+        if std::env::var_os(CHILD).is_some() {
+            let _ = std::panic::catch_unwind(|| super::enter(-1, 1, 0, 0));
+            std::process::exit(0);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "uring::test::failed_enter_stops_before_unwinding", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{:?}: {:?}", output.status, output.stderr);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stopping before pending reads' buffers can be released"));
+    }
 
     #[test]
     fn uring_reads_offsets_saturation_and_error_cqes() {
@@ -402,7 +505,7 @@ mod test {
         let mut extra = [0u8; 16];
         assert!(!unsafe { ring.push_read(f.as_raw_fd(), extra.as_mut_ptr(), 16, 0, 0, 999) }, "ring must report full");
 
-        ring.submit_and_wait(cap).unwrap();
+        ring.submit_and_wait(cap);
         assert_eq!(ring.unsubmitted(), 0);
         assert_eq!(ring.sq_space_left(), cap);
 
@@ -420,11 +523,11 @@ mod test {
         // 2. Fault injection: invalid fd `-1` produces `-EBADF` CQE without corrupting ring state,
         // and `acquire` / `release` recycles the idle ring cleanly.
         assert!(unsafe { ring.push_read(-1, extra.as_mut_ptr(), 16, 0, 0, 0xDEAD_BEEF) });
-        ring.submit_and_wait(1).unwrap();
+        ring.submit_and_wait(1);
         let err_cqe = ring.pop_cqe().expect("error CQE");
         assert_eq!(err_cqe.user_data, 0xDEAD_BEEF);
         assert_eq!(err_cqe.res, -libc::EBADF);
-        ring.submit_and_wait(0).unwrap();
+        ring.submit_and_wait(0);
 
         let saved_fd = ring.fd;
         ring.release();
