@@ -150,12 +150,12 @@ channel. `b3sum --check` checks the named files, not a directory's complete
 contents: an added file can go unnoticed. An empty checkfile now fails,
 but deleting some entries can still hide those missing checks.
 
-`b3sum` reads each file to its end, which is where the system gives no
-more bytes: the size a file reports never decides what is hashed
-([b3sum's README](b3sum/README.md), "What b3sum reads"). Hash stable
-files or a filesystem snapshot. Keeping the same open file protects
-against pathname replacement, not writes to that file while it is being
-hashed. A hash is not a snapshot or a lock.
+Hash stable files or a filesystem snapshot. `b3sum` hashes the file it
+opened, whatever its name points to later, but it takes no lock and no
+snapshot: a file that grows, is cut short or is overwritten while it is
+hashed can give the hash of bytes the file never held, with no error.
+[b3sum's README](b3sum/README.md), "What b3sum reads", says what
+happens in each case. Detecting it is not in this release (#443).
 
 The proofs trust their specification, instruction models and proof
 tools. Nothing establishes memory safety for all Rust thread

@@ -31,7 +31,9 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
 - `b3sum` reports failure on output errors and empty checkfiles.
 - Direct reads keep the originally opened file, including if its
   pathname has been replaced. Hashing still requires stable contents.
-- A file is read to where its reads end, whatever its size said.
+- A file that `b3sum` reads is read to where its reads end, whatever
+  its size said. (A mapped file is hashed to the size it had when
+  opened.) The README says what a file changed during the run gives.
 - A panic in `b3sum` stops the process at once, and a ring of reads
   cannot be dropped while the kernel still writes its buffers.
 - Where io_uring is unavailable, a small file that grew during the run
