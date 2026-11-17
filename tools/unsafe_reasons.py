@@ -20,7 +20,14 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FILES = ["threads/src/pipeline.rs"]
+FILES = [
+    "threads/src/pipeline.rs",
+    "b3sum/src/main.rs",
+    "b3sum/src/direct.rs",
+    "b3sum/src/outboard.rs",
+    "b3sum/src/uring.rs",
+    "b3sum/src/linux_pipe.rs",
+]
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
 
