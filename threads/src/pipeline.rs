@@ -77,13 +77,19 @@ impl<X> Ring<X> {
 
     #[inline(always)]
     fn front(&self) -> Option<&X> {
+        // Sound: the `len` items from `head` on are written (push_back) and
+        // not yet read out.
         if self.len == 0 { None } else { Some(unsafe { self.buf[self.head].assume_init_ref() }) }
     }
 
     #[inline(always)]
     fn push_back(&mut self, item: X) {
         let cap = self.buf.len();
-        debug_assert!(self.len < cap, "Ring capacity exceeded");
+        // In every build: one item more than the ring holds would be
+        // written over the oldest, a queued message or event lost in
+        // silence. Each ring's users keep within it (a slot, a piece or a
+        // room is in one ring once), and this holds them to that.
+        assert!(self.len < cap, "Ring capacity exceeded");
         let idx = (self.head + self.len) % cap;
         self.buf[idx].write(item);
         self.len += 1;
@@ -94,6 +100,8 @@ impl<X> Ring<X> {
         if self.len == 0 {
             return None;
         }
+        // Sound: as `front`; the item is read out once, since `head` moves
+        // past it.
         let item = unsafe { self.buf[self.head].assume_init_read() };
         self.head = (self.head + 1) % self.buf.len();
         self.len -= 1;
@@ -199,30 +207,42 @@ use crate::waker::WakerSlot;
 #[repr(align(128))]
 struct Rooms {
     buf: *mut u8,
-    _backing: Box<[u8]>,
     count: usize,
     refs: Box<[OwnLine<AtomicUsize>]>,
     caller_held: OwnLine<AtomicUsize>,
 }
 
+// Sound: `buf` points into the rooms' own allocation, which is never freed or
+// moved; what may touch which bytes is the credits' matter (Room,
+// Shared::run_room_piece), not the pointer's.
 unsafe impl Send for Rooms {}
 unsafe impl Sync for Rooms {}
 
 impl Rooms {
     fn new(count: usize) -> Self {
-        let mut backing = if count == 0 { Vec::new().into_boxed_slice() } else { vec![0u8; count * ROOM_LEN + 64].into_boxed_slice() };
+        // The rooms' bytes are given away for good, as the storage that
+        // holds them is (PipeStorage::acquire), and kept as a pointer
+        // alone: callers and workers write and read them through pointers
+        // made from this one, which a Box held beside it would claim to
+        // own alone.
         let buf = if count == 0 {
             core::ptr::NonNull::<u8>::dangling().as_ptr()
         } else {
+            let backing: &'static mut [u8] = Box::leak(vec![0u8; count * ROOM_LEN + 64].into_boxed_slice());
             let align = backing.as_ptr().align_offset(64);
+            // Sound: the allocation has 64 spare bytes, so the first 64-byte
+            // boundary and `count` rooms after it are inside it.
             unsafe { backing.as_mut_ptr().add(align) }
         };
-        Rooms { buf, _backing: backing, count, refs: (0..count).map(|_| OwnLine(AtomicUsize::new(0))).collect(), caller_held: OwnLine(AtomicUsize::new(0)) }
+        Rooms { buf, count, refs: (0..count).map(|_| OwnLine(AtomicUsize::new(0))).collect(), caller_held: OwnLine(AtomicUsize::new(0)) }
     }
 
     #[inline(always)]
     fn room_ptr(&self, index: usize) -> *mut u8 {
         debug_assert!(index < self.count);
+        // Sound: `index` is a room of this storage (the callers take it from a
+        // Room, a piece or a group of this Pipeline), so the offset is inside
+        // the rooms' allocation.
         unsafe { self.buf.add(index * ROOM_LEN) }
     }
 
@@ -270,6 +290,11 @@ struct PipeStorage {
     holders: OwnLine<AtomicUsize>,
 }
 
+// Sound: the UnsafeCells here are the owner's alone to write, and only between
+// tasks: `groups[g]` while group g is not in flight (acquire_free_group), the
+// saved epochs and `shared` while no Pipeline holds the storage or in its own
+// create and drop. Workers read a group's cells only from its dispatch to its
+// `completed_epoch`.
 unsafe impl Send for PipeStorage {}
 unsafe impl Sync for PipeStorage {}
 
@@ -306,6 +331,9 @@ impl PipeStorage {
         if let Some(st) = chosen {
             st.holders.store(1, Ordering::Release);
             for g in &st.groups[..groups] {
+                // Sound: the storage came off the free list, so no Pipeline
+                // holds it and every task that read these groups has finished
+                // (Pipeline::drop stops the process otherwise).
                 let t = unsafe { &mut *g.task.get() };
                 t.key = *key;
                 t.flags = flags;
@@ -350,6 +378,8 @@ pub struct Room {
     storage: &'static PipeStorage,
 }
 
+// Sound: a Room is the only way to its uncommitted bytes, and its other fields
+// are plain values; `storage` is shared and Sync.
 unsafe impl Send for Room {}
 unsafe impl Sync for Room {}
 
@@ -359,12 +389,16 @@ impl Room {
     #[inline(always)]
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         let rem = ROOM_LEN - self.offset as usize;
+        // Sound: the bytes from `offset` to the room's end are this Room's
+        // alone: committed bytes lie before `offset`, and no other Room has
+        // this index while this one's credits are out (take_credit).
         unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), rem) }
     }
 
     /// Pointer to the start of the remaining writable bytes.
     #[inline(always)]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        // Sound: `offset` is at most ROOM_LEN, inside or one past the room.
         unsafe { self.ptr.add(self.offset as usize) }
     }
 
@@ -466,11 +500,17 @@ struct Shared {
     pieces: Box<[PieceNode]>,
 }
 
+// Sound: each UnsafeCell here has one writer at a time, by the slot's or
+// piece's state: the owner before it dispatches the work, the workers of that
+// work until they publish it done, the owner again after. Nothing here is ever
+// freed.
 unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
 impl Shared {
     unsafe fn run_action(ctx: *const (), arg: u64, platform: Platform) {
+        // Sound: `ctx` is the `*const Shared` its Pipeline dispatched with
+        // (dispatch_one, dispatch_many), and a Shared is never freed.
         let shared = unsafe { &*(ctx as *const Shared) };
         let (kind, a, b) = unpack_arg(arg);
         match kind {
@@ -484,6 +524,10 @@ impl Shared {
     fn run_group(&self, group_idx: usize, platform: Platform) {
         let storage = self.storage;
         let group = &storage.groups[group_idx];
+        // Sound: the owner wrote this group's task, epoch and metas before it
+        // dispatched the group (publish_open), and writes them again only
+        // after it has seen `completed_epoch` reach this epoch, which is this
+        // function's last store.
         let task = unsafe { &*group.task.get() };
         let count = task.members;
         let epoch = unsafe { *group.epoch.get() };
@@ -518,12 +562,20 @@ impl Shared {
 
     fn run_room_piece(&self, pnode_idx: usize, platform: Platform) {
         let pnode = &self.pieces[pnode_idx];
+        // Sound: the owner wrote the piece's fields before dispatching it
+        // (commit_multi), and touches the node again only once `done` is set,
+        // which is this function's last store.
         let room_idx = unsafe { *pnode.room.get() };
         let offset = unsafe { *pnode.offset.get() } as usize;
         let len = unsafe { *pnode.len.get() } as usize;
         let counter = unsafe { *pnode.counter.get() };
+        // Sound: the piece is `len` committed bytes of its room from `offset`,
+        // which the Room's credit keeps unwritten and unshared until this task
+        // returns it below.
         let ptr = unsafe { self.storage.rooms.room_ptr(room_idx as usize).add(offset) };
         let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        // Sound: `out` is this piece's alone until `done` (as its fields
+        // above).
         let out = unsafe { &mut *pnode.out.0.get() };
         if counter == 0 && len > CHUNK_LEN {
             *out = crate::compress_subtree_to_parent_node(bytes, 0, &self.key, 0, self.flags, platform);
@@ -538,10 +590,17 @@ impl Shared {
     }
 
     fn run_multi_piece(&self, slot: usize, piece_idx: usize, platform: Platform) {
+        // Sound: the owner wrote the description before dispatching the slot's
+        // tasks (batch, submit_multi_slice), and writes it again only after
+        // `slot_done`.
         let desc = unsafe { *self.multi[slot].get() };
         if let Some((message_len, slot_len, per_part)) = desc.batch {
             let first = piece_idx * per_part;
             let count = (desc.total_len - first).min(per_part);
+            // Sound: the batch and its digests stay in the slot (`batches[s]`)
+            // until the slot's event, which waits for `slot_done`; this task's
+            // messages and digests are its own range of them (`first`,
+            // `count`).
             let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(first * slot_len), count * slot_len) };
             let digests = unsafe { core::slice::from_raw_parts_mut(desc.digests.add(first), count) };
             crate::many::hash_many_on(bytes, message_len, slot_len, &self.key, self.flags, digests, platform);
@@ -557,17 +616,23 @@ impl Shared {
         let offset = piece_idx * desc.piece_len;
         let part_len = (desc.total_len - offset).min(desc.piece_len);
         let counter = (offset / CHUNK_LEN) as u64;
+        // Sound: the message's bytes stay where they are until the slot is
+        // done (an owner in `owners[s]`; a loan by the Lent guard, which waits
+        // for `loan_completed`), and this piece reads its own range.
         let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(offset), part_len) };
         let cvs_ptr = self.cvs[slot].get() as *mut [u8; OUT_LEN];
         if piece_idx == 0 {
             debug_assert!(part_len > CHUNK_LEN);
             let pair = crate::compress_subtree_to_parent_node(bytes, 0, &self.key, 0, self.flags, platform);
+            // Sound: `cvs[slot]` has MAX_SLOT_PIECES + 1 values; piece 0
+            // writes the first two and piece i the one at i + 1, each its own.
             unsafe {
                 (*cvs_ptr).copy_from_slice(&pair[..OUT_LEN]);
                 (*cvs_ptr.add(1)).copy_from_slice(&pair[OUT_LEN..]);
             }
         } else {
             let cv = crate::hash_all_at_once(bytes, &self.key, counter, self.flags, platform).chaining_value();
+            // Sound: as piece 0's, above.
             unsafe {
                 (*cvs_ptr.add(piece_idx + 1)).copy_from_slice(&cv);
             }
@@ -575,6 +640,9 @@ impl Shared {
 
         let storage = self.storage;
         if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Sound: this is the slot's last task (`tasks_left` reached zero),
+            // so every piece's value is written and no one else reads or
+            // writes the slot's values or hash until `slot_done` below.
             let cvs = unsafe { &*self.cvs[slot].get() };
             let hash = fold_multi_cvs(&self.key, self.flags, cvs, desc.pieces);
             unsafe { *self.hashes[slot].get() = *hash.as_bytes() };
@@ -695,6 +763,9 @@ pub struct Pipeline<T, B = ()> {
     action_buf: [u64; MAX_SLOT_PIECES],
 }
 
+// Sound: the Pipeline owns its tags and owners (hence `T: Send, B: Send`); the
+// raw pointers are to its never-freed Shared and into buffers it holds, which
+// workers read only through tasks it dispatched.
 unsafe impl<T: Send, B: Send> Send for Pipeline<T, B> {}
 
 impl<T> Pipeline<T, ()> {
@@ -747,6 +818,9 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
         self.assert_uncommitted(s);
         self.open_messages -= 1;
 
+        // Sound: the slot is open and has no owner yet (assert_uncommitted);
+        // the owner stays in the slot, where its bytes cannot move, until the
+        // slot's event reads it out or the Pipeline's drop drops it.
         let b_ref = unsafe { (*self.owners[s].get()).write(owner) };
         let bytes: &[u8] = b_ref.as_ref();
         let (ptr, len) = (bytes.as_ptr(), bytes.len());
@@ -758,6 +832,7 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
 impl<T, B> Pipeline<T, B> {
     #[inline(always)]
     fn shared(&self) -> &Shared {
+        // Sound: `shared` is this Pipeline's Shared (create), never freed.
         unsafe { &*self.shared }
     }
 
@@ -770,8 +845,12 @@ impl<T, B> Pipeline<T, B> {
         let p_cap = limits.rooms + m + 1;
         let g_cap = m.clamp(4, 256);
         let actions_cap = m * MAX_SLOT_PIECES + p_cap + g_cap;
+        // An action names a slot, a piece or a group in 29 bits (pack_arg).
+        assert!(m < 1 << 29 && p_cap < 1 << 29, "Pipeline Limits beyond what an action can name");
 
         let storage = PipeStorage::acquire(actions_cap, m, limits.rooms, g_cap, &key, flags);
+        // Sound: this Pipeline now holds the storage alone
+        // (PipeStorage::acquire), and these cells are its holder's.
         let next_loan_epoch = unsafe { *storage.saved_loan_epoch.get() };
         let next_group_epoch = unsafe { *storage.saved_group_epoch.get() };
         let source_slot = storage.source.register();
@@ -784,6 +863,9 @@ impl<T, B> Pipeline<T, B> {
         // The storage's `Shared`, where it has one of this size: every task
         // of the Pipeline before is done (its drop saw to that), and only
         // the mode is this Pipeline's own.
+        // Sound: as the saved epochs above. A Shared the storage keeps was the
+        // Pipeline before's, whose every task is done (its drop saw to that),
+        // so reading its lengths and writing its mode race with no worker.
         let held = unsafe { *storage.shared.get() };
         let shared: *mut Shared = if !held.is_null() && unsafe { (&(*held).hashes).len() >= m } {
             // A storage has one count of rooms, so pieces enough too.
@@ -829,6 +911,7 @@ impl<T, B> Pipeline<T, B> {
                     })
                     .collect(),
             }));
+            // Sound: as above; the Shared is kept for the next Pipeline.
             unsafe { *storage.shared.get() = new };
             new
         };
@@ -950,6 +1033,7 @@ impl<T, B> Pipeline<T, B> {
     #[inline]
     fn try_take_room(&mut self) -> Option<Room> {
         if self.local_free_rooms.is_empty() {
+            // Sound: as `shared()`.
             let shared = unsafe { &*self.shared };
             let count = shared.storage.rooms.count;
             let start = self.room_cursor;
@@ -1073,6 +1157,9 @@ impl<T, B> Pipeline<T, B> {
 
         self.drain_slot_pieces(s);
         let pnode = self.alloc_piece_node(s);
+        // Sound: as `shared()`. The node came off the free list, so no task
+        // uses it: its fields are the owner's to write before the dispatch
+        // below.
         let shared = unsafe { &*self.shared };
         let node = &shared.pieces[pnode as usize];
         unsafe {
@@ -1088,6 +1175,8 @@ impl<T, B> Pipeline<T, B> {
         if rs.tail_piece == NONE {
             rs.head_piece = pnode;
         } else {
+            // Sound: `next` is the owner's alone (workers read a node's other
+            // fields).
             unsafe { *shared.pieces[rs.tail_piece as usize].next.get() = pnode };
         }
         rs.tail_piece = pnode;
@@ -1121,6 +1210,8 @@ impl<T, B> Pipeline<T, B> {
 
         match self.slots[s].kind {
             SlotKind::OpenShort { room: room_idx, offset, len } => {
+                // Sound: the offset is within the room (commit checked
+                // `written` against what was left).
                 let ptr = unsafe { self.shared().storage.rooms.room_ptr(room_idx as usize).add(offset as usize) };
                 let out = self.shared().hashes[s].get() as *mut u8;
                 let (group, epoch) = self.push_member(ptr, len as usize, out, room_idx, None);
@@ -1136,6 +1227,8 @@ impl<T, B> Pipeline<T, B> {
         match self.slots[s].kind {
             SlotKind::OpenEmpty => {
                 let empty_hash = crate::hash_serial(&[], &self.shared().key, self.shared().flags);
+                // Sound: no task runs for an empty message, so the slot's hash
+                // is the owner's to write.
                 unsafe { *self.shared().hashes[s].get() = *empty_hash.as_bytes() };
                 self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group: NONE, epoch: 0 };
             }
@@ -1216,6 +1309,9 @@ impl<T, B> Pipeline<T, B> {
         crate::many::assert_slots(batch.bytes(), batch.message_len(), batch.slot(), digests.len());
         self.open_messages -= 1;
 
+        // Sound: the slot is open and holds no batch (assert_uncommitted); the
+        // batch and digests stay in the slot until its event reads them out or
+        // the Pipeline's drop drops them.
         let hold = unsafe { (*self.batches[s].get()).write((batch, digests)) };
         let msg_len = hold.0.message_len();
         let slot_len = hold.0.slot();
@@ -1236,6 +1332,8 @@ impl<T, B> Pipeline<T, B> {
             debug_assert!((1..=MAX_SLOT_PIECES).contains(&pieces));
             self.shared().slot_done[s].store(false, Ordering::Relaxed);
             self.shared().tasks_left[s].store(pieces, Ordering::Relaxed);
+            // Sound: no task of this slot is in flight (it was open), so its
+            // description is the owner's to write before the dispatch below.
             unsafe {
                 *self.shared().multi[s].get() = MultiDesc {
                     input: bytes.as_ptr(),
@@ -1342,6 +1440,7 @@ impl<T, B> Pipeline<T, B> {
         debug_assert!((2..=MAX_SLOT_PIECES).contains(&pieces));
         self.shared().slot_done[s].store(false, Ordering::Relaxed);
         self.shared().tasks_left[s].store(pieces, Ordering::Relaxed);
+        // Sound: as `batch`'s, above.
         unsafe {
             *self.shared().multi[s].get() = MultiDesc { input: ptr, total_len: len, piece_len, pieces, batch: None, digests: core::ptr::null_mut(), loan_epoch }
         };
@@ -1355,6 +1454,7 @@ impl<T, B> Pipeline<T, B> {
     fn flush_sealed_short_rooms(&mut self) {
         for s in 0..self.slots.len() {
             if let SlotKind::OpenShort { room: room_idx, offset, len } = self.slots[s].kind {
+                // Sound: as in `end`.
                 let ptr = unsafe { self.shared().storage.rooms.room_ptr(room_idx as usize).add(offset as usize) };
                 let out = self.shared().hashes[s].get() as *mut u8;
                 let (group, epoch) = self.push_member(ptr, len as usize, out, room_idx, None);
@@ -1439,6 +1539,9 @@ impl<T, B> Pipeline<T, B> {
         let Some((group_idx, epoch)) = self.open_group.take() else { return };
         let count = self.local_count;
         let group = &self.shared().storage.groups[group_idx as usize];
+        // Sound: the group is not in flight (acquire_free_group gave it), so
+        // its task, metas and epoch are the owner's to write before the
+        // dispatch below.
         unsafe {
             let task = &mut *group.task.get();
             task.batch = self.local_batch;
@@ -1461,6 +1564,7 @@ impl<T, B> Pipeline<T, B> {
         let ctx = self.shared as *const Shared as *const ();
         match self.source_slot {
             Some(_) => self.shared().storage.source.publish_actions(Shared::run_action, ctx, core::slice::from_ref(&arg)),
+            // Sound: `ctx` is this Pipeline's Shared, as run_action requires.
             None => unsafe { Shared::run_action(ctx, arg, pool_platform()) },
         }
     }
@@ -1472,6 +1576,7 @@ impl<T, B> Pipeline<T, B> {
             None => {
                 for i in 0..count {
                     let arg = self.action_buf[i];
+                    // Sound: as dispatch_one's.
                     unsafe { Shared::run_action(ctx, arg, pool_platform()) };
                 }
             }
@@ -1493,6 +1598,7 @@ impl<T, B> Pipeline<T, B> {
     }
 
     fn drain_slot_pieces(&mut self, s: usize) {
+        // Sound: as `shared()`.
         let shared = unsafe { &*self.shared };
         let (key, flags, platform) = (shared.key, shared.flags, Platform::detect());
         let parent = |l: &CVBytes, r: &CVBytes| crate::hasher::parent_output(l, r, &key, flags, platform);
@@ -1504,6 +1610,8 @@ impl<T, B> Pipeline<T, B> {
             if head == NONE || !shared.pieces[head as usize].done.load(Ordering::Acquire) {
                 return;
             }
+            // Sound: the piece is done (checked above), so its `next` and
+            // `out` are the owner's again.
             let next = unsafe { *shared.pieces[head as usize].next.get() };
             let out = unsafe { *shared.pieces[head as usize].out.0.get() };
             self.free_pieces.push_back(head);
@@ -1519,6 +1627,9 @@ impl<T, B> Pipeline<T, B> {
 
             if ended && rs.room_pieces == 1 {
                 let root = parent(out[..OUT_LEN].try_into().unwrap(), out[OUT_LEN..].try_into().unwrap()).root_hash();
+                // Sound: every piece of this slot is done and merged here, on
+                // the owner's thread: the slot's hash and values have no other
+                // reader or writer.
                 unsafe { *shared.hashes[s].get() = *root.as_bytes() };
                 shared.slot_done[s].store(true, Ordering::Relaxed);
                 return;
@@ -1529,6 +1640,9 @@ impl<T, B> Pipeline<T, B> {
             } else {
                 out[..OUT_LEN].try_into().unwrap()
             };
+            // Sound: a room message's values are written here alone, on the
+            // owner's thread (workers write a slice message's, never both for
+            // one slot).
             let cvs = unsafe { &mut *shared.cvs[s].get() };
             while rs.stack_len > rs.merged_pieces.count_ones() as usize {
                 let right = cvs[rs.stack_len - 1];
@@ -1548,6 +1662,7 @@ impl<T, B> Pipeline<T, B> {
                     rs.stack_len -= 1;
                 }
                 let root = parent(&cvs[0], &right).root_hash();
+                // Sound: as the one-room root, above.
                 unsafe { *shared.hashes[s].get() = *root.as_bytes() };
                 shared.slot_done[s].store(true, Ordering::Relaxed);
                 return;
@@ -1593,15 +1708,21 @@ impl<T, B> Pipeline<T, B> {
         let event = match kind {
             SlotKind::WaitAborted { .. } => Event::Aborted { tag, owner: None },
             SlotKind::WaitSingle { has_owner, .. } | SlotKind::WaitMulti { has_owner } => {
+                // Sound: the slot's work is done (`ready`), so its hash has no
+                // writer; `has_owner` says the slot holds an owner, read out
+                // here once (the slot is then Free).
                 let hash = Hash::from_bytes(unsafe { *self.shared().hashes[s].get() });
                 let owner = if has_owner { Some(unsafe { (*self.owners[s].get()).assume_init_read() }) } else { None };
                 Event::Hashed { tag, hash, owner }
             }
             SlotKind::WaitRoomMulti => {
+                // Sound: as above.
                 let hash = Hash::from_bytes(unsafe { *self.shared().hashes[s].get() });
                 Event::Hashed { tag, hash, owner: None }
             }
             SlotKind::WaitBatch { .. } => {
+                // Sound: a WaitBatch slot holds its batch and digests (batch
+                // wrote them), read out here once.
                 let (batch, digests) = unsafe { (*self.batches[s].get()).assume_init_read() };
                 Event::Batch { tag, batch, digests }
             }
@@ -1670,6 +1791,8 @@ impl<T, B> Drop for Pipeline<T, B> {
         crate::lanes::sources::closed();
         let storage = self.shared().storage;
         storage.waker.clear();
+        // Sound: the Pipeline still holds the storage; these cells are its
+        // holder's.
         unsafe {
             *storage.saved_loan_epoch.get() = self.next_loan_epoch;
             *storage.saved_group_epoch.get() = self.next_group_epoch;
@@ -1679,9 +1802,12 @@ impl<T, B> Drop for Pipeline<T, B> {
             let s = s_idx as usize;
             match core::mem::replace(&mut self.slots[s].kind, SlotKind::Free) {
                 SlotKind::WaitSingle { has_owner: true, .. } | SlotKind::WaitMulti { has_owner: true } => {
+                    // Sound: a slot waiting with `has_owner` holds an owner no
+                    // event took.
                     unsafe { (*self.owners[s].get()).assume_init_drop() };
                 }
                 SlotKind::WaitBatch { .. } => {
+                    // Sound: a WaitBatch slot holds its batch and digests.
                     unsafe { (*self.batches[s].get()).assume_init_drop() };
                 }
                 _ => {}
