@@ -76,6 +76,11 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
 
 ## What a program on 0.9 changes
 
+- **The licence.** From this release BLAKE3-Servil is under any of MIT,
+  Apache-2.0, TGPPL-1.0 or BOSL-1.0, at your choice, as smalloc is
+  (#450). 0.9.0 and earlier stay under the terms they were published
+  with: CC0-1.0, Apache-2.0, or Apache-2.0 with the LLVM exception. A
+  program that relied on CC0 has MIT and Apache-2.0 to choose from.
 - **`Hasher::finalize` and `finalize_xof` take `&self`** (0.9 took the
   hasher): a hasher can be finalized and fed further, as with official
   BLAKE3.

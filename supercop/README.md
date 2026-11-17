@@ -58,7 +58,9 @@ pinned by its Cargo.lock and called as its users call it. The crate
 picks its kernels at run time for each message length, so its timings
 at every length are the ones its users get.
 
-License CC0-1.0 OR Apache-2.0; copyright and patent level 0.
+License: MIT, Apache-2.0, TGPPL-1.0 or BOSL-1.0, at your choice (the
+repository's LICENSE files). Upstream BLAKE3's code is used under its
+authors' CC0 dedication.
 
 Zooko
 ```
