@@ -737,9 +737,36 @@ each bug are in `git log`.
     stop it. Every map now goes through one function, which the option
     turns off. A test counts the maps on each path.
 
+21. **A small file that grew could be copied past its buffer**
+    (`linux_pipe`, #440). Where io_uring is not available (a container's
+    default profile denies it), a file of at most 16 KiB that grew
+    after its size was read had up to 16,448 bytes copied into a buffer
+    of 4,096. One function now sizes the buffer by what was read and
+    copies it in, on both paths, with a check in every build. A test
+    fails under the old sizing.
+22. **Growing the descriptor table closed a descriptor the caller had
+    passed** (`grow_descriptor_table`, #441). `b3sum /dev/fd/255 other`
+    lost its file, and another file opened later could take the number.
+    The table is now grown by a call that never lands on an open
+    descriptor. A test holds number 255 across it.
+23. **A panic on a reading thread could free buffers the kernel was
+    still writing** (`Uring`, #442). Dropping a ring does not wait for
+    its reads. A ring now counts its reads in flight and stops the
+    process if it is dropped with any, and `b3sum` is built so that a
+    panic stops the process at once. A test drops a ring with a read in
+    flight and expects the stop.
+24. **A read error could leave `b3sum` spinning** (`stream_fd_into_rooms`,
+    #437). After an error, with a finished read at the front and others
+    in flight, the loop never entered the kernel, where the rest would
+    complete. The error's way out is now the same code as the file's
+    end. No test: it needs a device that fails a read after serving one.
+
 Bugs 14 to 20 were found by the AI security audit of the first 0.10.0
-candidate, not by the checks above. 17 and 18 are in 0.9.0, reachable
-only outside its documented contract.
+candidate, and 24 by the second, not by the checks above. 21 to 23 were
+found by reading every `unsafe` block of `b3sum`'s Linux reads and of
+the Pipeline and writing its reason beside it;
+`tools/unsafe_reasons.py` now fails a block there without one. 17 and
+18 are in 0.9.0, reachable only outside its documented contract.
 
 ## What each check would catch
 

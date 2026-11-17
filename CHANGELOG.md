@@ -32,6 +32,12 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
 - Direct reads keep the originally opened file, including if its
   pathname has been replaced. Hashing still requires stable contents.
 - A file is read to where its reads end, whatever its size said.
+- A panic in `b3sum` stops the process at once, and a ring of reads
+  cannot be dropped while the kernel still writes its buffers.
+- Where io_uring is unavailable, a small file that grew during the run
+  is no longer copied past its buffer.
+- `b3sum` no longer closes a descriptor the caller passed
+  (`b3sum /dev/fd/255 other`).
 - `b3sum --no-mmap` maps no file (it was accepted and ignored). A file
   that another program shortens during the run then cannot stop it.
   `--check` refuses `--seek`.
