@@ -18,6 +18,7 @@ step() { echo "== $*"; "$@"; }
 # The version names this commit truly (tools/gen-ver.py: a release's on
 # the release commit alone, X.Y.Z+dev after it).
 step python3 tools/gen-ver.py --check
+step python3 tools/unsafe_reasons.py
 step cargo nextest run --cargo-quiet --release --no-default-features
 # nextest skips doc tests: the examples without std too, where Batch is absent.
 step cargo test -q --release --doc --no-default-features
