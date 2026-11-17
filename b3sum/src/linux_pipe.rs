@@ -471,6 +471,11 @@ pub(crate) fn force_miss() -> bool {
     FORCE_MISS.load(Ordering::Relaxed)
 }
 
+/// The tests' seam: called with each file's path just after the file is
+/// opened, where a test replaces what the path names.
+#[cfg(test)]
+pub(crate) static AFTER_OPEN: std::sync::Mutex<Option<Box<dyn Fn(&Path) + Send>>> = std::sync::Mutex::new(None);
+
 /// The tests' seam: with it set, every file is taken for one the page
 /// cache does not hold.
 #[cfg(test)]
@@ -967,8 +972,15 @@ fn run_hybrid_worker(
             }
         };
 
+        #[cfg(test)]
+        if let Some(hook) = AFTER_OPEN.lock().unwrap().as_ref() {
+            hook(&paths[i]);
+        }
+
+        // From here on the file is the one opened above, on every path:
+        // nothing opens its name again, which may name another file by now.
         if !meta.is_file() {
-            sink.put(i, crate::hash_path_hash(args, &paths[i]));
+            sink.put(i, crate::hash_open_file(args, file));
             continue;
         }
 
@@ -1141,10 +1153,8 @@ fn run_hybrid_worker(
                     sink.put(i, Err(e.into()));
                 }
             }
-        } else if let Err(e) = crate::hash_path_hash(args, &paths[i]).map(|h| {
-            sink.put(i, Ok(h));
-        }) {
-            sink.put(i, Err(e));
+        } else {
+            sink.put(i, crate::hash_open_file(args, file));
         }
     }
 
@@ -1492,5 +1502,38 @@ mod test {
         let mut none = vec![1u8; 7];
         assert_eq!(super::buffer_with_start(&mut none, 10_000, None), 0);
         assert!(none.capacity() > 10_000 && none.is_empty());
+    }
+
+    /// The file opened is the file hashed, where there is no io_uring too:
+    /// each path is replaced by another file just after it is opened, and
+    /// the hashes are the first files'. (That fallback opened the name a
+    /// second time, and hashed whatever it named by then.)
+    #[test]
+    fn without_a_ring_the_file_opened_is_the_file_hashed() {
+        blake3::initialize();
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file past the small files' reads, and a pipe-like
+        // input that is no regular file: the two places that opened again.
+        let first: Vec<u8> = (0..crate::MAP_LEN + 4096).map(|i| (i * 13) as u8).collect();
+        let paths: Vec<PathBuf> = (0..2).map(|i| dir.path().join(format!("f{i}"))).collect();
+        for path in &paths {
+            std::fs::write(path, &first).unwrap();
+        }
+        *super::AFTER_OPEN.lock().unwrap() = Some(Box::new(|path| {
+            std::fs::rename(path, path.with_extension("moved")).unwrap();
+            std::fs::write(path, b"another file").unwrap();
+        }));
+        super::set_force_miss(true);
+        let args = crate::Args::for_test_plain(paths.clone());
+        let mut got = Vec::new();
+        super::hash_paths_inner(&args, &paths, true, &mut |i, hash| {
+            got.push((i, hash.unwrap()));
+            true
+        });
+        super::set_force_miss(false);
+        *super::AFTER_OPEN.lock().unwrap() = None;
+        got.sort_by_key(|(i, _)| *i);
+        let want = blake3::convenience::hash(&first);
+        assert_eq!(got, vec![(0, want), (1, want)]);
     }
 }

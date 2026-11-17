@@ -96,6 +96,13 @@ CONTROLS = [
         "stopping before pending reads' buffers can be released\");\n    None",
         "failed_enter_stops_before_unwinding",
     ),
+    (
+        "the file opened is the file hashed where there is no io_uring",
+        "b3sum/src/linux_pipe.rs",
+        "        } else {\n            sink.put(i, crate::hash_open_file(args, file));\n        }\n",
+        "        } else {\n            drop(file);\n            sink.put(i, crate::hash_path_hash(args, &paths[i]));\n        }\n",
+        "without_a_ring_the_file_opened_is_the_file_hashed",
+    ),
 ]
 
 

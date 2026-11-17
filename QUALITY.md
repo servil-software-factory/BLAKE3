@@ -67,7 +67,7 @@ official BLAKE3. Cases are chosen from the code's boundaries and distinct
 paths. Mutation testing asks whether the core and thread-library tests
 reject deliberately changed code. Each surviving mutation has an
 explanation; a survivor is not automatically harmless. The mutation
-gate does not cover `b3sum`. In its place a program takes ten of
+gate does not cover `b3sum`. In its place a program takes eleven of
 `b3sum`'s protections out one at a time and requires the test for each
 to fail.
 

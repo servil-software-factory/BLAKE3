@@ -114,35 +114,34 @@ See [What `--check` does](what_does_check_do.md) for checkfile rules.
 
 ## What b3sum reads
 
-`b3sum` reads each file from byte 0 until the operating system reports
-end-of-file (`0` bytes). Initial file metadata helps choose the read path, but
-never decides where the file ends—so `/proc` files that report 0 bytes are still
-hashed completely.
+`b3sum` hashes the file it opened. If the name is moved or given to another
+file during the run, the file hashed is still the one that was opened.
 
-Once `b3sum` opens a file, it keeps using that open file handle. Moving or
-replacing the file at that path does not switch which file is hashed.
+**Hash files that are not changing.** `b3sum` takes no lock and no snapshot.
+If another program writes to a file while `b3sum` hashes it, the hash printed
+may be of bytes that the file never held all at once.
 
-**Files modified while `b3sum` is reading them:** `b3sum` does not lock files or
-take a filesystem snapshot. If another program modifies a file while `b3sum`
-reads it, the output is **not** guaranteed to be the hash of any single version
-of the file that existed (for example, `b3sum` can read old bytes from the first
-part and new bytes from the rest). Only hash files that are not changing, or hash
-a snapshot.
+How much of the file is hashed depends on how `b3sum` takes it in:
 
-Specifically, if a file grows or shrinks mid-read:
+- **Read** (files under 512 KiB, standard input, every file with `--no-mmap`,
+  and on Linux most files the page cache does not hold): `b3sum` reads until
+  the system says
+  the file has ended. The size the file reported at the start is not used.
+  So a file that reports 0 bytes and has some (as under `/proc`) is hashed
+  whole.
+- **Mapped** (other files of 512 KiB or more): `b3sum` hashes the bytes up to
+  the size the file had when it was opened.
 
-- **If the file grows:** Paths that read sequentially (small files, cold files,
-  standard input, or `--no-mmap`) read until end-of-file, so they include bytes
-  appended before `b3sum` reaches the end. Paths that memory-map the file
-  (by default, cached files of 512 KiB or more) only map its size at open, so
-  bytes appended afterward are not hashed. Direct I/O reads on cold files
-  detect trailing bytes and fall back to reading or mapping.
-- **If the file shrinks (is truncated):** When `b3sum` memory-maps the file,
-  reading past the new end causes a `SIGBUS` error and `b3sum` aborts without
-  printing a hash. When `b3sum` reads sequentially (small files, cold files, or
-  `--no-mmap`), hitting the shorter end reports end-of-file early, and `b3sum`
-  currently prints the hash of the prefix it had read so far rather than
-  detecting that the file shrank.
+What happens when a file changes during the run:
+
+| The file... | Read | Mapped |
+|---|---|---|
+| grows at its end | the added bytes are hashed if they arrive before `b3sum` reaches the end | the added bytes are not hashed |
+| is cut short | if `b3sum` had already read past the new end, it prints the hash of what it read: a file that never existed | `b3sum` stops with an error and prints no hash, unless the cut falls inside the file's last page of memory (4 KiB on most machines): then the missing bytes read as zeros, and it prints the hash of a file that never existed |
+| is overwritten in place | old bytes and new bytes may be mixed | the same |
+
+`b3sum` does not yet detect these cases
+([#443](https://github.com/servil-software-factory/BLAKE3/issues/443)).
 
 ## Direct I/O for large cold files
 

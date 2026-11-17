@@ -813,7 +813,7 @@ cannot see: Shuttle treats every atomic ordering as SeqCst; it tries
 thousands of schedules, not all; and the pool itself is the stand-in.
 
 `tools/b3sum_controls.py` does the same for `b3sum`, which the mutation
-gate does not cover: it takes ten protections out one at a time and
+gate does not cover: it takes eleven protections out one at a time and
 requires the test for each to fail.
 
 The current tests use bounded scenarios and probabilistic schedule

@@ -389,7 +389,7 @@ fn stdin_file() -> Option<File> {
 
 /// [`hash_path_hash`] for an open file. Every path hashes this file,
 /// including when its original pathname has since been replaced.
-fn hash_open_file(args: &Args, mut file: File) -> anyhow::Result<blake3::Hash> {
+pub(crate) fn hash_open_file(args: &Args, mut file: File) -> anyhow::Result<blake3::Hash> {
     if let Ok(meta) = file.metadata()
         && meta.is_file()
     {
