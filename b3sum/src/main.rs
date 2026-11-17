@@ -246,7 +246,7 @@ impl Args {
         }
         #[cfg(test)]
         MAPPED.with(|m| m.set(m.get() + 1));
-        // Sound as far as a map of a file another program may change can
+        // Sound: as far as a map of a file another program may change can
         // be: the bytes are only read, and a shortened file is the stop
         // above.
         unsafe { memmap2::Mmap::map(file) }.ok()
@@ -300,6 +300,8 @@ fn write_all_stdout(mut bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         while !bytes.is_empty() {
+            // Sound: a write of `bytes`, a slice held here, to standard
+            // output.
             let rc = unsafe { libc::write(1, bytes.as_ptr().cast(), bytes.len()) };
             if rc < 0 {
                 let e = io::Error::last_os_error();
@@ -495,6 +497,7 @@ const HOLD_PAGES: u64 = 1 << 18;
 pub(crate) fn hold(map: memmap2::Mmap) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static HELD: AtomicU64 = AtomicU64::new(0);
+    // Sound: a query with no memory argument.
     let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).expect("the page size is positive");
     let pages = (map.len() as u64).div_ceil(page);
     if HELD.fetch_add(pages, Ordering::Relaxed) + pages <= HOLD_PAGES {
@@ -526,6 +529,8 @@ fn mapped(args: &Args, file: &File) -> Option<memmap2::Mmap> {
 #[cfg(unix)]
 pub(crate) fn resident(map: &memmap2::Mmap) -> bool {
     let mut vec = 0u8;
+    // Sound: one page of the map (a map is at least one byte here, the
+    // callers') and one byte for the answer.
     let rc = unsafe { libc::mincore(map.as_ptr() as *mut libc::c_void, 1, (&mut vec as *mut u8).cast()) };
     rc == 0 && vec & 1 == 1
 }
@@ -569,6 +574,8 @@ fn read_all_uninit(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
     let mut at = 0usize;
     loop {
         if at == buf.capacity() {
+            // Sound: every byte below `at` was written by a read (`at` counts
+            // them); the length goes back to 0 once the buffer has grown.
             unsafe { buf.set_len(at) };
             buf.reserve(at.max(4096));
             unsafe { buf.set_len(0) };
@@ -577,6 +584,8 @@ fn read_all_uninit(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
         #[cfg(unix)]
         let rc = {
             use std::os::fd::AsRawFd;
+            // Sound: `avail` bytes from `at` are inside the capacity; the
+            // kernel writes at most that many.
             unsafe { libc::read(file.as_raw_fd(), buf.as_mut_ptr().add(at).cast(), avail) }
         };
         #[cfg(not(unix))]
@@ -589,6 +598,7 @@ fn read_all_uninit(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
             }
         };
         if rc == 0 {
+            // Sound: the reads wrote every byte below `at`.
             unsafe { buf.set_len(at) };
             return Ok(at);
         }
@@ -1392,6 +1402,8 @@ fn explain_sigbus() {
     extern "C" fn on_sigbus(_: libc::c_int) {
         if SAID.swap(true, std::sync::atomic::Ordering::SeqCst) {
             loop {
+                // Sound: calls a signal handler may make (pause, write,
+                // _exit), on a constant message.
                 unsafe { libc::pause() };
             }
         }
@@ -1402,11 +1414,15 @@ fn explain_sigbus() {
         }
     }
     let handler: extern "C" fn(libc::c_int) = on_sigbus;
+    // Sound: the handler makes only calls a signal handler may make, and
+    // SIGBUS is this program's to handle.
     unsafe { libc::signal(libc::SIGBUS, handler as libc::sighandler_t) };
 }
 
 fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
+    // Sound: before any thread starts; a broken pipe then ends b3sum, as it
+    // does other tools.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL)
     };
@@ -1437,6 +1453,7 @@ fn main() -> anyhow::Result<()> {
     let status = if files_failed > 0 { 1 } else { 0 };
     use std::io::Write;
     let _ = std::io::stderr().flush();
+    // Sound: ends the process; standard output and error were flushed above.
     unsafe { libc::_exit(status) }
 }
 
