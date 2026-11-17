@@ -182,9 +182,13 @@ impl Uring {
 
         // Sound: mapping the ring descriptor at kernel-defined offsets.
         let sq_ring_ptr =
+            // Sound: a new mapping of the ring's descriptor at the kernel's
+            // offset for it; the kernel chooses the address.
             unsafe { libc::mmap(ptr::null_mut(), sq_ring_len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, ring_fd, IORING_OFF_SQ_RING) };
         if sq_ring_ptr == libc::MAP_FAILED {
             let err = io::Error::last_os_error();
+            // Sound: the descriptor is this function's, closed once on each
+            // way out.
             unsafe { libc::close(ring_fd) };
             return Err(err);
         }
@@ -192,9 +196,12 @@ impl Uring {
         let (cq_ring_ptr, cq_ring_len) = if single_mmap {
             (sq_ring_ptr, 0)
         } else {
+            // Sound: as the first mapping.
             let p = unsafe { libc::mmap(ptr::null_mut(), cq_size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, ring_fd, IORING_OFF_CQ_RING) };
             if p == libc::MAP_FAILED {
                 let err = io::Error::last_os_error();
+                // Sound: this function's own mapping and descriptor, released
+                // once.
                 unsafe {
                     libc::munmap(sq_ring_ptr, sq_ring_len);
                     libc::close(ring_fd);
@@ -205,9 +212,12 @@ impl Uring {
         };
 
         let sqes_len = (params.sq_entries as usize) * size_of::<IoUringSqe>();
+        // Sound: as the first mapping.
         let sqes_raw = unsafe { libc::mmap(ptr::null_mut(), sqes_len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, ring_fd, IORING_OFF_SQES) };
         if sqes_raw == libc::MAP_FAILED {
             let err = io::Error::last_os_error();
+            // Sound: this function's own mappings and descriptor, released
+            // once.
             unsafe {
                 if !single_mmap {
                     libc::munmap(cq_ring_ptr, cq_ring_len);
@@ -222,14 +232,19 @@ impl Uring {
         let cq_base = cq_ring_ptr.cast::<u8>();
         let sqes_ptr = sqes_raw.cast::<IoUringSqe>();
 
+        // Sound: each offset is one the kernel gave for this ring (`params`),
+        // inside the mapping of the length it also gave; the heads and tails
+        // are u32s the kernel reads and writes atomically, as AtomicU32 does.
         let sq_head = unsafe { sq_base.add(params.sq_off.head as usize).cast::<AtomicU32>() };
         let sq_tail = unsafe { sq_base.add(params.sq_off.tail as usize).cast::<AtomicU32>() };
         let sq_mask = unsafe { *sq_base.add(params.sq_off.ring_mask as usize).cast::<u32>() };
         let sq_array = unsafe { sq_base.add(params.sq_off.array as usize).cast::<u32>() };
         for i in 0..params.sq_entries {
+            // Sound: the array has `sq_entries` slots.
             unsafe { *sq_array.add(i as usize) = i };
         }
 
+        // Sound: as the submission ring's, above.
         let cq_head = unsafe { cq_base.add(params.cq_off.head as usize).cast::<AtomicU32>() };
         let cq_tail = unsafe { cq_base.add(params.cq_off.tail as usize).cast::<AtomicU32>() };
         let cq_mask = unsafe { *cq_base.add(params.cq_off.ring_mask as usize).cast::<u32>() };
@@ -263,6 +278,8 @@ impl Uring {
 
     #[inline]
     pub(crate) fn sq_space_left(&self) -> u32 {
+        // Sound: `sq_head` points into the ring's mapping, which lives as long
+        // as the Uring.
         let head = unsafe { (*self.sq_head).load(Ordering::Acquire) };
         self.sq_entries - (self.local_sq_tail.wrapping_sub(head))
     }
@@ -281,6 +298,9 @@ impl Uring {
             return false;
         }
         let idx = (self.local_sq_tail & self.sq_mask) as usize;
+        // Sound: `idx` is below `sq_entries` (masked), so both writes are
+        // inside the ring's array and its SQEs; the kernel reads an SQE only
+        // after the tail moves past it (submit_and_wait).
         unsafe {
             *self.sq_array.add(idx) = idx as u32;
             *self.sqes_ptr.add(idx) = IoUringSqe {
@@ -311,6 +331,7 @@ impl Uring {
     /// A read's error CQE, in contrast, has finished using that read's buffer.
     pub(crate) fn submit_and_wait(&mut self, min_complete: u32) {
         if self.unsubmitted > 0 {
+            // Sound: into the ring's mapping, as sq_space_left's.
             unsafe { (*self.sq_tail).store(self.local_sq_tail, Ordering::Release) };
         }
         let mut to_submit = self.unsubmitted;
@@ -330,6 +351,7 @@ impl Uring {
                 }
             } else {
                 // Interrupted: the kernel may have consumed some SQEs.
+                // Sound: as above.
                 let head = unsafe { (*self.sq_head).load(Ordering::Acquire) };
                 to_submit = self.local_sq_tail.wrapping_sub(head);
                 if min_complete == 0 && to_submit == 0 {
@@ -341,12 +363,15 @@ impl Uring {
 
     #[inline]
     pub(crate) fn pop_cqe(&mut self) -> Option<IoUringCqe> {
+        // Sound: into the ring's mapping. Only this thread moves the head.
         let head = unsafe { (*self.cq_head).load(Ordering::Relaxed) };
         let tail = unsafe { (*self.cq_tail).load(Ordering::Acquire) };
         if head == tail {
             return None;
         }
         let idx = (head & self.cq_mask) as usize;
+        // Sound: `idx` is masked to the CQEs' count, and the kernel has
+        // finished writing the entry before it moved the tail past it.
         let cqe = unsafe { *self.cqes.add(idx) };
         unsafe { (*self.cq_head).store(head.wrapping_add(1), Ordering::Release) };
         self.in_flight -= 1;
@@ -358,6 +383,7 @@ impl Uring {
 /// at the syscall, before any caller can release an in-flight buffer.
 #[inline]
 fn enter(fd: RawFd, to_submit: u32, min_complete: u32, flags: u32) -> Option<u32> {
+    // Sound: a system call with plain values; no signal mask is passed.
     let rc = unsafe { libc::syscall(libc::SYS_io_uring_enter, fd, to_submit, min_complete, flags, ptr::null::<libc::sigset_t>(), size_of::<libc::sigset_t>()) };
     if rc >= 0 {
         return Some(rc as u32);
