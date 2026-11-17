@@ -54,7 +54,7 @@ const CHECK_ARG: &str = "check";
 #[command(
     version = blake3::BUILD_VERSION,
     max_term_width(100),
-    after_help = "More information: b3sum/README.md at https://github.com/servil-software-factory/BLAKE3/blob/servil/b3sum/README.md"
+    after_help = "More information: b3sum/README.md at https://github.com/servil-software-factory/BLAKE3/blob/main/b3sum/README.md"
 )]
 struct Inner {
     /// Files to hash, or checkfiles to check
@@ -85,7 +85,8 @@ struct Inner {
     #[arg(long, value_name("NUM"))]
     num_threads: Option<std::num::NonZeroUsize>,
 
-    /// No effect: b3sum chooses between reading and mapping each file
+    /// Read every file and map none: a file that another program
+    /// shortens while b3sum hashes it then cannot stop the run
     #[arg(long)]
     no_mmap: bool,
 
@@ -116,7 +117,8 @@ struct Inner {
         conflicts_with(LENGTH_ARG),
         conflicts_with(RAW_ARG),
         conflicts_with(TAG_ARG),
-        conflicts_with(NO_NAMES_ARG)
+        conflicts_with(NO_NAMES_ARG),
+        conflicts_with("seek")
     )]
     check: bool,
 
@@ -232,6 +234,24 @@ impl Args {
         self.inner.seek
     }
 
+    /// The map of `file`, unless `--no-mmap` asked for none or the file
+    /// cannot be mapped: the one place b3sum maps a file to hash it. A
+    /// mapped file that another program shortens stops the process when
+    /// its lost pages are read (`explain_sigbus`); a read sees the end.
+    /// (BLAKE3 #432: the option was accepted and did nothing.)
+    #[cfg(unix)]
+    pub(crate) fn map(&self, file: &File) -> Option<memmap2::Mmap> {
+        if self.inner.no_mmap {
+            return None;
+        }
+        #[cfg(test)]
+        MAPPED.with(|m| m.set(m.get() + 1));
+        // Sound: as far as a map of a file another program may change can
+        // be: the bytes are only read, and a shortened file is the stop
+        // above.
+        unsafe { memmap2::Mmap::map(file) }.ok()
+    }
+
     fn keyed(&self) -> bool {
         self.inner.keyed
     }
@@ -280,6 +300,8 @@ fn write_all_stdout(mut bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         while !bytes.is_empty() {
+            // Sound: a write of `bytes`, a slice held here, to standard
+            // output.
             let rc = unsafe { libc::write(1, bytes.as_ptr().cast(), bytes.len()) };
             if rc < 0 {
                 let e = io::Error::last_os_error();
@@ -343,13 +365,13 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path) -> anyhow::Result<blake3:
         // `b3sum < file`: a file, hashed as a file named is.
         #[cfg(unix)]
         if let Some(file) = stdin_file() {
-            return hash_open_file(args, file, Path::new("/dev/stdin"));
+            return hash_open_file(args, file);
         }
         let mut hasher = args.base_hasher.clone();
         update_from(&mut hasher, io::stdin())?;
         return Ok(hasher.finalize());
     }
-    hash_open_file(args, File::open(path)?, path)
+    hash_open_file(args, File::open(path)?)
 }
 
 /// Standard input as a file, where it is a regular file read from its
@@ -365,9 +387,9 @@ fn stdin_file() -> Option<File> {
     (file.metadata().ok()?.is_file() && from_start).then_some(file)
 }
 
-/// [`hash_path_hash`] for a file opened: `path` names it for a direct
-/// read, which opens it again.
-fn hash_open_file(args: &Args, mut file: File, path: &Path) -> anyhow::Result<blake3::Hash> {
+/// [`hash_path_hash`] for an open file. Every path hashes this file,
+/// including when its original pathname has since been replaced.
+pub(crate) fn hash_open_file(args: &Args, mut file: File) -> anyhow::Result<blake3::Hash> {
     if let Ok(meta) = file.metadata()
         && meta.is_file()
     {
@@ -382,7 +404,7 @@ fn hash_open_file(args: &Args, mut file: File, path: &Path) -> anyhow::Result<bl
         #[cfg(unix)]
         if let Ok(len) = usize::try_from(size)
             && len >= MAP_LEN
-            && let Ok(map) = unsafe { memmap2::Mmap::map(&file) }
+            && let Some(map) = args.map(&file)
         {
             let warm = resident(&map);
             // The tests' seam: a file just written is in the cache.
@@ -410,7 +432,7 @@ fn hash_open_file(args: &Args, mut file: File, path: &Path) -> anyhow::Result<bl
                 // (direct.rs). Where that cannot be (the file system, a
                 // short read), the map below.
                 if direct::is_for(&file, size)
-                    && let Some(h) = direct::hash(args.mode, path, len, threads().get().min(DIRECT_THREADS), &mut direct::Piece::new())
+                    && let Some(h) = direct::hash(args.mode, &file, len, threads().get().min(DIRECT_THREADS), &mut direct::Piece::new())
                 {
                     drop(map);
                     return Ok(h);
@@ -453,7 +475,7 @@ fn hash_path(args: &Args, path: &Path) -> anyhow::Result<blake3::OutputReader> {
             }
         } else {
             #[cfg(unix)]
-            if let Some(map) = mapped(&file) {
+            if let Some(map) = mapped(args, &file) {
                 update(&mut hasher, &map);
                 hold(map);
             } else {
@@ -475,6 +497,7 @@ const HOLD_PAGES: u64 = 1 << 18;
 pub(crate) fn hold(map: memmap2::Mmap) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static HELD: AtomicU64 = AtomicU64::new(0);
+    // Sound: a query with no memory argument.
     let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).expect("the page size is positive");
     let pages = (map.len() as u64).div_ceil(page);
     if HELD.fetch_add(pages, Ordering::Relaxed) + pages <= HOLD_PAGES {
@@ -484,13 +507,19 @@ pub(crate) fn hold(map: memmap2::Mmap) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The files this thread has mapped (`Args::map`).
+    pub(crate) static MAPPED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 #[cfg(unix)]
-fn mapped(file: &File) -> Option<memmap2::Mmap> {
+fn mapped(args: &Args, file: &File) -> Option<memmap2::Mmap> {
     let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
     if len < MAP_LEN {
         return None;
     }
-    let map = unsafe { memmap2::Mmap::map(file) }.ok()?;
+    let map = args.map(file)?;
     if cfg!(target_os = "linux") {
         return Some(map);
     }
@@ -500,6 +529,8 @@ fn mapped(file: &File) -> Option<memmap2::Mmap> {
 #[cfg(unix)]
 pub(crate) fn resident(map: &memmap2::Mmap) -> bool {
     let mut vec = 0u8;
+    // Sound: one page of the map (a map is at least one byte here, the
+    // callers') and one byte for the answer.
     let rc = unsafe { libc::mincore(map.as_ptr() as *mut libc::c_void, 1, (&mut vec as *mut u8).cast()) };
     rc == 0 && vec & 1 == 1
 }
@@ -543,6 +574,8 @@ fn read_all_uninit(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
     let mut at = 0usize;
     loop {
         if at == buf.capacity() {
+            // Sound: every byte below `at` was written by a read (`at` counts
+            // them); the length goes back to 0 once the buffer has grown.
             unsafe { buf.set_len(at) };
             buf.reserve(at.max(4096));
             unsafe { buf.set_len(0) };
@@ -551,6 +584,8 @@ fn read_all_uninit(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
         #[cfg(unix)]
         let rc = {
             use std::os::fd::AsRawFd;
+            // Sound: `avail` bytes from `at` are inside the capacity; the
+            // kernel writes at most that many.
             unsafe { libc::read(file.as_raw_fd(), buf.as_mut_ptr().add(at).cast(), avail) }
         };
         #[cfg(not(unix))]
@@ -563,6 +598,7 @@ fn read_all_uninit(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
             }
         };
         if rc == 0 {
+            // Sound: the reads wrote every byte below `at`.
             unsafe { buf.set_len(at) };
             return Ok(at);
         }
@@ -1035,7 +1071,7 @@ fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
     let (made, spare) = (Mutex::new(made), Mutex::new(spare));
     let unwritten = Mutex::new(Vec::<(usize, io::Error)>::new());
     let write = |(i, hash, nodes): Made| {
-        if let Err(e) = std::fs::write(outboard::path_in(dir, &hash), &nodes) {
+        if let Err(e) = outboard::write_in(dir, &hash, &nodes) {
             unwritten.lock().unwrap().push((i, e));
         }
         // No worker may be left to take it.
@@ -1049,7 +1085,7 @@ fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let Some(path) = paths.get(i) else { break };
             nodes.clear();
-            let hashed = outboard_of(args.mode, path, in_a_file, &mut rooms, &mut nodes);
+            let hashed = outboard_of(args, path, in_a_file, &mut rooms, &mut nodes);
             // An empty outboard (a file of one chunk group or less) is no
             // file: there is nothing in it to read, and creating a file
             // costs more than hashing a short one.
@@ -1108,16 +1144,46 @@ fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
     failed
 }
 
+/// All of `file` into `bytes`, in one read where it has the `says` bytes
+/// its size says: the read asks for a byte more, and a file gives fewer
+/// bytes than asked only at its end, so the read itself says where the
+/// end is and the size does not. A file with more is read on to its end
+/// (BLAKE3 #424: a read of exactly the size gave the hash of that many
+/// bytes of a file that had grown).
+fn read_to_its_end(file: &mut impl Read, says: usize, bytes: &mut Vec<u8>) -> io::Result<()> {
+    bytes.resize(says + 1, 0);
+    let mut got = 0;
+    while got <= says {
+        match file.read(&mut bytes[got..]) {
+            Ok(0) => {
+                bytes.truncate(got);
+                return Ok(());
+            }
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    file.read_to_end(bytes)?;
+    Ok(())
+}
+
 /// The hash of the input at `path` (`-`: standard input), and its
 /// outboard appended to `nodes`. A file under MAP_LEN is read into the
 /// thread's room by one read; a longer one that the page cache does not
 /// hold is read directly, where the system has such reads (Linux); any
 /// other is mapped where it can be (the mapping then held, as every
 /// mapping b3sum makes: `hold`), else read whole.
-fn outboard_of(mode: blake3::Mode, path: &Path, threads: usize, rooms: &mut outboard::Rooms, nodes: &mut Vec<u8>) -> anyhow::Result<blake3::Hash> {
+fn outboard_of(args: &Args, path: &Path, threads: usize, rooms: &mut outboard::Rooms, nodes: &mut Vec<u8>) -> anyhow::Result<blake3::Hash> {
+    let mode = args.mode;
     let bytes = &mut rooms.bytes;
     bytes.clear();
     if path == Path::new("-") {
+        // The key was standard input, read to its end: no message is
+        // left there, and its tree would be the empty message's.
+        if matches!(mode, blake3::Mode::Keyed(_)) {
+            bail!("Cannot open `-` in keyed mode");
+        }
         io::stdin().lock().read_to_end(bytes)?;
         return Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes));
     }
@@ -1125,28 +1191,18 @@ fn outboard_of(mode: blake3::Mode, path: &Path, threads: usize, rooms: &mut outb
     let meta = file.metadata()?;
     #[cfg(unix)]
     if meta.is_file() && meta.len() < MAP_LEN as u64 {
-        // One read of the length the file has now: what a longer read
-        // or a second would say is that it has since grown.
-        let len = meta.len() as usize;
-        bytes.resize(len, 0);
-        let mut got = 0;
-        while got < len {
-            match file.read(&mut bytes[got..])? {
-                0 => break,
-                n => got += n,
-            }
-        }
-        return Ok(outboard::outboard(mode, &bytes[..got], threads, &mut rooms.cvs, nodes));
+        read_to_its_end(&mut file, meta.len() as usize, bytes)?;
+        return Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes));
     }
     #[cfg(target_os = "linux")]
     if meta.is_file()
-        && let Some(hash) = outboard::outboard_direct(mode, path, &file, meta.len(), threads, &mut rooms.piece, &mut rooms.cvs, nodes)
+        && let Some(hash) = outboard::outboard_direct(mode, &file, meta.len(), threads, &mut rooms.piece, &mut rooms.cvs, nodes)
     {
         return Ok(hash);
     }
     #[cfg(unix)]
     if meta.len() > 0
-        && let Ok(map) = unsafe { memmap2::Mmap::map(&file) }
+        && let Some(map) = args.map(&file)
     {
         let hash = outboard::outboard(mode, &map, threads, &mut rooms.cvs, nodes);
         hold(map);
@@ -1233,27 +1289,27 @@ fn hash_some(args: &Args, next: &std::sync::atomic::AtomicUsize, done: &mut dyn 
     }
 }
 
-fn emit_checked_entry(parsed: ParsedCheckLine, res: anyhow::Result<blake3::Hash>, args: &Args, out: &mut OutBuf) -> bool {
+fn emit_checked_entry(parsed: ParsedCheckLine, res: anyhow::Result<blake3::Hash>, args: &Args, out: &mut OutBuf) -> anyhow::Result<bool> {
     let ParsedCheckLine { file_string, is_escaped, expected_hash, .. } = parsed;
     let display = if is_escaped { "\\".to_string() + &file_string } else { file_string };
     let found_hash = match res {
         Ok(h) => h,
         Err(e) => {
-            let _ = out.write_bytes(format!("{}: FAILED ({})\n", display, e).as_bytes());
-            return false;
+            out.write_bytes(format!("{}: FAILED ({})\n", display, e).as_bytes())?;
+            return Ok(false);
         }
     };
     // Constant-time comparison (`blake3::Hash::eq`).
     if expected_hash == found_hash {
         if !args.quiet() {
-            let _ = out.write_bytes(display.as_bytes());
-            let _ = out.write_bytes(b": OK\n");
+            out.write_bytes(display.as_bytes())?;
+            out.write_bytes(b": OK\n")?;
         }
-        true
+        Ok(true)
     } else {
-        let _ = out.write_bytes(display.as_bytes());
-        let _ = out.write_bytes(b": FAILED\n");
-        false
+        out.write_bytes(display.as_bytes())?;
+        out.write_bytes(b": FAILED\n")?;
+        Ok(false)
     }
 }
 
@@ -1282,6 +1338,7 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
     let mut entries = Vec::new();
     let mut batch_paths = Vec::new();
     let mut eof = false;
+    let mut saw_line = false;
 
     while !eof {
         entries.clear();
@@ -1293,6 +1350,7 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
                 eof = true;
                 break;
             }
+            saw_line = true;
             match parse_check_line(&line, args.sigilcode()) {
                 Err(e) => entries.push(Entry::ParseErr(e)),
                 Ok(parsed) if parsed.file_path == Path::new("-") => entries.push(Entry::Stdin(parsed)),
@@ -1322,11 +1380,11 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
                 }
                 Entry::Stdin(parsed) => {
                     let res = hash_path_hash(args, &parsed.file_path);
-                    emit_checked_entry(parsed, res, args, out)
+                    emit_checked_entry(parsed, res, args, out)?
                 }
                 Entry::File { parsed, batch_idx } => {
                     let res = batch_results[batch_idx].take().expect("every batch path hashed");
-                    emit_checked_entry(parsed, res, args, out)
+                    emit_checked_entry(parsed, res, args, out)?
                 }
             };
             if !ok {
@@ -1334,6 +1392,7 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
             }
         }
     }
+    ensure!(saw_line, "{}: no checksum entries", path.display());
     Ok(())
 }
 
@@ -1343,6 +1402,8 @@ fn explain_sigbus() {
     extern "C" fn on_sigbus(_: libc::c_int) {
         if SAID.swap(true, std::sync::atomic::Ordering::SeqCst) {
             loop {
+                // Sound: calls a signal handler may make (pause, write,
+                // _exit), on a constant message.
                 unsafe { libc::pause() };
             }
         }
@@ -1353,11 +1414,15 @@ fn explain_sigbus() {
         }
     }
     let handler: extern "C" fn(libc::c_int) = on_sigbus;
+    // Sound: the handler makes only calls a signal handler may make, and
+    // SIGBUS is this program's to handle.
     unsafe { libc::signal(libc::SIGBUS, handler as libc::sighandler_t) };
 }
 
 fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
+    // Sound: before any thread starts; a broken pipe then ends b3sum, as it
+    // does other tools.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL)
     };
@@ -1380,14 +1445,15 @@ fn main() -> anyhow::Result<()> {
     } else {
         files_failed = hash_inputs(&args, &mut out);
     }
-    let _ = out.flush();
+    out.flush()?;
+    std::io::stdout().flush()?;
     if args.check() && files_failed > 0 {
         eprintln!("{}: WARNING: {} computed checksum{} did NOT match", NAME, files_failed, if files_failed == 1 { "" } else { "s" },);
     }
     let status = if files_failed > 0 { 1 } else { 0 };
     use std::io::Write;
-    let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
+    // Sound: ends the process; standard output and error were flushed above.
     unsafe { libc::_exit(status) }
 }
 

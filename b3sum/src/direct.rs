@@ -10,7 +10,6 @@
 //! and is too large to cache (Zooko, November 14, 2026).
 
 use blake3::throughput::{Cv, TreeHasher};
-use std::path::Path;
 
 /// A cold file is read in pieces of this many bytes, each by one direct
 /// read: 128 groups, so a piece starts on a group and its groups'
@@ -80,15 +79,16 @@ pub(crate) fn is_for(file: &std::fs::File, len: u64) -> bool {
     cold
 }
 
-/// The file at `path`, of `len` bytes, read in pieces of PIECE bytes by
+/// The open `file`, of `len` bytes, read in pieces of PIECE bytes by
 /// `threads` threads, each piece handed, with its number, to `each` on the
 /// thread that read it, beside its share of `outs`: `per` of them a piece
 /// (the last piece's, what is left). None where the file cannot be opened
-/// for direct reads, or a read fails or comes back short, or a last piece
-/// has fewer bytes or more than `len` promised: the caller then reads the
-/// file another way.
+/// for direct reads, or a read fails or comes back short, or the file
+/// does not end at `len` (a last piece with fewer bytes or more, or bytes
+/// after a last whole piece): the caller then reads the file another way.
+/// The reads say where the file ends, and `len` only where to look.
 pub(crate) fn read<T: Send>(
-    path: &Path,
+    file: &std::fs::File,
     len: usize,
     threads: usize,
     mine: &mut Piece,
@@ -98,7 +98,12 @@ pub(crate) fn read<T: Send>(
 ) -> Option<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(path).ok()?;
+    // Open a new description of this very file, with independent flags and
+    // offset. Reopening its old pathname could hash a different file after
+    // a rename; changing flags on a dup would change the caller's too.
+    // Without procfs, the caller uses its original descriptor another way.
+    let direct = format!("/proc/self/fd/{}", file.as_raw_fd());
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(direct).ok()?;
     let threads = threads.min(len.div_ceil(PIECE)).max(1);
     let pieces = std::sync::Mutex::new(outs.chunks_mut(per).enumerate());
     let failed = std::sync::atomic::AtomicBool::new(false);
@@ -126,14 +131,28 @@ pub(crate) fn read<T: Send>(
             work(mine);
         });
     }
-    (!failed.into_inner()).then_some(())
+    if failed.into_inner() {
+        return None;
+    }
+    // A last piece that is whole was asked for no byte more than it has,
+    // so its read does not say the file ends there: one more read does
+    // (BLAKE3 #424: a file that had grown past a multiple of PIECE gave
+    // the hash of its first `len` bytes, with no sign of the rest).
+    if len % PIECE == 0 {
+        // Sound: the buffer holds PIECE writable bytes.
+        let more = unsafe { libc::pread(file.as_raw_fd(), mine.0.cast(), PIECE, len as libc::off_t) };
+        if more != 0 {
+            return None;
+        }
+    }
+    Some(())
 }
 
-/// The hash of the file at `path`, of `len` bytes (PIECE or more), read
+/// The hash of the open `file`, of `len` bytes (PIECE or more), read
 /// directly: each piece's subtree hashed by the thread that read it, on
 /// its own core's kernels, then the pieces' parents a layer at a time.
 /// None as [`read`] says.
-pub(crate) fn hash(mode: blake3::Mode, path: &Path, len: usize, threads: usize, mine: &mut Piece) -> Option<blake3::Hash> {
+pub(crate) fn hash(mode: blake3::Mode, file: &std::fs::File, len: usize, threads: usize, mine: &mut Piece) -> Option<blake3::Hash> {
     assert!(len > PIECE, "two pieces or more");
     #[cfg(test)]
     HASHED.with(|h| h.set(h.get() + 1));
@@ -142,7 +161,7 @@ pub(crate) fn hash(mode: blake3::Mode, path: &Path, len: usize, threads: usize, 
     let mut cvs = vec![Cv::from_bytes([0; 32]); pieces];
     {
         let tree = tree.clone().on_this_core();
-        read(path, len, threads, mine, &mut cvs, 1, |i, bytes, cv| cv[0] = tree.subtree_cv((i * PIECE / blake3::CHUNK_LEN) as u64, bytes))?;
+        read(file, len, threads, mine, &mut cvs, 1, |i, bytes, cv| cv[0] = tree.subtree_cv((i * PIECE / blake3::CHUNK_LEN) as u64, bytes))?;
     }
     // A layer's last value, with no sibling, goes up as it is.
     let mut next = vec![Cv::from_bytes([0; 32]); pieces.div_ceil(2)];
@@ -184,17 +203,19 @@ mod test {
                 eprintln!("no direct reads in {}", dir.path().display());
                 return;
             }
+            let file = std::fs::File::open(&path).unwrap();
             for mode in [blake3::Mode::Plain, blake3::Mode::Keyed(&key)] {
                 let want = blake3::convenience::hash_with(mode, &all[..len]);
                 for threads in [1, 2, 5] {
-                    assert_eq!(hash(mode, &path, len, threads, &mut piece), Some(want), "len={len} threads={threads}");
+                    assert_eq!(hash(mode, &file, len, threads, &mut piece), Some(want), "len={len} threads={threads}");
                 }
-                for wrong in [len + 1, len - 1, len + PIECE] {
-                    // Bytes past a length that ends a piece are not read.
-                    if wrong < len && wrong % PIECE == 0 {
+                // Any other length, one that ends a piece too: the file's
+                // end is where its reads say.
+                for wrong in [len + 1, len - 1, len + PIECE, len - PIECE, len.next_multiple_of(PIECE) - PIECE] {
+                    if wrong == len || wrong <= PIECE {
                         continue;
                     }
-                    assert_eq!(hash(mode, &path, wrong, 2, &mut piece), None, "len={len} read as {wrong}");
+                    assert_eq!(hash(mode, &file, wrong, 2, &mut piece), None, "len={len} read as {wrong}");
                 }
             }
         }
@@ -205,6 +226,31 @@ mod test {
         TAKE_FOR_COLD.with(|c| c.set(true));
         assert!(is_for(&file, DIRECT_MIN) && !is_for(&file, DIRECT_MIN - 1));
         TAKE_FOR_COLD.with(|c| c.set(false));
+    }
+
+    /// Replacing a pathname after open must not switch which file is
+    /// hashed. Rename is the synchronization: no racing threads or sleeps.
+    #[test]
+    fn direct_reads_keep_the_open_file_when_its_path_is_replaced() {
+        blake3::initialize();
+        if crate::threads().get() == 1 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input");
+        let original = vec![0x35u8; DIRECT_MIN as usize];
+        std::fs::write(&path, &original).unwrap();
+        if std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(&path).is_err() {
+            return;
+        }
+        let file = std::fs::File::open(&path).unwrap();
+        std::fs::rename(&path, dir.path().join("moved")).unwrap();
+        std::fs::write(&path, vec![0x97u8; original.len()]).unwrap();
+        let args = crate::Args::for_test_plain(vec![path.clone()]);
+        crate::linux_pipe::set_force_miss(true);
+        let got = crate::hash_open_file(&args, file).unwrap();
+        crate::linux_pipe::set_force_miss(false);
+        assert_eq!(got, blake3::convenience::hash(&original), "hash the open file, not a replacement at its old name");
     }
 
     /// b3sum's one-file path reads a cold file of DIRECT_MIN or more

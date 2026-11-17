@@ -19,6 +19,14 @@ document describes all of these edge cases in detail.
 > confusing enough that I don't recommend using `--check` as a security tool in
 > new code.
 
+An expected digest needs a trusted source: a checkfile an attacker can
+rewrite cannot authenticate the files it names. `--check` fails if any
+checkfile is empty, any line is invalid, any read fails or any digest
+mismatches. It also fails on an output error. Removing only some entries
+from a checkfile can still leave a successful check of the remainder.
+Hash stable files or a filesystem snapshot; concurrent writes are not
+made atomic by hashing.
+
 ## The simple case
 
 Here's the result of running `b3sum a b c/d` in a directory that contains

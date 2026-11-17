@@ -34,3 +34,12 @@ memmap2 = "0.9"
 bao-tree = { version = "=0.17.0", default-features = false }
 duct = "1.0.0"
 tempfile = "3.1.0"
+
+# A panic stops the process at once (crash-only): nothing unwinds past a
+# thread's reads that the kernel still has in flight, whose buffers the
+# unwinding would free while the other threads go on hashing.
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
