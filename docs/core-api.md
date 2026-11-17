@@ -130,6 +130,8 @@ The throughput API, for power users.
   The hashes of a `Batch`'s messages, in `mode`, on the calling thread.
 - `fn context_key(context: &str) -> ContextKey`  
   Hash a key-derivation context string and return a `ContextKey`.
+- `const fn level_of(len: u64) -> u32`  
+  The level of whole subtrees of `len` bytes.
 - `const fn left_len(len: u64) -> u64`  
   The bytes of the left subtree of a message, or of a subtree, of `len` bytes.
 
@@ -194,14 +196,31 @@ The batch calls' input.
 
 ### `struct Cv`
 
-A subtree's chaining value.
+The chaining value of a **whole** subtree, with its place.
 
 ```rust
+const fn unset() -> Self
+const fn at(level: u32, index: u64, bytes: [u8; 32]) -> Self
 const fn as_bytes(&self) -> &[u8; 32]
-const fn from_bytes(bytes: [u8; 32]) -> Self
+const fn level(&self) -> u32
+const fn index(&self) -> u64
 ```
 
-Implements: `Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`.
+Implements: `Clone`, `Copy`, `Debug`, `Eq`, `From`, `PartialEq`.
+
+
+### `struct LastCv`
+
+The chaining value of a message's **last** subtree, with its place and length.
+
+```rust
+const fn at(first_chunk: u64, len: u64, bytes: [u8; 32]) -> Self
+const fn as_bytes(&self) -> &[u8; 32]
+const fn first_chunk(&self) -> u64
+const fn len(&self) -> u64
+```
+
+Implements: `Clone`, `Copy`, `Debug`, `Eq`, `From`, `PartialEq`.
 
 
 ### `struct TreeHasher`
@@ -214,12 +233,13 @@ fn on_this_core(self) -> Self
 fn hash(&self, input: &[u8]) -> Hash
 fn hash_many<P: Prepared>(&self, batch: &P, out: &mut [[u8; 32]])
 fn hash_each(&self, items: &[(&[Block], usize)], out: &mut [[u8; 32]])
-fn subtree_cv(&self, first_chunk: u64, input: &[u8]) -> Cv
-fn subtree_halves(&self, first_chunk: u64, input: &[u8]) -> [Cv; 2]
+fn subtree_cv(&self, level: u32, index: u64, input: &[u8]) -> Cv
+fn last_cv(&self, first_chunk: u64, input: &[u8]) -> LastCv
 fn parent_cv(&self, left: &Cv, right: &Cv) -> Cv
+fn last_parent_cv(&self, left: &Cv, right: &LastCv) -> LastCv
 fn parent_cvs(&self, children: &[Cv], out: &mut [Cv])
-fn root_hash(&self, left: &Cv, right: &Cv) -> Hash
-fn root_output(&self, left: &Cv, right: &Cv) -> OutputReader
+fn root_hash(&self, left: &Cv, right: &LastCv, len: u64) -> Hash
+fn root_output(&self, left: &Cv, right: &LastCv, len: u64) -> OutputReader
 ```
 
 Implements: `Clone`, `Zeroize`.

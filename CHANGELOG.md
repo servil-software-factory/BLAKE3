@@ -11,15 +11,22 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
   or are lent to it in place; results arrive as events, in order; the
   pool hashes them. Misuse stops the process: it does not unwind
   (crash-only).
-- **The tree API** (`throughput::TreeHasher`, `Cv`, `left_len`, #378), for
-  programs that build or check a BLAKE3 tree themselves (verified
-  streaming, Bao, iroh): a subtree's chaining value, a layer of parents,
-  the root. A `TreeHasher` is also a mode prepared once: `hash`,
-  `hash_many` and `hash_each` hash whole messages in it, so a
-  key-derivation context is hashed once for many messages.
-  `Prepared::part` gives some of a batch's messages as a batch, for a
-  pool of the program's own. The library's pool runs on these calls
-  (`docs/hazmat-removal.md`).
+- **The tree API** (`throughput::TreeHasher`, `Cv`, `LastCv`, `level_of`,
+  `left_len`; #378, #421), for programs that build or check a BLAKE3 tree
+  themselves (verified streaming, Bao, iroh): a subtree's chaining value,
+  a layer of parents, the root. A tree that is not BLAKE3's has no way
+  through it. A whole subtree is named by its level and index, so a size
+  that is no power of two of chunks cannot be said, and `level_of(5 MiB)`
+  in a `const` stops the build. The message's last subtree has its own
+  type, `LastCv`, so a short subtree as a left child does not compile.
+  Each value carries its place: joining two that are not siblings, or a
+  root whose children do not hold the message's length, panics in every
+  build. A `TreeHasher` is also a mode prepared once: `hash`, `hash_many`
+  and `hash_each` hash whole messages in it, so a key-derivation context
+  is hashed once for many messages. `Prepared::part` gives some of a
+  batch's messages as a batch, for a pool of the program's own. `b3sum`
+  builds its trees with these calls; the library's own pool still uses
+  hidden calls without the places (`docs/hazmat-removal.md`).
 - **`b3sum --outboard DIR`** writes each file's bao-tree outboard beside
   its hash, byte for byte bao-tree 0.17.0's
   (`BlockSize::from_chunk_log(4)`). A 1 GiB file from storage: 120 ms,

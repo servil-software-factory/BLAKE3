@@ -100,7 +100,7 @@
 //!   energy at best).
 
 use crate::platform::Platform;
-use crate::throughput::{Cv as ChainingValue, Prepared, TreeHasher};
+use crate::throughput::{BareCv as ChainingValue, Prepared, TreeHasher};
 use crate::{CHUNK_LEN, Hash};
 #[cfg(test)]
 use crate::{Hasher, KEY_LEN};
@@ -392,7 +392,7 @@ fn tree_cvs<T>(pool: &Pool, input: &[u8], tree: &TreeHasher, counter: u64, merge
 pub(crate) fn subtree_halves(tree: &TreeHasher, counter: u64, input: &[u8]) -> [ChainingValue; 2] {
     assert!(input.len().is_power_of_two() && input.len() >= MIN_SPLIT_LEN, "a whole subtree of at least MIN_SPLIT_LEN bytes");
     assert_eq!(counter % (input.len() / CHUNK_LEN) as u64, 0, "a subtree starts at a multiple of its chunk count");
-    let Some((pool, _caller)) = spare_pool() else { return tree.clone().on_this_core().subtree_halves(counter, input) };
+    let Some((pool, _caller)) = spare_pool() else { return tree.clone().on_this_core().bare_subtree_halves(counter, input) };
     tree_cvs(pool, input, tree, counter, |pieces, cvs, own| {
         merge_to_children(pieces, cvs, own);
         [cvs[0], cvs[1]]
@@ -572,7 +572,7 @@ impl Job<'_> {
                 let piece = pieces[index];
                 let bytes = &input[piece.offset..][..piece.len];
                 let counter = counter + (piece.offset / CHUNK_LEN) as u64;
-                let cv = if own { tree.subtree_cv_on(*own_platform, counter, bytes) } else { tree.subtree_cv(counter, bytes) };
+                let cv = if own { tree.subtree_cv_on(*own_platform, counter, bytes) } else { tree.bare_subtree_cv(counter, bytes) };
                 unsafe { *cvs.add(index) = cv };
             }
             Work::Messages { batch, tree, pieces, outputs } => {
@@ -686,7 +686,7 @@ fn sme2_prefix(len: usize, threads: usize) -> usize {
 /// subtree, on the pool's platform like the pieces.
 fn merge_root(pieces: &[Piece], cvs: &mut [ChainingValue], tree: &TreeHasher) -> Hash {
     merge_to_children(pieces, cvs, tree);
-    tree.root_hash(&cvs[0], &cvs[1])
+    tree.bare_root_hash(&cvs[0], &cvs[1])
 }
 
 /// [`merge_root`] up to the root's two children, left in `cvs[0]` and
@@ -712,7 +712,7 @@ fn merge_to_children(pieces: &[Piece], cvs: &mut [ChainingValue], tree: &TreeHas
             // The inner loop's variant: each call merges at least one pair.
             assert!(children >= 2, "a parents call with under two children");
             let parents = children / 2;
-            tree.parent_cvs(&cvs[read..read + children], &mut out[..parents]);
+            tree.bare_parent_cvs(&cvs[read..read + children], &mut out[..parents]);
             cvs[write..write + parents].copy_from_slice(&out[..parents]);
             read += children;
             write += parents;
@@ -3590,8 +3590,10 @@ mod test {
                     offset += p.len;
                 }
                 assert_eq!(offset, len);
-                let mut cvs: Vec<ChainingValue> =
-                    pieces.iter().map(|p| TreeHasher::new(crate::Mode::Plain).subtree_cv((p.offset / CHUNK_LEN) as u64, &input[p.offset..][..p.len])).collect();
+                let mut cvs: Vec<ChainingValue> = pieces
+                    .iter()
+                    .map(|p| TreeHasher::new(crate::Mode::Plain).bare_subtree_cv((p.offset / CHUNK_LEN) as u64, &input[p.offset..][..p.len]))
+                    .collect();
                 assert_eq!(merge_root(&pieces, &mut cvs, &TreeHasher::new(crate::Mode::Plain)), crate::convenience::hash(&input[..len]), "{len} {threads}");
             }
         }
