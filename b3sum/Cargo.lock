@@ -66,7 +66,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "b3sums"
-version = "0.9.0+dev"
+version = "0.10.0+22b940b4a3251556e0323514159cad516e61cc13"
 dependencies = [
  "anyhow",
  "bao-tree",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "blake3-servil"
-version = "0.9.0+dev"
+version = "0.10.0+22b940b4a3251556e0323514159cad516e61cc13"
 dependencies = [
  "arrayvec",
  "blake3-servil-core",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "blake3-servil-core"
-version = "0.9.0+dev"
+version = "0.10.0+22b940b4a3251556e0323514159cad516e61cc13"
 dependencies = [
  "arrayvec",
  "blake3-servil-version",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "blake3-servil-version"
-version = "0.9.0+dev"
+version = "0.10.0+22b940b4a3251556e0323514159cad516e61cc13"
 
 [[package]]
 name = "bytes"
