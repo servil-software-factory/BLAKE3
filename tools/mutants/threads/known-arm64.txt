@@ -12,10 +12,6 @@ model files: src/finish.rs src/park.rs src/waker.rs
 src/finish.rs	delete ! in Finish::wait	1	OPEN: the pool's scheduling: `if poll()` leaves the polls for the park as soon as a poll did work; whether a test then hangs depends on the machine: it survives here (the VM's whole run at 5c0247cd, November 12) and on five x86-64 machines; the tests it hung were the first pipeline's
 src/lanes.rs	delete ! in initialize	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	delete ! in sources::visible	2	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	delete match arm 128 in Task::run_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/lanes.rs	delete match arm 256 in Task::run_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/lanes.rs	delete match arm 512 in Task::run_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/lanes.rs	delete match arm CHUNK_LEN in Task::run_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	replace != with == in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace % with + in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace % with + in places::assign	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -41,7 +37,6 @@ src/lanes.rs	replace < with > in cut_items	1	OPEN: the pool's scheduling under i
 src/lanes.rs	replace < with > in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace << with >>	1	no places off Linux: settle sets none here, so PLACES stays unset and FAR_LEN, the mutated constant, is never compared; the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace << with >> in sources::Source::unregister	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace == with != in Task::run_equal_members	1	speed: chooses between equally correct paths (a member length's own kernel, or the general one)
 src/lanes.rs	replace == with != in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace == with != in places::Plan::done	2	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace == with != in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
@@ -83,8 +78,6 @@ src/lanes.rs	replace sources::open -> bool with true	1	OPEN: the pool's scheduli
 src/lanes.rs	replace sources::run_one -> bool with false	1	OPEN: the pool's scheduling: the workers never run a source's item, and the caller hashes every piece itself: the same digests. The tests it hung here were the first pipeline's (the VM's whole run at 5c0247cd, November 12); on x86-64 it times out (timeouts-x86_64.txt)
 src/lanes.rs	replace sources::visible -> bool with false	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
-src/lanes.rs	replace | with & in Task::run_equal_members	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/lanes.rs	replace | with ^ in Task::run_equal_members	4	equivalent: | and ^ agree on flag bits that never overlap
 src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace || with && in sources::visible	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lib.rs	replace __all_workers_parked -> bool with true	1	a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before
@@ -102,7 +95,6 @@ src/pipeline.rs	replace < with <= in Pipeline<T, B>::acquire_free_group	1	speed:
 src/pipeline.rs	replace < with == in Pipeline<T, B>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
 src/pipeline.rs	replace < with > in Pipeline<T, B>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
 src/pipeline.rs	replace == with != in Pipeline<T, B>::acquire_free_group	1	equivalent: when assigned == 0, completed_epoch >= 0 is already true for every u64; the check skips the atomic load on the first revolution
-src/pipeline.rs	replace > with >= in Shared::run_room_piece	1	equivalent: counter == 0 in run_room_piece is reached only by full ROOM_LEN (64 KiB) commits, so len == CHUNK_LEN never occurs with counter == 0
 src/pipeline.rs	replace >= with < in Pipeline<T, B>::batch	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the batch piece (identical digests)
 src/pipeline.rs	replace >= with < in Pipeline<T, B>::commit_multi	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the room piece (identical digests)
 src/pipeline.rs	replace >= with < in block_on	1	speed: SPIN_BEFORE_SLEEP governs only how long block_on spins before parking; ThreadPark wakes the thread either way

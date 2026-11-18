@@ -510,7 +510,64 @@ fn hash_run<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: 
     }
     // Sound: the first outputs.len() slots were written just above.
     let filled: &[&[u8; N]] = unsafe { core::slice::from_raw_parts(table.as_ptr() as *const &[u8; N], outputs.len()) };
-    platform.hash_many::<N>(filled, key, 0, IncrementCounter::No, flags | CHUNK_START | CHUNK_END | ROOT, 0, 0, outputs.as_flattened_mut());
+    whole_messages(filled, key, flags, outputs, platform);
+}
+
+/// The kernel call for one message of whole blocks in each lane. Both a
+/// contiguous batch and a table of separately borrowed messages use it.
+#[inline(always)]
+fn whole_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
+    const { assert!(N >= BLOCK_LEN && N <= CHUNK_LEN && N % BLOCK_LEN == 0) };
+    let (flags, start, end) = if N == BLOCK_LEN { (flags | CHUNK_START | CHUNK_END | ROOT, 0, 0) } else { (flags, CHUNK_START, CHUNK_END | ROOT) };
+    platform.hash_many(lanes, key, 0, IncrementCounter::No, flags, start, end, out.as_flattened_mut());
+}
+
+/// Try the full-block lanes on separately borrowed messages. A mismatch
+/// leaves the outputs alone, for the caller's one-message path. Each lane
+/// checks its own length as it becomes a reference to a fixed-size array.
+#[cfg(feature = "std")]
+pub(crate) fn try_whole_group<'a>(
+    count: usize,
+    input: impl Fn(usize) -> &'a [u8],
+    key: &CVWords,
+    flags: u8,
+    platform: Platform,
+    output: impl FnMut(usize, [u8; OUT_LEN]),
+) -> bool {
+    fn run<'a, const N: usize>(
+        count: usize,
+        input: impl Fn(usize) -> &'a [u8],
+        key: &CVWords,
+        flags: u8,
+        platform: Platform,
+        mut output: impl FnMut(usize, [u8; OUT_LEN]),
+    ) -> bool {
+        let table: Option<arrayvec::ArrayVec<&[u8; N], TABLE>> = (0..count).map(|i| input(i).try_into().ok()).collect();
+        let Some(table) = table else { return false };
+        // Only a group that takes the lanes needs temporary outputs.
+        let mut digests = arrayvec::ArrayVec::<[u8; OUT_LEN], TABLE>::new();
+        digests.extend(core::iter::repeat_n([0; OUT_LEN], count));
+        whole_messages(&table, key, flags, &mut digests, platform);
+        for (i, &digest) in digests.iter().enumerate() {
+            output(i, digest);
+        }
+        true
+    }
+    if !(2..=TABLE).contains(&count) {
+        return false;
+    }
+    match input(0).len() {
+        BLOCK_LEN => run::<BLOCK_LEN>(count, input, key, flags, platform, output),
+        #[cfg(target_arch = "x86_64")]
+        128 => run::<128>(count, input, key, flags, platform, output),
+        #[cfg(target_arch = "x86_64")]
+        256 => run::<256>(count, input, key, flags, platform, output),
+        #[cfg(target_arch = "x86_64")]
+        512 => run::<512>(count, input, key, flags, platform, output),
+        #[cfg(target_arch = "x86_64")]
+        CHUNK_LEN => run::<CHUNK_LEN>(count, input, key, flags, platform, output),
+        _ => false,
+    }
 }
 
 /// One-block messages on SME2, every group on the message kernel, the
@@ -679,25 +736,24 @@ fn hash_blocks<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, output
 /// call each for one or two.
 #[inline(never)]
 fn hash_four_at_a_time<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
-    let (start, end) = (CHUNK_START, CHUNK_END | ROOT);
     // Keep the padded fourth lane for remainders of three. For other
     // x86 tails, the existing platform kernel avoids separate scalar hashes.
     if cfg!(target_arch = "x86_64") && lanes.len() % 4 != 3 {
         noted_lanes(lanes.len());
-        platform.hash_many::<N>(lanes, key, 0, IncrementCounter::No, flags, start, end, outputs.as_flattened_mut());
+        whole_messages(lanes, key, flags, outputs, platform);
         return;
     }
     let fours = lanes.len() / 4 * 4;
     if fours > 0 {
         noted_lanes(fours);
-        platform.hash_many::<N>(&lanes[..fours], key, 0, IncrementCounter::No, flags, start, end, outputs[..fours].as_flattened_mut());
+        whole_messages(&lanes[..fours], key, flags, &mut outputs[..fours], platform);
     }
     match lanes.len() - fours {
         3 => {
             let spare = [lanes[fours], lanes[fours + 1], lanes[fours + 2], lanes[fours + 2]];
             let mut digests = [[0u8; OUT_LEN]; 4];
             noted_lanes(4);
-            platform.hash_many::<N>(&spare, key, 0, IncrementCounter::No, flags, start, end, digests.as_flattened_mut());
+            whole_messages(&spare, key, flags, &mut digests, platform);
             outputs[fours..].copy_from_slice(&digests[..3]);
         }
         _ => {
@@ -812,6 +868,7 @@ unsafe fn hash_many_blocks(
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::vec::Vec;
 
     #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
     #[test]
@@ -820,7 +877,33 @@ mod test {
         crate::initialize();
         one_block_groups(&[], &mut [], BLOCK_LEN + 1, crate::IV, 0, Platform::detect());
     }
-    use std::vec::Vec;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn separately_borrowed_whole_blocks_take_the_batch_lanes() {
+        crate::initialize();
+        let platform = Platform::detect();
+        let tree = crate::throughput::TreeHasher::new(crate::Mode::Plain);
+        let input = [std::vec![9; CHUNK_LEN], std::vec![7; CHUNK_LEN], std::vec![2; CHUNK_LEN]];
+        let mut out = [[0; OUT_LEN]; 3];
+        for len in [64, 65, 128, 192, 256, 512, 1024] {
+            let before = out;
+            let bytes = |i: usize| &input[i][..len];
+            let grouped = len == 64 || cfg!(target_arch = "x86_64") && matches!(len, 128 | 256 | 512 | 1024);
+            assert_eq!(tree.try_hash_group_on(platform, out.len(), bytes, |i, digest| out[i] = digest), grouped, "{len} bytes");
+            if grouped {
+                for (i, digest) in out.iter().enumerate() {
+                    assert_eq!(digest, blake3::hash(bytes(i)).as_bytes());
+                }
+            } else {
+                assert_eq!(out, before, "a group without a kernel leaves no output");
+            }
+        }
+        let before = out;
+        assert!(!tree.try_hash_group_on(platform, out.len(), |i| &input[i][..if i == 0 { 64 } else { 63 }], |i, digest| out[i] = digest));
+        assert!(!tree.try_hash_group_on(platform, 1, |i| &input[i][..64], |i, digest| out[i] = digest));
+        assert_eq!(out, before, "a mixed group or one message leaves no output");
+    }
 
     /// `count` deterministic messages of `len` bytes, each in its slot
     /// (slot_len), zero past its end: little-endian 64-bit words `len << 48
