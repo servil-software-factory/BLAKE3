@@ -42,15 +42,19 @@ use super::*;
 /// # Ok(())
 /// # }
 /// ```
+#[repr(C)]
 pub struct Hasher {
-    pub(crate) core: HasherCore,
     /// The message's bytes from its last 16 KiB boundary, gathered while
-    /// they arrive in shorter updates: the first `staged`.
+    /// they arrive in shorter updates: the first `staged`. Placed at the
+    /// start in C order with `finishing`, `stage`, and `core`'s header so
+    /// messages up to 16 KiB touch contiguous cache lines and leave
+    /// `CvStack`'s 9.9 KiB arrays cold at the end.
     pub(crate) staged: usize,
     /// Set while one `finalize_each` call finishes this hasher, so that
     /// the call sees an index it is given twice (`each::name_each`).
     pub(crate) finishing: bool,
     pub(crate) stage: [core::mem::MaybeUninit<u8>; STAGE_LEN],
+    pub(crate) core: HasherCore,
 }
 
 impl Clone for Hasher {
@@ -78,9 +82,10 @@ pub(crate) const STAGE_LEN: usize = 16 * CHUNK_LEN;
 
 /// The tree's state behind a [`Hasher`]: its chunk, and the chaining values
 /// of its finished subtrees.
+#[repr(C)]
 pub(crate) struct HasherCore {
-    pub(crate) key: CVWords,
     pub(crate) chunk_state: ChunkState,
+    pub(crate) key: CVWords,
     pub(crate) initial_chunk_counter: u64,
     // The stack size is MAX_DEPTH + 1 because we do lazy merging. For example,
     // with 7 chunks, we have 3 entries in the stack. Adding an 8th chunk
