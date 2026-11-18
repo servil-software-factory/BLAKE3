@@ -847,13 +847,26 @@ struct Pool {
 /// process ([`crate::initialize_multithreaded`] is its public face): this
 /// thread starts the SME2 thread and worker 1, and worker 1 the other
 /// workers. Calls run on the workers started so far.
-pub(crate) fn initialize(threads: usize) {
+pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
+    #[cfg(target_os = "linux")]
+    let node = if requested == Some(core::num::NonZeroUsize::MIN) { None } else { places::Node::current() };
+    let threads = requested.map_or_else(
+        || {
+            let available = std::thread::available_parallelism().map_or(1, |n| n.get());
+            #[cfg(target_os = "linux")]
+            if let Some(node) = &node {
+                return available.min(node.cpu_count());
+            }
+            available
+        },
+        |n| n.get(),
+    );
     // With one thread, none beside the caller: no SME2 thread either.
     let sme2 = threads > 1 && cfg!(blake3_sme2) && !matches!(pool_platform(), p if core::mem::discriminant(&p) == core::mem::discriminant(&Platform::detect()));
     let pool = Pool { callers: AtomicUsize::new(0), threads, sme2, park: crate::park::Park::new(Pool::workers_of(threads), crate::park::FANOUT) };
     assert!(POOL.set(pool).is_ok(), "initialize_multithreaded creates the pool once");
     if threads == 1 {
-        return;
+        return threads;
     }
     // Before any thread starts: a child forked from here on has none of
     // them, and its multithreaded calls stop at `pool` (FORKED).
@@ -869,6 +882,12 @@ pub(crate) fn initialize(threads: usize) {
     std::thread::Builder::new()
         .name("blake3-worker-1".into())
         .spawn(move || {
+            // Bind before starting the other workers, which inherit this
+            // mask. The caller keeps its own affinity.
+            #[cfg(target_os = "linux")]
+            if let Some(node) = node {
+                node.bind();
+            }
             for worker in 2..threads {
                 std::thread::Builder::new().name(format!("blake3-worker-{worker}")).spawn(move || worker_main(worker - 1)).expect("spawning a BLAKE3 worker");
             }
@@ -880,6 +899,7 @@ pub(crate) fn initialize(threads: usize) {
             worker_main(0)
         })
         .expect("spawning a BLAKE3 worker");
+    threads
 }
 
 /// The workers' places. On a machine with more than one last-level cache
@@ -1174,8 +1194,8 @@ pub(crate) mod places {
     /// The places of a machine and of `workers` workers.
     #[derive(Debug, PartialEq)]
     pub(crate) struct Places {
-        /// Each CPU's place (0 for a CPU the process may not run on).
-        of_cpu: Box<[u8]>,
+        /// Each CPU's place (`u16::MAX` outside the worker CPU mask).
+        of_cpu: Box<[u16]>,
         /// Each place's CPUs.
         cpus: Box<[Set]>,
         /// Each worker's place.
@@ -1224,7 +1244,7 @@ pub(crate) mod places {
         order.sort_by_key(|&(place, c)| (place, c.cpu));
         let words = workers.div_ceil(64).max(1);
         let mut places = Places {
-            of_cpu: std::vec![0u8; CPUS].into(),
+            of_cpu: std::vec![u16::MAX; CPUS].into(),
             cpus: std::vec![[0u64; CPUS / 64]; caches.len()].into(),
             of_worker: (0..workers).map(|k| order[(k + 1) % order.len()].0 as u8).collect(),
             near: std::vec![std::vec![0u64; words].into_boxed_slice(); caches.len()].into(),
@@ -1233,7 +1253,7 @@ pub(crate) mod places {
         };
         let mut socket_of = std::vec![0usize; caches.len()];
         for &(place, c) in &order {
-            places.of_cpu[c.cpu] = place as u8;
+            places.of_cpu[c.cpu] = place as u16;
             places.cpus[place][c.cpu / 64] |= 1 << (c.cpu % 64);
             socket_of[place] = c.socket;
         }
@@ -1275,25 +1295,102 @@ pub(crate) mod places {
             .collect()
     }
 
-    /// The CPUs this thread may run on, in order: None where the system
-    /// refuses to say.
+    /// The CPU mask of the calling thread.
     #[cfg(target_os = "linux")]
-    fn allowed() -> Option<Vec<usize>> {
+    fn affinity() -> std::io::Result<Set> {
         let mut allowed: Set = [0; CPUS / 64];
         // Sound: the set is `len` writable bytes.
         if unsafe { sched_getaffinity(0, core::mem::size_of::<Set>(), &mut allowed) } != 0 {
-            return None;
+            return Err(std::io::Error::last_os_error());
         }
+        Ok(allowed)
+    }
+
+    /// The CPUs this thread may run on, in order.
+    #[cfg(target_os = "linux")]
+    fn allowed() -> Option<Vec<usize>> {
+        let allowed = affinity().ok()?;
         Some((0..CPUS).filter(|c| allowed[c / 64] >> (c % 64) & 1 == 1).collect())
     }
 
-    /// The calling thread's place (0 where none are set).
+    /// A kernel CPU list, such as `0-3,8,10-11`, in the affinity layout.
+    #[cfg(target_os = "linux")]
+    fn cpu_set(list: &str) -> Set {
+        let mut set = [0; CPUS / 64];
+        for range in list.trim().split(',') {
+            let (first, last) = range.split_once('-').unwrap_or((range, range));
+            let first = first.parse::<usize>().expect("a Linux CPU number");
+            let last = last.parse::<usize>().expect("a Linux CPU number");
+            assert!(first <= last && last < CPUS, "CPU range {range} outside the worker mask");
+            for cpu in first..=last {
+                set[cpu / 64] |= 1 << (cpu % 64);
+            }
+        }
+        set
+    }
+
+    /// The initiating thread's node, intersected with its allowed CPUs.
+    /// None when there is no additional restriction to apply.
+    #[cfg(target_os = "linux")]
+    pub(super) struct Node(Set);
+
+    #[cfg(target_os = "linux")]
+    impl Node {
+        pub(super) fn current() -> Option<Self> {
+            let online = match std::fs::read_to_string("/sys/devices/system/node/online") {
+                Ok(list) => list,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+                Err(e) => panic!("read Linux memory nodes: {e}"),
+            };
+            if online.trim().parse::<usize>().is_ok() {
+                return None;
+            }
+            // Sound: sched_getcpu takes no arguments and accesses no caller memory.
+            let cpu = unsafe { sched_getcpu() };
+            assert!(cpu >= 0, "find the initiating thread's CPU");
+            let node = std::fs::read_dir(format!("/sys/devices/system/cpu/cpu{cpu}"))
+                .expect("read the initiating CPU's topology")
+                .find_map(|entry| {
+                    let name = entry.expect("read a CPU topology entry").file_name();
+                    name.to_str()?.strip_prefix("node")?.parse::<usize>().ok()
+                })
+                .expect("the initiating CPU belongs to a memory node");
+            let list = std::fs::read_to_string(format!("/sys/devices/system/node/node{node}/cpulist")).expect("read the memory node's CPUs");
+            Self::within(affinity().expect("read the initiating thread's allowed CPUs"), cpu_set(&list))
+        }
+
+        fn within(allowed: Set, node: Set) -> Option<Self> {
+            let mask = Self(core::array::from_fn(|i| allowed[i] & node[i]));
+            assert!(mask.cpu_count() > 0, "the selected memory node has no allowed CPU");
+            (mask.0 != allowed).then_some(mask)
+        }
+
+        pub(super) fn cpu_count(&self) -> usize {
+            self.0.iter().map(|word| word.count_ones() as usize).sum()
+        }
+
+        pub(super) fn bind(&self) {
+            // Sound: the set is `len` readable bytes.
+            if unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &self.0) } != 0 {
+                panic!("keep this thread to one memory node: {}", std::io::Error::last_os_error());
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn confine_cli_thread() {
+        if let Some(node) = Node::current() {
+            node.bind();
+        }
+    }
+
+    /// The calling thread's place, or an out-of-range index when it has none.
     fn here() -> usize {
         #[cfg(target_os = "linux")]
         if let Some(places) = PLACES.get() {
             // Sound: no arguments, no memory.
             let cpu = unsafe { sched_getcpu() };
-            return usize::try_from(cpu).ok().and_then(|c| places.of_cpu.get(c)).map_or(0, |&p| p as usize);
+            return usize::try_from(cpu).ok().and_then(|c| places.of_cpu.get(c)).map_or(usize::MAX, |&p| p as usize);
         }
         0
     }
@@ -1382,6 +1479,70 @@ pub(crate) mod places {
             assert!(!allowed().unwrap().is_empty());
         }
 
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_node_keeps_only_the_allowed_members() {
+            let allowed = cpu_set("1,3,5,60-68");
+            let node = Node::within(allowed, cpu_set("0-3,5,62-66")).unwrap();
+            assert_eq!(node.0, cpu_set("1,3,5,62-66"));
+            assert_eq!(node.cpu_count(), 8);
+            assert!(Node::within(node.0, cpu_set("0-66")).is_none());
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn the_pool_stays_on_one_node_without_binding_the_caller() {
+            if std::thread::available_parallelism().map_or(1, |n| n.get()) < 2 || Node::current().is_none() {
+                return;
+            }
+            let before = affinity().unwrap();
+            crate::initialize_multithreaded(None);
+            let workers = pool().workers();
+            let start = now();
+            while !(settled() && all_workers_parked()) {
+                assert!(now() - start < std::time::Duration::from_secs(10), "workers finish startup and park");
+                std::thread::yield_now();
+            }
+            assert_eq!(affinity().unwrap(), before, "initialization leaves the caller's mask alone");
+            let mut all_workers = [0; CPUS / 64];
+            let mut seen = 0;
+            for task in std::fs::read_dir("/proc/self/task").unwrap() {
+                let path = task.unwrap().path();
+                if !std::fs::read_to_string(path.join("comm")).unwrap().starts_with("blake3-worker-") {
+                    continue;
+                }
+                let status = std::fs::read_to_string(path.join("status")).unwrap();
+                let mask = cpu_set(status.lines().find_map(|l| l.strip_prefix("Cpus_allowed_list:")).unwrap());
+                for (all, current) in all_workers.iter_mut().zip(mask) {
+                    *all |= current;
+                }
+                seen += 1;
+            }
+            assert_eq!(seen, workers);
+            let mut found = false;
+            for entry in std::fs::read_dir("/sys/devices/system/node").unwrap() {
+                let entry = entry.unwrap();
+                if !entry.file_name().to_str().and_then(|n| n.strip_prefix("node")).is_some_and(|n| n.parse::<usize>().is_ok()) {
+                    continue;
+                }
+                let cpus = cpu_set(&std::fs::read_to_string(entry.path().join("cpulist")).unwrap());
+                let on_node = cpus.iter().zip(&all_workers).all(|(node, used)| used & !node == 0);
+                let capacity = cpus.iter().zip(&before).map(|(node, allowed)| (node & allowed).count_ones() as usize).sum();
+                found |= on_node && pool().threads <= capacity;
+            }
+            assert!(seen > 0 && found, "the default pool fits an allowed node");
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn the_cli_mask_needs_no_further_node_restriction() {
+            let before = affinity().unwrap();
+            confine_cli_thread();
+            let after = affinity().unwrap();
+            assert!(after.iter().zip(before).all(|(new, old)| new & !old == 0));
+            assert!(Node::current().is_none());
+        }
+
         /// The machine as the system describes it, read by `read` and read
         /// again here another way: the CPUs are the ones this process may
         /// run on, each once, and two share a cache exactly when the
@@ -1428,6 +1589,7 @@ pub(crate) mod places {
         #[test]
         #[cfg(target_os = "linux")]
         fn the_workers_take_their_places_and_a_thread_learns() {
+            confine_cli_thread();
             let cpus = allowed().unwrap();
             if cpus.len() < 4 {
                 return;
@@ -1921,6 +2083,7 @@ pub(crate) mod places {
             assert_eq!(p.cpus.len(), 2);
             assert_eq!(bits(&p.cpus[0]), (6..12).collect::<Vec<_>>());
             assert_eq!(p.count[..], [5, 6]);
+            assert_eq!(p.of_cpu[12], u16::MAX, "a CPU outside the worker mask has no place");
             let p = assign(&cpus, 500, 95).unwrap();
             assert_eq!(p.of_cpu[0], 0);
             // A place's workers, where it has any.
