@@ -315,9 +315,10 @@ development line runs once per change, run once more on that commit, and
 the pages users read rewritten for it. `main` takes it from `next`, and
 only John and the organization's owners can update `main` (the
 organization's ruleset). `python3 tools/release-check.py [COMMIT]`
-reads where each step left its result and prints PASS, FAIL, or OPEN
-with the command that makes the evidence. The release's tracking issue
-lists what it takes and ticks each step:
+reads each step's evidence. If the previous release was a patch on a
+separate line, pass its published tag as `--previous TAG`. Use that same
+tag for the comparisons below. The release's tracking issue lists what
+it takes and ticks each step:
 
 1. Once the code and API scope are settled, run `python3 tools/gen-ver.py
    X.Y.Z` from a clean release checkout. It stamps `X.Y.Z+<code parent's hash>`
@@ -331,15 +332,16 @@ lists what it takes and ticks each step:
    `sh tools/check-builds.sh`. Pull-request CI normally checks a synthetic
    merge, so its head-SHA label alone is not evidence for the release commit.
 3. `bench-hashes check --against <previous release tag> --cells all`,
-   with bench-hashes at its latest release, on the Arm VM, on each x86
-   machine of the fleet, and on the timing Mac (a Mac Mini M6 that runs
-   timing jobs alone): each commit was checked against its parent alone,
-   and this sees what small slowdowns add up to. When the old side
-   predates the bench's calls, `--old-bench <bench commit>` builds it with
-   a bench that calls it the same way (the runner's "old_bench_commit").
-   That bench must build beside BLAKE3-Servil, as every bench from 1f4dfd63 on
-   does; one from before the two became separate checkouts (0.18.3 and
-   older) builds only inside it, and `check` says so.
+   on the Arm VM, on each x86 machine of the fleet, and on the timing
+   Mac (a Mac Mini M6). Use one bench commit on both sides for the calls
+   they share. Compare new calls with a suitable development baseline on
+   the current bench. When the old API prevents one bench from building
+   both sides, set `--old-bench <bench commit>` (the runner's
+   `old_bench_commit`) and record the bench difference beside the result.
+   The older bench must build beside BLAKE3-Servil, as every bench from
+   1f4dfd63 on does. Keep both streams of the VM check's output. After
+   the check exits zero, append `release-vm: ok` to the log. The early
+   reading from its first four pairs is not the final verdict.
 4. The long proofs, every kernel; the full mutation run.
 5. The packages' dry-run (below), all four together: the core needs its
    version crate, the thread library needs the core, and the CLI needs the
