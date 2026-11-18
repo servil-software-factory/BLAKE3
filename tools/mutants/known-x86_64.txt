@@ -120,7 +120,6 @@ src/lib.rs	replace / with * in compress_parents_parallel	1	same code: every test
 src/lib.rs	replace / with * in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace / with * in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace << with >>	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/lib.rs	replace <= with > in hash_all_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace == with != in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace > with < in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace > with == in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -133,14 +132,12 @@ src/lib.rs	replace hash_one_chunk_root -> Hash with Default::default()	1	same co
 src/lib.rs	replace prefetch_cold with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lib.rs	replace prefetch_kernels with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lib.rs	replace prefetch_update_kernels with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/lib.rs	replace | with & in hash_all_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace | with & in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace | with ^ in Hash::from_hex	1	equivalent: `high << 4 | low` joins a high nibble and a value below 16 for every text that is accepted, and a refused text's bytes are never returned
 src/lib.rs	replace | with ^ in Hash::from_hex::hex_val	2	equivalent: a character is a digit or a letter, never both, so the two masks are never both set, and neither are the two values they select
 src/lib.rs	replace | with ^ in Output::root_output_block	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in OutputReader::fill	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in compress_parents_parallel	1	equivalent: | and ^ agree on flag bits that never overlap
-src/lib.rs	replace | with ^ in hash_all_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace | with ^ in hash_many_rounded	1	the tests' record of the widths a count rounded to (ROUNDED_WIDTH): `|` and `^` agree unless one width is recorded twice in a reading, which no test's reading holds (three x86-64 machines' whole runs, November 10, 2026)
 src/lib.rs	replace | with ^ in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace || with && in compress_chunks_parallel	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -206,13 +203,12 @@ src/many.rs	replace | with & in hash_run_padded	1	same code: every test binary h
 src/many.rs	replace | with & in hash_two_chunks	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with & in neon_plans_last_len	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in hash_blocks	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace | with ^ in hash_four_at_a_time	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in hash_group_across	2	equivalent: | and ^ agree on flag bits that never overlap
-src/many.rs	replace | with ^ in hash_run	3	equivalent: | and ^ agree on flag bits that never overlap
 src/many.rs	replace | with ^ in hash_run_padded	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in hash_two_chunks	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in neon_plans_last_len	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in subtree_across	2	equivalent: | and ^ agree on flag bits that never overlap
+src/many.rs	replace | with ^ in whole_messages	4	equivalent: mode flags use bits 4 through 6; CHUNK_START, CHUNK_END and ROOT use bits 0, 1 and 3. Each combination uses disjoint bits.
 src/many.rs	replace || with && in hash_many_on	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/pair.rs	replace | with ^ in parent	1	equivalent: | and ^ agree on flag bits that never overlap
 src/platform.rs	delete ! in Sme2Turn::take	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

@@ -72,7 +72,7 @@ fn test_hash_many_multithreaded_inside_guard_pages() {
     for len in [1, 63, 64, 100, 128, 192, 200, 256, 640, 1000, 1024, 1088, 2000, 2048, 3072, 4096, 4100, 8192, 15360, 15359, 16384] {
         for count in [1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 15, 16, 17, 21, 24, 31, 33, 127, 128, 129] {
             for at_end in [true, false] {
-                let slot = crate::many::slot_len(len);
+                let slot = crate::slot_len(len);
                 if slot * count < 64 * CHUNK_LEN {
                     continue;
                 }
@@ -159,7 +159,7 @@ fn test_every_multithreaded_call_inside_guard_pages() {
                 // its rooms, and a batch of three, every digest into places
                 // flush against a page.
                 let count = 3;
-                let slot = crate::many::slot_len(len);
+                let slot = crate::slot_len(len);
                 let mut batch = filled(slot * count, at_end);
                 for i in 0..count {
                     let m = &mut batch.bytes()[i * slot..][..slot];

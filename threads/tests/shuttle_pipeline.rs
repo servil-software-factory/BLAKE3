@@ -124,9 +124,7 @@ mod pipeline;
 
 // What src/pipeline.rs takes from its crate's root: the core library's
 // own items, as threads/src/lib.rs names them.
-pub(crate) use blake3_servil_core::hazmat::{
-    CVBytes, CVWords, compress_subtree_to_parent_node, hash_all_at_once, hash_serial, hash_serial_on, hasher, many, platform,
-};
+pub(crate) use blake3_servil_core::thread_support::{Platform, assert_slots, slot_len};
 pub(crate) use blake3_servil_core::{CHUNK_LEN, Hash, Mode, OUT_LEN, convenience};
 pub(crate) mod throughput {
     pub use blake3_servil_core::throughput::*;
@@ -134,7 +132,8 @@ pub(crate) mod throughput {
 
 /// The pool's stand-in.
 mod lanes {
-    use crate::platform::Platform;
+    use crate::Platform;
+    use crate::throughput::TreeHasher;
     use shuttle::sync::Mutex;
     use std::collections::VecDeque;
 
@@ -162,30 +161,28 @@ mod lanes {
     pub(crate) struct Task {
         pub(crate) len: usize,
         pub(crate) batch: Option<usize>,
-        pub(crate) key: crate::CVWords,
-        pub(crate) flags: u8,
         pub(crate) members: usize,
         pub(crate) member: [Member; MEMBERS],
     }
     unsafe impl Send for Task {}
 
     impl Task {
-        pub(crate) fn members(key: &crate::CVWords, flags: u8, batch: Option<usize>) -> Task {
-            Task { len: 0, batch, key: *key, flags, members: 0, member: [NO_MEMBER; MEMBERS] }
+        pub(crate) fn members(batch: Option<usize>) -> Task {
+            Task { len: 0, batch, members: 0, member: [NO_MEMBER; MEMBERS] }
         }
 
         /// As the pool's, each member alone.
-        pub(crate) fn run_members(&self, platform: Platform) {
+        pub(crate) fn run_members(&self, tree: &TreeHasher, platform: Platform) {
             for m in &self.member[..self.members] {
                 // A worker may be switched away from before each member.
                 shuttle::thread::yield_now();
                 let bytes = unsafe { core::slice::from_raw_parts(m.input, m.len) };
                 if let Some(message_len) = self.batch {
-                    let slot = crate::many::slot_len(message_len);
+                    let slot = crate::slot_len(message_len);
                     let digests = unsafe { core::slice::from_raw_parts_mut(m.out as *mut [u8; crate::OUT_LEN], m.len / slot) };
-                    crate::many::hash_many_on(bytes, message_len, slot, &self.key, self.flags, digests, platform);
+                    tree.hash_slots_on(platform, bytes, message_len, slot, digests);
                 } else {
-                    let hash = crate::hash_serial_on(bytes, &self.key, self.flags, platform);
+                    let hash = tree.hash_on(platform, bytes);
                     unsafe { core::ptr::copy_nonoverlapping(hash.as_bytes().as_ptr(), m.out, crate::OUT_LEN) };
                 }
             }

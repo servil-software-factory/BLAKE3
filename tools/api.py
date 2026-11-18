@@ -53,24 +53,35 @@ def ty(t):
         return "(" + ", ".join(ty(x) for x in v) + ")"
     if k == "impl_trait":
         return "impl " + " + ".join(bound(b) for b in v)
+    if k == "dyn_trait":
+        bounds = [trait_ty(p["trait"]) for p in v["traits"]]
+        if v.get("lifetime"):
+            bounds.append(v["lifetime"])
+        s = "dyn " + " + ".join(bounds)
+        return "(" + s + ")" if len(bounds) > 1 else s
     if k == "qualified_path":
         return ty(v["self_type"]) + "::" + v["name"]
     return k
 
 
+def trait_ty(t):
+    s = t["path"].split("::")[-1]
+    a = t.get("args")
+    if a and "angle_bracketed" in a:
+        xs = [ty(g["type"]) for g in a["angle_bracketed"]["args"] if "type" in g]
+        xs += [c["name"] + " = " + ty(c["binding"]["equality"]["type"]) for c in a["angle_bracketed"].get("constraints", []) if "type" in c.get("binding", {}).get("equality", {})]
+        if xs:
+            s += "<" + ", ".join(xs) + ">"
+    if a and "parenthesized" in a:
+        s += "(" + ", ".join(ty(x) for x in a["parenthesized"]["inputs"]) + ")"
+        if a["parenthesized"].get("output"):
+            s += " -> " + ty(a["parenthesized"]["output"])
+    return s
+
+
 def bound(b):
     if "trait_bound" in b:
-        t = b["trait_bound"]["trait"]
-        s = t["path"].split("::")[-1]
-        a = t.get("args")
-        if a and "angle_bracketed" in a:
-            xs = [ty(g["type"]) for g in a["angle_bracketed"]["args"] if "type" in g]
-            xs += [c["name"] + " = " + ty(c["binding"]["equality"]["type"]) for c in a["angle_bracketed"].get("constraints", []) if "type" in c.get("binding", {}).get("equality", {})]
-            if xs:
-                s += "<" + ", ".join(xs) + ">"
-        if a and "parenthesized" in a:
-            s += "(" + ", ".join(ty(x) for x in a["parenthesized"]["inputs"]) + ")" + ((" -> " + ty(a["parenthesized"]["output"])) if a["parenthesized"].get("output") else "")
-        return s
+        return trait_ty(b["trait_bound"]["trait"])
     return b.get("outlives", "?")
 
 

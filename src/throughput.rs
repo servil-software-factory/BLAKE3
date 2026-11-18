@@ -26,7 +26,7 @@
 pub use crate::block::Packed;
 pub use crate::block::{Batch, Block, Part, Prepared};
 #[cfg(feature = "std")]
-pub use crate::each::{finalize_each, hash_each, update_each};
+pub use crate::each::{finalize_each, hash_each, update_each, update_each_with};
 
 use crate::{CHUNK_LEN, ContextKey, DERIVE_KEY_CONTEXT, Hash, IV, Mode, OUT_LEN};
 
@@ -139,17 +139,13 @@ pub fn context_key(context: &str) -> ContextKey {
     crate::hash_serial(context.as_bytes(), IV, DERIVE_KEY_CONTEXT).0
 }
 
-/// A chaining value's 32 bytes with no place: what a Hasher's large
-/// update takes back from the threads crate's pool, the two halves of a
-/// subtree the Hasher named (`incremental::Pool`, docs/hazmat-removal.md,
-/// C). The pool builds them with [`Cv`] and [`LastCv`], as a program does.
-///
-/// Equality is constant-time, as [`struct@Hash`]'s is.
-#[doc(hidden)]
+/// The value passed to the kernels; the checked calls carry its place
+/// separately. Equality is constant-time, as [`struct@Hash`]'s is.
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
-pub struct BareCv([u8; OUT_LEN]);
+struct BareCv([u8; OUT_LEN]);
 
+#[cfg(all(test, feature = "std"))]
 impl BareCv {
     /// The chaining value's bytes.
     #[inline]
@@ -211,6 +207,20 @@ const fn place(level: u32, index: u64) -> u64 {
     assert!(index < u64::MAX >> (level + 10), "the subtree ends beyond a message's last byte");
     // The index is under 2^54, below the level's bits: the sum joins them.
     ((level as u64 + 1) << LEVEL_SHIFT) + index
+}
+
+/// The place and size of the bytes a whole-subtree call was given.
+#[inline]
+fn subtree_place(level: u32, index: u64, len: usize) -> u64 {
+    let at = place(level, index);
+    assert!(len as u64 == CHUNK << level, "a whole subtree at level {level} holds {} bytes (found {len})", CHUNK << level);
+    at
+}
+
+/// The two halves of a valid whole subtree above level zero.
+const fn half_places(level: u32, index: u64) -> [u64; 2] {
+    let left = ((level as u64) << LEVEL_SHIFT) + 2 * index;
+    [left, left + 1]
 }
 
 /// The place of the parent of the whole subtree at `place` (an even index).
@@ -288,6 +298,14 @@ impl Cv {
     #[inline]
     pub const fn index(&self) -> u64 {
         self.set() & INDEX_MASK
+    }
+
+    /// The two values returned to a Hasher by its pool. Check their
+    /// places before the stack takes only the bytes.
+    pub(crate) fn halves_bytes([left, right]: [Self; 2], level: u32, index: u64) -> [crate::CVBytes; 2] {
+        let [a, b] = half_places(level, index);
+        assert!(left.place == a && right.place == b, "not the halves of level {level} index {index}: {left:?} and {right:?}");
+        [left.value.0, right.value.0]
     }
 
     /// The place, of a value that has one.
@@ -484,8 +502,8 @@ impl TreeHasher {
         Self { key, flags, on_this_core: false }
     }
 
-    /// The `TreeHasher` of a Hasher's key words and flags, for the pool its
-    /// large updates go to (incremental::Pool).
+    /// The `TreeHasher` of a Hasher's key words and flags, for its large
+    /// subtrees' callback (Hasher::update_with).
     pub(crate) fn of_words(key: &crate::CVWords, flags: u8) -> Self {
         Self { key: *key, flags, on_this_core: false }
     }
@@ -502,19 +520,25 @@ impl TreeHasher {
     /// turn for a whole job (docs/hazmat-removal.md, D).
     #[doc(hidden)]
     pub fn subtree_cv_on(&self, platform: crate::platform::Platform, level: u32, index: u64, input: &[u8]) -> Cv {
-        let place = place(level, index);
-        assert!(input.len() as u64 == CHUNK << level, "a whole subtree at level {level} holds {} bytes (found {})", CHUNK << level, input.len());
+        let place = subtree_place(level, index, input.len());
         Cv { value: self.cv_on(platform, index << level, input), place }
     }
 
-    /// A whole subtree's chaining value, on `platform`'s kernels.
+    /// A subtree's chaining value, on `platform`'s kernels.
     #[inline]
     fn cv_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> BareCv {
         if input.len() <= CHUNK_LEN {
             return BareCv(crate::ChunkState::new(&self.key, first_chunk, self.flags, platform).update(input).output().chaining_value());
         }
+        let [left, right] = self.halves_on(platform, first_chunk, input);
+        BareCv(crate::hasher::parent_output(&left.0, &right.0, &self.key, self.flags, platform).chaining_value())
+    }
+
+    /// The values of a subtree's children, not yet labelled.
+    #[inline]
+    fn halves_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> [BareCv; 2] {
         let [left, right] = crate::tree::root_children(&crate::tree::PlatformKernels { key: &self.key, flags: self.flags, platform }, input, 0, first_chunk);
-        BareCv(crate::hasher::parent_output(&left, &right, &self.key, self.flags, platform).chaining_value())
+        [BareCv(left), BareCv(right)]
     }
 
     /// This `TreeHasher`, its calls kept to the calling core's own kernels: for
@@ -562,7 +586,14 @@ impl TreeHasher {
     /// ```
     pub fn hash(&self, input: &[u8]) -> Hash {
         let turn = self.turn(input.len());
-        crate::hash_serial_on(input, &self.key, self.flags, turn.platform())
+        self.hash_on(turn.platform(), input)
+    }
+
+    /// A worker already holds the turn for these kernels.
+    #[doc(hidden)]
+    #[inline]
+    pub fn hash_on(&self, platform: crate::platform::Platform, input: &[u8]) -> Hash {
+        crate::hash_serial_on(input, &self.key, self.flags, platform)
     }
 
     /// The hashes of a batch's messages, as [`hash_many`] gives them, in
@@ -571,7 +602,29 @@ impl TreeHasher {
     /// Requires one output a message.
     pub fn hash_many<P: Prepared>(&self, batch: &P, out: &mut [[u8; OUT_LEN]]) {
         let turn = self.turn_if(crate::many::sme2_sized(batch.message_len(), out.len()));
-        crate::many::hash_many_on(batch.bytes(), batch.message_len(), batch.slot(), &self.key, self.flags, out, turn.platform());
+        self.hash_slots_on(turn.platform(), batch.bytes(), batch.message_len(), batch.slot(), out);
+    }
+
+    /// A worker's slice of a batch. Slot shape and output count are
+    /// checked by the same code as `hash_many`.
+    #[doc(hidden)]
+    #[inline]
+    pub fn hash_slots_on(&self, platform: crate::platform::Platform, bytes: &[u8], len: usize, slot: usize, out: &mut [[u8; OUT_LEN]]) {
+        crate::many::hash_many_on(bytes, len, slot, &self.key, self.flags, out, platform);
+    }
+
+    /// Try the whole-block lanes with separate readable inputs. Returns
+    /// false without writing if this group takes the one-message path.
+    #[doc(hidden)]
+    #[cfg(feature = "std")]
+    pub fn try_hash_group_on<'a>(
+        &self,
+        platform: crate::platform::Platform,
+        count: usize,
+        input: impl Fn(usize) -> &'a [u8],
+        output: impl FnMut(usize, [u8; OUT_LEN]),
+    ) -> bool {
+        crate::many::try_whole_group(count, input, &self.key, self.flags, platform, output)
     }
 
     /// The hash of each message, of any lengths, as [`hash_each`] gives
@@ -584,46 +637,6 @@ impl TreeHasher {
         assert_eq!(items.len(), out.len(), "one digest per item");
         let platform = if self.on_this_core { crate::platform::Platform::own_core() } else { crate::platform::Platform::detect() };
         crate::each::hash_each_on(&self.key, self.flags, items, out, platform, |item| self.hash(item));
-    }
-
-    /// Requires that `input` is a whole subtree whose first chunk is
-    /// `first_chunk`: not empty, and no longer than the subtree aligned at
-    /// that chunk can be (at chunk zero, any length).
-    fn assert_subtree(first_chunk: u64, input: &[u8]) {
-        assert!(!input.is_empty(), "a subtree holds at least one byte");
-        assert!(first_chunk <= u64::MAX / CHUNK_LEN as u64, "the subtree's first chunk, {first_chunk}, is beyond a message's last");
-        if let Some(max) = crate::max_subtree_len(first_chunk * CHUNK_LEN as u64) {
-            assert!(input.len() as u64 <= max, "the subtree at chunk {first_chunk} holds at most {max} bytes (found {})", input.len());
-        }
-    }
-
-    /// The chaining value of the subtree over `input`, whose first chunk
-    /// is the message's chunk `first_chunk`.
-    ///
-    /// Requires a whole subtree: `input` is not empty, and is no longer
-    /// than the subtree aligned at `first_chunk` can be (the largest power
-    /// of two of chunks that divides `first_chunk`; at chunk zero, any
-    /// length). The message's last subtree may end short of that.
-    fn bare_subtree_cv(&self, first_chunk: u64, input: &[u8]) -> BareCv {
-        Self::assert_subtree(first_chunk, input);
-        let turn = self.turn(input.len());
-        self.cv_on(turn.platform(), first_chunk, input)
-    }
-
-    /// The subtree [`bare_subtree_cv`](TreeHasher::bare_subtree_cv) hashes, as the
-    /// chaining values of its two halves: what a caller keeps when the
-    /// subtree may turn out to be the whole message, whose root
-    /// ([`bare_root_hash`](TreeHasher::bare_root_hash)) is made from its two children.
-    ///
-    /// Requires what `subtree_cv` does, and more than one chunk.
-    #[doc(hidden)]
-    pub fn bare_subtree_halves(&self, first_chunk: u64, input: &[u8]) -> [BareCv; 2] {
-        Self::assert_subtree(first_chunk, input);
-        assert!(input.len() > CHUNK_LEN, "a subtree of one chunk has no halves");
-        let turn = self.turn(input.len());
-        let [left, right] =
-            crate::tree::root_children(&crate::tree::PlatformKernels { key: &self.key, flags: self.flags, platform: turn.platform() }, input, 0, first_chunk);
-        [BareCv(left), BareCv(right)]
     }
 
     /// The chaining value of the parent of two subtrees.
@@ -670,9 +683,30 @@ impl TreeHasher {
     ///
     /// Requires `input.len() == 1024 << level`, checked in every build.
     pub fn subtree_cv(&self, level: u32, index: u64, input: &[u8]) -> Cv {
-        let place = place(level, index);
-        assert!(input.len() as u64 == CHUNK << level, "a whole subtree at level {level} holds {} bytes (found {})", CHUNK << level, input.len());
-        Cv { value: self.bare_subtree_cv(index << level, input), place }
+        let place = subtree_place(level, index, input.len());
+        let turn = self.turn(input.len());
+        Cv { value: self.cv_on(turn.platform(), index << level, input), place }
+    }
+
+    /// The chaining values of a whole subtree's left and right halves,
+    /// in that order. Keep the halves when the subtree might turn out to
+    /// be the whole message: its root needs both children.
+    ///
+    /// Requires a positive `level` and the same whole subtree as
+    /// [`subtree_cv`](Self::subtree_cv), checked in every build.
+    pub fn subtree_halves(&self, level: u32, index: u64, input: &[u8]) -> [Cv; 2] {
+        let turn = self.turn(input.len());
+        self.subtree_halves_on(turn.platform(), level, index, input)
+    }
+
+    /// The same checked call for a worker that already holds its turn.
+    #[doc(hidden)]
+    pub fn subtree_halves_on(&self, platform: crate::platform::Platform, level: u32, index: u64, input: &[u8]) -> [Cv; 2] {
+        subtree_place(level, index, input.len());
+        assert!(level > 0, "a subtree of one chunk has no halves");
+        let [a, b] = half_places(level, index);
+        let [left, right] = self.halves_on(platform, index << level, input);
+        [Cv { value: left, place: a }, Cv { value: right, place: b }]
     }
 
     /// The chaining value of the message's last subtree: `input` is the
@@ -683,9 +717,16 @@ impl TreeHasher {
     /// divides it), checked in every build. That is what makes it no
     /// longer than the left sibling it will be given.
     pub fn last_cv(&self, first_chunk: u64, input: &[u8]) -> LastCv {
+        let turn = self.turn(input.len());
+        self.last_cv_on(turn.platform(), first_chunk, input)
+    }
+
+    /// The same checked call for a worker that already holds its turn.
+    #[doc(hidden)]
+    pub fn last_cv_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> LastCv {
         let (len, max) = (input.len() as u64, last_max(first_chunk));
         assert!(len >= 1 && len <= max, "the last subtree at chunk {first_chunk} holds 1 to {max} bytes (found {len})");
-        LastCv { value: self.bare_subtree_cv(first_chunk, input), first_chunk, len }
+        LastCv { value: self.cv_on(platform, first_chunk, input), first_chunk, len }
     }
 
     /// The parent of two whole subtrees: whole, a level up.
@@ -809,7 +850,8 @@ mod tree_test {
     /// Official BLAKE3's hazmat: the independent implementation of the
     /// tree's pieces.
     mod official {
-        use blake3::hazmat::{self, HasherExt};
+        pub(super) use crate::test::official::parent;
+        use blake3::hazmat::HasherExt;
         pub(super) fn hasher(mode: crate::Mode) -> blake3::Hasher {
             match mode {
                 crate::Mode::Plain => blake3::Hasher::new(),
@@ -823,19 +865,6 @@ mod tree_test {
             hasher.set_input_offset(first_chunk * 1024);
             hasher.update(input);
             hasher.finalize_non_root()
-        }
-        pub(super) fn parent(mode: crate::Mode, left: &[u8; 32], right: &[u8; 32], root: bool) -> [u8; 32] {
-            let context_key;
-            let mode = match mode {
-                crate::Mode::Plain => hazmat::Mode::Hash,
-                crate::Mode::Keyed(key) => hazmat::Mode::KeyedHash(key),
-                crate::Mode::DeriveKey(context) => {
-                    context_key = hazmat::hash_derive_key_context(context);
-                    hazmat::Mode::DeriveKeyMaterial(&context_key)
-                }
-                crate::Mode::DeriveKeyWith(_) => unreachable!("the tests derive from a context string"),
-            };
-            if root { *hazmat::merge_subtrees_root(left, right, mode).as_bytes() } else { hazmat::merge_subtrees_non_root(left, right, mode) }
         }
     }
 
@@ -893,9 +922,10 @@ mod tree_test {
                         let bytes = &input[100..100 + len];
                         checked += 1;
                         let want = official::subtree_cv(mode, first_chunk, bytes);
-                        assert_eq!(*tree.bare_subtree_cv(first_chunk, bytes).as_bytes(), want, "first_chunk={first_chunk} len={len}");
+                        assert_eq!(*tree.last_cv(first_chunk, bytes).as_bytes(), want, "first_chunk={first_chunk} len={len}");
                         if len > CHUNK_LEN {
-                            let [left, right] = tree.bare_subtree_halves(first_chunk, bytes);
+                            let turn = tree.turn(len);
+                            let [left, right] = tree.halves_on(turn.platform(), first_chunk, bytes);
                             assert_eq!(*tree.bare_parent_cv(&left, &right).as_bytes(), want, "the halves' parent, first_chunk={first_chunk} len={len}");
                             let split = left_len(len as u64) as usize;
                             assert_eq!(
@@ -916,6 +946,27 @@ mod tree_test {
         // The 19 lengths where the place allows them all, fewer at the
         // narrower places: 164 a mode and tree.
         assert_eq!(checked, 3 * 2 * 164, "the places and lengths checked");
+    }
+
+    #[test]
+    fn whole_subtree_halves_keep_their_places_and_values() {
+        crate::initialize();
+        let input = painted(64 * CHUNK_LEN);
+        for mode in modes() {
+            for tree in [TreeHasher::new(mode), TreeHasher::new(mode).on_this_core()] {
+                for (level, index) in [(1, 0), (2, 3), (5, 7), (6, (1 << 30) + 1)] {
+                    let bytes = &input[..CHUNK_LEN << level];
+                    let (head, tail) = bytes.split_at(bytes.len() / 2);
+                    let first = index << level;
+                    let want_left = official::subtree_cv(mode, first, head);
+                    let want_right = official::subtree_cv(mode, first + (head.len() / CHUNK_LEN) as u64, tail);
+                    assert_eq!(
+                        tree.subtree_halves(level, index, bytes),
+                        [Cv::at(level - 1, 2 * index, want_left), Cv::at(level - 1, 2 * index + 1, want_right)]
+                    );
+                }
+            }
+        }
     }
 
     /// A parent and the root from two chaining values, against official
@@ -958,7 +1009,7 @@ mod tree_test {
         crate::initialize();
         fn cv(tree: &TreeHasher, input: &[u8], first_chunk: u64) -> BareCv {
             if input.len() <= 16 * CHUNK_LEN {
-                return tree.bare_subtree_cv(first_chunk, input);
+                return tree.last_cv(first_chunk, input).value;
             }
             let split = left_len(input.len() as u64) as usize;
             let left = cv(tree, &input[..split], first_chunk);
@@ -1019,24 +1070,31 @@ mod tree_test {
     }
 
     #[test]
-    #[should_panic(expected = "a subtree holds at least one byte")]
+    #[should_panic(expected = "the last subtree at chunk 0 holds 1 to")]
     fn a_subtree_is_not_empty() {
         crate::initialize();
-        TreeHasher::new(Mode::Plain).bare_subtree_cv(0, &[]);
+        TreeHasher::new(Mode::Plain).last_cv(0, &[]);
     }
 
     #[test]
-    #[should_panic(expected = "the subtree at chunk 6 holds at most 2048 bytes (found 2049)")]
+    #[should_panic(expected = "the last subtree at chunk 6 holds 1 to 2048 bytes (found 2049)")]
     fn a_subtree_is_no_longer_than_its_place_allows() {
         crate::initialize();
-        TreeHasher::new(Mode::Plain).bare_subtree_cv(6, &[0; 2049]);
+        TreeHasher::new(Mode::Plain).last_cv(6, &[0; 2049]);
     }
 
     #[test]
     #[should_panic(expected = "a subtree of one chunk has no halves")]
     fn the_halves_of_a_chunk_do_not_exist() {
         crate::initialize();
-        TreeHasher::new(Mode::Plain).bare_subtree_halves(0, &[0; 1024]);
+        TreeHasher::new(Mode::Plain).subtree_halves(0, 0, &[0; 1024]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a whole subtree at level 1 holds 2048 bytes (found 2047)")]
+    fn halves_need_the_whole_subtree() {
+        crate::initialize();
+        TreeHasher::new(Mode::Plain).subtree_halves(1, 0, &[0; 2047]);
     }
 
     #[test]
@@ -1153,7 +1211,7 @@ mod tree_test {
             // Chunk 64 is the place of index `64 >> level` at every level here.
             let on = tree.subtree_cv_on(crate::platform::Platform::detect(), level, 64 >> level, &input[..len]);
             assert!(on == tree.subtree_cv(level, 64 >> level, &input[..len]), "{len} bytes");
-            assert!(*on.as_bytes() == *tree.bare_subtree_cv(64, &input[..len]).as_bytes(), "{len} bytes");
+            assert_eq!(*on.as_bytes(), official::subtree_cv(Mode::Keyed(&KEY), 64, &input[..len]), "{len} bytes");
         }
     }
 

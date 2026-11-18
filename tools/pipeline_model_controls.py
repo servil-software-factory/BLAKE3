@@ -24,8 +24,8 @@ SOURCE = os.path.join(ROOT, "threads", "src", "pipeline.rs")
 FAULTS = [
     (
         "a group is published done before its members are hashed",
-        "        task.run_members(platform);\n",
-        "        group.completed_epoch.swap(epoch, Ordering::SeqCst);\n        task.run_members(platform);\n",
+        "        task.run_members(&self.tree, platform);\n",
+        "        group.completed_epoch.swap(epoch, Ordering::SeqCst);\n        task.run_members(&self.tree, platform);\n",
     ),
     (
         "a finished task wakes no one",
@@ -34,13 +34,15 @@ FAULTS = [
     ),
     (
         "a room piece is published done before it is hashed",
-        "        let out = unsafe { &mut *pnode.out.0.get() };\n        if counter == 0 && len > CHUNK_LEN {",
-        "        pnode.done.swap(true, Ordering::SeqCst);\n        let out = unsafe { &mut *pnode.out.0.get() };\n        if counter == 0 && len > CHUNK_LEN {",
+        "        unsafe { *pnode.out.0.get() = value };",
+        "        pnode.done.swap(true, Ordering::SeqCst);\n        unsafe { *pnode.out.0.get() = value };",
+
     ),
     (
         "a room piece gives its room back before it has read it",
-        "        let ptr = unsafe { self.storage.rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        // Sound: `out` is this piece's alone",
-        "        self.storage.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { self.storage.rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        // Sound: `out` is this piece's alone",
+        "        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };",
+        "        self.storage.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };",
+
     ),
     (
         "a message's pieces are published done before the last is hashed",
@@ -72,7 +74,7 @@ FAULTS = [
 
 def model_passes():
     env = {**os.environ, "RUSTFLAGS": "--cfg shuttle"}
-    run = subprocess.run(["cargo", "test", "-q", "--release", "--test", "shuttle_pipeline"], cwd=os.path.join(ROOT, "threads"), env=env, capture_output=True, text=True)
+    run = subprocess.run(["cargo", "test", "--locked", "-q", "--release", "--test", "shuttle_pipeline"], cwd=os.path.join(ROOT, "threads"), env=env, capture_output=True, text=True)
     # A fault may show as a failed comparison, a deadlock Shuttle reports,
     # or the Pipeline's own stop of the process: each is a panic or a
     # signal after the test began. Anything else is no verdict.

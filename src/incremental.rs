@@ -3,6 +3,7 @@
 //! it to other cores and in groups).
 
 use super::*;
+use crate::throughput::{Cv, TreeHasher};
 
 /// A message's hash, fed in pieces: [`update`](Hasher::update) with each
 /// piece, in order, then [`finalize`](Hasher::finalize). The pieces may be
@@ -106,7 +107,7 @@ impl Clone for HasherCore {
 }
 
 /// What the Hasher's kernels take from the library (hasher::Hooks): with
-/// `pooled`, subtrees of lanes::MIN_SPLIT_LEN and more on the pool; whole
+/// `pooled`, subtrees of the given size and more on the pool; whole
 /// subtrees on `platform` (an SME2 turn's); `chunk_platform`, the chunk
 /// state's, otherwise.
 struct HasherHooks<'a> {
@@ -114,17 +115,13 @@ struct HasherHooks<'a> {
     flags: u8,
     chunk_platform: Platform,
     platform: Platform,
-    pooled: Option<Pool>,
+    pooled: Option<&'a Pool<'a>>,
 }
 
-/// Another crate's threads, for a Hasher's whole subtrees: `halves`
-/// gives the two halves' chaining values of a subtree of `min_len` bytes
-/// or more whose first chunk is the message's chunk `first_chunk` (what
-/// `TreeHasher::subtree_halves` returns), hashed however its crate likes.
-#[derive(Clone, Copy)]
-pub struct Pool {
+/// The callback and threshold shared by Hasher::update_with and a turn.
+pub(crate) struct Pool<'a> {
     pub min_len: usize,
-    pub halves: fn(tree: &crate::throughput::TreeHasher, first_chunk: u64, input: &[u8]) -> [crate::throughput::BareCv; 2],
+    pub halves: &'a dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2],
 }
 
 impl hasher::Hooks for HasherHooks<'_> {
@@ -146,13 +143,14 @@ impl hasher::Hooks for HasherHooks<'_> {
 
     #[inline(always)]
     fn children(&self, input: &[u8], ahead: usize, counter: u64) -> [CVBytes; 2] {
-        let pair = if let Some(pool) = self.pooled.filter(|pool| input.len() >= pool.min_len) {
-            let [left, right] = (pool.halves)(&crate::throughput::TreeHasher::of_words(self.key, self.flags), counter, input);
-            let mut pair = [0u8; 2 * OUT_LEN];
-            pair[..OUT_LEN].copy_from_slice(left.as_bytes());
-            pair[OUT_LEN..].copy_from_slice(right.as_bytes());
-            pair
-        } else if self.pooled.is_some() {
+        if let Some(pool) = self.pooled.filter(|pool| input.len() >= pool.min_len) {
+            let level = crate::throughput::level_of(input.len() as u64);
+            let index = counter >> level;
+            assert!(index << level == counter, "a subtree of {} bytes starts at its own boundary, not chunk {counter}", input.len());
+            let halves = (pool.halves)(&TreeHasher::of_words(self.key, self.flags), level, index, input);
+            return Cv::halves_bytes(halves, level, index);
+        }
+        let pair = if self.pooled.is_some() {
             // Pooled, the subtrees below take the lock one at a time, and
             // the pool's own never use SME2.
             let own = platform::Sme2Turn::take(self.chunk_platform, input.len() >= SME2_SIZED_LEN);
@@ -190,7 +188,7 @@ type HasherKernels<'a> = hasher::Kernels<'a, Platform, HasherHooks<'a>>;
 
 /// A Hasher's kernels on its key and chunk state (see HasherHooks).
 #[inline(always)]
-fn kernels_on<'a>(key: &'a CVWords, chunk_state: &ChunkState, platform: Platform, pooled: Option<Pool>) -> HasherKernels<'a> {
+fn kernels_on<'a>(key: &'a CVWords, chunk_state: &ChunkState, platform: Platform, pooled: Option<&'a Pool<'a>>) -> HasherKernels<'a> {
     hasher::Kernels {
         key,
         flags: chunk_state.flags,
@@ -258,7 +256,7 @@ impl Hasher {
     /// and the stage goes to the core as one update, its chunks side by
     /// side in the lanes. A message of under 16 KiB is therefore whole in
     /// the stage, where `finalize` hashes it as the one-shot call would.
-    fn gather(&mut self, input: &[u8], pooled: Option<Pool>) -> &mut Self {
+    fn gather(&mut self, input: &[u8], pooled: Option<&Pool<'_>>) -> &mut Self {
         self.gather_part(input, pooled, false);
         self
     }
@@ -267,7 +265,7 @@ impl Hasher {
     /// whole group (from offset zero) is kept for the caller to hash with
     /// others' (`held_group`), and the rest of `input`
     /// returned; else nothing is left.
-    pub(crate) fn gather_part<'a>(&mut self, mut input: &'a [u8], pooled: Option<Pool>, hold: bool) -> &'a [u8] {
+    pub(crate) fn gather_part<'a>(&mut self, mut input: &'a [u8], pooled: Option<&Pool<'_>>, hold: bool) -> &'a [u8] {
         self.core.assert_room(self.count(), input.len());
         while !input.is_empty() {
             // Whole groups skip the stage. So does a fresh hasher's first
@@ -391,7 +389,7 @@ impl Hasher {
         if counter == 0 {
             return node;
         }
-        hasher::above(&core.kernels(core.chunk_state.platform, None), &core.cv_stack, hasher::ones(counter), node)
+        hasher::above(&core.kernels(), &core.cv_stack, hasher::ones(counter), node)
     }
 
     /// The root hash, for a caller that then resets the Hasher
@@ -483,12 +481,19 @@ impl Hasher {
         self.gather(input, None)
     }
 
-    /// [`update`](Hasher::update), its whole subtrees of `pool.min_len`
-    /// bytes and more hashed by `pool` (the thread crate's
-    /// `update_multithreaded`). Not for programs: the crates' interface.
-    #[doc(hidden)]
-    pub fn update_on(&mut self, input: &[u8], pool: Pool) -> &mut Self {
-        self.gather(input, Some(pool))
+    /// Add the next piece, letting the caller hash large whole subtrees.
+    ///
+    /// The Hasher can pass subtrees of at least `min_len` bytes to
+    /// `halves`. For each call, return the same ordered values as
+    /// `tree.subtree_halves(level, index, input)` in the given mode. The
+    /// Hasher checks both places in every build; the callback is
+    /// responsible for their bytes.
+    ///
+    /// The callback finishes its work before returning. It is borrowed
+    /// only for this update, so it can use the caller's workers or scratch.
+    /// Input that is not passed to it hashes on the calling thread.
+    pub fn update_with(&mut self, input: &[u8], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2]) -> &mut Self {
+        self.gather(input, Some(&Pool { min_len, halves }))
     }
 
     /// The [`struct@Hash`] of everything updated so far. The Hasher is left
@@ -625,12 +630,6 @@ impl HasherCore {
         self.cv_stack.merge(&kernels, post_merge_stack_len);
     }
 
-    /// The kernels on this Hasher's key and flags (see HasherKernels).
-    #[inline(always)]
-    fn kernels(&self, platform: Platform, pooled: Option<Pool>) -> HasherKernels<'_> {
-        kernels_on(&self.key, &self.chunk_state, platform, pooled)
-    }
-
     // Official BLAKE3's reference implementation (reference_impl.rs) merges
     // the new CV with existing CVs from the stack before pushing it. It can,
     // because it knows more input is coming, so none of the merges are root.
@@ -690,9 +689,9 @@ impl HasherCore {
         self.chunk_state.chunk_counter += CHUNKS;
     }
 
-    /// `update`'s loop; with `pooled`, whole subtrees of
-    /// `lanes::MIN_SPLIT_LEN` and more go to the pool.
-    pub(crate) fn update_pooled(&mut self, input: &[u8], pooled: Option<Pool>) -> &mut Self {
+    /// `update`'s loop; with `pooled`, whole subtrees at or above the
+    /// callback's threshold may go to the pool.
+    pub(crate) fn update_pooled(&mut self, input: &[u8], pooled: Option<&Pool<'_>>) -> &mut Self {
         self.assert_room(self.count(), input.len());
         // The partial chunk first (hasher::fill), then whole subtrees and the
         // last chunk (hasher::feed), as src/hasher.rs describes.
@@ -705,8 +704,14 @@ impl HasherCore {
         self
     }
 
+    /// A Hasher's own kernels for its final output, with no pool.
+    #[inline(always)]
+    fn kernels(&self) -> HasherKernels<'_> {
+        kernels_on(&self.key, &self.chunk_state, self.chunk_state.platform, None)
+    }
+
     pub fn final_output(&self) -> Output {
-        hasher::final_node(&self.kernels(self.chunk_state.platform, None), &self.chunk_state, &self.cv_stack)
+        hasher::final_node(&self.kernels(), &self.chunk_state, &self.cv_stack)
     }
 
     /// The serial update: whole subtrees now, the last chunk kept.
@@ -788,6 +793,45 @@ impl Zeroize for HasherCore {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    fn update_with_one_wrong_half(wrong: usize) {
+        crate::initialize();
+        Hasher::new(Mode::Plain, None).update_with(&[0; STAGE_LEN], STAGE_LEN, &|tree, level, index, input| {
+            let mut halves = tree.subtree_halves(level, index, input);
+            halves[wrong] = halves[1 - wrong];
+            halves
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "not the halves of level 4 index 0")]
+    fn pool_rejects_a_wrong_left_half_alone() {
+        update_with_one_wrong_half(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "not the halves of level 4 index 0")]
+    fn pool_rejects_a_wrong_right_half_alone() {
+        update_with_one_wrong_half(1);
+    }
+
+    #[test]
+    fn pool_halves_use_the_subtrees_nonzero_place() {
+        let calls = core::cell::Cell::new(0);
+        crate::initialize();
+        let input = painted();
+        let input = &input[..2 * STAGE_LEN];
+        let key = [3; KEY_LEN];
+        let mut hasher = Hasher::new(Mode::Keyed(&key), None);
+        hasher.update(&input[..STAGE_LEN]);
+        hasher.update_with(&input[STAGE_LEN..], STAGE_LEN, &|tree, level, index, input| {
+            assert_eq!((level, index, input.len()), (4, 1, STAGE_LEN));
+            calls.set(calls.get() + 1);
+            tree.subtree_halves(level, index, input)
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(hasher.finalize().as_bytes(), blake3::keyed_hash(&key, input).as_bytes());
+    }
 
     fn painted() -> std::vec::Vec<u8> {
         let mut input = std::vec![0u8; 3 * STAGE_LEN];
@@ -932,7 +976,7 @@ mod test {
     /// the Hasher held before (`first_block`): after a longer message and a
     /// reset (`finalize_each`), after `clone_from` over a longer message,
     /// and when its bytes arrive by the path that skips `update`'s own
-    /// first block (`gather`, as `update_on` calls it).
+    /// first block (`gather`, as `update_with` calls it).
     #[test]
     #[cfg(feature = "std")]
     fn a_block_or_less_is_padded_whatever_the_hasher_held_before() {

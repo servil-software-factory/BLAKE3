@@ -16,9 +16,8 @@
 
 use crate::lanes::sources::{ACTION_SME2, Source};
 use crate::lanes::{MEMBERS, Member, OwnLine, TASK_LEN, Task, pool_platform};
-use crate::platform::Platform;
-use crate::throughput::{Batch, Prepared};
-use crate::{CHUNK_LEN, CVBytes, CVWords, Hash, Mode, OUT_LEN};
+use crate::throughput::{Batch, Cv, LastCv, Prepared, TreeHasher, level_of};
+use crate::{CHUNK_LEN, Hash, Mode, OUT_LEN, Platform};
 use core::future::Future;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
@@ -36,6 +35,7 @@ use std::sync::Arc;
 /// reaches both the 32-lane AVX-512 chunk kernel and SME2's flat subtree
 /// walk with one mechanism (`1 whole Room == 1 worker piece`).
 pub const ROOM_LEN: usize = 64 * 1024;
+const ROOM_LEVEL: u32 = level_of(ROOM_LEN as u64);
 
 /// Minimum subtree size that benefits from the SME2 coprocessor (16 chunks).
 const SME2_MIN_LEN: usize = 16 * CHUNK_LEN;
@@ -357,7 +357,7 @@ impl PipeStorage {
         }
     }
 
-    fn acquire(actions: usize, messages: usize, rooms: usize, groups: usize, key: &CVWords, flags: u8) -> &'static PipeStorage {
+    fn acquire(actions: usize, messages: usize, rooms: usize, groups: usize) -> &'static PipeStorage {
         let chosen = {
             let mut free = FREE_STORAGES.lock().unwrap();
             let fits = |st: &&'static PipeStorage| {
@@ -367,14 +367,6 @@ impl PipeStorage {
         };
         if let Some(st) = chosen {
             st.holders.store(1, Ordering::Release);
-            for g in &st.groups[..groups] {
-                // Sound: the storage came off the free list, so no Pipeline
-                // holds it and every task that read these groups has finished
-                // (Pipeline::drop stops the process otherwise).
-                let t = unsafe { &mut *g.task.get() };
-                t.key = *key;
-                t.flags = flags;
-            }
             return st;
         }
         let actions = actions.max(1024);
@@ -389,7 +381,7 @@ impl PipeStorage {
             rooms: Rooms::new(rooms),
             groups: (0..groups)
                 .map(|_| MemberGroup {
-                    task: UnsafeCell::new(Task::members(key, flags, None)),
+                    task: UnsafeCell::new(Task::members(None)),
                     metas: UnsafeCell::new([dummy; MEMBERS]),
                     epoch: UnsafeCell::new(0),
                     completed_epoch: OwnLine(AtomicU64::new(0)),
@@ -490,17 +482,30 @@ struct PieceNode {
     room: UnsafeCell<u32>,
     offset: UnsafeCell<u32>,
     len: UnsafeCell<u32>,
-    counter: UnsafeCell<u64>,
-    out: OwnLine<UnsafeCell<[u8; 64]>>,
+    index: UnsafeCell<u64>,
+    out: OwnLine<UnsafeCell<RoomValue>>,
     done: OwnLine<AtomicBool>,
     next: UnsafeCell<u32>,
+}
+
+#[derive(Clone, Copy)]
+enum RoomValue {
+    // A first room might be the whole message. Keep both children of its root.
+    First([Cv; 2]),
+    Whole(Cv),
+    Last(LastCv),
+}
+
+struct PieceValues {
+    whole: [Cv; MAX_SLOT_PIECES],
+    last: Option<LastCv>,
 }
 
 #[derive(Clone, Copy)]
 struct MultiDesc {
     input: *const u8,
     total_len: usize,
-    piece_len: usize,
+    piece_level: u32,
     pieces: usize,
     batch: Option<(usize, usize, usize)>,
     digests: *mut [u8; OUT_LEN],
@@ -526,11 +531,10 @@ fn finished(storage: &'static PipeStorage, publish: impl FnOnce()) {
 /// storage for the next Pipeline of its size (`create`), as the storage
 /// does, so nothing a worker can reach is memory an owner gives back.
 struct Shared {
-    key: CVWords,
-    flags: u8,
+    tree: TreeHasher,
     storage: &'static PipeStorage,
     hashes: Box<[UnsafeCell<[u8; OUT_LEN]>]>,
-    cvs: Box<[UnsafeCell<[[u8; OUT_LEN]; MAX_SLOT_PIECES + 1]>]>,
+    cvs: Box<[UnsafeCell<PieceValues>]>,
     slot_done: Box<[OwnLine<AtomicBool>]>,
     tasks_left: Box<[OwnLine<AtomicUsize>]>,
     multi: Box<[UnsafeCell<MultiDesc>]>,
@@ -568,7 +572,7 @@ impl Shared {
         let task = unsafe { &*group.task.get() };
         let count = task.members;
         let epoch = unsafe { *group.epoch.get() };
-        task.run_members(platform);
+        task.run_members(&self.tree, platform);
         let metas = unsafe { &*group.metas.get() };
 
         // Coalesce consecutive members sharing a Room into a single atomic subtraction.
@@ -605,20 +609,22 @@ impl Shared {
         let room_idx = unsafe { *pnode.room.get() };
         let offset = unsafe { *pnode.offset.get() } as usize;
         let len = unsafe { *pnode.len.get() } as usize;
-        let counter = unsafe { *pnode.counter.get() };
-        // Sound: the piece is `len` committed bytes of its room from `offset`,
-        // which the Room's credit keeps unwritten and unshared until this task
-        // returns it below.
-        let ptr = unsafe { self.storage.rooms.room_ptr(room_idx as usize).add(offset) };
+        let index = unsafe { *pnode.index.get() };
+        let rooms = &self.storage.rooms;
+        assert!((room_idx as usize) < rooms.count && offset <= ROOM_LEN && len <= ROOM_LEN - offset, "a piece stays within its room");
+        // Sound: these are just the committed bytes. The Room's credit keeps
+        // them from being written again until this task releases them below.
+        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };
         let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-        // Sound: `out` is this piece's alone until `done` (as its fields
-        // above).
-        let out = unsafe { &mut *pnode.out.0.get() };
-        if counter == 0 && len > CHUNK_LEN {
-            *out = crate::compress_subtree_to_parent_node(bytes, 0, &self.key, 0, self.flags, platform);
+        let value = if index == 0 {
+            RoomValue::First(self.tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))
+        } else if len == ROOM_LEN {
+            RoomValue::Whole(self.tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))
         } else {
-            out[..OUT_LEN].copy_from_slice(&crate::hash_all_at_once(bytes, &self.key, counter, self.flags, platform).chaining_value());
-        }
+            RoomValue::Last(self.tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))
+        };
+        // Sound: this piece's output is its worker's alone until `done`.
+        unsafe { *pnode.out.0.get() = value };
         let storage = self.storage;
         storage.rooms.release_n(room_idx, 1);
         finished(storage, || {
@@ -631,6 +637,7 @@ impl Shared {
         // tasks (batch, submit_multi_slice), and writes it again only after
         // `slot_done`.
         let desc = unsafe { *self.multi[slot].get() };
+        assert!(piece_idx < desc.pieces, "the action names a piece of its submission");
         if let Some((message_len, slot_len, per_part)) = desc.batch {
             let first = piece_idx * per_part;
             let count = (desc.total_len - first).min(per_part);
@@ -640,7 +647,7 @@ impl Shared {
             // `count`).
             let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(first * slot_len), count * slot_len) };
             let digests = unsafe { core::slice::from_raw_parts_mut(desc.digests.add(first), count) };
-            crate::many::hash_many_on(bytes, message_len, slot_len, &self.key, self.flags, digests, platform);
+            self.tree.hash_slots_on(platform, bytes, message_len, slot_len, digests);
             let storage = self.storage;
             if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {
                 finished(storage, || {
@@ -650,29 +657,22 @@ impl Shared {
             return;
         }
 
-        let offset = piece_idx * desc.piece_len;
-        let part_len = (desc.total_len - offset).min(desc.piece_len);
-        let counter = (offset / CHUNK_LEN) as u64;
-        // Sound: the message's bytes stay where they are until the slot is
-        // done (an owner in `owners[s]`; a loan by the Lent guard, which waits
-        // for `loan_completed`), and this piece reads its own range.
-        let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(offset), part_len) };
-        let cvs_ptr = self.cvs[slot].get() as *mut [u8; OUT_LEN];
-        if piece_idx == 0 {
-            debug_assert!(part_len > CHUNK_LEN);
-            let pair = crate::compress_subtree_to_parent_node(bytes, 0, &self.key, 0, self.flags, platform);
-            // Sound: `cvs[slot]` has MAX_SLOT_PIECES + 1 values; piece 0
-            // writes the first two and piece i the one at i + 1, each its own.
-            unsafe {
-                (*cvs_ptr).copy_from_slice(&pair[..OUT_LEN]);
-                (*cvs_ptr.add(1)).copy_from_slice(&pair[OUT_LEN..]);
-            }
+        // Sound: the owner, or the Lent guard, keeps all the message's
+        // bytes in place until the slot is done. The chunks of this slice
+        // are the same partition the submitter put in the action list.
+        let input = unsafe { core::slice::from_raw_parts(desc.input, desc.total_len) };
+        let level = desc.piece_level;
+        let bytes = input.chunks(CHUNK_LEN << level).nth(piece_idx).expect("a piece within its message");
+        let values = self.cvs[slot].get();
+        if piece_idx + 1 == desc.pieces {
+            let value = self.tree.last_cv_on(platform, (piece_idx as u64) << level, bytes);
+            // Sound: only the last piece writes this field.
+            unsafe { (*values).last = Some(value) };
         } else {
-            let cv = crate::hash_all_at_once(bytes, &self.key, counter, self.flags, platform).chaining_value();
-            // Sound: as piece 0's, above.
-            unsafe {
-                (*cvs_ptr.add(piece_idx + 1)).copy_from_slice(&cv);
-            }
+            let value = self.tree.subtree_cv_on(platform, level, piece_idx as u64, bytes);
+            // Sound: a separate slot for each index (submit_multi_slice
+            // limits the count); form no borrow of other workers' slots.
+            unsafe { core::ptr::addr_of_mut!((*values).whole).cast::<Cv>().add(piece_idx).write(value) };
         }
 
         let storage = self.storage;
@@ -680,8 +680,9 @@ impl Shared {
             // Sound: this is the slot's last task (`tasks_left` reached zero),
             // so every piece's value is written and no one else reads or
             // writes the slot's values or hash until `slot_done` below.
-            let cvs = unsafe { &*self.cvs[slot].get() };
-            let hash = fold_multi_cvs(&self.key, self.flags, cvs, desc.pieces);
+            let values = unsafe { &mut *values };
+            let last = values.last.take().expect("the last piece supplied its value");
+            let hash = fold_multi_cvs(&self.tree, &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
             unsafe { *self.hashes[slot].get() = *hash.as_bytes() };
             if desc.loan_epoch != 0 {
                 self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);
@@ -693,27 +694,44 @@ impl Shared {
     }
 }
 
-fn fold_multi_cvs(key: &CVWords, flags: u8, cvs: &[[u8; OUT_LEN]; MAX_SLOT_PIECES + 1], pieces: usize) -> Hash {
-    let platform = Platform::detect();
-    let parent = |l: &CVBytes, r: &CVBytes| crate::hasher::parent_output(l, r, key, flags, platform);
-    debug_assert!(pieces >= 2);
-    let mut stack: arrayvec::ArrayVec<CVBytes, 8> = arrayvec::ArrayVec::new();
-    let cv0 = parent(&cvs[0], &cvs[1]).chaining_value();
-    stack.push(cv0);
-    for (idx, cv) in (1..pieces).zip(&cvs[2..=pieces]) {
-        let n = idx as u64;
-        while stack.len() > n.count_ones() as usize {
-            let right = stack.pop().unwrap();
-            let left = stack.pop().unwrap();
-            stack.push(parent(&left, &right).chaining_value());
-        }
-        stack.push(*cv);
+/// Settle the lazy merges of `count` equal-size pieces. The 1-bits of
+/// `count` name the whole subtrees left on the stack, largest first.
+fn merge_pieces(tree: &TreeHasher, stack: &mut [Cv], mut used: usize, count: u64) -> usize {
+    for _ in count.count_ones() as usize..used {
+        stack[used - 2] = tree.parent_cv(&stack[used - 2], &stack[used - 1]);
+        used -= 1;
     }
-    let mut right = stack.pop().unwrap();
-    while stack.len() > 1 {
-        right = parent(&stack.pop().unwrap(), &right).chaining_value();
+    used
+}
+
+/// Add a whole piece. The same fold serves slice pieces and rooms.
+fn push_piece(tree: &TreeHasher, stack: &mut [Cv], used: &mut usize, preceding: u64, piece: Cv) {
+    let n = merge_pieces(tree, stack, *used, preceding);
+    stack[n] = piece;
+    *used = n + 1;
+}
+
+/// The whole subtrees meet the final piece on the right edge. Check the
+/// root against the submitted length.
+fn finish_pieces(tree: &TreeHasher, stack: &mut [Cv], used: usize, count: u64, mut last: LastCv, len: u64) -> Hash {
+    let used = merge_pieces(tree, stack, used, count);
+    let (first, rest) = stack[..used].split_first().expect("a whole piece before the last");
+    for left in rest.iter().rev() {
+        last = tree.last_parent_cv(left, &last);
     }
-    parent(&stack.pop().unwrap(), &right).root_hash()
+    tree.root_hash(first, &last, len)
+}
+
+fn fold_multi_cvs(tree: &TreeHasher, whole: &[Cv], last: LastCv, len: u64) -> Hash {
+    // There is always a separate last piece. Below a power-of-two cap,
+    // no push needs more slots than the cap's base-two logarithm.
+    const { assert!(MAX_SLOT_PIECES.is_power_of_two()) };
+    let mut stack = [Cv::unset(); MAX_SLOT_PIECES.ilog2() as usize];
+    let mut used = 0;
+    for (i, &value) in whole.iter().enumerate() {
+        push_piece(tree, &mut stack, &mut used, i as u64, value);
+    }
+    finish_pieces(tree, &mut stack, used, whole.len() as u64, last, len)
 }
 
 /// Compact hot-path slot state (24 bytes; multi-room state sits in `room_streams`).
@@ -733,7 +751,7 @@ enum SlotKind {
 
 #[derive(Clone, Copy)]
 struct RoomStream {
-    room_pieces: u64,
+    len: u64,
     head_piece: u32,
     tail_piece: u32,
     stack_len: usize,
@@ -741,7 +759,7 @@ struct RoomStream {
 }
 
 impl RoomStream {
-    const EMPTY: Self = RoomStream { room_pieces: 0, head_piece: NONE, tail_piece: NONE, stack_len: 0, merged_pieces: 0 };
+    const EMPTY: Self = RoomStream { len: 0, head_piece: NONE, tail_piece: NONE, stack_len: 0, merged_pieces: 0 };
 }
 
 struct SlotMeta<T> {
@@ -938,7 +956,7 @@ impl<T, B> Pipeline<T, B> {
         crate::lanes::require();
         prepare_thread();
         assert!(limits.messages > 0, "Pipeline Limits.messages must be at least 1");
-        let (key, flags) = mode.key_and_flags();
+        let tree = TreeHasher::new(mode);
         let m = limits.messages;
         let p_cap = limits.rooms + m + 1;
         let g_cap = m.clamp(4, 256);
@@ -946,7 +964,7 @@ impl<T, B> Pipeline<T, B> {
         // An action names a slot, a piece or a group in 29 bits (pack_arg).
         assert!(m < 1 << 29 && p_cap < 1 << 29, "Pipeline Limits beyond what an action can name");
 
-        let storage = PipeStorage::acquire(actions_cap, m, limits.rooms, g_cap, &key, flags);
+        let storage = PipeStorage::acquire(actions_cap, m, limits.rooms, g_cap);
         // Sound: this Pipeline now holds the storage alone
         // (PipeStorage::acquire), and these cells are its holder's.
         let next_loan_epoch = unsafe { *storage.saved_loan_epoch.get() };
@@ -969,19 +987,17 @@ impl<T, B> Pipeline<T, B> {
             // A storage has one count of rooms, so pieces enough too.
             assert!(unsafe { (&(*held).pieces).len() } >= p_cap, "a Shared of as many messages has as many pieces");
             unsafe {
-                (*held).key = key;
-                (*held).flags = flags;
+                (*held).tree = tree;
             }
             held
         } else {
             // One it replaces stays allocated: a worker of an earlier
             // Pipeline may still be reading it.
             let new = Box::into_raw(Box::new(Shared {
-                key,
-                flags,
+                tree,
                 storage,
                 hashes: (0..m).map(|_| UnsafeCell::new([0u8; OUT_LEN])).collect(),
-                cvs: (0..m).map(|_| UnsafeCell::new([[0u8; OUT_LEN]; MAX_SLOT_PIECES + 1])).collect(),
+                cvs: (0..m).map(|_| UnsafeCell::new(PieceValues { whole: [Cv::unset(); MAX_SLOT_PIECES], last: None })).collect(),
                 slot_done: (0..m).map(|_| OwnLine(AtomicBool::new(true))).collect(),
                 tasks_left: (0..m).map(|_| OwnLine(AtomicUsize::new(0))).collect(),
                 multi: (0..m)
@@ -989,7 +1005,7 @@ impl<T, B> Pipeline<T, B> {
                         UnsafeCell::new(MultiDesc {
                             input: core::ptr::null(),
                             total_len: 0,
-                            piece_len: TASK_LEN,
+                            piece_level: level_of(TASK_LEN as u64),
                             pieces: 0,
                             batch: None,
                             digests: core::ptr::null_mut(),
@@ -1002,8 +1018,8 @@ impl<T, B> Pipeline<T, B> {
                         room: UnsafeCell::new(0),
                         offset: UnsafeCell::new(0),
                         len: UnsafeCell::new(0),
-                        counter: UnsafeCell::new(0),
-                        out: OwnLine(UnsafeCell::new([0u8; 64])),
+                        index: UnsafeCell::new(0),
+                        out: OwnLine(UnsafeCell::new(RoomValue::Whole(Cv::unset()))),
                         done: OwnLine(AtomicBool::new(true)),
                         next: UnsafeCell::new(NONE),
                     })
@@ -1250,8 +1266,11 @@ impl<T, B> Pipeline<T, B> {
         }
 
         room.take_credit();
-        let counter = self.room_streams[s].room_pieces * (ROOM_LEN / CHUNK_LEN) as u64;
-        self.room_streams[s].room_pieces += 1;
+        let rs = &mut self.room_streams[s];
+        // The earlier commits all filled a whole room. A short one
+        // seals the message, so there can be no commit after it.
+        let index = rs.len / ROOM_LEN as u64;
+        rs.len = rs.len.checked_add(written as u64).expect("a message fits in u64 bytes");
 
         self.drain_slot_pieces(s);
         let pnode = self.alloc_piece_node(s);
@@ -1264,7 +1283,7 @@ impl<T, B> Pipeline<T, B> {
             *node.room.get() = room_idx;
             *node.offset.get() = start_offset;
             *node.len.get() = written as u32;
-            *node.counter.get() = counter;
+            *node.index.get() = index;
             *node.next.get() = NONE;
         }
         node.done.store(false, Ordering::Relaxed);
@@ -1324,7 +1343,7 @@ impl<T, B> Pipeline<T, B> {
     fn end_slow(&mut self, s: usize) {
         match self.slots[s].kind {
             SlotKind::OpenEmpty => {
-                let empty_hash = crate::hash_serial(&[], &self.shared().key, self.shared().flags);
+                let empty_hash = self.shared().tree.hash(&[]);
                 // Sound: no task runs for an empty message, so the slot's hash
                 // is the owner's to write.
                 unsafe { *self.shared().hashes[s].get() = *empty_hash.as_bytes() };
@@ -1404,7 +1423,7 @@ impl<T, B> Pipeline<T, B> {
         let (pid, s) = message.take();
         assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
         self.assert_uncommitted(s);
-        crate::many::assert_slots(batch.bytes(), batch.message_len(), batch.slot(), digests.len());
+        crate::assert_slots(batch.bytes(), batch.message_len(), batch.slot(), digests.len());
         self.open_messages -= 1;
 
         // Sound: the slot is open and holds no batch (assert_uncommitted); the
@@ -1436,7 +1455,7 @@ impl<T, B> Pipeline<T, B> {
                 *self.shared().multi[s].get() = MultiDesc {
                     input: bytes.as_ptr(),
                     total_len: count,
-                    piece_len: 0,
+                    piece_level: 0,
                     pieces,
                     batch: Some((msg_len, slot_len, per_part)),
                     digests: digests_ptr,
@@ -1535,12 +1554,20 @@ impl<T, B> Pipeline<T, B> {
             piece_len *= 2;
         }
         let pieces = len.div_ceil(piece_len);
-        debug_assert!((2..=MAX_SLOT_PIECES).contains(&pieces));
+        assert!((2..=MAX_SLOT_PIECES).contains(&pieces), "a split message fits its piece slots");
         self.shared().slot_done[s].store(false, Ordering::Relaxed);
         self.shared().tasks_left[s].store(pieces, Ordering::Relaxed);
         // Sound: as `batch`'s, above.
         unsafe {
-            *self.shared().multi[s].get() = MultiDesc { input: ptr, total_len: len, piece_len, pieces, batch: None, digests: core::ptr::null_mut(), loan_epoch }
+            *self.shared().multi[s].get() = MultiDesc {
+                input: ptr,
+                total_len: len,
+                piece_level: level_of(piece_len as u64),
+                pieces,
+                batch: None,
+                digests: core::ptr::null_mut(),
+                loan_epoch,
+            }
         };
         self.slots[s].kind = SlotKind::WaitMulti { has_owner };
         for p in 0..pieces {
@@ -1698,8 +1725,7 @@ impl<T, B> Pipeline<T, B> {
     fn drain_slot_pieces(&mut self, s: usize) {
         // Sound: as `shared()`.
         let shared = unsafe { &*self.shared };
-        let (key, flags, platform) = (shared.key, shared.flags, Platform::detect());
-        let parent = |l: &CVBytes, r: &CVBytes| crate::hasher::parent_output(l, r, &key, flags, platform);
+        let tree = &shared.tree;
         let ended = matches!(self.slots[s].kind, SlotKind::WaitRoomMulti);
         let aborted = matches!(self.slots[s].kind, SlotKind::WaitAborted { .. });
 
@@ -1723,48 +1749,27 @@ impl<T, B> Pipeline<T, B> {
                 continue;
             }
 
-            if ended && rs.room_pieces == 1 {
-                let root = parent(out[..OUT_LEN].try_into().unwrap(), out[OUT_LEN..].try_into().unwrap()).root_hash();
-                // Sound: every piece of this slot is done and merged here, on
-                // the owner's thread: the slot's hash and values have no other
-                // reader or writer.
+            // Sound: the caller alone writes a room message's stack
+            // (workers write a slice message's slots, never both for one slot).
+            let cvs = unsafe { &mut (*shared.cvs[s].get()).whole };
+            if ended && rs.merged_pieces + 1 == rs.len.div_ceil(ROOM_LEN as u64) {
+                let root = match out {
+                    RoomValue::First([left, right]) => tree.root_hash(&left, &right.into(), rs.len),
+                    RoomValue::Whole(cv) => finish_pieces(tree, cvs, rs.stack_len, rs.merged_pieces, cv.into(), rs.len),
+                    RoomValue::Last(last) => finish_pieces(tree, cvs, rs.stack_len, rs.merged_pieces, last, rs.len),
+                };
+                // Sound: the room message is done, with no other writer.
                 unsafe { *shared.hashes[s].get() = *root.as_bytes() };
                 shared.slot_done[s].store(true, Ordering::Relaxed);
                 return;
             }
-
-            let cv: CVBytes = if rs.merged_pieces == 0 {
-                parent(out[..OUT_LEN].try_into().unwrap(), out[OUT_LEN..].try_into().unwrap()).chaining_value()
-            } else {
-                out[..OUT_LEN].try_into().unwrap()
+            let cv = match out {
+                RoomValue::First([left, right]) => tree.parent_cv(&left, &right),
+                RoomValue::Whole(cv) => cv,
+                RoomValue::Last(_) => panic!("a short room is the last piece"),
             };
-            // Sound: a room message's values are written here alone, on the
-            // owner's thread (workers write a slice message's, never both for
-            // one slot).
-            let cvs = unsafe { &mut *shared.cvs[s].get() };
-            while rs.stack_len > rs.merged_pieces.count_ones() as usize {
-                let right = cvs[rs.stack_len - 1];
-                let left = cvs[rs.stack_len - 2];
-                cvs[rs.stack_len - 2] = parent(&left, &right).chaining_value();
-                rs.stack_len -= 1;
-            }
-            cvs[rs.stack_len] = cv;
-            rs.stack_len += 1;
+            push_piece(tree, cvs, &mut rs.stack_len, rs.merged_pieces, cv);
             rs.merged_pieces += 1;
-
-            if ended && rs.merged_pieces == rs.room_pieces {
-                let mut right = cvs[rs.stack_len - 1];
-                rs.stack_len -= 1;
-                while rs.stack_len > 1 {
-                    right = parent(&cvs[rs.stack_len - 1], &right).chaining_value();
-                    rs.stack_len -= 1;
-                }
-                let root = parent(&cvs[0], &right).root_hash();
-                // Sound: as the one-room root, above.
-                unsafe { *shared.hashes[s].get() = *root.as_bytes() };
-                shared.slot_done[s].store(true, Ordering::Relaxed);
-                return;
-            }
         }
     }
 
@@ -2198,6 +2203,27 @@ mod test {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "the children are not siblings")]
+    fn the_piece_fold_refuses_swapped_values() {
+        crate::initialize();
+        let tree = TreeHasher::new(Mode::Plain);
+        let left = Cv::at(ROOM_LEVEL, 0, [1; OUT_LEN]);
+        let next = Cv::at(ROOM_LEVEL, 1, [2; OUT_LEN]);
+        let last = LastCv::at(2 * (ROOM_LEN / CHUNK_LEN) as u64, 1, [3; OUT_LEN]);
+        fold_multi_cvs(&tree, &[next, left], last, 2 * ROOM_LEN as u64 + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "the root's children hold")]
+    fn the_piece_fold_checks_the_submitted_length() {
+        crate::initialize();
+        let tree = TreeHasher::new(Mode::Plain);
+        let left = Cv::at(ROOM_LEVEL, 0, [1; OUT_LEN]);
+        let last = LastCv::at((ROOM_LEN / CHUNK_LEN) as u64, 1, [2; OUT_LEN]);
+        fold_multi_cvs(&tree, &[left], last, ROOM_LEN as u64 + 2);
+    }
+
+    #[test]
     fn aaa_unit_single_step_every_stage() {
         crate::initialize_multithreaded(None);
         let step_until = |source: &Source, cond: &dyn Fn() -> bool, what: &str| {
@@ -2275,7 +2301,7 @@ mod test {
         let mut p_multi = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 0 });
         let Poll::Ready(mm) = poll_once(p_multi.message(99, None)) else { panic!("multi msg ready") };
         p_multi.owned(mm, vec![0x44; MAX_SLOT_PIECES * TASK_LEN]);
-        assert_eq!(unsafe { (*p_multi.shared().multi[0].get()).piece_len }, TASK_LEN);
+        assert_eq!(unsafe { (*p_multi.shared().multi[0].get()).piece_level }, level_of(TASK_LEN as u64));
         let src = &p_multi.shared().storage.source;
         let sd = &p_multi.shared().slot_done;
         step_until(src, &|| sd[0].load(Ordering::Acquire), "dispatch_many + run_multi_piece");
@@ -2374,8 +2400,17 @@ mod test {
             max_len,
         ];
 
-        // Identical Limits across all 4 modes also exercises PipeStorage recycling across Modes!
+        // The same limits across modes exercise the reuse of PipeStorage.
         for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("pipeline derive"), Mode::DeriveKeyWith(&ctx_key)] {
+            let expected = lens.map(|len| {
+                let bytes = &input[..len];
+                match mode {
+                    Mode::Plain => *blake3::hash(bytes).as_bytes(),
+                    Mode::Keyed(key) => *blake3::keyed_hash(key, bytes).as_bytes(),
+                    Mode::DeriveKey(context) => blake3::derive_key(context, bytes),
+                    Mode::DeriveKeyWith(_) => blake3::derive_key("pipeline modes", bytes),
+                }
+            });
             let mut pipe = Pipeline::new(mode, Limits { messages: 4, rooms: 3 });
             for (idx, &len) in lens.iter().enumerate() {
                 block_on(async {
@@ -2398,7 +2433,7 @@ mod test {
                     for ev in drain_all(&mut pipe, 3) {
                         match ev {
                             Event::Hashed { tag, hash, owner: None } => {
-                                assert_eq!(hash, convenience::hash_with(mode, &input[..lens[tag]]), "room len={}", lens[tag]);
+                                assert_eq!(*hash.as_bytes(), expected[tag], "room len={}", lens[tag]);
                             }
                             _ => panic!("unexpected event"),
                         }
@@ -2408,7 +2443,7 @@ mod test {
             let rem = lens.len() % 3;
             for ev in drain_all(&mut pipe, rem) {
                 if let Event::Hashed { tag, hash, .. } = ev {
-                    assert_eq!(hash, convenience::hash_with(mode, &input[..lens[tag]]));
+                    assert_eq!(*hash.as_bytes(), expected[tag]);
                 } else {
                     panic!("unexpected event");
                 }
@@ -2420,7 +2455,7 @@ mod test {
                 while owned_pipe.events.len() == 6 || owned_pipe.free_slots.is_empty() {
                     if let Some(Event::Hashed { tag, hash, owner: Some(buf) }) = owned_pipe.next_event() {
                         assert_eq!(buf.len(), lens[tag]);
-                        assert_eq!(hash, convenience::hash_with(mode, &input[..lens[tag]]));
+                        assert_eq!(*hash.as_bytes(), expected[tag]);
                     } else {
                         block_on(owned_pipe.ready());
                     }
@@ -2431,7 +2466,7 @@ mod test {
             while owned_pipe.end_queue.len() + owned_pipe.events.len() > 0 {
                 if let Some(Event::Hashed { tag, hash, owner: Some(buf) }) = owned_pipe.next_event() {
                     assert_eq!(buf.len(), lens[tag]);
-                    assert_eq!(hash, convenience::hash_with(mode, &input[..lens[tag]]));
+                    assert_eq!(*hash.as_bytes(), expected[tag]);
                 } else {
                     block_on(owned_pipe.ready());
                 }
@@ -2448,7 +2483,7 @@ mod test {
                 match lent_pipe.next_event() {
                     Some(Event::Hashed { tag, hash, owner: None }) => {
                         assert_eq!(tag, idx);
-                        assert_eq!(hash, convenience::hash_with(mode, slice), "lent len={len}");
+                        assert_eq!(*hash.as_bytes(), expected[tag], "lent len={len}");
                     }
                     _ => panic!("expected Hashed"),
                 }
@@ -3210,7 +3245,7 @@ mod test {
             let pnode = p_ab.free_pieces.pop_front().unwrap();
             p_ab.shared().pieces[pnode as usize].done.store(false, Ordering::SeqCst);
             unsafe { *p_ab.shared().pieces[pnode as usize].next.get() = NONE };
-            p_ab.room_streams[0] = RoomStream { room_pieces: 1, head_piece: pnode, tail_piece: pnode, stack_len: 0, merged_pieces: 0 };
+            p_ab.room_streams[0] = RoomStream { len: ROOM_LEN as u64, head_piece: pnode, tail_piece: pnode, stack_len: 0, merged_pieces: 0 };
             p_ab.slots[0] = SlotMeta { tag: Some(77), kind: SlotKind::WaitAborted { group: 0, epoch: 5 } };
             p_ab.free_slots.pop_front();
             p_ab.end_queue.push_back(0);
