@@ -9,6 +9,9 @@ change to an item's assignees, and once a day, and by hand:
   `Next move: NAME` line, whoever that line names first becomes the
   item's sole assignee; if the line names someone who cannot be assigned
   or names nobody while the item stays open, the bot replies saying so.
+  An edit of a comment counts only when it changes whom the line names,
+  and a reopened item's body does not count: either would hand the item
+  back to whoever an old line named, after others have moved it on.
 - Otherwise an open item with no assignee gets its author, with a
   comment; one with several gets a comment asking for one.
 
@@ -125,6 +128,17 @@ def resolve_target(rest, author, assignable):
     return "unassignable", candidate
 
 
+def edit_names_someone_new(event, parsed, author, assignable):
+    """Whether an edit of a comment changed whom its `Next move:` line names. An edit that did not is
+    no new directive: applied again, it would hand the item back to whoever an older comment named,
+    after others have moved it on (a typing mistake mended a week later, say)."""
+    changes = event.get("changes") or {}
+    if "body" not in changes:
+        return False
+    before = next_move_line((changes.get("body") or {}).get("from") or "")
+    return before is None or resolve_target(before[1], author, assignable) != resolve_target(parsed[1], author, assignable)
+
+
 def allowed_list(assignable):
     return ", ".join(f"`@{u}`" for u in sorted(assignable.values(), key=str.lower)) or "none"
 
@@ -182,10 +196,14 @@ def handle_event(token, repo, event_name, event):
         if not is_trusted(author, comment.get("author_association", ""), assignable):
             return True, None
         number = event["issue"]["number"]
+        if event.get("action") == "edited" and not edit_names_someone_new(event, parsed, author, assignable):
+            print(f"#{number}: an edit that names the same next mover as before: nothing to do")
+            return True, None
         apply_next_move(repo, number, author, parsed[0], parsed[1], assignable, get_item, set_assignee, post_comment)
         return True, number
 
-    if event_name in {"issues", "pull_request_target"} and event.get("action") in {"opened", "reopened"}:
+    # (the body speaks at the opening only: at a reopening its line is as old as the item)
+    if event_name in {"issues", "pull_request_target"} and event.get("action") == "opened":
         obj = event.get("issue") or event.get("pull_request") or {}
         user = obj.get("user") or {}
         if not is_bot(user):
