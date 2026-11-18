@@ -1,7 +1,7 @@
 [package]
 name = "blake3-servil-version"
 # The library's version, set with it by tools/gen-ver.py.
-version = "0.9.0+dev"
+version = "0.10.0+d83c3eb9c448f29e29eeb1037d062e72b3b7165a"
 authors = ["John Servil", "Devon Jonte"]
 description = "blake3-servil's build version: its version and what names the code built"
 repository = "https://github.com/servil-software-factory/BLAKE3"
