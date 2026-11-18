@@ -13,6 +13,11 @@ an [AMD EPYC 9255](https://servil-software-factory.github.io/bench-hashes/benchm
 and an [Intel i7-12700K](https://servil-software-factory.github.io/bench-hashes/benchmark-results/12thGenIntelRCoreTMi712700K.linux70042generic/bench-hashes.map.html);
 [an overview](https://servil-software-factory.github.io/bench-hashes/) sets every machine side by side.
 
+We measure and tune on one memory node. On Linux, the library keeps its
+workers on the initializing thread's node, within its allowed CPUs. The
+application still controls its own threads and buffer placement. `b3sum`
+keeps its calling thread and workers within the same node.
+
 ## How it is checked
 
 **It is new.** AIs wrote it under Zooko's direction, and no human has reviewed it line
