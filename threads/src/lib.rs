@@ -300,9 +300,9 @@ pub(crate) fn ran(kind: Ran) {
 /// before them, in place of `initialize`. It starts `threads - 1` workers,
 /// and each multithreaded call hashes on its calling thread and the
 /// workers (calls made at once share the workers), and on CPUs with SME2
-/// (Apple M4) the SME2 thread too; `None` means one thread
-/// a CPU (`std::thread::available_parallelism`, which follows the CPU
-/// affinity the program runs under). With 1, calls hash on their calling
+/// (Apple M4) the SME2 thread too. `None` uses the available logical CPUs,
+/// limited on Linux to the allowed CPUs of the initializing thread's
+/// memory node. With 1, calls hash on their calling
 /// thread alone: no workers start, nor the SME2 thread. Otherwise it
 /// starts the first worker and returns; the first worker starts the others
 /// (each 20-30 us on Linux x86-64), and calls run on the workers started
@@ -329,23 +329,13 @@ pub(crate) fn ran(kind: Ran) {
 /// every thread started may be woken by a call, and while a `Pipeline` is
 /// open one that finds no work looks for 5 us before it sleeps.
 ///
-/// On Linux, on a machine with more than one last-level cache (several
-/// sockets, or an EPYC, whose cores share one in groups), each worker is
-/// kept to the CPUs under one of them (`sched_setaffinity`), among the CPUs
-/// the process may run on, and a call wakes the workers under its own
-/// thread's cache first, then its socket's, then the rest. The calling
-/// threads' own affinity is never set. What a caller has just written is
-/// in its cache, and a worker under another fetches it across the
-/// machine; what lies in memory alone is every worker's alike. A call
-/// cannot see which it has, so each calling thread times its calls and
-/// learns, for each kind and size of call under 256 MiB, whether the
-/// workers under its own cache or all of them finish sooner: it tries
-/// each for five calls, keeps the faster, and tries the other again at
-/// the end of every 16 to 256 calls. On 2x EPYC 7443 a 1 MiB message read
-/// into a buffer and hashed takes 74 us this way; with the workers
-/// wherever the system put them it took 437 us, more than the 236 us of
-/// one thread; a 16 MiB collection left in memory takes 0.19 ms, as
-/// before.
+/// On Linux where node topology is available, workers stay on the memory
+/// node of the initializing thread's CPU. On a machine with more than one
+/// last-level cache, each worker is kept to a cache within that node.
+/// A call wakes workers under its own cache first where it has any there.
+/// Calling threads keep their own affinity and their buffer placement.
+/// For each kind and size of call under 256 MiB, a caller with local
+/// workers learns whether they or all workers on the node finish sooner.
 ///
 /// Several programs each with a full pool share the machine without
 /// trouble, and unevenly. On an i7-12700K (20 CPUs), N programs each
@@ -378,12 +368,9 @@ pub(crate) fn ran(kind: Ran) {
 /// ```
 pub fn initialize_multithreaded(threads: Option<core::num::NonZeroUsize>) {
     static STARTED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let cpus = || std::thread::available_parallelism().map_or(1, |n| n.get());
     let started = *STARTED.get_or_init(|| {
-        let threads = threads.map_or_else(cpus, |n| n.get());
         initialize();
-        lanes::initialize(threads);
-        threads
+        lanes::initialize(threads)
     });
     lanes::prepare_thread();
     if let Some(threads) = threads {
@@ -393,6 +380,14 @@ pub fn initialize_multithreaded(threads: Option<core::num::NonZeroUsize>) {
             "blake3-servil: the multithreaded calls were started with {started} threads; initialize_multithreaded cannot change that to {threads}"
         );
     }
+}
+
+/// Keep the command-line tool's main thread on one memory node before
+/// it starts its file readers and hash workers.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn __confine_cli_to_one_node() {
+    lanes::places::confine_cli_thread();
 }
 
 /// Whether every worker of the multithreaded calls' pool is parked (false

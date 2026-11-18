@@ -1430,6 +1430,8 @@ fn main() -> anyhow::Result<()> {
     explain_sigbus();
     blake3::initialize();
     let args = Args::parse()?;
+    #[cfg(target_os = "linux")]
+    blake3::__confine_cli_to_one_node();
     if let Some(threads) = args.num_threads() {
         THREADS.set(threads).expect("main sets the threads first");
     }

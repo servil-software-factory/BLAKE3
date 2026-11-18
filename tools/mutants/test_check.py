@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import mock_open, patch
 
 import check
@@ -48,18 +49,38 @@ class Readers(unittest.TestCase):
     def test_linux_fields(self):
         for field in ["flags", "Features"]:
             with patch.object(check.sys, "platform", "linux"), \
+                 patch.object(check, "allowed_on_multiple_nodes", return_value=False), \
                  patch("builtins.open", mock_open(read_data=f"processor: 0\n{field}\t: avx2 avx512f\n")):
                 self.assertEqual(check.cpu_flags(), {"avx2", "avx512f"})
 
     def test_linux_names_the_two_vendor_facts_rows_depend_on(self):
         read = lambda info: patch("builtins.open", mock_open(read_data=info))
-        with patch.object(check.sys, "platform", "linux"):
+        with patch.object(check.sys, "platform", "linux"), \
+             patch.object(check, "allowed_on_multiple_nodes", return_value=False):
             with read("vendor_id\t: GenuineIntel\ncpu family\t: 6\nflags\t: avx2 avx512f\n"):
                 self.assertEqual(check.cpu_flags(), {"avx2", "avx512f", "genuine_intel"})
             with read("vendor_id\t: AuthenticAMD\ncpu family\t: 26\nflags\t: avx2 avx512f\n"):
                 self.assertEqual(check.cpu_flags(), {"avx2", "avx512f", "amd_family_ge_1a"})
             with read("vendor_id\t: AuthenticAMD\ncpu family\t: 25\nflags\t: avx2\n"):
                 self.assertEqual(check.cpu_flags(), {"avx2"})
+
+    def test_linux_names_only_the_process_visible_numa_fact(self):
+        with patch.object(check.sys, "platform", "linux"), \
+             patch("builtins.open", mock_open(read_data="flags: avx2\n")), \
+             patch.object(check, "allowed_on_multiple_nodes", return_value=True) as nodes:
+            self.assertEqual(check.cpu_flags(), {"avx2", "multi_node"})
+            nodes.assert_called_once_with("/sys/devices/system/node")
+
+    def test_node_ranges_count_each_allowed_node_only_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "nodes"
+            self.assertFalse(check.allowed_on_multiple_nodes(root, {0, 8}))
+            for name, ranges in [("node0", "0-3,5\n"), ("node2", "8,12-14\n"), ("node3", "\n")]:
+                (root / name).mkdir(parents=True)
+                (root / name / "cpulist").write_text(ranges)
+            self.assertFalse(check.allowed_on_multiple_nodes(root, {0, 3, 5}))
+            self.assertFalse(check.allowed_on_multiple_nodes(root, {8, 14}))
+            self.assertTrue(check.allowed_on_multiple_nodes(root, {5, 13}))
 
     def test_linux_reader_error_propagates(self):
         with patch.object(check.sys, "platform", "linux"), patch("builtins.open", side_effect=PermissionError("denied")), \

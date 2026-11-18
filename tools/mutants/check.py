@@ -196,9 +196,34 @@ TIMEOUTS = os.path.join(LISTS, f"timeouts-{platform.machine()}.txt")
 NAME = re.compile(r"^(\S+?):\d+:\d+: (.*)$")
 
 
+def allowed_on_multiple_nodes(root, allowed=None):
+    """Count only nodes on which this process may actually run."""
+    if allowed is None:
+        allowed = os.sched_getaffinity(0)
+    try:
+        entries = os.listdir(root)
+    except FileNotFoundError:
+        return False
+    found_one = False
+    for name in entries:
+        if not re.fullmatch(r"node[0-9]+", name):
+            continue
+        with open(os.path.join(root, name, "cpulist")) as node:
+            ranges = node.read().strip()
+        for part in ranges.split(",") if ranges else ():
+            low, _, high = part.partition("-")
+            lo, hi = int(low), int(high or low)
+            if any(lo <= cpu <= hi for cpu in allowed):
+                if found_one:
+                    return True
+                found_one = True
+                break
+    return False
+
+
 def cpu_flags():
-    """The CPU's feature flags as the OS names them (Linux: /proc/cpuinfo's
-    flags or Features line; macOS: sysctl's hw.optional names set to 1)."""
+    """The CPU's feature flags as the OS names them, plus facts named
+    by the survivor lists (vendor, family, and allowed Linux NUMA nodes)."""
     if sys.platform == "linux":
         with open("/proc/cpuinfo") as info:
             for line in info:
@@ -221,6 +246,8 @@ def cpu_flags():
         # neither an AMD wide-kernel machine's nor a CPU's without AVX-512.
         if fields.get("vendor_id") == "GenuineIntel":
             flags.add("genuine_intel")
+        if allowed_on_multiple_nodes("/sys/devices/system/node"):
+            flags.add("multi_node")
         return flags
     if sys.platform == "darwin":
         out = subprocess.run(["sysctl", "hw.optional"], capture_output=True, text=True, check=True).stdout
