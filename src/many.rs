@@ -168,6 +168,10 @@ fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut
 /// took.
 #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
 fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key: &CVWords, flags: u8, platform: Platform) -> usize {
+    // Check the descriptor length once, before narrowing it or filling
+    // any lanes. Both short batches and expanded Packed messages come here.
+    assert!(len <= BLOCK_LEN, "an independent short message fits in one block");
+    let len = len as u8;
     let lanes = crate::ffi_output::lanes(platform);
     if lanes == 0 {
         return 0;
@@ -193,7 +197,7 @@ fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key
 /// start of `blocks`, on the `W`-lane independent-compression kernel.
 /// Requires the CPU to run that kernel (`ffi_output::lanes`).
 #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
-unsafe fn packed_group<const W: usize>(blocks: &[u8], out: &mut [[u8; OUT_LEN]], len: usize, key: &CVWords, flags: u8) {
+unsafe fn packed_group<const W: usize>(blocks: &[u8], out: &mut [[u8; OUT_LEN]], len: u8, key: &CVWords, flags: u8) {
     let block = |i: usize| -> &[u8; BLOCK_LEN] { blocks[i * BLOCK_LEN..][..BLOCK_LEN].try_into().unwrap() };
     let inputs: [crate::ffi_output::Input<'_>; W] = core::array::from_fn(|i| crate::ffi_output::packed(block(i), key, len, flags));
     // Sound: the caller's CPU runs the W-lane kernel; every block is 64
@@ -808,6 +812,14 @@ unsafe fn hash_many_blocks(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    #[test]
+    #[should_panic(expected = "an independent short message fits in one block")]
+    fn an_independent_batch_refuses_a_multiblock_length() {
+        crate::initialize();
+        one_block_groups(&[], &mut [], BLOCK_LEN + 1, crate::IV, 0, Platform::detect());
+    }
     use std::vec::Vec;
 
     /// `count` deterministic messages of `len` bytes, each in its slot

@@ -545,12 +545,29 @@ const SCRATCH: usize = 64 * 1024;
 /// sits at 0): at 1 KiB and 3 KiB mod 4 KiB, past the table and the
 /// values before them, with room for a padded group of 16 parents' inputs
 /// (32 values) at either.
-fn scratch_layout(n: usize) -> (usize, usize) {
+const fn scratch_layout(n: usize) -> (usize, usize) {
     let cvs = (8 * n).next_multiple_of(4096) + 1024;
-    let half = cvs + (32 * n.max(32)).saturating_sub(2048).next_multiple_of(4096) + 2048;
-    debug_assert!(half + 16 * n.max(64) <= SCRATCH, "the flat walk's scratch holds its buffers");
+    let width = if n < 2 * GROUP { 2 * GROUP } else { n };
+    let half = cvs + (OUT_LEN * width).saturating_sub(2048).next_multiple_of(4096) + 2048;
     (cvs, half)
 }
+
+// flat_walk checks flat_takes before using the layout. Check every
+// size it admits at build time, including the last padded parent calls.
+const _: () = {
+    assert!(FLAT_MIN_CHUNKS.is_power_of_two() && FLAT_MAX_CHUNKS.is_power_of_two() && FLAT_MIN_CHUNKS <= FLAT_MAX_CHUNKS);
+    let mut n = FLAT_MIN_CHUNKS;
+    while n <= FLAT_MAX_CHUNKS {
+        let (cvs, half) = scratch_layout(n);
+        let padded = 2 * GROUP;
+        let first_width = if n < padded { padded } else { n };
+        let second_width = if n / 2 < padded { padded } else { n / 2 };
+        assert!(n * core::mem::size_of::<*const u8>() <= cvs, "the pointer table fits before the values");
+        assert!(cvs + OUT_LEN * first_width <= half, "the values fit before the level above");
+        assert!(half + OUT_LEN * second_width <= SCRATCH, "the level above fits in scratch");
+        n *= 2;
+    }
+};
 
 #[cfg(test)]
 mod scratch_layout_tests {
