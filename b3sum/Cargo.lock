@@ -66,7 +66,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "b3sums"
-version = "0.8.0+dev"
+version = "0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924"
 dependencies = [
  "anyhow",
  "blake3-servil",
@@ -87,7 +87,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "blake3-servil"
-version = "0.8.0+dev"
+version = "0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924"
 dependencies = [
  "arrayvec",
  "blake3-servil-core",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "blake3-servil-core"
-version = "0.8.0+dev"
+version = "0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924"
 dependencies = [
  "arrayvec",
  "blake3-servil-version",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "blake3-servil-version"
-version = "0.8.0+dev"
+version = "0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924"
 
 [[package]]
 name = "cc"

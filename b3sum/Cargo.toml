@@ -2,7 +2,7 @@
 # program it installs is b3sum.
 [package]
 name = "b3sums"
-version = "0.8.0+dev"
+version = "0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924"
 authors = ["Jack O'Connor <oconnor663@gmail.com>", "John Servil"]
 description = "b3sum, the BLAKE3 command-line hasher, on blake3-servil: the same digests, faster"
 repository = "https://github.com/servil-software-factory/BLAKE3"
@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.25"
-blake3 = { version = "=0.8.0+dev", path = "../threads", package = "blake3-servil" }
+blake3 = { version = "=0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924", path = "../threads", package = "blake3-servil" }
 clap = { version = "4.0.8", features = ["derive", "wrap_help"] }
 hex = "0.4.0"
 # --sigilcode: each hash as a sigil (johnservil/sigil), its full version pinned.

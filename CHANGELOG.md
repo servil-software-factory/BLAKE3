@@ -1,4 +1,4 @@
-# blake3-servil 0.9.0+dev, against blake3-servil 0.8.0
+# blake3-servil 0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924, against blake3-servil 0.8.0
 
 What changed since 0.8.0, each item with where it is described. The
 figures come from checks of this code against 0.8.0, on the machines

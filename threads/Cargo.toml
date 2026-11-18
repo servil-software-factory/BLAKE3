@@ -1,6 +1,6 @@
 [package]
 name = "blake3-servil"
-version = "0.8.0+dev"
+version = "0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924"
 authors = ["John Servil", "Devon Jonte", "Sam Shackleton"]
 description = "the BLAKE3 hash function on every core: blake3-servil-core's kernels behind a shared thread pool"
 repository = "https://github.com/servil-software-factory/BLAKE3"
@@ -22,7 +22,7 @@ zeroize = ["blake3-servil-core/zeroize"]
 [dependencies]
 # The one-thread library: the kernels and their proofs, the Hasher, the
 # direct and grouped calls. This crate re-exports it whole.
-blake3-servil-core = { version = "=0.8.0+dev", path = ".." }
+blake3-servil-core = { version = "=0.9.1+b01b322ad8c411133e9abc49605e65e1a9684924", path = ".." }
 arrayvec = { version = "0.7.4", default-features = false }
 
 [build-dependencies]
