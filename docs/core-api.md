@@ -105,6 +105,7 @@ A message's hash, fed in pieces.
 ```rust
 fn new(mode: Mode<'_>, length_hint: Option<u64>) -> Self
 fn update(&mut self, input: &[u8]) -> &mut Self
+fn update_with(&mut self, input: &[u8], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2]) -> &mut Self
 fn finalize(&self) -> Hash
 fn finalize_xof(&self) -> OutputReader
 fn update_reader(&mut self, reader: impl Read) -> Result<&mut Self>
@@ -124,6 +125,8 @@ The throughput API, for power users.
   The hash of each message, of any lengths, on the calling thread.
 - `fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])])`  
   Feed each piece to its hasher.
+- `fn update_each_with(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2])`  
+  Feed a turn of pieces, letting the caller hash large whole subtrees.
 - `fn hash(mode: Mode<'_>, input: &[Block], len: usize) -> Hash`  
   The hash in `mode` of the message of `len` bytes that starts `input`.
 - `fn hash_many<P: Prepared>(mode: Mode<'_>, batch: &P, out: &mut [[u8; 32]])`  
@@ -234,6 +237,7 @@ fn hash(&self, input: &[u8]) -> Hash
 fn hash_many<P: Prepared>(&self, batch: &P, out: &mut [[u8; 32]])
 fn hash_each(&self, items: &[(&[Block], usize)], out: &mut [[u8; 32]])
 fn subtree_cv(&self, level: u32, index: u64, input: &[u8]) -> Cv
+fn subtree_halves(&self, level: u32, index: u64, input: &[u8]) -> [Cv; 2]
 fn last_cv(&self, first_chunk: u64, input: &[u8]) -> LastCv
 fn parent_cv(&self, left: &Cv, right: &Cv) -> Cv
 fn last_parent_cv(&self, left: &Cv, right: &LastCv) -> LastCv

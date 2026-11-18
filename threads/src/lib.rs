@@ -206,24 +206,11 @@
 
 pub use blake3_servil_core::{BLOCK_LEN, BUILD_VERSION, CHUNK_LEN, ContextKey, Hash, HexError, KEY_LEN, Mode, OUT_LEN, OutputReader, convenience, initialize};
 
-// The core's inside, under the names this crate's files know it by.
-#[allow(unused_imports)]
-pub(crate) use blake3_servil_core::IncrementCounter;
-#[allow(unused_imports)]
 pub(crate) use blake3_servil_core::convenience::Hasher;
-#[allow(unused_imports)]
-pub(crate) use blake3_servil_core::hazmat::platform::MAX_SIMD_DEGREE;
-#[allow(unused_imports)]
-pub(crate) use blake3_servil_core::hazmat::{
-    CHUNK_END, CHUNK_START, CVBytes, CVWords, DERIVE_KEY_MATERIAL, IV, KEYED_HASH, Output, ROOT, compress_subtree_to_parent_node, hash_all_at_once,
-    hash_serial, hash_serial_on, hasher, incremental, many, platform, tree,
-};
+pub(crate) use blake3_servil_core::thread_support::{MAX_SIMD_DEGREE, Platform, Sme2Turn, assert_slots, prepare_collection_thread, slot_len};
 #[allow(unused_imports)]
 pub(crate) mod block {
     pub use blake3_servil_core::throughput::{Batch, Block};
-}
-pub(crate) mod each {
-    pub use blake3_servil_core::hazmat::each::*;
 }
 
 /// The primitives src/finish.rs runs on: the standard library's here, and
@@ -423,10 +410,6 @@ pub mod throughput {
     use crate::{Hash, Hasher, Mode, OUT_LEN};
     pub use blake3_servil_core::throughput::*;
 
-    /// This crate's pool, for the core's Hasher: its whole subtrees of
-    /// MIN_SPLIT_LEN and more.
-    const POOL: crate::incremental::Pool = crate::incremental::Pool { min_len: crate::lanes::MIN_SPLIT_LEN, halves: crate::lanes::subtree_halves };
-
     /// [`Hasher::update`](crate::convenience::Hasher::update), using other CPU
     /// cores where that is faster: the same result, never slower. Pieces of
     /// 512 KiB and more use them, as [`hash_multithreaded`] does; shorter ones
@@ -446,7 +429,7 @@ pub mod throughput {
     /// ```
     pub fn update_multithreaded<'h>(hasher: &'h mut crate::convenience::Hasher, input: &[u8]) -> &'h mut crate::convenience::Hasher {
         crate::lanes::require();
-        hasher.update_on(input, POOL)
+        hasher.update_with(input, crate::lanes::MIN_SPLIT_LEN, &crate::lanes::subtree_halves)
     }
 
     /// [`hash_many`], using other CPU cores where that is faster: the same
@@ -579,6 +562,6 @@ pub mod throughput {
     /// [`update_each`] applies when workers participate.
     pub fn update_each_multithreaded(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
         crate::lanes::require();
-        blake3_servil_core::hazmat::each::update_turn(hashers, pieces, Some(POOL));
+        update_each_with(hashers, pieces, crate::lanes::MIN_SPLIT_LEN, &crate::lanes::subtree_halves);
     }
 }

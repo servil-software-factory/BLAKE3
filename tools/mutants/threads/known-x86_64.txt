@@ -29,7 +29,6 @@ src/lanes.rs	replace prefix_for -> usize with 0	1	same code: every test binary o
 src/lanes.rs	replace prefix_for -> usize with 1	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace sme2_main with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
-src/lanes.rs	replace | with ^ in Task::run_equal_members	4	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace __all_workers_parked -> bool with true	1	as on aarch64: survives (known-aarch64.txt): a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	equivalent: `later >= 0` adds `later` to the owed when it is 0, which is adding nothing; the `if` keeps an atomic add off the path of a job that owes none
@@ -45,7 +44,6 @@ src/pipeline.rs	replace < with <= in Pipeline<T, B>::acquire_free_group	1	speed:
 src/pipeline.rs	replace < with == in Pipeline<T, B>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
 src/pipeline.rs	replace < with > in Pipeline<T, B>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
 src/pipeline.rs	replace == with != in Pipeline<T, B>::acquire_free_group	1	equivalent: when assigned == 0, completed_epoch >= 0 is already true for every u64; the check skips the atomic load on the first revolution
-src/pipeline.rs	replace > with >= in Shared::run_room_piece	1	equivalent: counter == 0 in run_room_piece is reached only by full ROOM_LEN (64 KiB) commits, so len == CHUNK_LEN never occurs with counter == 0
 src/pipeline.rs	replace >= with < in Pipeline<T, B>::batch	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the batch piece (identical digests)
 src/pipeline.rs	replace >= with < in Pipeline<T, B>::commit_multi	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the room piece (identical digests)
 src/pipeline.rs	replace >= with < in block_on	1	speed: SPIN_BEFORE_SLEEP governs only how long block_on spins before parking; ThreadPark wakes the thread either way
