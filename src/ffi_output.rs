@@ -40,10 +40,9 @@ unsafe extern "C" {
 /// A packed message's descriptor (`Packed<16>`, `Packed<32>`): its block
 /// zero-padded past `len` bytes, the key as its chaining value, and the
 /// flags of a whole one-chunk root (CHUNK_START, CHUNK_END and ROOT with
-/// the mode's).
-pub(crate) fn packed<'a>(block: &'a [u8; BLOCK_LEN], key: &'a [u32; 8], len: usize, flags: u8) -> Input<'a> {
-    debug_assert!(len <= BLOCK_LEN, "a packed message is one block");
-    Input { block, cv: key, len: len as u8, flags: flags | CHUNK_START | CHUNK_END | ROOT }
+/// the mode's). The caller checks `len <= BLOCK_LEN` for the batch.
+pub(crate) fn packed<'a>(block: &'a [u8; BLOCK_LEN], key: &'a [u32; 8], len: u8, flags: u8) -> Input<'a> {
+    Input { block, cv: key, len, flags: flags | CHUNK_START | CHUNK_END | ROOT }
 }
 
 pub(crate) fn lanes(platform: Platform) -> usize {
