@@ -556,7 +556,8 @@ struct Piece {
 /// prefix, each piece is [`next_piece_len`] of what remains, and the last
 /// is whatever is left. The prefix is whole subtrees of up to
 /// [`MAX_PREFIX_PIECE_LEN`], rounded down to a multiple of the first piece
-/// after it. A piece's length never exceeds the one before it (the
+/// after it (the piece that follows the prefix as rounded, not as asked
+/// for). A piece's length never exceeds the one before it (the
 /// prefix's last piece is at least the first after it, and a share only
 /// falls as the input shrinks) and every piece starts at a multiple of
 /// its own length, so each is a whole subtree at its offset. Fills `pieces` and returns how many form the prefix
@@ -568,8 +569,25 @@ fn cut_with_prefix(pieces: &mut Vec<Piece>, len: usize, threads: usize, prefix: 
     assert!(len > MIN_PIECE_LEN, "one piece has no parent to merge; hash it whole instead");
     assert!(prefix < len, "the SME2 thread's prefix leaves the pool some input");
     let mut offset = 0;
-    let first_after = next_piece_len(len - prefix, threads);
-    let prefix = prefix / first_after * first_after;
+    // The first piece after the prefix is a share of what the prefix
+    // leaves, and rounding the prefix down leaves more: a larger share,
+    // at some lengths twice the size the prefix was rounded to. So the
+    // two are settled together: round, look at the piece that follows,
+    // and round to that when it is larger (it only grows, to
+    // MAX_PIECE_LEN at most).
+    let mut first_after = next_piece_len(len - prefix, threads);
+    let mut rounded = prefix / first_after * first_after;
+    // It only grows, and there are five piece sizes it can be.
+    for _ in 0..5 {
+        let after = next_piece_len(len - rounded, threads);
+        if after == first_after {
+            break;
+        }
+        first_after = after;
+        rounded = prefix / first_after * first_after;
+    }
+    assert!(next_piece_len(len - rounded, threads) == first_after, "the SME2 prefix and the piece after it settle");
+    let prefix = rounded;
     while offset < prefix {
         let piece = MAX_PREFIX_PIECE_LEN.min(1 << (usize::BITS - 1 - (prefix - offset).leading_zeros()));
         pieces.push(Piece { offset, len: piece });
@@ -2545,6 +2563,74 @@ mod test {
                     .collect();
                 assert_eq!(merge_root(&pieces, &mut cvs, crate::IV, 0), crate::convenience::hash(&input[..len]), "{len} {threads}");
             }
+        }
+    }
+
+    /// The lengths from MIN_SPLIT_LEN up, in whole KiB, at which the cut
+    /// for `threads` threads with the SME2 thread's share is no tree: a
+    /// piece that is no power of two, or off its place, or longer than
+    /// the one before it.
+    fn lengths_the_prefix_cut_misplaces(threads: usize) -> Vec<usize> {
+        (MIN_SPLIT_LEN / 1024..=128 * threads + 1024)
+            .map(|k| k * 1024)
+            .filter(|&len| {
+                let (pieces, _) = cut_with_prefix_vec(len, threads, sme2_prefix(len, threads));
+                !(0..pieces.len() - 1).all(|i| pieces[i].len.is_power_of_two() && pieces[i].offset % pieces[i].len == 0 && pieces[i].len >= pieces[i + 1].len)
+            })
+            .collect()
+    }
+
+    /// The cut with the SME2 thread's share is a tree at every length a
+    /// pool of 2 to 64 threads takes.
+    #[test]
+    fn the_prefix_cut_is_a_tree_at_every_length() {
+        let bad: Vec<(usize, usize, usize)> = (2..=64)
+            .filter_map(|threads| {
+                let lens = lengths_the_prefix_cut_misplaces(threads);
+                lens.first().map(|&first| (threads, first / 1024, lens.len()))
+            })
+            .collect();
+        assert!(bad.is_empty(), "(threads, first length in KiB, lengths) whose cut is no tree: {bad:?}");
+    }
+
+    /// At a length where settling changes the prefix: with 16 threads at
+    /// 2176 KiB the unrounded share's first piece is 64 KiB, the rounded
+    /// prefix leaves a 128 KiB piece, and the prefix is two pieces.
+    #[test]
+    fn the_prefix_cut_settles_to_the_piece_after_it() {
+        let len = 2176 * 1024;
+        let (pieces, own) = cut_with_prefix_vec(len, 16, sme2_prefix(len, 16));
+        assert_eq!(own, 2);
+        assert_eq!((pieces[0].len, pieces[1].len), (128 * 1024, 64 * 1024));
+    }
+
+    /// A settled prefix stays: with 2 threads at 512 KiB the share's
+    /// first piece is 64 KiB, the piece after the rounded prefix is
+    /// 128 KiB, and settling rounds to that without losing the prefix.
+    #[test]
+    fn the_prefix_cut_keeps_a_settled_prefix() {
+        let len = 512 * 1024;
+        let (pieces, own) = cut_with_prefix_vec(len, 2, sme2_prefix(len, 2));
+        assert_eq!(own, 1);
+        assert_eq!(pieces[0].len, 256 * 1024);
+    }
+
+    /// The pool call at the lengths this machine's pool would cut so:
+    /// equal to the serial hash. Without SME2 no prefix is cut and this
+    /// passes; on an Apple M4 or later it reaches the cut above.
+    #[test]
+    fn hash_pool_at_the_lengths_the_prefix_cut_misplaces() {
+        crate::initialize();
+        let threads = pool().threads;
+        if threads < 2 {
+            return;
+        }
+        let lens = lengths_the_prefix_cut_misplaces(threads);
+        let Some(&longest) = lens.last() else { return };
+        let mut input = vec![0u8; longest + 1];
+        crate::test::paint_test_input(&mut input);
+        for &len in [lens[0], lens[lens.len() / 2], longest, longest + 1].iter() {
+            assert_eq!(crate::convenience::hash(&input[..len]), hash_with_key(&input[..len], crate::IV, 0), "len = {len}");
         }
     }
 
