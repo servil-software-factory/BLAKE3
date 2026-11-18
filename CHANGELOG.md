@@ -1,4 +1,4 @@
-# blake3-servil 0.10.0+dev, against blake3-servil 0.9.0
+# blake3-servil 0.10.0+95fb588ab8e1cfa12426077b9606c82c3e22b15b, against blake3-servil 0.9.0
 
 What changed since 0.9.0, each item with where it is described. Every
 figure names its machine. bench-hashes' page for this release sets 0.8,
