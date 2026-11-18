@@ -395,36 +395,27 @@ pub const BLOCK_LEN: usize = 64;
 /// the maximum degree of parallelism used by the implementation equals the number of chunks.
 pub const CHUNK_LEN: usize = 1024;
 
-#[doc(hidden)]
-pub const MAX_DEPTH: usize = 54; // 2^54 * CHUNK_LEN = 2^64
+pub(crate) const MAX_DEPTH: usize = 54; // 2^54 * CHUNK_LEN = 2^64
 
 // A chunk's CV is words while its blocks compress (the kernels' form); the
 // hash_many interface hashes input bytes and parent nodes alike, so its
 // output CVs are bytes.
-#[doc(hidden)]
-pub type CVWords = [u32; 8];
-#[doc(hidden)]
-pub type CVBytes = [u8; 32]; // little-endian
+pub(crate) type CVWords = [u32; 8];
+pub(crate) type CVBytes = [u8; 32]; // little-endian
 
-#[doc(hidden)]
-pub const IV: &CVWords = &[0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];
+pub(crate) const IV: &CVWords = &[0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];
 
 // These are the internal flags that we use to domain separate root/non-root,
 // chunk/parent, and chunk beginning/middle/end. These get set at the high end
 // of the block flags word in the compression function, so their values start
 // high and go down.
-#[doc(hidden)]
-pub const CHUNK_START: u8 = 1 << 0;
-#[doc(hidden)]
-pub const CHUNK_END: u8 = 1 << 1;
+pub(crate) const CHUNK_START: u8 = 1 << 0;
+pub(crate) const CHUNK_END: u8 = 1 << 1;
 const PARENT: u8 = 1 << 2;
-#[doc(hidden)]
-pub const ROOT: u8 = 1 << 3;
-#[doc(hidden)]
-pub const KEYED_HASH: u8 = 1 << 4;
+pub(crate) const ROOT: u8 = 1 << 3;
+pub(crate) const KEYED_HASH: u8 = 1 << 4;
 const DERIVE_KEY_CONTEXT: u8 = 1 << 5;
-#[doc(hidden)]
-pub const DERIVE_KEY_MATERIAL: u8 = 1 << 6;
+pub(crate) const DERIVE_KEY_MATERIAL: u8 = 1 << 6;
 
 /// An output of the default size, 32 bytes, which provides constant-time
 /// equality checking.
@@ -668,8 +659,7 @@ impl fmt::Display for HexError {
 #[cfg(feature = "std")]
 impl std::error::Error for HexError {}
 
-#[doc(hidden)]
-pub type Output = hasher::Output<Platform>;
+pub(crate) type Output = hasher::Output<Platform>;
 
 impl Clone for Output {
     fn clone(&self) -> Self {
@@ -769,7 +759,7 @@ impl Zeroize for ChunkState {
 /// Undocumented and unstable, for benchmarks only.
 #[doc(hidden)]
 #[derive(Clone, Copy)]
-pub enum IncrementCounter {
+pub(crate) enum IncrementCounter {
     Yes,
     No,
 }
@@ -985,7 +975,7 @@ fn compress_chunks_parallel(input: &[u8], key: &CVWords, chunk_counter: u64, fla
 // return it as an additional output.) These parents are never the root and
 // never empty; those cases use a different codepath.
 #[doc(hidden)]
-pub fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWords, flags: u8, platform: Platform, out: &mut [u8]) -> usize {
+pub(crate) fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWords, flags: u8, platform: Platform, out: &mut [u8]) -> usize {
     debug_assert_eq!(child_chaining_values.len() % OUT_LEN, 0, "wacky hash bytes");
     let num_children = child_chaining_values.len() / OUT_LEN;
     debug_assert!(num_children >= 2, "not enough children");
@@ -1030,7 +1020,7 @@ pub fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWords, fl
 // different codepath. Its arrays live in tree::root_children, out of line.
 #[inline]
 #[doc(hidden)]
-pub fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8, platform: Platform) -> [u8; BLOCK_LEN] {
+pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8, platform: Platform) -> [u8; BLOCK_LEN] {
     debug_assert!(input.len() > CHUNK_LEN);
     let kernels = tree::PlatformKernels { key, flags, platform };
     let [left, right] = tree::root_children(&kernels, input, ahead, chunk_counter);
@@ -1075,36 +1065,6 @@ fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
     Hash(out)
 }
 
-// Hash a whole subtree at its chunk counter (or the whole input at zero).
-// Unlike the wider helpers above, this also handles one chunk or less.
-// The pool's pieces (lanes.rs) use it; the one-shot calls go through
-// tree::hash.
-#[cfg(feature = "std")]
-#[inline]
-#[doc(hidden)]
-pub fn hash_all_at_once(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, platform: Platform) -> Output {
-    // The input is a complete subtree at chunk_counter, or the whole
-    // input (including empty) at counter zero. Its byte offset fits u64.
-    debug_assert!(chunk_counter <= u64::MAX / CHUNK_LEN as u64);
-    debug_assert!(chunk_counter == 0 || (!input.is_empty() && input.len() as u64 <= max_subtree_len(chunk_counter * CHUNK_LEN as u64).unwrap()));
-
-    // If the whole subtree is one chunk, hash it directly with a ChunkState.
-    if input.len() <= CHUNK_LEN {
-        return ChunkState::new(key, chunk_counter, flags, platform).update(input).output();
-    }
-
-    // Otherwise construct an Output object from the parent node returned by
-    // compress_subtree_to_parent_node().
-    hasher::Output {
-        input_chaining_value: *key,
-        block: compress_subtree_to_parent_node(input, 0, key, chunk_counter, flags, platform),
-        block_len: BLOCK_LEN as u8,
-        counter: 0,
-        flags: flags | PARENT,
-        platform,
-    }
-}
-
 /// Run the startup self-test and detect the CPU: every program calls this
 /// once, before any other call of this
 /// crate, and a call before it panics. Under 0.2 ms, once per process
@@ -1122,35 +1082,16 @@ pub fn initialize() {
     platform::Platform::detect_unchecked().record();
 }
 
-/// What a crate that adds threads builds on (blake3-servil's pool, stream
-/// and pipeline): the one-thread calls on a chosen platform, the tree's
-/// pieces, and the Hasher's inside. Not for programs: it changes with the
-/// two crates, which are released together.
+/// Scheduling and storage setup shared with `blake3-servil`'s workers.
+/// Hashing goes through the checked calls on `throughput::TreeHasher`.
 #[doc(hidden)]
 #[cfg(feature = "std")]
-pub mod hazmat {
-    pub use crate::{
-        CHUNK_END, CHUNK_START, CVBytes, CVWords, DERIVE_KEY_MATERIAL, IV, KEYED_HASH, Output, ROOT, compress_subtree_to_parent_node, hash_all_at_once,
-        hash_serial, hash_serial_on,
-    };
-    pub mod platform {
-        pub use crate::platform::{MAX_SIMD_DEGREE, Platform, Sme2Turn, words_from_le_bytes_32};
-    }
-    pub mod many {
-        pub use crate::many::{assert_slots, hash_many_on, slot_len};
-    }
-    pub mod hasher {
-        pub use crate::hasher::parent_output;
-    }
-    pub mod tree {
-        pub use crate::tree::left_len;
-    }
-    pub mod incremental {
-        pub use crate::incremental::Pool;
-    }
-    pub mod each {
-        pub use crate::each::{Item, MEMBERS, hash_each_on, prepare_thread, update_turn};
-    }
+pub mod thread_support {
+    pub use crate::each::prepare_thread as prepare_collection_thread;
+    pub use crate::many::{assert_slots, slot_len};
+    pub use crate::platform::{MAX_SIMD_DEGREE, Platform, Sme2Turn};
+    #[cfg(blake3_sme2)]
+    pub use crate::sme2::prepare_thread_scratch as prepare_sme2_scratch;
 }
 
 /// An alias to distinguish [`context_key`](throughput::context_key) outputs from other keys.
@@ -1197,8 +1138,7 @@ impl Mode<'_> {
     /// every call (October 24, the i7's disassembly of a caller); a
     /// constant mode folds to its constants, inlined.
     #[inline]
-    #[doc(hidden)]
-    pub fn key(self, room: &mut core::mem::MaybeUninit<CVWords>) -> (&CVWords, u8) {
+    pub(crate) fn key(self, room: &mut core::mem::MaybeUninit<CVWords>) -> (&CVWords, u8) {
         match self {
             Mode::Plain => (IV, 0),
             _ => {
@@ -1210,8 +1150,7 @@ impl Mode<'_> {
 
     /// The key words and flags this mode hashes with.
     #[inline]
-    #[doc(hidden)]
-    pub fn key_and_flags(self) -> (CVWords, u8) {
+    pub(crate) fn key_and_flags(self) -> (CVWords, u8) {
         match self {
             Mode::Plain => (*IV, 0),
             Mode::Keyed(key) => (platform::words_from_le_bytes_32(key), KEYED_HASH),
@@ -1226,8 +1165,7 @@ impl Mode<'_> {
 /// hash() in its modes and hash_multithreaded()'s short path all come
 /// through here.
 #[inline]
-#[doc(hidden)]
-pub fn hash_serial(input: &[u8], key: &CVWords, flags: u8) -> Hash {
+pub(crate) fn hash_serial(input: &[u8], key: &CVWords, flags: u8) -> Hash {
     hash_serial_from(Platform::detect(), input, key, flags, false)
 }
 
@@ -1362,14 +1300,14 @@ pub(crate) const SME2_SIZED_BATCH: usize = 16;
 /// on every platform.
 #[inline]
 #[doc(hidden)]
-pub fn hash_serial_on(input: &[u8], key: &CVWords, flags: u8, platform: Platform) -> Hash {
+pub(crate) fn hash_serial_on(input: &[u8], key: &CVWords, flags: u8, platform: Platform) -> Hash {
     Hash(tree::hash(&tree::PlatformKernels { key, flags, platform }, input))
 }
 
 /// [`hash_many`] in the mode of `key` and `flags`, on the calling thread.
 #[inline]
 #[doc(hidden)]
-pub fn hash_many_serial(input: &[u8], message_len: usize, slot: usize, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]]) {
+pub(crate) fn hash_many_serial(input: &[u8], message_len: usize, slot: usize, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]]) {
     hash_many_serial_from(Platform::detect(), input, message_len, slot, key, flags, out);
 }
 

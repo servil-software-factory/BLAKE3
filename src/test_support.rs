@@ -85,6 +85,21 @@ pub(crate) mod official {
         reader.fill(&mut out);
         out
     }
+    /// Merge two chaining values without depending on our tree kernels.
+    pub(crate) fn parent(mode: crate::Mode, left: &[u8; 32], right: &[u8; 32], root: bool) -> [u8; 32] {
+        use blake3::hazmat;
+        let key;
+        let mode = match mode {
+            crate::Mode::Plain => hazmat::Mode::Hash,
+            crate::Mode::Keyed(key) => hazmat::Mode::KeyedHash(key),
+            crate::Mode::DeriveKey(context) => {
+                key = hazmat::hash_derive_key_context(context);
+                hazmat::Mode::DeriveKeyMaterial(&key)
+            }
+            crate::Mode::DeriveKeyWith(key) => hazmat::Mode::DeriveKeyMaterial(key),
+        };
+        if root { *hazmat::merge_subtrees_root(left, right, mode).as_bytes() } else { hazmat::merge_subtrees_non_root(left, right, mode) }
+    }
     pub(crate) fn compress_xof(cv: &[u32; 8], block: &[u8; 64], block_len: u8, counter: u64, flags: u8) -> [u8; 64] {
         portable().compress_xof(cv, block, block_len, counter, flags)
     }
@@ -110,12 +125,6 @@ pub fn paint_test_input(buf: &mut [u8]) {
     for (i, b) in buf.iter_mut().enumerate() {
         *b = (i % 251) as u8;
     }
-}
-
-/// The parent node of two chaining values under `mode`.
-pub(crate) fn parent(left: &crate::CVBytes, right: &crate::CVBytes, mode: crate::Mode) -> crate::Output {
-    let (key, flags) = mode.key_and_flags();
-    crate::hasher::parent_output(left, right, &key, flags, crate::platform::Platform::detect())
 }
 
 /// Buffers between inaccessible pages, for the tests that place inputs

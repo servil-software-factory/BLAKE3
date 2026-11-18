@@ -11,7 +11,7 @@
 
 use crate::many::TABLE;
 use crate::platform::Platform;
-use crate::throughput::Block;
+use crate::throughput::{Block, Cv, TreeHasher};
 use crate::{CHUNK_END, CHUNK_LEN, CHUNK_START, CVBytes, CVWords, ChunkState, Hash, Hasher, IncrementCounter, Mode, OUT_LEN};
 
 // Many messages arriving at once, such as a server's uploads, each with
@@ -46,6 +46,14 @@ use crate::{CHUNK_END, CHUNK_LEN, CHUNK_START, CVBytes, CVWords, ChunkState, Has
 /// ```
 pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
     update_turn(hashers, pieces, None);
+}
+
+/// Feed a turn of pieces, letting the caller hash large whole subtrees.
+/// As in [`update_each`], each hasher takes its pieces in order. The
+/// callback and `min_len` have [`Hasher::update_with`]'s contract, with
+/// `tree` prepared for the mode of whichever hasher needs the subtree.
+pub fn update_each_with(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2]) {
+    update_turn(hashers, pieces, Some(&crate::incremental::Pool { min_len, halves }));
 }
 
 /// Mark each hasher `which` names, and panic on one named twice. In every
@@ -165,7 +173,7 @@ fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]
 /// drain un-holds, and a drain leaves nothing waiting), so a hasher that
 /// is not held has no earlier bytes waiting, and takes its piece now. Both
 /// lists live on the stack: a turn allocates nothing.
-pub fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option<crate::incremental::Pool>) {
+fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option<&crate::incremental::Pool<'_>>) {
     let mut held = arrayvec::ArrayVec::<usize, TABLE>::new();
     let mut waiting = arrayvec::ArrayVec::<(usize, &[u8]), TABLE>::new();
     for &(i, bytes) in pieces {
@@ -187,7 +195,7 @@ fn gather<'a>(
     hashers: &mut [Hasher],
     i: usize,
     bytes: &'a [u8],
-    pooled: Option<crate::incremental::Pool>,
+    pooled: Option<&crate::incremental::Pool<'_>>,
     held: &mut arrayvec::ArrayVec<usize, TABLE>,
     waiting: &mut arrayvec::ArrayVec<(usize, &'a [u8]), TABLE>,
 ) {
@@ -212,7 +220,7 @@ fn drain<'a>(
     hashers: &mut [Hasher],
     held: &mut arrayvec::ArrayVec<usize, TABLE>,
     waiting: &mut arrayvec::ArrayVec<(usize, &'a [u8]), TABLE>,
-    pooled: Option<crate::incremental::Pool>,
+    pooled: Option<&crate::incremental::Pool<'_>>,
 ) {
     loop {
         flush_held(hashers, held);
@@ -454,11 +462,7 @@ pub fn hash_each(mode: Mode, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LE
 #[cfg(blake3_sme2)]
 const BY_BLOCKS_AT_ONCE: usize = TABLE;
 #[cfg(not(blake3_sme2))]
-const BY_BLOCKS_AT_ONCE: usize = MEMBERS;
-
-/// The most messages a pool's task holds side by side (the thread crate's
-/// `Task`), and so the most `hash_by_blocks` takes in a call there.
-pub const MEMBERS: usize = 64;
+const BY_BLOCKS_AT_ONCE: usize = 64;
 
 /// The digest of each of `items`, every one of up to a chunk, of any
 /// lengths, by their blocks: those with as many whole blocks before their
@@ -633,7 +637,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
 
 /// An item of a collection, as hash_each_on reads it: its bytes. The
 /// public calls' items are messages in blocks; the pool's ranges, bytes.
-pub trait Item {
+pub(crate) trait Item {
     fn bytes(&self) -> &[u8];
 }
 
@@ -654,7 +658,7 @@ impl Item for (&[Block], usize) {
 /// [`hash_each`] in the mode of `key` and `flags`, the lanes on
 /// `platform`, each message that fills the lanes alone (or is a chunk or
 /// less) through `alone`.
-pub fn hash_each_on<I: Item>(key: &CVWords, flags: u8, items: &[I], out: &mut [[u8; OUT_LEN]], platform: Platform, alone: impl Fn(&[u8]) -> Hash) {
+pub(crate) fn hash_each_on<I: Item>(key: &CVWords, flags: u8, items: &[I], out: &mut [[u8; OUT_LEN]], platform: Platform, alone: impl Fn(&[u8]) -> Hash) {
     let key = *key;
     // Items of up to a chunk, two or more, by their blocks (hash_by_blocks).
     #[cfg(target_arch = "x86_64")]
@@ -821,6 +825,25 @@ mod test {
             h.stage(&[0; crate::STAGE_LEN]);
         }
         hash_cohort::<2>(&mut hashers, &[0, 1]);
+    }
+
+    #[test]
+    fn a_turn_uses_the_callback_in_each_hashers_mode_and_order() {
+        crate::initialize();
+        let key = [3; crate::KEY_LEN];
+        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Keyed(&key), None)];
+        let mut input = vec![0; 2 * crate::STAGE_LEN + 7];
+        crate::test::paint_test_input(&mut input);
+        let (first, rest) = input.split_at(crate::STAGE_LEN);
+        let calls = core::cell::Cell::new(0);
+        update_each_with(&mut hashers, &[(0, first), (1, rest), (0, rest)], crate::STAGE_LEN, &|tree, level, index, bytes| {
+            assert_eq!(bytes.len(), crate::STAGE_LEN);
+            calls.set(calls.get() + 1);
+            tree.subtree_halves(level, index, bytes)
+        });
+        assert_eq!(calls.get(), 3);
+        assert_eq!(hashers[0].finalize().as_bytes(), blake3::hash(&input).as_bytes());
+        assert_eq!(hashers[1].finalize().as_bytes(), blake3::keyed_hash(&key, rest).as_bytes());
     }
 
     #[test]

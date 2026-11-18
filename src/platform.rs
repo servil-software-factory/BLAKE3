@@ -32,7 +32,7 @@ cfg_if::cfg_if! {
 ///
 /// ```
 /// # #[cfg(feature = "std")] {
-/// use blake3_servil_core::hazmat::platform::Platform;
+/// use blake3_servil_core::thread_support::Platform;
 /// blake3_servil_core::initialize();
 /// #[cfg(target_arch = "x86_64")]
 /// let _ = matches!(Platform::detect(), Platform::AVX2 { .. });
@@ -44,7 +44,7 @@ cfg_if::cfg_if! {
 /// and cannot make one (the same names, so this fails for that reason):
 ///
 /// ```compile_fail,E0603
-/// use blake3_servil_core::hazmat::platform::Platform;
+/// use blake3_servil_core::thread_support::Platform;
 /// #[cfg(target_arch = "x86_64")]
 /// let _ = Platform::AVX2;
 /// #[cfg(target_arch = "aarch64")]
@@ -310,7 +310,7 @@ impl Platform {
         degree
     }
 
-    pub fn compress_in_place(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
+    pub(crate) fn compress_in_place(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
         match self {
             // Safe because detect() checked for platform support.
             #[cfg(blake3_sse41_ffi)]
@@ -331,7 +331,7 @@ impl Platform {
     /// Compress `count` whole blocks of one chunk into `cv`: the first block
     /// with `flags | flags_start`, the rest with `flags`, all with `counter`.
     /// `blocks` holds at least `count * BLOCK_LEN` bytes; `count` is 1..=16.
-    pub fn compress_blocks(&self, cv: &mut CVWords, blocks: &[u8], count: usize, counter: u64, flags: u8, flags_start: u8) {
+    pub(crate) fn compress_blocks(&self, cv: &mut CVWords, blocks: &[u8], count: usize, counter: u64, flags: u8, flags_start: u8) {
         assert!((1..=16).contains(&count));
         assert!(blocks.len() >= count * BLOCK_LEN);
         // The integer-only kernel runs on every AArch64 core.
@@ -352,7 +352,7 @@ impl Platform {
         }
     }
 
-    pub fn compress_xof(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) -> [u8; 64] {
+    pub(crate) fn compress_xof(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) -> [u8; 64] {
         match self {
             // Safe because detect() checked for platform support.
             #[cfg(blake3_sse41_ffi)]
@@ -379,7 +379,7 @@ impl Platform {
     // after every block, there's a small but measurable performance loss.
     // Compressing chunks with a dedicated loop avoids this.
 
-    pub fn hash_many<const N: usize>(
+    pub(crate) fn hash_many<const N: usize>(
         &self,
         inputs: &[&[u8; N]],
         key: &CVWords,
@@ -419,7 +419,7 @@ impl Platform {
         }
     }
 
-    pub fn xof_many(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, mut counter: u64, flags: u8, out: &mut [u8]) {
+    pub(crate) fn xof_many(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, mut counter: u64, flags: u8, out: &mut [u8]) {
         debug_assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
         if out.is_empty() {
             // The current assembly implementation always outputs at least 1 block.

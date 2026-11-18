@@ -99,11 +99,11 @@
 //!   more units add heat, not throughput (4 MiB 2% less time and 7% less
 //!   energy at best).
 
-use crate::platform::Platform;
-use crate::throughput::{BareCv, Cv as ChainingValue, LastCv, Prepared, TreeHasher, level_of};
+use crate::throughput::{Cv as ChainingValue, LastCv, Prepared, TreeHasher, level_of};
 use crate::{CHUNK_LEN, Hash};
 #[cfg(test)]
 use crate::{Hasher, KEY_LEN};
+use crate::{Platform, Sme2Turn};
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -343,7 +343,7 @@ pub(crate) fn prepare_thread() {
         s.cvs.reserve(PREPARED_PIECES);
     });
     sources::job_source();
-    crate::each::prepare_thread();
+    crate::prepare_collection_thread();
 }
 
 /// `cut` fills this thread's scratch with a job's pieces; `job` runs with
@@ -367,7 +367,7 @@ fn with_scratch<C, T>(cut: impl FnOnce(&mut Vec<Piece>) -> C, job: impl FnOnce(C
 /// `merge` gets `tree` kept to a core's own kernels too, as the pieces
 /// ran: the merges are the pool's work like them.
 fn tree_cvs<T>(pool: &Pool, input: &[u8], tree: &TreeHasher, counter: u64, merge: impl FnOnce(&[Piece], &mut [ChainingValue], LastCv, &TreeHasher) -> T) -> T {
-    let turn = crate::platform::Sme2Turn::take(Platform::detect(), true);
+    let turn = Sme2Turn::take(Platform::detect(), true);
     let plan = pool.plan(places::Kind::Tree, input.len());
     let threads = tree_threads(input.len(), plan.threads, turn.platform().simd_degree());
     let prefix = prefix_for(&turn, input.len(), threads);
@@ -386,29 +386,18 @@ fn tree_cvs<T>(pool: &Pool, input: &[u8], tree: &TreeHasher, counter: u64, merge
     )
 }
 
-/// The chaining values of the two halves of the subtree `input` at chunk
-/// `counter`, over the machine's threads: what `TreeHasher::subtree_halves`
-/// returns for a whole subtree.
-/// Requires a power-of-two number of chunks, at least MIN_SPLIT_LEN
-/// bytes, and `counter` a multiple
-/// of that number, as `Hasher::update` hands out.
-pub(crate) fn subtree_halves(tree: &TreeHasher, counter: u64, input: &[u8]) -> [BareCv; 2] {
-    assert!(input.len().is_power_of_two() && input.len() >= MIN_SPLIT_LEN, "a whole subtree of at least MIN_SPLIT_LEN bytes");
-    assert_eq!(counter % (input.len() / CHUNK_LEN) as u64, 0, "a subtree starts at a multiple of its chunk count");
-    let Some((pool, _caller)) = spare_pool() else { return tree.clone().on_this_core().bare_subtree_halves(counter, input) };
-    tree_cvs(pool, input, tree, counter, |pieces, cvs, last, own| {
+/// The halves of the whole subtree the Hasher asks for (at least
+/// MIN_SPLIT_LEN), over the machine's threads. The Hasher checks the
+/// returned places before its stack takes the values.
+pub(crate) fn subtree_halves(tree: &TreeHasher, level: u32, index: u64, input: &[u8]) -> [ChainingValue; 2] {
+    let Some((pool, _caller)) = spare_pool() else { return tree.clone().on_this_core().subtree_halves(level, index, input) };
+    tree_cvs(pool, input, tree, index << level, |pieces, cvs, last, own| {
         let (left, right) = merge_to_children(pieces, cvs, last, own);
-        // The two are the halves asked for: the calls that made them kept
-        // each join to siblings, and this, in every build, the two to
-        // their places.
-        let level = level_of(input.len() as u64) - 1;
-        let index = counter >> level;
-        assert!(
-            (left.level(), left.index(), right.first_chunk(), right.len()) == (level, index, (index + 1) << level, input.len() as u64 / 2),
-            "not the halves of {} bytes at chunk {counter}: {left:?} and {right:?}",
-            input.len()
-        );
-        [BareCv::from_bytes(*left.as_bytes()), BareCv::from_bytes(*right.as_bytes())]
+        // This job ends at the end of a whole subtree. The last value
+        // must be whole too. Its size is bounded by the subtree aligned
+        // at its first chunk, so a power-of-two size aligns there.
+        let right_level = level_of(right.len());
+        [left, ChainingValue::at(right_level, right.first_chunk() >> right_level, *right.as_bytes())]
     })
 }
 
@@ -433,7 +422,7 @@ pub(crate) fn hash_many_over_pool(tree: &TreeHasher, batch: crate::throughput::P
     )
 }
 
-/// [`crate::each::hash_each_multithreaded`]'s pool job: the items under
+/// [`crate::throughput::hash_each_multithreaded`]'s pool job: the items under
 /// MIN_SPLIT_LEN, cut into ranges of about [`next_piece_len`] of the
 /// bytes that remain, each range hashed by one thread. An item of
 /// MIN_SPLIT_LEN or more is set aside here (its digest zero, a stand-in)
@@ -444,7 +433,7 @@ pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block]
     };
     let plan = pool.plan(places::Kind::Each, items.iter().map(|i| i.1).sum());
     with_scratch(
-        |pieces| cut_items(pieces, items, plan.threads),
+        |pieces| cut_items(pieces, items, plan.threads, |item| crate::throughput::Block::bytes(item.0)[..item.1].len()),
         |(), pieces, _| {
             let work = Work::Each { items, tree: tree.clone().on_this_core(), pieces, outputs: out.as_mut_ptr() };
             pool.run_job(work, pieces.len(), 0, plan.threads, plan.near());
@@ -471,9 +460,12 @@ pub(crate) fn hash_each_small(tree: &TreeHasher, items: &[(&[crate::throughput::
 /// that remain (one item at least, however long), so ranges shrink toward
 /// the end as subtree pieces do. An item of MIN_SPLIT_LEN or more weighs
 /// nothing here: it is hashed after, over the pool.
-fn cut_items(pieces: &mut Vec<Piece>, items: &[impl crate::each::Item], threads: usize) {
-    let weight = |i: &dyn crate::each::Item| if i.bytes().len() >= MIN_SPLIT_LEN { 0 } else { i.bytes().len() };
-    let mut remaining: usize = items.iter().map(|i| weight(i)).sum();
+fn cut_items<I>(pieces: &mut Vec<Piece>, items: &[I], threads: usize, len: impl Fn(&I) -> usize) {
+    let weight = |item: &I| {
+        let n = len(item);
+        if n >= MIN_SPLIT_LEN { 0 } else { n }
+    };
+    let mut remaining: usize = items.iter().map(&weight).sum();
     let mut start = 0;
     while start < items.len() {
         let want = next_piece_len(remaining, threads);
@@ -696,7 +688,7 @@ fn cut_with_prefix(pieces: &mut Vec<Piece>, len: usize, threads: usize, prefix: 
 
 /// The SME2 thread's prefix for a call holding `turn`: [`sme2_prefix`]
 /// when the turn gave it SME2, else nothing.
-fn prefix_for(turn: &crate::platform::Sme2Turn, len: usize, threads: usize) -> usize {
+fn prefix_for(turn: &Sme2Turn, len: usize, threads: usize) -> usize {
     #[cfg(blake3_sme2)]
     if matches!(turn.platform(), Platform::SME2 { .. }) {
         return sme2_prefix(len, threads);
@@ -813,7 +805,7 @@ fn cut_messages_vec(count: usize, message_len: usize, threads: usize) -> Vec<Pie
 #[cfg(test)]
 fn cut_items_vec(items: &[&[u8]], threads: usize) -> Vec<Piece> {
     let mut pieces = Vec::new();
-    cut_items(&mut pieces, items, threads);
+    cut_items(&mut pieces, items, threads, |item| item.len());
     pieces
 }
 
@@ -828,12 +820,12 @@ fn subtree_cv(pieces: &[Piece], cvs: &[[u8; crate::OUT_LEN]], mode: crate::Mode)
     }
     let offset = pieces[0].offset;
     let len: usize = pieces.iter().map(|p| p.len).sum();
-    let boundary = offset + crate::tree::left_len(len);
+    let boundary = offset + crate::throughput::left_len(len as u64) as usize;
     let split = pieces.partition_point(|p| p.offset < boundary);
     assert!(split > 0 && split < pieces.len() && pieces[split].offset == boundary, "pieces do not tile the tree");
     let left = subtree_cv(&pieces[..split], &cvs[..split], mode);
     let right = subtree_cv(&pieces[split..], &cvs[split..], mode);
-    crate::test::parent(&left, &right, mode).chaining_value()
+    crate::test::official::parent(mode, &left, &right, false)
 }
 
 /// The pool: threads - 1 workers (the calling thread hashes too) taking from the registered sources
@@ -2744,8 +2736,6 @@ pub(crate) const TASK_LEN: usize = 64 * CHUNK_LEN;
 pub(crate) struct Task {
     pub(crate) len: usize,
     pub(crate) batch: Option<usize>,
-    pub(crate) key: crate::CVWords,
-    pub(crate) flags: u8,
     pub(crate) members: usize,
     pub(crate) member: [Member; MEMBERS],
 }
@@ -2766,10 +2756,9 @@ const NO_MEMBER: Member = Member { input: core::ptr::null(), len: 0, out: core::
 unsafe impl Send for Task {}
 
 impl Task {
-    /// An empty task of short messages (with `batch`, batches of messages
-    /// of that length) in the mode of `key` and `flags`.
-    pub(crate) fn members(key: &crate::CVWords, flags: u8, batch: Option<usize>) -> Task {
-        Task { len: 0, batch, key: *key, flags, members: 0, member: [NO_MEMBER; MEMBERS] }
+    /// An empty task of short messages, or batches of one message length.
+    pub(crate) fn members(batch: Option<usize>) -> Task {
+        Task { len: 0, batch, members: 0, member: [NO_MEMBER; MEMBERS] }
     }
 }
 
@@ -2778,69 +2767,37 @@ impl Task {
     /// multi-lane kernels (`hash_many`'s, from a table of pointers) where
     /// that length is one block, or on x86 two to sixteen blocks of a power
     /// of two (128 B to 1 KiB); any others one at a time.
-    pub(crate) fn run_members(&self, platform: Platform) {
+    pub(crate) fn run_members(&self, tree: &TreeHasher, platform: Platform) {
         let members = &self.member[..self.members];
         if let Some(message_len) = self.batch {
             for m in members {
                 // Sound: the stream keeps each batch's bytes and digest
                 // space in place until the task's `left` is zero.
                 let bytes = unsafe { core::slice::from_raw_parts(m.input, m.len) };
-                let slot = crate::many::slot_len(message_len);
+                let slot = crate::slot_len(message_len);
                 let count = m.len / slot;
                 let digests = unsafe { core::slice::from_raw_parts_mut(m.out as *mut [u8; crate::OUT_LEN], count) };
-                crate::many::hash_many_on(bytes, message_len, slot, &self.key, self.flags, digests, platform);
+                tree.hash_slots_on(platform, bytes, message_len, slot, digests);
             }
             return;
         }
-        // Sound: the stream keeps every member's bytes and `out` in place
-        // until the task's `left` is zero.
-        if members.len() >= 2 && members.iter().all(|m| m.len == members[0].len) {
-            match members[0].len {
-                crate::BLOCK_LEN => return self.run_equal_members::<{ crate::BLOCK_LEN }>(platform),
-                #[cfg(target_arch = "x86_64")]
-                128 => return self.run_equal_members::<128>(platform),
-                #[cfg(target_arch = "x86_64")]
-                256 => return self.run_equal_members::<256>(platform),
-                #[cfg(target_arch = "x86_64")]
-                512 => return self.run_equal_members::<512>(platform),
-                #[cfg(target_arch = "x86_64")]
-                CHUNK_LEN => return self.run_equal_members::<CHUNK_LEN>(platform),
-                _ => {}
-            }
+        let input = |i: usize| {
+            let m = members[i];
+            // Sound: the submission keeps each member's bytes readable
+            // until the task publishes completion.
+            unsafe { core::slice::from_raw_parts(m.input, m.len) }
+        };
+        let output = |i: usize, digest| {
+            // Sound: each member has its own output, kept until completion.
+            unsafe { members[i].out.cast::<[u8; crate::OUT_LEN]>().write(digest) };
+        };
+        if tree.try_hash_group_on(platform, members.len(), input, output) {
+            crate::ran(crate::Ran::EqualMembers);
+            return;
         }
         crate::ran(crate::Ran::MemberAlone);
-        for m in members {
-            let bytes = unsafe { core::slice::from_raw_parts(m.input, m.len) };
-            let hash = crate::hash_serial_on(bytes, &self.key, self.flags, platform);
-            unsafe { core::ptr::copy_nonoverlapping(hash.as_bytes().as_ptr(), m.out, crate::OUT_LEN) };
-        }
-    }
-}
-
-impl Task {
-    /// The members' digests, each a message of `N` bytes (whole blocks, at
-    /// most a chunk; run_members checked), side by side on the multi-lane
-    /// kernel from a table of pointers.
-    fn run_equal_members<const N: usize>(&self, platform: Platform) {
-        crate::ran(crate::Ran::EqualMembers);
-        let members = &self.member[..self.members];
-        // Sound: the stream keeps every member's N bytes and `out` in place
-        // until the task's `left` is zero.
-        let table: arrayvec::ArrayVec<&[u8; N], MEMBERS> = members.iter().map(|m| unsafe { &*(m.input as *const [u8; N]) }).collect();
-        let mut digests = [[0u8; crate::OUT_LEN]; MEMBERS];
-        // One block carries every flag at once, and passes them as the
-        // 64-byte batches do (flags_start and flags_end 0): with every
-        // caller of hash_many::<64> passing those zeros, LLVM specializes it
-        // (AArch64: x5 and x6 left out, `out` in a register; a queue passing
-        // its flags here instead cost the VM's lent batches of 16).
-        let (flags, start, end) = if N == crate::BLOCK_LEN {
-            (self.flags | crate::CHUNK_START | crate::CHUNK_END | crate::ROOT, 0, 0)
-        } else {
-            (self.flags, crate::CHUNK_START, crate::CHUNK_END | crate::ROOT)
-        };
-        platform.hash_many::<N>(&table, &self.key, 0, crate::IncrementCounter::No, flags, start, end, digests[..members.len()].as_flattened_mut());
-        for (m, digest) in members.iter().zip(&digests) {
-            unsafe { core::ptr::copy_nonoverlapping(digest.as_ptr(), m.out, crate::OUT_LEN) };
+        for i in 0..members.len() {
+            output(i, *tree.hash_on(platform, input(i)).as_bytes());
         }
     }
 }
@@ -2860,12 +2817,10 @@ fn sme2_main() {
 
 fn sme2_serve() -> ! {
     assert!(SME2_THREAD.set(std::thread::current()).is_ok(), "one SME2 thread");
-    // Prepare this thread's 64 KiB SME2 flat-walk scratch before reporting parked,
-    // so the first pipeline or stream task on SME2 allocates nothing.
-    {
-        let turn = crate::platform::Sme2Turn::take(Platform::detect(), true);
-        let _ = crate::hash_all_at_once(&[0u8; 32 * 1024], crate::IV, 0, 0, turn.platform());
-    }
+    // Prepare the flat-walk scratch before reporting parked, so the
+    // first task on this worker allocates nothing.
+    #[cfg(blake3_sme2)]
+    blake3_servil_core::thread_support::prepare_sme2_scratch();
     loop {
         if let Some(item) = sources::take_stream_item() {
             match item {
@@ -2874,7 +2829,7 @@ fn sme2_serve() -> ! {
                     if arg & sources::ACTION_SME2 == 0 {
                         unsafe { f(context as *const (), arg, pool_platform()) };
                     } else {
-                        let turn = crate::platform::Sme2Turn::take(Platform::detect(), true);
+                        let turn = Sme2Turn::take(Platform::detect(), true);
                         unsafe { f(context as *const (), arg & !sources::ACTION_SME2, turn.platform()) };
                         drop(turn);
                     }
@@ -2926,7 +2881,7 @@ fn worker_main(me: usize) {
         pool.park.register(me);
         // Before the first piece: a collection's range then allocates
         // nothing here.
-        crate::each::prepare_thread();
+        crate::prepare_collection_thread();
         pool.serve(me)
     });
     std::process::abort()
@@ -2970,11 +2925,11 @@ mod test {
             let placed: Vec<ChainingValue> =
                 whole.iter().zip(&cvs).map(|(p, bytes)| ChainingValue::at(level_of(p.len as u64), (p.offset / p.len) as u64, *bytes)).collect();
             let last = LastCv::at((end.offset / CHUNK_LEN) as u64, end.len as u64, cvs[whole.len()]);
-            let split = pieces.partition_point(|p| p.offset < crate::tree::left_len(len));
+            let split = pieces.partition_point(|p| p.offset < crate::throughput::left_len(len as u64) as usize);
             for mode in [crate::Mode::Plain, crate::Mode::Keyed(&key), crate::Mode::DeriveKeyWith(&context_key)] {
                 let left = subtree_cv(&pieces[..split], &cvs[..split], mode);
                 let right = subtree_cv(&pieces[split..], &cvs[split..], mode);
-                let want = crate::test::parent(&left, &right, mode).root_hash();
+                let want = Hash::from_bytes(crate::test::official::parent(mode, &left, &right, true));
                 assert_eq!(want, merge_root(&pieces, &mut placed.clone(), last, &TreeHasher::new(mode), len), "len={len}, threads={threads}");
             }
         }
@@ -3039,12 +2994,6 @@ mod test {
         platforms.push(Platform::detect());
         let key = [0x5Au8; crate::KEY_LEN];
         let context = "equal queue members";
-        let context_key = crate::throughput::context_key(context);
-        let modes = [
-            (*crate::IV, 0),
-            (crate::platform::words_from_le_bytes_32(&key), crate::KEYED_HASH),
-            (crate::platform::words_from_le_bytes_32(&context_key), crate::DERIVE_KEY_MATERIAL),
-        ];
         let counts: &[usize] = &[2, 3, 4, 7, 8, 15, 16, 17, 63, MEMBERS];
         let offsets: &[usize] = &[0, 1, 7, 63];
         let api_modes = [crate::Mode::Plain, crate::Mode::Keyed(&key), crate::Mode::DeriveKey(context)];
@@ -3059,8 +3008,8 @@ mod test {
                                 (0..offset + length).map(|i| ((m * 1031 + i) % 251) as u8).collect()
                             })
                             .collect();
-                        for (mode, (words, flags)) in modes.iter().enumerate() {
-                            let api_mode = api_modes[mode];
+                        for (mode, api_mode) in api_modes.iter().copied().enumerate() {
+                            let tree = TreeHasher::new(api_mode);
                             let expected: Vec<[u8; crate::OUT_LEN]> =
                                 inputs.iter().map(|input| *crate::convenience::hash_with(api_mode, &input[offset..]).as_bytes()).collect();
                             golden.add(expected.as_flattened(), || {
@@ -3068,7 +3017,7 @@ mod test {
                             });
                             for &platform in &platforms {
                                 let mut out = vec![[0xAA; crate::OUT_LEN]; count + 2];
-                                let mut task = Task::members(words, *flags, None);
+                                let mut task = Task::members(None);
                                 task.members = count;
                                 // Every destination from one raw base (Stacked Borrows).
                                 let base = out.as_mut_ptr();
@@ -3077,7 +3026,7 @@ mod test {
                                     task.member[m] = Member { input: inputs[m][offset..].as_ptr(), len: inputs[m].len() - offset, out };
                                 }
                                 crate::RAN.with(|r| r.set(0));
-                                task.run_members(platform);
+                                task.run_members(&tree, platform);
                                 // Which path (BLAKE3 #219): one length, two
                                 // members or more, a length with a kernel
                                 // (one block everywhere; 128 B to 1 KiB on
@@ -3549,11 +3498,11 @@ mod test {
         for len in [64, 128, 1024, 100] {
             let input: Vec<u8> = (0..len).map(|i| i as u8).collect();
             let mut out = [[0u8; crate::OUT_LEN]; 1];
-            let mut task = Task::members(crate::IV, 0, None);
+            let mut task = Task::members(None);
             task.members = 1;
             task.member[0] = Member { input: input.as_ptr(), len, out: out.as_mut_ptr().cast::<u8>() };
             crate::RAN.with(|r| r.set(0));
-            task.run_members(Platform::detect());
+            task.run_members(&TreeHasher::new(crate::Mode::Plain), Platform::detect());
             let ran = crate::RAN.with(|r| r.get());
             assert!(ran & crate::Ran::MemberAlone as u32 != 0 && ran & crate::Ran::EqualMembers as u32 == 0, "{len} B alone");
             assert_eq!(out[0], *crate::convenience::hash(&input).as_bytes());
@@ -3723,15 +3672,16 @@ mod test {
         if !pool().sme2 {
             return;
         }
-        // Give the SME2 worker time to finish its startup outside the
-        // hash call: only then does it release the shared accelerator.
+        // Let startup finish before using the pool in this check.
         while !all_workers_parked() {
             std::thread::yield_now();
         }
-        let mut input = vec![0u8; MIN_SPLIT_LEN + CHUNK_LEN + 1];
+        // Include a length that once crossed the wrong piece boundary.
+        let mut input = vec![0u8; 576 * CHUNK_LEN];
         crate::test::paint_test_input(&mut input);
-        for len in [MIN_SPLIT_LEN, MIN_SPLIT_LEN + 1, input.len()] {
-            assert_eq!(hash_mt(&input[..len], crate::Mode::Plain), crate::convenience::hash(&input[..len]));
+        for len in [MIN_SPLIT_LEN, MIN_SPLIT_LEN + 1, MIN_SPLIT_LEN + CHUNK_LEN + 1, input.len()] {
+            let bytes = &input[..len];
+            assert_eq!(hash_mt(bytes, crate::Mode::Plain).as_bytes(), blake3::hash(bytes).as_bytes(), "{len} bytes");
         }
     }
 
@@ -3861,7 +3811,7 @@ mod test {
         let mut buffer = vec![0u8; 4 * MIN_SPLIT_LEN];
         crate::test::paint_test_input(&mut buffer);
         for message_len in [crate::BLOCK_LEN, 256, 100, 3 * CHUNK_LEN + 5] {
-            let slot = crate::many::slot_len(message_len);
+            let slot = crate::slot_len(message_len);
             let count = buffer.len() / slot;
             let mut owned = buffer[..count * slot].to_vec();
             for message in owned.chunks_exact_mut(slot) {

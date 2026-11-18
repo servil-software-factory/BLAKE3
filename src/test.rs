@@ -1754,6 +1754,7 @@ fn test_set_input_offset_cant_finalize_xof() {
 /// layer, against the one-shot hash.
 #[test]
 fn test_grouped_hash() {
+    let parent = |left: &CVBytes, right: &CVBytes| crate::hasher::parent_output(left, right, crate::IV, 0, crate::Platform::detect());
     const MAX_CHUNKS: usize = (TEST_CASES_MAX + 1) / CHUNK_LEN;
     let mut input_buf = [0; TEST_CASES_MAX];
     paint_test_input(&mut input_buf);
@@ -1780,7 +1781,7 @@ fn test_grouped_hash() {
             while chaining_values.len() > 2 {
                 let n = chaining_values.len();
                 for i in 0..(n / 2) {
-                    chaining_values[i] = parent(&chaining_values[2 * i], &chaining_values[2 * i + 1], crate::Mode::Plain).chaining_value();
+                    chaining_values[i] = parent(&chaining_values[2 * i], &chaining_values[2 * i + 1]).chaining_value();
                 }
                 if n % 2 == 1 {
                     chaining_values[n / 2] = chaining_values[n - 1];
@@ -1788,11 +1789,7 @@ fn test_grouped_hash() {
                 chaining_values.truncate(n / 2 + n % 2);
             }
             assert_eq!(chaining_values.len(), 2);
-            assert_eq!(
-                expected_hash,
-                parent(&chaining_values[0], &chaining_values[1], crate::Mode::Plain).root_hash(),
-                "{case} bytes in subtrees of {subtree_chunks} chunks"
-            );
+            assert_eq!(expected_hash, parent(&chaining_values[0], &chaining_values[1]).root_hash(), "{case} bytes in subtrees of {subtree_chunks} chunks");
         }
     }
 }

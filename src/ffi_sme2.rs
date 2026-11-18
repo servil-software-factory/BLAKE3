@@ -467,16 +467,28 @@ unsafe fn walk_on_stack(input: &[u8], key: &CVWords, chunk_counter: u64, flags: 
 #[repr(C, align(4096))]
 struct Scratch([core::mem::MaybeUninit<u8>; SCRATCH]);
 
-// Each thread's scratch for the flat walk, allocated on its first walk.
-// Off the stack: a 64 KiB stack frame is probed with a store into each
+// Each thread's scratch for the flat walk, prepared by the pool's SME2
+// worker at startup or allocated on the thread's first walk. Off the stack: a 64 KiB stack frame is probed with a store into each
 // page on every call, and those stores, landing among the buffers the SME
 // unit is about to use, put it in its slow state at some stack depths
 // (M4 Max, hash(32 KiB) 0.178-0.245 ns/B by depth with the buffers on the
 // stack, 0.177 at every depth off it; probe/stack-map, jobs 169-171).
 #[cfg(feature = "std")]
 std::thread_local! {
-    static SCRATCH_BLOCK: Box<core::cell::UnsafeCell<Scratch>> =
-        Box::new(core::cell::UnsafeCell::new(Scratch([core::mem::MaybeUninit::uninit(); SCRATCH])));
+    static SCRATCH_BLOCK: Box<core::cell::UnsafeCell<Scratch>> = {
+        #[cfg(test)]
+        SCRATCH_INITIALIZED.with(|flag| flag.set(true));
+        Box::new(core::cell::UnsafeCell::new(Scratch([core::mem::MaybeUninit::uninit(); SCRATCH])))
+    };
+    #[cfg(test)]
+    static SCRATCH_INITIALIZED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Allocate the calling thread's scratch before its first task. The
+/// pool's SME2 worker does this before it first parks.
+#[cfg(feature = "std")]
+pub fn prepare_thread_scratch() {
+    SCRATCH_BLOCK.with(|_| ());
 }
 
 /// The flat walk in `block`, SCRATCH bytes on a 4 KiB boundary, which
@@ -557,6 +569,15 @@ fn scratch_layout(n: usize) -> (usize, usize) {
 #[cfg(test)]
 mod scratch_layout_tests {
     use super::*;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn startup_allocates_the_scratch_before_any_walk() {
+        // The test needs no accelerator. It runs on the Arm VM too.
+        assert!(!SCRATCH_INITIALIZED.with(|flag| flag.get()));
+        prepare_thread_scratch();
+        assert!(SCRATCH_INITIALIZED.with(|flag| flag.get()));
+    }
 
     #[test]
     #[should_panic(expected = "the flat walk's scratch holds its buffers")]
