@@ -36,21 +36,13 @@ const ROWS: usize = 8;
 /// when it merges with a single value. A message's first subtree is never
 /// a row: it may be the whole message, whose root needs its two halves,
 /// and the kernels have their fastest path for that (`Feed::children`).
+#[repr(C)]
 pub struct CvStack {
-    /// The single values: entry i's is written before it is read (an
-    /// entry is read below the length, after its push or its merge). The
-    /// storage is never zeroed and never moved as a value of its own: a
-    /// stack that started it as `None` with 1.7 KiB to follow was copied,
-    /// those bytes and all, into every new Hasher on AArch64 (41 ns).
-    cvs: core::mem::MaybeUninit<[Cv; DEPTH]>,
     len: usize,
-    /// Bit i: entry i is a row, kept in `rows[i % ROWS]`.
     wide: u64,
-    /// Each row's width.
     widths: [u8; ROWS],
-    /// Bit s: the rows' place s has been written whole (zeroed as it was
-    /// first given out).
     ready: u64,
+    cvs: core::mem::MaybeUninit<[Cv; DEPTH]>,
     rows: core::mem::MaybeUninit<[[Cv; ROW]; ROWS]>,
 }
 
