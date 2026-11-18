@@ -794,14 +794,25 @@ impl Zeroize for HasherCore {
 mod test {
     use super::*;
 
-    #[test]
-    #[should_panic(expected = "not the halves of level 4 index 0")]
-    fn pool_halves_are_checked_before_the_hasher_takes_their_bytes() {
+    fn update_with_one_wrong_half(wrong: usize) {
         crate::initialize();
         Hasher::new(Mode::Plain, None).update_with(&[0; STAGE_LEN], STAGE_LEN, &|tree, level, index, input| {
-            let [left, right] = tree.subtree_halves(level, index, input);
-            [right, left]
+            let mut halves = tree.subtree_halves(level, index, input);
+            halves[wrong] = halves[1 - wrong];
+            halves
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "not the halves of level 4 index 0")]
+    fn pool_rejects_a_wrong_left_half_alone() {
+        update_with_one_wrong_half(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "not the halves of level 4 index 0")]
+    fn pool_rejects_a_wrong_right_half_alone() {
+        update_with_one_wrong_half(1);
     }
 
     #[test]

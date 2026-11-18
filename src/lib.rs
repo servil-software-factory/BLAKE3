@@ -1090,6 +1090,8 @@ pub mod thread_support {
     pub use crate::each::prepare_thread as prepare_collection_thread;
     pub use crate::many::{assert_slots, slot_len};
     pub use crate::platform::{MAX_SIMD_DEGREE, Platform, Sme2Turn};
+    #[cfg(blake3_sme2)]
+    pub use crate::sme2::prepare_thread_scratch as prepare_sme2_scratch;
 }
 
 /// An alias to distinguish [`context_key`](throughput::context_key) outputs from other keys.

@@ -2817,12 +2817,10 @@ fn sme2_main() {
 
 fn sme2_serve() -> ! {
     assert!(SME2_THREAD.set(std::thread::current()).is_ok(), "one SME2 thread");
-    // Prepare this thread's 64 KiB SME2 flat-walk scratch before reporting parked,
-    // so the first pipeline or stream task on SME2 allocates nothing.
-    {
-        let turn = Sme2Turn::take(Platform::detect(), true);
-        let _ = TreeHasher::new(crate::Mode::Plain).hash_on(turn.platform(), &[0u8; 32 * 1024]);
-    }
+    // Prepare the flat-walk scratch before reporting parked, so the
+    // first task on this worker allocates nothing.
+    #[cfg(blake3_sme2)]
+    blake3_servil_core::thread_support::prepare_sme2_scratch();
     loop {
         if let Some(item) = sources::take_stream_item() {
             match item {
@@ -3674,15 +3672,16 @@ mod test {
         if !pool().sme2 {
             return;
         }
-        // Give the SME2 worker time to finish its startup outside the
-        // hash call: only then does it release the shared accelerator.
+        // Let startup finish before using the pool in this check.
         while !all_workers_parked() {
             std::thread::yield_now();
         }
-        let mut input = vec![0u8; MIN_SPLIT_LEN + CHUNK_LEN + 1];
+        // Include a length that once crossed the wrong piece boundary.
+        let mut input = vec![0u8; 576 * CHUNK_LEN];
         crate::test::paint_test_input(&mut input);
-        for len in [MIN_SPLIT_LEN, MIN_SPLIT_LEN + 1, input.len()] {
-            assert_eq!(hash_mt(&input[..len], crate::Mode::Plain), crate::convenience::hash(&input[..len]));
+        for len in [MIN_SPLIT_LEN, MIN_SPLIT_LEN + 1, MIN_SPLIT_LEN + CHUNK_LEN + 1, input.len()] {
+            let bytes = &input[..len];
+            assert_eq!(hash_mt(bytes, crate::Mode::Plain).as_bytes(), blake3::hash(bytes).as_bytes(), "{len} bytes");
         }
     }
 
