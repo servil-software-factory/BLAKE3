@@ -350,7 +350,11 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     {
         let mut refs = arrayvec::ArrayVec::<[&[u8; CHUNK_LEN]; ALONE_CHUNKS], N>::new();
         refs.extend(alike.iter().map(|&i| {
-            let stage = hashers[i].held_group().expect("a held group").1;
+            let hasher = &hashers[i];
+            // The shared key serves plain hashers only. Check the public
+            // mode as we take each stage, without comparing key bytes.
+            assert!(alike.len() == 1 || hasher.core.chunk_state.flags == 0, "only plain hashers share a cohort");
+            let stage = hasher.held_group().expect("a held group").1;
             core::array::from_fn(|j| stage[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap())
         }));
         let refs = refs.as_slice().as_flattened();
@@ -805,6 +809,19 @@ fn left_len(n: usize) -> usize {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[should_panic(expected = "only plain hashers share a cohort")]
+    fn a_shared_cohort_refuses_a_keyed_stage() {
+        crate::initialize();
+        let key = [7; crate::KEY_LEN];
+        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Keyed(&key), None)];
+        for h in &mut hashers {
+            h.stage(&[0; crate::STAGE_LEN]);
+        }
+        hash_cohort::<2>(&mut hashers, &[0, 1]);
+    }
 
     #[test]
     fn prepare_thread_reserves_collection_storage() {

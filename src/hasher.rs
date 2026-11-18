@@ -107,9 +107,12 @@ impl CvStack {
     }
 
     fn set_row(&mut self, i: usize, row: &[Cv]) {
-        // Sound: within the rows' storage; plain bytes.
-        unsafe { core::slice::from_raw_parts_mut((self.rows.as_mut_ptr() as *mut Cv).add((i % ROWS) * ROW), row.len()) }.copy_from_slice(row);
-        self.widths[i % ROWS] = row.len() as u8;
+        let slot = i % ROWS;
+        // Sound: MaybeUninit has the same layout as Cv and permits every
+        // byte here to be unwritten. clone_from may write a fresh slot.
+        let rows = unsafe { &mut *self.rows.as_mut_ptr().cast::<[[core::mem::MaybeUninit<Cv>; ROW]; ROWS]>() };
+        rows[slot][..row.len()].write_copy_of_slice(row);
+        self.widths[slot] = row.len() as u8;
         self.wide |= 1 << i;
     }
 
@@ -244,13 +247,15 @@ impl CvStack {
                 // into the lower row's place. The place for the children
                 // is written before it is read, and never zeroed first:
                 // zeroing 2 KiB a merge cost more than the merge saved.
-                let n = self.row(a).len();
+                let (left, right) = (self.row(a), self.row(b));
+                let n = left.len();
+                assert_eq!(n, right.len(), "two rows merge at one width");
                 let mut children = core::mem::MaybeUninit::<[Cv; 2 * ROW]>::uninit();
                 let at = children.as_mut_ptr() as *mut Cv;
                 // Sound: 2n values written into room for 2 ROW, then read.
                 let children = unsafe {
-                    core::ptr::copy_nonoverlapping(self.row(a).as_ptr(), at, n);
-                    core::ptr::copy_nonoverlapping(self.row(b).as_ptr(), at.add(n), n);
+                    core::ptr::copy_nonoverlapping(left.as_ptr(), at, n);
+                    core::ptr::copy_nonoverlapping(right.as_ptr(), at.add(n), n);
                     core::slice::from_raw_parts(at, 2 * n)
                 };
                 // Sound: row a's place, its first n values written (they are row a).
@@ -1078,6 +1083,20 @@ mod test {
                 }
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "two rows merge at one width")]
+    fn unequal_rows_stop_before_copying() {
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let mut stack = CvStack::new();
+        stack.push_row(&k, &[[1; crate::OUT_LEN]; 4]);
+        stack.push_row(&k, &[[2; crate::OUT_LEN]; 4]);
+        // Both slots are initialized in full. Model a bad recorded width
+        // that integer division would round down without halving the row.
+        stack.widths[0] = 6;
+        stack.merge(&k, 1);
     }
 
     /// A stack keeps at most ROWS rows: with 1023 groups (ten subtrees,

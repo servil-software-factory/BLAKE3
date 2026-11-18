@@ -548,13 +548,21 @@ const SCRATCH: usize = 64 * 1024;
 fn scratch_layout(n: usize) -> (usize, usize) {
     let cvs = (8 * n).next_multiple_of(4096) + 1024;
     let half = cvs + (32 * n.max(32)).saturating_sub(2048).next_multiple_of(4096) + 2048;
-    debug_assert!(half + 16 * n.max(64) <= SCRATCH, "the flat walk's scratch holds its buffers");
+    // The offsets reserve the table and the first CV level in order.
+    // Check the last buffer once, before walk_in writes to scratch.
+    assert!(half + 16 * n.max(64) <= SCRATCH, "the flat walk's scratch holds its buffers");
     (cvs, half)
 }
 
 #[cfg(test)]
 mod scratch_layout_tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "the flat walk's scratch holds its buffers")]
+    fn an_oversize_layout_stops_before_a_kernel_can_use_it() {
+        scratch_layout(2 * FLAT_MAX_CHUNKS);
+    }
 
     /// For every size the flat walk takes, its three buffers are where
     /// the comment says: the pointer table from 0, then the chaining
