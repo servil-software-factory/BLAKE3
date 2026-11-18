@@ -376,7 +376,7 @@ use zeroize::Zeroize;
 /// `b3sum --version` and the C library's `b3_version()` print it.
 pub use blake3_servil_version::BUILD_VERSION;
 
-/// The number of bytes in a [`Hash`](struct.Hash.html), 32.
+/// The number of bytes in a [`struct@Hash`], 32.
 pub const OUT_LEN: usize = 32;
 
 /// The number of bytes in a key, 32.

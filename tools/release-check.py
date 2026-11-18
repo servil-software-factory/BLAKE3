@@ -2,7 +2,7 @@
 """The release checklist's mechanical steps, read from where each gate
 left its result, for one commit (CONTRIBUTING.md, "Releases").
 
-    python3 tools/release-check.py [COMMIT]        # default: main's tip
+    python3 tools/release-check.py [COMMIT] [--previous TAG]  # default: main's tip
 
 It runs nothing heavy. For each step it reads the evidence the gate
 wrote and prints one line: PASS, FAIL, OPEN (no evidence yet, with the
@@ -26,9 +26,10 @@ and the rest timed out or have no verdict.
   hex digits), so an earlier commit's log cannot stand in for it:
   - VM check: tmp/night/check-release-vm-C.log, from
     `cd ../bench-hashes && cargo run --release -- check --fork <this checkout> --against <previous tag> --cells all`,
-    with `--old-bench <bench commit>` when the old side predates the
-    bench's calls (0.8: 5be5f236, the old API's bench), as in the Mac
-    job's "old_bench_commit".
+    on one compatible bench where possible, with `--old-bench` only when
+    the API change prevents that. Keep both output streams. Finish the
+    log with `release-vm: ok` only on exit 0, so a first-stage reading
+    cannot pass the gate while the bench repeats its suspects.
   - Full mutation run: tmp/night/mutants-C.log, with one complete section
     per crate (core and threads), each naming this commit and matching its
     survivor and timeout lists, from
@@ -49,14 +50,14 @@ and the rest timed out or have no verdict.
 - The pages: README.md, QUALITY.md, CHANGELOG.md changed since the
   previous release (a release rewrites them for its readers).
 
-The previous release is the nearest reachable v* tag, excluding tags on
-this candidate itself. Creating the release's tag must not make the check
-compare the release against itself; tags on other branches are irrelevant.
-The first release has none: its checks run against the main line before
-the release's changes (the commit the release's tracking issue names),
-and its pages are read fresh rather than diffed.
+By default the previous release is the nearest reachable v* tag other
+than the candidate. If a patch release is on a separate line, pass its
+published tag with --previous. The tag must name an older version commit.
+The first release has no prior tag. Its checks run against the main line
+before the release's changes, and its pages are read fresh.
 """
 
+import argparse
 import glob
 import io
 import json
@@ -85,6 +86,7 @@ EXCHANGE = os.environ.get("MAC_RUNNER") or os.path.join(os.path.dirname(MAIN), "
 
 # A step's two outcomes besides PASS, FAIL and OPEN.
 TIMED_OUT, NO_VERDICT = "timed out", "no verdict"
+VM_OK = "release-vm: ok"
 
 
 def git(*args):
@@ -120,6 +122,24 @@ def log_tail(path):
 def log_ends_with(path, text):
     tail = log_tail(path)
     return None if tail is None else text in tail
+
+
+def vm_result(path, commit, old):
+    """Require the bench's own comparison line, and a full check's verdict."""
+    try:
+        lines = (Path(MAIN) / path).read_text(errors="replace").splitlines()
+    except FileNotFoundError:
+        return None
+    title = re.compile(r"check: BLAKE3-Servil's .+ \(([0-9a-f]{12})\) against .+ \(([0-9a-f]{12})\)")
+    comparisons = [m.groups() for line in lines if (m := title.fullmatch(line))]
+    if len(comparisons) != 1:
+        return False
+    candidate, baseline = comparisons[0]
+    if candidate != commit[:12] or baseline == candidate or (old is not None and baseline != old[:12]):
+        return False
+    if any(line.startswith("check: measuring the ") for line in lines):
+        return False
+    return lines[-1:] == [VM_OK] and "regress: no cell slower" in lines
 
 
 def mutation_crate(lines, commit):
@@ -183,6 +203,10 @@ def ci_builds(run, into):
                         f.write(files.read(name))
 
 
+def version_at(commit):
+    return re.search(r'(?m)^version = "([^"]+)"', git("show", f"{commit}:Cargo.toml")).group(1)
+
+
 def artifacts_result(commit, run=None):
     """The release's artifacts in this checkout's dist/, by
     release_artifacts.directory: True where every one is there and a clean
@@ -191,9 +215,8 @@ def artifacts_result(commit, run=None):
     `run`: the commit's dispatched CI run, where it has completed. Each
     b3sum program and each crate must be, byte for byte, the one that run
     made: two builders, ours and GitHub's, and neither's word alone."""
-    version = re.search(r'(?m)^version = "([^"]+)"', git("show", f"{commit}:Cargo.toml")).group(1)
     try:
-        release = release_artifacts.Release("v" + version, ROOT, commit)
+        release = release_artifacts.Release("v" + version_at(commit), ROOT, commit)
     except release_artifacts.NotARelease as e:
         return False, f"{e} (python3 tools/gen-ver.py X.Y.Z makes a version commit)"
     dist = os.path.join(ROOT, "dist")
@@ -244,9 +267,32 @@ def previous_release(commit):
     return git("describe", "--tags", "--abbrev=0", *matches, commit)
 
 
+def named_previous(commit, tag):
+    """An explicit baseline must be a tag of a real, older stamp."""
+    try:
+        old = git("rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}")
+    except subprocess.CalledProcessError as e:
+        raise release_artifacts.NotARelease(f"no local tag {tag}; fetch the published release tag") from e
+    release = release_artifacts.Release(tag, ROOT, old)
+    if release.version != version_at(old):
+        raise release_artifacts.NotARelease(f"{tag} and its Cargo.toml version disagree")
+    triplet = lambda version: tuple(int(n) for n in version.split("+", 1)[0].split("."))
+    if old == commit or triplet(release.version) >= triplet(version_at(commit)):
+        raise release_artifacts.NotARelease(f"{tag} is not older than the candidate")
+    return tag
+
+
 def main():
-    commit = git("rev-parse", sys.argv[1] if len(sys.argv) > 1 else "main")
-    previous = previous_release(commit)
+    parser = argparse.ArgumentParser(description="Check the evidence for a BLAKE3-Servil release.")
+    parser.add_argument("commit", nargs="?", default="main")
+    parser.add_argument("--previous", metavar="TAG", help="the published baseline tag, when it is not on the candidate's line")
+    args = parser.parse_args()
+    commit = git("rev-parse", args.commit)
+    try:
+        previous = named_previous(commit, args.previous) if args.previous else previous_release(commit)
+    except release_artifacts.NotARelease as e:
+        parser.error(str(e))
+    old = git("rev-parse", previous + "^{commit}") if previous else None
     results = []
     built = None
 
@@ -283,7 +329,7 @@ def main():
         j = json.loads(Path(job).read_text())
         if (j.get("type") == "check" and j.get("cells") == "all"
                 and j.get("new_commit") == commit
-                and (previous is None or j.get("old_commit") == git("rev-parse", previous))):
+                and (old is None or j.get("old_commit") == old)):
             mac = v["status"]
             # A check on battery measures the efficiency cores' clock, not
             # the machine's (job 351; jobs 1696 and 1697 passed so, #202):
@@ -299,8 +345,10 @@ def main():
          + (f" (the last one: {mac})" if mac in ("timed out", "no verdict") else "")
          + (f" (the last one ran off AC power: {mac_power}; run it again plugged in)" if mac_power else ""))
 
-    step("VM check against the previous release", log_ends_with(f"tmp/night/check-release-vm-{commit[:12]}.log", "no cell slower"),
-         f"(cd ../bench-hashes && cargo run --release -- check --fork {ROOT} --against {previous or '<the main line before this release>'} --cells all [--old-bench <bench commit>]) > tmp/night/check-release-vm-{commit[:12]}.log")
+    vm_log = f"tmp/night/check-release-vm-{commit[:12]}.log"
+    step("VM check against the previous release", vm_result(vm_log, commit, old),
+         f"(cd ../bench-hashes && cargo run --locked --release -- check --fork {ROOT} --against {previous or '<the main line before this release>'} --cells all) > {vm_log} 2>&1"
+         f" && printf '%s\\n' '{VM_OK}' >> {vm_log}")
     step("full mutation run, core and threads", mutation_result(f"tmp/night/mutants-{commit[:12]}.log", commit),
          f"python3 tools/mutants/check.py --whole > tmp/night/mutants-{commit[:12]}.log, the commit checked out (both crates; --whole, since the default covers the change since origin/next)")
     step("check-builds", log_ends_with(f"tmp/night/check-builds-{commit[:12]}.log", "every build passes"),

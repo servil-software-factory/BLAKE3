@@ -71,7 +71,7 @@ class CI(unittest.TestCase):
 
 
 class ReleaseEvidence(unittest.TestCase):
-    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, "")):
+    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, ""), vm_log=None, previous=None):
         jobs = [job(), job()] if ci_jobs is None else ci_jobs
         def git(*args):
             if args[0] == "rev-parse":
@@ -106,7 +106,9 @@ class ReleaseEvidence(unittest.TestCase):
             logs = root / "tmp/night"
             logs.mkdir(parents=True)
             candidate = (git_override or git)("rev-parse", "candidate")[:12]
-            for name, text in [("check-release-vm", "no cell slower"), ("check-builds", "every build passes"), ("publish-dry-run", "publish-dry-run: ok")]:
+            if vm_log is None:
+                vm_log = f"check: BLAKE3-Servil's working tree ({candidate}) against {old} ({old[:12]})\nregress: no cell slower\n{check.VM_OK}"
+            for name, text in [("check-release-vm", vm_log), ("check-builds", "every build passes"), ("publish-dry-run", "publish-dry-run: ok")]:
                 (logs / f"{name}-{candidate}.log").write_text(text + "\n")
             if mutation_log is not None:
                 # A real run prints the full SHA for each crate, even when this
@@ -117,9 +119,10 @@ class ReleaseEvidence(unittest.TestCase):
                         + "mutants: 2 crates took 99 s in all\n")
                 (logs / f"mutants-{candidate}.log").write_text(text.replace(HEAD, identity))
             output = io.StringIO()
+            args = ["release-check.py", "candidate"] + (["--previous", previous] if previous else [])
             with patch.object(check, "MAIN", tmp), patch.object(check, "EXCHANGE", str(root / "mac-runner")), patch.object(check, "git", git_override or git), \
                  patch.object(check, "github", github), patch.object(check, "artifacts_result", lambda commit, run=None: artifacts), \
-                 patch("sys.argv", ["release-check.py", "candidate"]), contextlib.redirect_stdout(output):
+                 patch("sys.argv", args), contextlib.redirect_stdout(output):
                 with self.assertRaises(SystemExit) as caught:
                     check.main()
             return caught.exception.code, output.getvalue()
@@ -168,6 +171,21 @@ class ReleaseEvidence(unittest.TestCase):
     def test_wrong_commits_not_pass(self):
         self.assertEqual(self.run_gate(new="c" * 40)[0], 1)
         self.assertEqual(self.run_gate(old="c" * 40)[0], 1)
+
+    def test_vm_verdict_needs_the_right_comparison_and_full_scope(self):
+        good = f"check: BLAKE3-Servil's working tree ({HEAD[:12]}) against {OLD} ({OLD[:12]})\n"
+        for header in ("", good.replace(OLD[:12], "c" * 12), good.replace(HEAD[:12], "d" * 12), good + "check: measuring the 7 named points\n"):
+            with self.subTest(header=header):
+                code, output = self.run_gate(vm_log=header + f"regress: no cell slower\n{check.VM_OK}")
+                self.assertEqual(code, 1, output)
+                self.assertIn("FAIL  VM check against the previous release", output)
+
+    def test_a_first_stage_vm_reading_is_not_a_verdict(self):
+        start = f"check: BLAKE3-Servil's working tree ({HEAD[:12]}) against {OLD} ({OLD[:12]})\n"
+        text = start + "regress: no cell slower\nregress: suspects: a cell to repeat"
+        code, output = self.run_gate(vm_log=text)
+        self.assertEqual(code, 1, output)
+        self.assertIn("FAIL  VM check against the previous release", output)
 
     def test_mutation_timeout_mismatch_is_no_verdict(self):
         text = f"mutants: BLAKE3-Servil at {HEAD}\nmutants: the whole run\nmutants: 12 survive, each known and explained\nmutants: the time-outs differ from timeouts-x86_64.txt (no verdict on those mutants)\n"
@@ -384,6 +402,35 @@ class PreviousRelease(unittest.TestCase):
         code, output = ReleaseEvidence.run_gate(self, new=self.new, old=self.old, git_override=self.git)
         self.assertEqual(code, 1)
         self.assertIn("no previous release: read README.md", output)
+
+    def test_an_explicit_patch_tag_can_be_on_a_separate_line(self):
+        self.git("checkout", "-qb", "patch-line", self.old)
+        manifest = self.repo / "Cargo.toml"
+        manifest.write_text('[package]\nversion = "0.3.1+dev"\n')
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-qm", "patch code")
+        version = "0.3.1+" + self.git("rev-parse", "HEAD")
+        manifest.write_text(f'[package]\nversion = "{version}"\n')
+        self.git("commit", "-qam", "stamp patch")
+        tag = "v" + version
+        self.git("tag", "-a", tag, "-m", "patch release")
+        patch_commit = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "candidate")
+        manifest.write_text('[package]\nversion = "0.4.0+dev"\n')
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-qm", "candidate version")
+        head = self.git("rev-parse", "HEAD")
+
+        with patch.object(check, "ROOT", str(self.repo)):
+            code, output = ReleaseEvidence.run_gate(self, new=head, old=patch_commit, git_override=self.git, previous=tag)
+            self.assertEqual(code, 0, output)
+            self.assertIn(f"rewritten since {tag}", output)
+            with patch.object(check, "git", self.git):
+                self.assertEqual(check.previous_release(head), "v0.3.0+fixture")
+                with self.assertRaisesRegex(check.release_artifacts.NotARelease, "no local tag candidate"):
+                    check.named_previous(head, "candidate")
+                with self.assertRaisesRegex(check.release_artifacts.NotARelease, "not older"):
+                    check.named_previous(patch_commit, tag)
 
     def test_release_on_second_parent_is_reachable(self):
         self.git("checkout", "-qb", "release-side", self.old)
