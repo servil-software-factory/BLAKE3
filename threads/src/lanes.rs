@@ -2601,8 +2601,9 @@ impl Pool {
     /// finds nothing.
     fn serve(&self, me: usize) -> ! {
         let mut placed = false;
+        let mut turn = sources::Turn::default();
         loop {
-            if sources::run_one() {
+            if sources::run_one(&mut turn) {
                 continue;
             }
             if sources::open() && spin_for_work() {
@@ -2981,18 +2982,36 @@ pub(crate) mod sources {
     }
 
     /// The first registered source for which `f` says yes.
-    fn find(mut f: impl FnMut(&'static Source) -> bool) -> bool {
-        let mut active = ACTIVE.load(Ordering::SeqCst);
+    fn find(f: impl FnMut(&'static Source) -> bool) -> bool {
+        find_from(0, f).is_some()
+    }
+
+    /// The slot of the first registered source for which `f` says yes, in
+    /// a walk of the slots from `start` up and then of those below it.
+    fn find_from(start: usize, mut f: impl FnMut(&'static Source) -> bool) -> Option<usize> {
+        let mut active = ACTIVE.load(Ordering::SeqCst).rotate_right(start as u32);
         while active != 0 {
-            let slot = active.trailing_zeros() as usize;
+            let slot = (active.trailing_zeros() as usize + start) % SLOTS;
             active &= active - 1;
             let ptr = REGISTERED[slot].load(Ordering::Acquire);
             // Sound: sources are never freed (they are recycled).
             if !ptr.is_null() && f(unsafe { &*ptr }) {
-                return true;
+                return Some(slot);
             }
         }
-        false
+        None
+    }
+
+    /// The items a worker takes lowest slot first before it takes one in
+    /// turn ([`run_one`]).
+    pub(crate) const TURN: u32 = 16;
+
+    /// A worker's count toward its next turn, and where that turn's walk
+    /// begins.
+    #[derive(Default)]
+    pub(crate) struct Turn {
+        taken: u32,
+        cursor: u32,
     }
 
     /// Run one item from any source: whether there was one. The walk
@@ -3007,18 +3026,37 @@ pub(crate) mod sources {
     /// the other's pieces before its last one finishes. When two or more
     /// wait and a worker is parked, this one wakes the next first (the
     /// chain).
-    pub(crate) fn run_one() -> bool {
-        run_one_from(serve)
+    ///
+    /// That argument is of calls that end. A Pipeline that streams
+    /// publishes its next item before its last is taken, so a source in a
+    /// higher slot could wait behind it for as long as it streamed (a
+    /// 1 MiB message of a second Pipeline, waited for under an executor
+    /// that sleeps: from 9 ms to 8 s, where alone it took 50 us; the
+    /// audits of November 19). So after every [`TURN`] items a worker
+    /// takes one in turn: that walk begins where its last such walk ended,
+    /// and goes round. One source alone is served as before, and several
+    /// each get a share of every worker that their slot does not decide.
+    pub(crate) fn run_one(turn: &mut Turn) -> bool {
+        run_one_from(turn, serve)
     }
 
     /// [`run_one`]'s walk, with `serve` what is done with the item taken
     /// (the test's way in: a recording `serve`).
-    fn run_one_from(mut serve: impl FnMut(&'static Source, Item)) -> bool {
-        find(|source| {
+    fn run_one_from(turn: &mut Turn, mut serve: impl FnMut(&'static Source, Item)) -> bool {
+        let in_turn = turn.taken >= TURN;
+        let start = if in_turn { turn.cursor as usize } else { 0 };
+        let taken_from = find_from(start, |source| {
             let Some(item) = source.take() else { return false };
             serve(source, item);
             true
-        })
+        });
+        let Some(slot) = taken_from else { return false };
+        if in_turn {
+            *turn = Turn { taken: 0, cursor: ((slot + 1) % SLOTS) as u32 };
+        } else {
+            turn.taken += 1;
+        }
+        true
     }
 
     /// Hash `item` of `source` on this thread, waking the next worker first
@@ -3180,7 +3218,9 @@ pub(crate) mod sources {
         /// served a, a, a, b, b, b (run_one's own walk, its item recorded,
         /// not run). The order is the pool's by choice (run_one's comment:
         /// serving them in turn cost the shared cells 6-16%, #241), and a
-        /// test states it so a change to it is a decision.
+        /// test states it so a change to it is a decision. After TURN
+        /// items a worker takes one in turn, whichever slot it is in: the
+        /// second half.
         #[test]
         fn test_a_worker_serves_the_lowest_source_until_it_is_empty() {
             // A pool of one, so no worker starts: the sources below hold
@@ -3195,7 +3235,8 @@ pub(crate) mod sources {
                 s.finish.published.store(3, Ordering::SeqCst);
             }
             let mut served = Vec::new();
-            while run_one_from(|source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
+            let mut turn = Turn::default();
+            while run_one_from(&mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
             let (a, b) = (slots[0], slots[1]);
             assert_eq!(served, [a, a, a, b, b, b], "the lower slot whole, then the higher");
             // An item published to the lower slot meanwhile is served before
@@ -3203,9 +3244,40 @@ pub(crate) mod sources {
             sources[0].finish.published.store(4, Ordering::SeqCst);
             sources[1].finish.published.store(5, Ordering::SeqCst);
             served.clear();
-            while run_one_from(|source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
+            while run_one_from(&mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
             assert_eq!(served, [a, b, b]);
-            for slot in slots {
+            // A lower source that is never empty (it streams) does not keep
+            // the higher ones waiting for ever: after every TURN items the
+            // worker takes one in turn, round the sources that hold any.
+            let third: &'static Source = Box::leak(Box::new(Source::new()));
+            let c = third.register().expect("a free slot");
+            let all = [sources[0], sources[1], third];
+            let slot_of = |source: &Source| [a, b, c][all.iter().position(|s| core::ptr::eq(*s, source)).unwrap()];
+            // A claim takes half of what waits (run_len, in a pool of one
+            // thread): enough for every claim below to find some.
+            let many = 1 << 62;
+            for (source, at) in all.iter().zip([4, 5, 0]) {
+                source.finish.published.store(at + many, Ordering::SeqCst);
+            }
+            let mut turn = Turn::default();
+            served.clear();
+            for _ in 0..3 * (TURN as usize + 1) {
+                assert!(run_one_from(&mut turn, |source, _| served.push(slot_of(source))));
+            }
+            let lowest = a.min(b).min(c);
+            let mut in_turn = Vec::new();
+            for (i, &slot) in served.iter().enumerate() {
+                if i % (TURN as usize + 1) == TURN as usize {
+                    in_turn.push(slot);
+                } else {
+                    assert_eq!(slot, lowest, "item {i} is the lowest slot's");
+                }
+            }
+            in_turn.sort_unstable();
+            let mut each = [a, b, c];
+            each.sort_unstable();
+            assert_eq!(in_turn, each, "three turns serve the three sources once each");
+            for slot in [a, b, c] {
                 Source::unregister(slot);
             }
         }
