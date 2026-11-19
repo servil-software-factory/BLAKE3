@@ -35,6 +35,8 @@ class Versions(unittest.TestCase):
             (src / "lib.rs").write_text("")
         (self.root / "tools").mkdir()
         shutil.copyfile(SCRIPT, self.root / "tools/gen-ver.py")
+        # The stamp reads its own commit as the release check will.
+        shutil.copyfile(SCRIPT.with_name("release_artifacts.py"), self.root / "tools/release_artifacts.py")
         (self.root / "CHANGELOG.md").write_text("# blake3-servil 0.8.0+" + "a" * 40 + ", against official BLAKE3\n")
         (self.root / "capi/b3.h").write_text(f'#define B3_VERSION "{DEV}"\n')
         self.run_command("cargo", "generate-lockfile", "--offline", "--manifest-path", "b3sum/Cargo.toml")
@@ -179,6 +181,40 @@ class Versions(unittest.TestCase):
         # is not one the pattern knows, and nothing is stamped.
         notes.write_bytes(b"# blake3-servil 0.8.0+dev\r\n\r\nFaster.\r\n")
         self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+
+    def files(self):
+        return {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts and "__pycache__" not in p.parts}
+
+    def test_a_stamp_the_release_check_would_refuse_is_undone(self):
+        # Cargo writes b3sum's lock anew and drops a comment in it: a line
+        # removed, which the release check allows no version commit. The
+        # check before the stamp passes; the stamp made its commit and its
+        # tag, and the release check then refused them.
+        lock = self.root / "b3sum/Cargo.lock"
+        lock.write_text(lock.read_text() + "# a note someone left\n")
+        self.git("commit", "-qam", "a comment in b3sum's lock")
+        self.stamp("--check")
+        head, before = self.git("rev-parse", "HEAD"), self.files()
+        said = self.stamp("0.9.0", succeeds=False)
+        self.assertIn("the stamp is undone", said)
+        self.assertIn("b3sum/Cargo.lock has lines added or removed", said)
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual(self.git("tag", "-l"), "")
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
+        self.assertEqual(self.files(), before)
+
+    def test_a_stamp_writes_nothing_where_a_line_to_replace_is_missing(self):
+        # The header's line is not as the stamp expects (carriage returns):
+        # the manifests before it were written by then, and the stamp left
+        # them so.
+        (self.root / "capi/b3.h").write_bytes(b'#define B3_VERSION "' + DEV.encode() + b'"\r\n')
+        self.git("commit", "-qam", "a header with carriage returns")
+        before = self.files()
+        said = self.stamp("0.9.0", succeeds=False)
+        self.assertIn("capi/b3.h: no line matches", said)
+        self.assertIn("nothing is written", said)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.git("tag", "-l"), "")
 
     def test_check_holds_a_version_commits_title_to_its_release(self):
         self.stamp("99.2.0")

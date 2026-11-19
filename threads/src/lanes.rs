@@ -507,9 +507,13 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 /// it takes words: `std::io::stderr` takes a lock, and a caller that
 /// holds it while it waits for this thread would wait for ever; so would
 /// a write to a full pipe whose reader waits for that caller. A reader
-/// that is only behind has that tenth of a second to make room. (A pipe
-/// that has room for a line when asked has it for these words, unless
-/// another writer fills it between the asking and the writing.)
+/// that is only behind has that tenth of a second to make room.
+///
+/// The tenth of a second bounds the asking, not the writing. A
+/// descriptor that took words when asked may not when written to: another
+/// writer filled the pipe in between, a terminal's flow was stopped, a
+/// file's storage waits. The write then waits as any write does, and the
+/// end with it.
 ///
 /// A panic is not this: it goes through the process's panic hook before
 /// anything here runs, and the standard hook writes through
@@ -535,11 +539,11 @@ pub(crate) fn stop(why: &str) -> ! {
     }
     let mut stderr = PollFd { fd: 2, events: POLLOUT, revents: 0 };
     // Sound: one PollFd, written by poll, which returns within its 100 ms.
-    // What poll returns is not asked: a poll that fails leaves `revents`
-    // zero, and one that reports an error beside the room to write (a
-    // pipe nobody reads) has nobody to tell.
-    let _ = unsafe { poll(&mut stderr, 1, 100) };
-    if stderr.revents == POLLOUT {
+    let ready = unsafe { poll(&mut stderr, 1, 100) };
+    // One descriptor ready, and for writing alone: a poll that failed or
+    // timed out says nothing of `revents`, and one that reports an error
+    // beside the room to write (a pipe nobody reads) has nobody to tell.
+    if (ready, stderr.revents) == (1, POLLOUT) {
         // Sound: `why` is `len` readable bytes. Whether they were written
         // changes nothing here.
         let _ = unsafe { write(2, why.as_ptr().cast(), why.len()) };

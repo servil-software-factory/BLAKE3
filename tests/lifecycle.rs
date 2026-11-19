@@ -71,13 +71,15 @@ enum Step {
     CloneFrom,
     Turn,
     TurnWith,
+    TurnSome,
+    TurnNone,
     Finish,
     Debug,
     Xof,
     New,
 }
 use Step::*;
-const STEPS: [Step; 14] = [Update, With, Reader, Write, WriteAll, Flush, Clone, CloneFrom, Turn, TurnWith, Finish, Debug, Xof, New];
+const STEPS: [Step; 16] = [Update, With, Reader, Write, WriteAll, Flush, Clone, CloneFrom, Turn, TurnWith, TurnSome, TurnNone, Finish, Debug, Xof, New];
 
 struct Walk {
     h: Vec<Hasher>,
@@ -125,6 +127,22 @@ impl Walk {
             Turn | TurnWith => {
                 let pieces: Vec<_> = (0..n).map(|k| ((i + k) % n, &bytes[k.min(bytes.len())..])).chain([(i, &bytes[..bytes.len().min(3)])]).collect();
                 if matches!(op, Turn) {
+                    update_each(&mut self.h, &pieces)
+                } else {
+                    update_each_with(&mut self.h, &pieces, 16384, &TreeHasher::subtree_halves)
+                }
+                for (k, b) in pieces {
+                    self.m[k].bytes.extend_from_slice(b);
+                }
+            }
+            // A turn that names some of the hashers, and one that names
+            // none: the others hold what they held. (Every turn named
+            // every hasher until an auditor's fault, an `update_each`
+            // that fed a hasher its pieces did not name, passed.)
+            TurnSome | TurnNone => {
+                let pieces: Vec<_> =
+                    if matches!(op, TurnSome) { (0..n).step_by(2).map(|k| ((i + k) % n, &bytes[k.min(bytes.len())..])).collect() } else { vec![] };
+                if i % 2 == 0 {
                     update_each(&mut self.h, &pieces)
                 } else {
                     update_each_with(&mut self.h, &pieces, 16384, &TreeHasher::subtree_halves)
@@ -184,11 +202,14 @@ fn short_histories_preserve_every_message() {
         }
     }
 }
-/// Every operation after every other, after every pair and after every
-/// three: the 14 steps to depth four (38,416 histories), on three hashers
-/// of three modes, with lengths on both sides of the 16 KiB group. An
-/// operation that leaves a value which a later one cannot take shows
-/// here, whichever they are.
+/// Every step after every other, after every pair and after every three:
+/// the 16 steps to depth four (65,536 sequences), on three hashers (two
+/// plain and one keyed at the start; a step makes new ones in the other
+/// modes), the first step on hasher 0, the second on 1, and so on, with
+/// lengths on both sides of the 16 KiB group. A step that leaves a value
+/// which a later one cannot take shows here, whichever they are. These
+/// are the sequences of this file's steps, not of every argument each
+/// operation takes.
 #[test]
 fn every_four_operations_in_a_row_preserve_every_message() {
     initialize();

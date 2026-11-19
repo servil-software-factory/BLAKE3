@@ -21,18 +21,25 @@ fault.)
 
 The copy holds the files Git knows or would add, and the lock files, as
 they are in the working tree when the run begins: what is saved to the
-tree during a run is neither tested nor touched. It lies in the build
-directory (pipeline-model-controls/ in CARGO_TARGET_DIR, or in target/
-here), which Git ignores, and each run brings it up to date. Between
-runs it may hold the last fault planted; nothing but this script builds
-from it. One run at a time uses a copy: a second run waits for the first.
+tree during a run is neither tested nor touched. (The tree is read
+while others may write it. A run that finds a file changed under its
+reading stops and says so.) It lies in the build directory
+(pipeline-model-controls/ in CARGO_TARGET_DIR, or in target/ here),
+which Git ignores, with a build directory of its own beside it, so that
+no build of the tree can take a build of the copy for its own. Each run
+makes the copy anew. Between runs it holds the last fault planted;
+nothing but this script builds from it. One run at a time uses it: a
+second run waits for the first, and a run ends what an earlier run that
+was killed outright left running there.
 """
 
 import fcntl
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE = os.path.join("threads", "src", "pipeline.rs")
@@ -96,20 +103,22 @@ FAULTS = [
 ]
 
 
-def build_directory():
-    """Where the copy and its builds go: the build directory in use, so
-    that the crates of others built there for the model serve the copy too."""
-    return os.path.abspath(os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target"))
+def home():
+    """Where the copy and its builds go: in the build directory in use."""
+    return os.path.join(os.path.abspath(os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")), "pipeline-model-controls")
 
 
 def model_passes(copy):
-    env = {**os.environ, "RUSTFLAGS": "--cfg shuttle", "CARGO_TARGET_DIR": build_directory()}
+    """Whether the model passes on the copy as it is now, and what it said."""
+    env = {**os.environ, "RUSTFLAGS": "--cfg shuttle", "CARGO_TARGET_DIR": os.path.join(home(), "target")}
     run = None
     try:
         # In a process group of its own: a stop of this script stops the
         # build and the model with it.
+        # --nocapture: the model names each scenario as it begins, and a
+        # process that the Pipeline stops takes what was captured with it.
         run = subprocess.Popen(
-            ["cargo", "test", "--locked", "-q", "--release", "--test", "shuttle_pipeline"],
+            ["cargo", "test", "--locked", "-q", "--release", "--test", "shuttle_pipeline", "--", "--nocapture"],
             cwd=os.path.join(copy, "threads"), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         stdout, stderr = run.communicate()
     except BaseException:
@@ -128,52 +137,111 @@ def model_passes(copy):
     began = "running 1 test" in stdout
     if run.returncode != 0 and not began:
         sys.exit(f"pipeline_model_controls: the model did not build or run:\n{stdout[-2000:]}\n{stderr[-2000:]}")
-    return run.returncode == 0, stdout[-3000:] + stderr[-3000:]
+    return run.returncode == 0, stdout + stderr
+
+
+def how_it_failed(said):
+    """Where and how a run of the model failed, for the reader of this
+    script's lines: the scenario it was in (the model names each as it
+    begins) and the failure's kind. The verdict is the model's exit
+    alone; this says whether the fault was caught for the reason its
+    name gives."""
+    scenarios = [line.split(": ", 1)[1].strip() for line in said.splitlines() if line.startswith("shuttle_pipeline: ")]
+    lines = said.splitlines()
+    at = [n for n, line in enumerate(lines) if "panicked at" in line]
+    stops = [line.strip() for line in lines if line.startswith("blake3-servil: ")]
+    if "deadlock!" in said:
+        how = "a deadlock"
+    elif at and at[0] + 1 < len(lines):
+        how = lines[at[0] + 1].strip()[:100]
+    elif stops:
+        how = "the Pipeline stopped the process: " + stops[-1][len("blake3-servil: "):][:100]
+    else:
+        how = "the process ended with no word of the model's"
+    return f"in {scenarios[-1] if scenarios else 'no scenario'}: {how}"
 
 
 def tree_files():
-    """The tree's files, as paths from its root: what Git knows or would
-    add, and the lock files; those that are there now. Nothing of the
-    build directory's, should it lie in the tree under a name Git does
-    not ignore: the copy would hold a copy of itself."""
+    """The tree's files and symbolic links, as paths from its root: what
+    Git knows or would add, and the lock files; those that are there now.
+    Nothing of the build directory's, should it lie in the tree under a
+    name Git does not ignore: the copy would hold a copy of itself."""
     listed = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT, check=True, stdout=subprocess.PIPE).stdout
     names = {os.fsdecode(name) for name in listed.split(b"\0") if name} | set(LOCK_FILES)
-    builds = build_directory() + os.sep
-    return sorted(name for name in names if os.path.isfile(os.path.join(ROOT, name)) and not os.path.join(ROOT, name).startswith(builds))
+    builds = os.path.dirname(home()) + os.sep
+    there = lambda path: os.path.islink(path) or os.path.isfile(path)
+    return sorted(name for name in names if there(os.path.join(ROOT, name)) and not os.path.join(ROOT, name).startswith(builds))
 
 
-def write(path, data):
-    """Write the file at this moment. Cargo takes a source no newer than
-    its last build for unchanged: a file whose bytes change is written
-    anew, and never given an older file's time."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(data)
+def end_earlier_runs(copy):
+    """End what a run that was killed outright left running in the copy
+    (its build, its model): they would read the copy while this run makes
+    it anew, and their builds would land among this run's. They are known
+    by their working directory, which only this script's builds have.
+    Where the system has no /proc to ask, nothing is looked for."""
+    if not os.path.isdir("/proc"):
+        return
+    for _ in range(100):
+        found = False
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit() or int(entry) == os.getpid():
+                continue
+            try:
+                cwd = os.readlink(f"/proc/{entry}/cwd")
+            except OSError:
+                continue
+            if cwd == copy or cwd.startswith(copy + os.sep):
+                found = True
+                try:
+                    os.kill(int(entry), signal.SIGKILL)
+                except OSError:
+                    pass
+        if not found:
+            return
+        time.sleep(0.05)
+    sys.exit(f"pipeline_model_controls: processes of an earlier run are still at work in {copy}")
 
 
-def bring_up_to_date(copy):
-    """Make the copy hold the tree's files, byte for byte, and no other
-    file. A file whose bytes are the tree's already is left as it is, so
-    that Cargo builds again only what changed."""
+def make_copy(copy, read=None):
+    """Make the copy anew: the tree's files, byte for byte, with their
+    modes, and its symbolic links as links. Anew, not brought up to date:
+    whatever an earlier run or an earlier tree left there is gone, and
+    every file is newer than every build made from the copy before
+    (Cargo takes a source no newer than its last build for unchanged).
+    `read` is called with each file's name after it is read (the tests'
+    way of saving a file while the copy is made)."""
+    if os.path.lexists(copy):
+        shutil.rmtree(copy)
     names = tree_files()
+    seen = {}
     for name in names:
-        with open(os.path.join(ROOT, name), "rb") as f:
+        source, path = os.path.join(ROOT, name), os.path.join(copy, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.islink(source):
+            os.symlink(os.readlink(source), path)
+            continue
+        was = os.stat(source)
+        with open(source, "rb") as f:
             data = f.read()
-        path = os.path.join(copy, name)
+        if read:
+            read(name)
+        with open(path, "wb") as f:
+            f.write(data)
+        os.chmod(path, was.st_mode & 0o777)
+        seen[name] = (was.st_mtime_ns, was.st_size)
+    # The tree is not held still while it is read. A file written
+    # meanwhile may have been taken half-written, or beside files of an
+    # earlier moment: no tree that ever was.
+    now = {}
+    for name in seen:
         try:
-            with open(path, "rb") as f:
-                same = f.read() == data
+            is_now = os.stat(os.path.join(ROOT, name))
+            now[name] = (is_now.st_mtime_ns, is_now.st_size)
         except OSError:
-            same = False
-        if not same:
-            write(path, data)
-        os.chmod(path, os.stat(os.path.join(ROOT, name)).st_mode & 0o777)
-    wanted = set(names)
-    for folder, _, files in os.walk(copy):
-        for file in files:
-            path = os.path.join(folder, file)
-            if os.path.relpath(path, copy) not in wanted:
-                os.remove(path)
+            now[name] = None
+    changed = sorted(name for name in seen if now[name] != seen[name])
+    if changed or tree_files() != names:
+        sys.exit("pipeline_model_controls: the tree changed while it was copied" + (f" ({', '.join(changed[:3])})" if changed else "") + ": nothing was built; run this again")
 
 
 def stopped(signum, _frame):
@@ -186,12 +254,11 @@ def main():
         sys.exit("pipeline_model_controls: takes no argument")
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stopped)
-    home = os.path.join(build_directory(), "pipeline-model-controls")
-    copy = os.path.join(home, "tree")
-    os.makedirs(copy, exist_ok=True)
-    # One run at a time plants faults in a copy. The lock ends with the
+    copy = os.path.join(home(), "tree")
+    os.makedirs(home(), exist_ok=True)
+    # One run at a time plants faults in the copy. The lock ends with the
     # process, however it ends.
-    with open(os.path.join(home, "lock"), "w") as lock:
+    with open(os.path.join(home(), "lock"), "w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -201,7 +268,8 @@ def main():
 
 
 def controls(copy):
-    bring_up_to_date(copy)
+    end_earlier_runs(copy)
+    make_copy(copy)
     source = os.path.join(copy, SOURCE)
     with open(source, "rb") as f:
         original = f.read().decode()
@@ -210,13 +278,14 @@ def controls(copy):
             sys.exit(f"pipeline_model_controls: the place of the fault '{name}' is not there once: update this script")
     passes, said = model_passes(copy)
     if not passes:
-        sys.exit(f"pipeline_model_controls: the model fails on the Pipeline as it is:\n{said}")
+        sys.exit(f"pipeline_model_controls: the model fails on the Pipeline as it is:\n{said[-6000:]}")
     missed = []
     for name, find, replace in FAULTS:
-        write(source, original.replace(find, replace).encode())
-        caught = not model_passes(copy)[0]
-        print(f"{'caught' if caught else 'MISSED'}  {name}", flush=True)
-        if not caught:
+        with open(source, "wb") as f:
+            f.write(original.replace(find, replace).encode())
+        passes, said = model_passes(copy)
+        print(f"MISSED  {name}" if passes else f"caught  {name} ({how_it_failed(said)})", flush=True)
+        if passes:
             missed.append(name)
     if missed:
         sys.exit(f"pipeline_model_controls: the model passes {len(missed)} planted faults")

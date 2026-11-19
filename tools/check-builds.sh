@@ -50,10 +50,12 @@ RUSTFLAGS="-D warnings" step cargo nextest run --cargo-quiet --release --manifes
 RUSTFLAGS="-D warnings" step cargo check -q --tests --examples --target x86_64-unknown-linux-gnu
 RUSTFLAGS="-D warnings" step cargo check -q --tests --target x86_64-unknown-linux-gnu --no-default-features
 # A build for any other target stops in build.rs, naming official BLAKE3
-# (#160, #180): Windows, and WebAssembly for the rest. The build script
+# (#160, #180): Windows, WebAssembly for the rest, and x86-64 Linux with
+# pointers of 32 bits (the x32 ABI: the right architecture and system,
+# and sizes this library does not check for). The build script
 # runs even where the target's standard library is absent; the Linux builds
 # above are the control.
-for target in x86_64-pc-windows-msvc wasm32-unknown-unknown; do
+for target in x86_64-pc-windows-msvc wasm32-unknown-unknown x86_64-unknown-linux-gnux32; do
 	step sh -c "cargo check -q --keep-going --target $target 2>&1 | grep -q 'for $target, use official BLAKE3'"
 done
 # A C compiler that cannot assemble the x86-64 kernels stops the build,
@@ -66,10 +68,12 @@ step sh -c 'python3 tools/gen_x86_chunk_root.py | cmp - c/blake3_chunk_root_x86-
 step sh -c 'python3 tools/gen_avx512_32.py | cmp - c/blake3_avx512_32.S'
 step sh -c 'python3 tools/gen_output16.py | cmp - c/blake3_output16.S'
 step sh -c 'python3 tools/gen_output8.py | cmp - c/blake3_output8.S'
-# Both crates document their traits and account for their lifecycle operations.
+# Both crates document their traits and account for their lifecycle
+# operations: with every feature on, so that a trait implementation
+# behind a feature (as 0.9's Zeroize was) is one of those accounted for.
 step python3 tools/test_api.py
 for manifest in Cargo.toml threads/Cargo.toml; do
-    step sh -c 'RUSTC_BOOTSTRAP=1 cargo rustdoc -q --manifest-path "$0" --lib --features serde -- -Z unstable-options --output-format json' "$manifest"
+    step sh -c 'RUSTC_BOOTSTRAP=1 cargo rustdoc -q --manifest-path "$0" --lib --all-features -- -Z unstable-options --output-format json' "$manifest"
 done
 step python3 tools/api.py "$CARGO_TARGET_DIR/doc/blake3_servil_core.json" --check docs/core-api.md
 step python3 tools/api.py "$CARGO_TARGET_DIR/doc/blake3_servil.json" --check

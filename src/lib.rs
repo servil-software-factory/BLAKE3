@@ -1092,7 +1092,7 @@ pub mod thread_support {
 
 /// An alias to distinguish [`context_key`](throughput::context_key) outputs from other keys.
 /// It is a plain byte array, and so are its traits: its `Debug` prints the
-/// key, and its `==` does not run in constant time.
+/// key, and its `==` promises no constant time.
 pub type ContextKey = [u8; KEY_LEN];
 
 /// The most bytes a subtree starting at byte `input_offset` of a message

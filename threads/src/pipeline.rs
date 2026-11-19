@@ -200,10 +200,14 @@ impl Drop for Message {
 ///
 /// # Trait implementations
 ///
-/// - `Drop` stops the process (an abort, not a panic) unless the loan's
-///   hashing has finished, even where no worker has been given it yet or
-///   its Pipeline is gone; once it has finished, the guard may be dropped
-///   before its event is taken.
+/// - `Drop` stops the process (an abort, not a panic) while the loan's
+///   hashing has not finished, even where no worker has been given it yet
+///   or its Pipeline is gone; once it has finished, the guard may be
+///   dropped before its event is taken. The guard reads a count of its
+///   storage's finished work: after its Pipeline was dropped with the
+///   loan still not handed to a worker, and a later Pipeline has used the
+///   same storage, the drop may pass though the loan was never hashed,
+///   and no worker reads its bytes then either.
 #[must_use = "hold the guard until the message's event; dropping an active loan aborts the process"]
 pub struct Lent<'a> {
     completed: &'static AtomicU64,
@@ -826,23 +830,28 @@ process_static! {
 /// hashes: in the calls that hand work over
 /// ([`commit`](Pipeline::commit), [`end`](Pipeline::end),
 /// [`owned`](Pipeline::owned), [`lent`](Pipeline::lent) and
-/// [`batch`](Pipeline::batch)), and, for the short messages that are
-/// gathered into groups, in the next wait ([`ready`](Pipeline::ready),
-/// [`room`](Pipeline::room) or [`message`](Pipeline::message)). So a
-/// short message's event comes only after a wait, there as with
-/// workers, and its [`Lent`] guard is held until then.
+/// [`batch`](Pipeline::batch)), and in the waits
+/// ([`ready`](Pipeline::ready), [`room`](Pipeline::room) and
+/// [`message`](Pipeline::message)). Short messages are gathered into
+/// groups, and a group that is not yet full is hashed by a later call or
+/// by a wait: so a short message's event may come only after `ready` has
+/// been awaited, there as with workers, and its [`Lent`] guard is held
+/// until its event.
 ///
 /// # Memory
 ///
 /// A Pipeline's storage (its Rooms, about 64 KiB each, and its queues) is
-/// kept when the Pipeline is dropped, for a later Pipeline with the same
-/// number of Rooms and no more messages: it is never returned to the
-/// system. So a process whose Pipelines all have the same `Limits` holds
-/// as much as its most Pipelines alive at once, and one that sizes each
-/// Pipeline differently grows with every new size. The storage is not
-/// cleared: a keyed Pipeline's key and the bytes last written to its
-/// Rooms stay in the process's memory until another Pipeline writes over
-/// them, and no call of this crate wipes them.
+/// never returned to the system. It is in use while its Pipeline or any
+/// [`Room`] of that Pipeline is alive, and is then kept for a later
+/// Pipeline of as many Rooms and no more messages. So a process holds as
+/// many storages of a size as it has had in use at once: a Room kept past
+/// its Pipeline's drop keeps that Pipeline's storage, and the next
+/// Pipeline takes another. A process that asks for other numbers of
+/// Rooms, or for more messages than before, is given new storages and
+/// keeps the old. The storage is not cleared: a keyed Pipeline's key and
+/// the bytes last written to its Rooms stay in the process's memory until
+/// another Pipeline writes over them, and no call of this crate wipes
+/// them.
 ///
 /// # Giving up a message
 ///
@@ -857,9 +866,9 @@ process_static! {
 ///   message ended or aborted, and every message's event taken with
 ///   [`next_event`](Pipeline::next_event). Dropped while a worker may
 ///   still be reading its buffers, it stops the whole process. (Dropped
-///   earlier than this rule allows at a moment when no worker is at
-///   work, it drops what it holds, and what it had not hashed is never
-///   hashed.)
+///   earlier than this rule allows at a moment when nothing it has handed
+///   to the pool is unfinished, it drops what it holds, and what it had
+///   not handed over is never hashed.)
 ///
 /// So keep a Pipeline in a task that outlives its clients (one for a
 /// thread's connections, not one a connection), and do not let a
@@ -923,10 +932,11 @@ process_static! {
 ///
 /// # Trait implementations
 ///
-/// - `Drop` stops the process (an abort) if a worker is still hashing one
-///   of its messages; otherwise it drops quietly, with the messages not
-///   yet hashed, the events not taken and their owners, and keeps its
-///   buffers for a later Pipeline.
+/// - `Drop` stops the process (an abort) if work it has handed to the
+///   pool is unfinished, whether a worker is hashing it or it still waits
+///   for one; otherwise it drops quietly, with the messages not yet handed
+///   over, the events not taken and their owners, and keeps its buffers
+///   for a later Pipeline.
 /// - `Send` lets a pipeline move between threads when its tags and owners
 ///   are `Send`, keeping the same messages and tokens.
 pub struct Pipeline<T, B = ()> {
@@ -979,7 +989,8 @@ impl<T> Pipeline<T, ()> {
     /// `limits.rooms` together reach 2^29 - 1 (the Pipeline numbers its
     /// work in 29 bits). Before
     /// [`initialize_multithreaded`](crate::initialize_multithreaded), and
-    /// in a child process forked after it.
+    /// in a child process forked after that call started the pool's
+    /// threads.
     pub fn new(mode: Mode, limits: Limits) -> Self {
         Self::create(mode, limits)
     }
@@ -1189,8 +1200,8 @@ impl<T, B> Pipeline<T, B> {
     ///
     /// # Panics
     ///
-    /// If waiting cannot free a slot: as many messages as
-    /// `Limits.messages` are open, or as many events wait to be taken
+    /// If no slot is free and waiting cannot free one: as many messages
+    /// as `Limits.messages` are open, or as many events wait to be taken
     /// ([`next_event`](Pipeline::next_event)). Only this task could end
     /// one or take one, and it is here.
     #[inline(always)]
@@ -1589,7 +1600,8 @@ impl<T, B> Pipeline<T, B> {
     ///
     /// If `message` is another Pipeline's, or has bytes committed from a
     /// Room already; if `digests` has not one place for each message of
-    /// `batch`.
+    /// `batch`, or `batch`'s bytes are not that many whole slots (blocks
+    /// borrowed by `Batch::from_blocks` that end in a part of a slot).
     pub fn batch(&mut self, message: Message, batch: Batch<'static>, digests: Box<[[u8; OUT_LEN]]>) {
         let (pid, s) = message.take();
         assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
@@ -2226,6 +2238,14 @@ fn prepare_thread() {
 }
 
 /// Drive `future` to completion on the current thread, parking between polls.
+///
+/// A `block_on` may run inside a poll of another on the same thread (a
+/// future whose poll calls a helper built on this function). The two
+/// share the thread's waker, and the inner one may take a wake that was
+/// the outer one's: so when the inner one has slept and been woken, the
+/// outer future is polled once more before it sleeps, whether or not
+/// the wake was its own. A future that runs a `block_on` which sleeps
+/// on every one of its polls is therefore polled again after each.
 ///
 /// # Examples
 ///

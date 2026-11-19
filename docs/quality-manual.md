@@ -914,13 +914,23 @@ these model tests are run with Shuttle's own scheduling.
   makes, then a grouped call that relied on every `Hasher` being one a
   constructor makes. Each had tests of its own. The lifecycle tests
   (`tests/lifecycle.rs`, `threads/tests/lifecycle.rs`) now walk such
-  sequences: every one to a small depth, and long seeded ones, on
-  several values at once, each step compared with official BLAKE3 for
-  every value in play. `tools/api.py --check` refuses a public method
-  or trait implementation of those types that no walk names, and a
-  trait implementation of any public type whose documentation has no
-  sentence for it. A fuzzer guided by coverage over such sequences has
-  not been tried.
+  sequences: every sequence of their steps to a small depth, and long
+  seeded ones, on several values at once. A step is one public
+  operation with a few lengths and neighbours, not every argument it
+  takes. After each step every `Hasher` in play is compared with
+  official BLAKE3, the ones the step did not name included; the
+  Pipeline's walk compares every event with official BLAKE3 and with
+  the order its messages ended in. `tools/api.py --check` refuses a
+  public method or trait implementation of those types that neither
+  walk's list names, and a trait implementation of any public type
+  whose documentation has no sentence for it. Both are lists of names
+  kept complete, for the features the documentation is built with and
+  for the implementations a crate writes for the type itself (not the
+  automatic or blanket ones, nor those for references to it): they
+  make a new operation's author say where it is walked, and do not show
+  that a walk tests what it names. A second model checked that, once,
+  with faults of its own (BLAKE3 #461). A fuzzer guided by coverage
+  over such sequences has not been tried.
 
 ## Timing and secrets
 

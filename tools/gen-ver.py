@@ -37,6 +37,12 @@ import sys
 import tomllib
 from pathlib import Path
 
+# No compiled copy of the module beside it: a stamp needs a clean tree,
+# and must not be what dirties it.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import release_artifacts
+
 
 def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
@@ -154,22 +160,29 @@ def set_version(full, notes=True):
         if not TITLE.fullmatch(title):
             sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> before a stamp replaces it (found {title!r})")
     files = list(PACKAGES.values())
-    for path in files:
-        edit(path, r'^version = ".*"$', f'version = "{full}"')
-    for path, dependency in PINS.items():
-        edit(path, rf'^({dependency} = \{{ version = ")[^"]*', rf"\g<1>={full}")
+    lines = [(path, r'^version = ".*"$', f'version = "{full}"') for path in files]
+    lines += [(path, rf'^({dependency} = \{{ version = ")[^"]*', rf"\g<1>={full}") for path, dependency in PINS.items()]
     if notes:
-        edit("CHANGELOG.md", r"\A" + TITLED + r"(?=[ \t,\n]|\Z)", f"# blake3-servil {full}")
+        lines.append(("CHANGELOG.md", r"\A" + TITLED + r"(?=[ \t,\n]|\Z)", f"# blake3-servil {full}"))
         files.append("CHANGELOG.md")
-    edit("capi/b3.h", r'^#define B3_VERSION ".*"$', f'#define B3_VERSION "{full}"')
+    lines.append(("capi/b3.h", r'^#define B3_VERSION ".*"$', f'#define B3_VERSION "{full}"'))
+    # The release lock names the published packages too, as its
+    # workspace's members: no workspace of theirs is in the repository for
+    # Cargo to update it by.
+    lines += [(RELEASE_LOCK, rf'^(name = "{re.escape(name)}"\nversion = ")[^"]*', rf"\g<1>{full}") for name in PACKAGES if name != "blake3-servil-c"]
+    # Every line to replace is found before any is written: a stamp that
+    # stopped at a file it could not read as it expects (one with carriage
+    # returns before its line feeds, say) had by then written the files
+    # before it.
+    for path, pattern, _ in lines:
+        with open(path, newline="") as f:
+            if not re.search(pattern, f.read(), flags=re.M):
+                sys.exit(f"{path}: no line matches {pattern}; nothing is written")
+    for path, pattern, replacement in lines:
+        edit(path, pattern, replacement)
     # The CLI's tracked lock contains all four published packages.
     subprocess.run(["cargo", "update", "-q", *[a for name in PACKAGES if name != "blake3-servil-c" for a in ("-p", name)]],
                    cwd="b3sum", check=True)
-    # The release lock names them too, as its workspace's members: no
-    # workspace of theirs is in the repository for Cargo to update it by.
-    for name in PACKAGES:
-        if name != "blake3-servil-c":
-            edit(RELEASE_LOCK, rf'^(name = "{re.escape(name)}"\nversion = ")[^"]*', rf"\g<1>{full}")
     files += ["b3sum/Cargo.lock", RELEASE_LOCK, "capi/b3.h"]
     check_copies(full)
     return files
@@ -209,6 +222,16 @@ files = set_version(full)
 # --no-verify: the pre-commit hook's speed check measures code, and this
 # commit changes version strings alone (AGENTS: follow a rule for its purpose).
 git("commit", "-q", "--no-verify", "-m", f"Version {full}", "--", *files)
+# The release check's own reading of a version commit, before the tag
+# names this one: its parent with the version written in, and nothing
+# else. A stamp can write more than that where a tool it runs rewrites a
+# whole file (Cargo's update of b3sum's lock drops a comment there), and
+# the release check then refused a tag that already stood.
+try:
+    release_artifacts.Release(f"v{full}", repo=os.getcwd(), commit=git("rev-parse", "HEAD"))
+except release_artifacts.NotARelease as refused:
+    git("reset", "-q", "--hard", "HEAD^")
+    sys.exit(f"the stamp is undone: no tag is made, and the tree is as it was. {refused}")
 git("tag", f"v{full}")
 print(f"v{full}")
 # The dependency line for the release notes: the release commit by its full

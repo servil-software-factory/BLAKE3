@@ -9,10 +9,10 @@ checkout with a source that holds each fault's place), with a stand-in
 for Cargo that passes on the source as it was and, for a planted fault,
 fails, passes, or never ends, as each test asks: every fault caught, a
 fault missed, a model that fails with no fault, a fault's place gone, a
-file saved to the tree while a run goes on, a run stopped by each signal
-it handles, a run killed outright, two runs at once, and what the copy
-holds from one run to the next. They build nothing and take a second or
-two.
+file saved to the tree while a run goes on and while the copy is made,
+a run stopped by each signal it handles, a run killed outright and what
+it left running, two runs at once, and what the copy holds from one run
+to the next. They build nothing and take a second or two.
 """
 
 import importlib.util
@@ -31,7 +31,7 @@ SCRIPT = os.path.join(TOOLS, "pipeline_model_controls.py")
 # Run in the copy's threads/ as `cargo test ... --test shuttle_pipeline`.
 CARGO = """#!/bin/sh
 echo "running 1 test"
-pwd >> "$CONTROLS_RAN_IN"
+echo "$(pwd) $CARGO_TARGET_DIR" >> "$CONTROLS_RAN_IN"
 cmp -s src/pipeline.rs "$CONTROLS_ORIGINAL" && exit "${CONTROLS_AS_IT_IS:-0}"
 case "$CONTROLS_FAULT" in
 caught) exit 101 ;;
@@ -53,11 +53,16 @@ exit 2
 """
 
 
-def faults():
-    spec = importlib.util.spec_from_file_location("pipeline_model_controls", SCRIPT)
+def script(path=SCRIPT):
+    """The script at `path`, as a module."""
+    spec = importlib.util.spec_from_file_location("pipeline_model_controls", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.FAULTS
+    return module
+
+
+def faults():
+    return script().FAULTS
 
 
 def alive(pid):
@@ -75,11 +80,15 @@ def alive(pid):
 
 
 def files_under(folder):
-    """Every file under the folder: its path from there, bytes and time."""
+    """Every file under the folder: its path from there, bytes and time;
+    for a symbolic link, where it points."""
     found = {}
     for where, _, names in os.walk(folder):
         for name in names:
             path = os.path.join(where, name)
+            if os.path.islink(path):
+                found[os.path.relpath(path, folder)] = (b"a link to " + os.fsencode(os.readlink(path)), os.lstat(path).st_mtime_ns)
+                continue
             with open(path, "rb") as f:
                 found[os.path.relpath(path, folder)] = (f.read(), os.stat(path).st_mtime_ns)
     return found
@@ -172,10 +181,12 @@ class Controls(unittest.TestCase):
         self.assertEqual(run.stdout.count("caught  "), len(faults()))
         self.assertIn(f"fails for each of {len(faults())} planted faults", run.stdout)
         self.assert_untouched()
-        # Every build, the one with no fault included, ran in the copy.
+        # Every build, the one with no fault included, ran in the copy,
+        # into a build directory that is the copy's own.
         with open(self.ran_in) as f:
             ran_in = f.read().split("\n")[:-1]
-        self.assertEqual(ran_in, [os.path.realpath(os.path.join(self.copy, "threads"))] * (1 + len(faults())))
+        home = os.path.realpath(os.path.dirname(self.copy))
+        self.assertEqual(ran_in, [f"{os.path.join(home, 'tree', 'threads')} {os.path.join(home, 'target')}"] * (1 + len(faults())))
 
     def test_a_fault_the_model_passes_fails_the_run(self):
         run = self.run_script("missed")
@@ -224,17 +235,22 @@ class Controls(unittest.TestCase):
                 self.assertFalse(alive(model), "the model's process outlived the stopped run")
 
     def test_a_killed_run_leaves_the_tree_alone_and_the_next_run_is_whole(self):
-        status, said, _ = self.end_during_a_fault(signal.SIGKILL)
+        status, said, self.model = self.end_during_a_fault(signal.SIGKILL)
         self.assertEqual(status, -signal.SIGKILL, said)
         # Nothing could clean up: the fault is still in the copy. The tree never held it.
         self.assertNotEqual(self.copy_source(), self.original)
         self.assert_untouched()
+        # Nor could it stop its model, which runs on in the copy (the
+        # stand-in's, as a build or a model of Cargo's would).
+        self.assertTrue(alive(self.model), "the killed run's model is gone already: this test shows nothing")
         planted_at = os.stat(os.path.join(self.copy, "threads", "src", "pipeline.rs")).st_mtime_ns
         os.remove(self.ran_in)
         run = self.run_script("caught")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn(f"fails for each of {len(faults())} planted faults", run.stdout)
         self.assert_untouched()
+        if os.path.isdir("/proc"):
+            self.assertFalse(alive(self.model), "the next run left the killed run's model at work in the copy")
         # Its first build was of the source as the tree has it, written after the fault was:
         # Cargo would take a file no newer than the fault's build for the fault still.
         with open(self.ran_in) as f:
@@ -265,29 +281,62 @@ class Controls(unittest.TestCase):
         self.write("target/release/built", "ignored: a build's output\n")
         self.write("threads/src/crlf.rs", "// a line that ends in a carriage return and a line feed\r\n")
         os.chmod(os.path.join(self.root, "threads", "Cargo.toml"), 0o755)
-        subprocess.run(["git", "-C", self.root, "add", "threads/Cargo.toml"], check=True)
+        os.symlink("threads/Cargo.toml", os.path.join(self.root, "a-link"))
+        os.symlink("nowhere", os.path.join(self.root, "a-link-to-nothing"))
+        self.write("extra", "a file, for now\n")
+        subprocess.run(["git", "-C", self.root, "add", "threads/Cargo.toml", "a-link"], check=True)
         run = self.run_script("caught")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        tree = {name: file[0] for name, file in self.tree_now().items()}
-        copy = {name: file[0] for name, file in files_under(self.copy).items()}
-        self.assertEqual({name: data for name, data in copy.items() if name != os.path.join("threads", "src", "pipeline.rs")}, {name: data for name, data in tree.items() if name != os.path.join("threads", "src", "pipeline.rs")})
+        source = os.path.join("threads", "src", "pipeline.rs")
+        tree = {name: file[0] for name, file in self.tree_now().items() if name != source}
+        copy = {name: file[0] for name, file in files_under(self.copy).items() if name != source}
+        self.assertEqual(copy, tree)
         self.assertIn("Cargo.lock", copy)
         self.assertIn(os.path.join("threads", "Cargo.lock"), copy)
         self.assertEqual(os.stat(os.path.join(self.copy, "threads", "Cargo.toml")).st_mode & 0o777, 0o755)
-        # The next run: a file that left the tree leaves the copy; a file
-        # that changed is written anew; one that did not keeps its time
-        # (Cargo builds again only what changed).
+        # A link is a link in the copy too, whatever it points at.
+        for link, to in (("a-link", "threads/Cargo.toml"), ("a-link-to-nothing", "nowhere")):
+            self.assertEqual(os.readlink(os.path.join(self.copy, link)), to)
+        # The next run makes the copy anew: a file that left the tree is
+        # gone, a file that became a folder is a folder (and the reverse),
+        # what was left in the copy is gone, and every file is written
+        # again, newer than any build of the run before.
         times = {name: file[1] for name, file in files_under(self.copy).items()}
         os.remove(os.path.join(self.root, "threads", "src", "new.rs"))
-        self.write("threads/Cargo.toml", "# a manifest, changed\n")
+        os.remove(os.path.join(self.root, "extra"))
+        os.mkdir(os.path.join(self.root, "extra"))
+        self.write("extra/file", "a folder now\n")
+        os.remove(os.path.join(self.root, "threads", "src", "crlf.rs"))
+        with open(os.path.join(self.copy, "left-by-someone"), "w") as f:
+            f.write("not the tree's\n")
         run = self.run_script("caught")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         after = files_under(self.copy)
-        self.assertNotIn(os.path.join("threads", "src", "new.rs"), after)
-        self.assertEqual(after[os.path.join("threads", "Cargo.toml")][0], b"# a manifest, changed\n")
-        self.assertGreater(after[os.path.join("threads", "Cargo.toml")][1], times[os.path.join("threads", "Cargo.toml")])
-        for name in ("Cargo.lock", os.path.join("threads", "src", "crlf.rs"), ".gitignore"):
-            self.assertEqual(after[name][1], times[name], f"{name} did not change, and was written again")
+        self.assertEqual({name: file[0] for name, file in after.items() if name != source}, {name: file[0] for name, file in self.tree_now().items() if name != source})
+        self.assertIn(os.path.join("extra", "file"), after)
+        for name in (".gitignore", "Cargo.lock", os.path.join("threads", "Cargo.toml")):
+            self.assertGreater(after[name][1], times[name], f"{name} was not written again")
+
+    def test_a_file_saved_while_the_copy_is_made_stops_the_run(self):
+        # The tree is not held still while it is read: a file saved then
+        # may be taken half-written, or beside files of an earlier moment.
+        controls = script(self.script)
+        copy = os.path.join(self.base, "a-copy")
+
+        def save(name):
+            if name == os.path.join("threads", "Cargo.toml"):
+                self.write("threads/Cargo.toml", "# a manifest, saved while the copy was made\n")
+
+        with self.assertRaises(SystemExit) as stop:
+            controls.make_copy(copy, read=save)
+        self.assertIn("the tree changed while it was copied (threads/Cargo.toml)", str(stop.exception))
+        # And a file added then.
+        with self.assertRaises(SystemExit) as stop:
+            controls.make_copy(copy, read=lambda name: self.write("added-meanwhile", "new\n"))
+        self.assertIn("the tree changed while it was copied", str(stop.exception))
+        # With the tree at rest, the copy is made.
+        controls.make_copy(copy)
+        self.assertTrue(os.path.isfile(os.path.join(copy, "added-meanwhile")))
 
     def test_the_copy_lies_in_the_build_directory_in_use(self):
         builds = os.path.join(self.base, "builds")
@@ -301,7 +350,7 @@ class Controls(unittest.TestCase):
         for _ in range(2):
             run = self.run_script("caught", CARGO_TARGET_DIR=inside)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertFalse(os.path.exists(os.path.join(inside, "pipeline-model-controls", "tree", "builds-here")))
+        self.assertFalse(os.path.lexists(os.path.join(inside, "pipeline-model-controls", "tree", "builds-here")))
 
     def test_an_argument_is_refused(self):
         run = self.run_script("caught", "--put-back")

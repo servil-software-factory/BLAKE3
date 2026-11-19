@@ -6,6 +6,8 @@
                                                          release's assets, crates.io's packages
     ... --rebuilt DIR    each b3sum program and each crate is also, byte for byte, the one in DIR
                          (and the one in each folder inside DIR: a builder's each)
+    ... --builders A,B   with --rebuilt: the builders are the folders A and B inside DIR, and no
+                         others; each must be there, and must hold every crate
     ... --commit COMMIT  the version commit, where its tag is not made yet
 
 TAG is a release's tag, vX.Y.Z+<code commit>: it names the version commit
@@ -367,13 +369,23 @@ def published(release):
         yield f"the GitHub release: {missing}", missing, None
 
 
-def rebuilt_problems(name, data, rebuilt):
+def rebuilt_problems(name, data, rebuilt, named=None):
     """Why the b3sum program or crate `name` is not the second one in the
     folder `rebuilt`: nothing where the two are the same bytes. A folder
     inside `rebuilt` is one builder's files: `name` is then compared with
     every builder's copy, and a builder that made any crate made this
-    one."""
-    builders = [rebuilt] + sorted(os.path.join(rebuilt, sub) for sub in os.listdir(rebuilt) if os.path.isdir(os.path.join(rebuilt, sub)))
+    one. With `named`, the builders are those folders of `rebuilt` and no
+    others: each is there, and each holds every crate (which builders
+    there should be is then the caller's word, not the folder's: a
+    builder that left no crate at all, or one folder holding everyone's
+    files, was not told from two builders that agree)."""
+    if named is None:
+        builders = [rebuilt] + sorted(os.path.join(rebuilt, sub) for sub in os.listdir(rebuilt) if os.path.isdir(os.path.join(rebuilt, sub)))
+    else:
+        builders = [os.path.join(rebuilt, sub) for sub in named]
+        absent = [builder for builder in builders if not os.path.isdir(builder)]
+        if absent:
+            return [f"no files of the builder {os.path.basename(builder)} in {rebuilt}: each builder named has a folder of its own there" for builder in absent]
     copies = [builder for builder in builders if os.path.isfile(os.path.join(builder, name))]
     if not copies:
         script = "crates-release" if name.endswith(".crate") else "b3sum-release"
@@ -386,15 +398,20 @@ def rebuilt_problems(name, data, rebuilt):
             found.append(f"its bytes (SHA-256 {digests[0]}) are not the second build's in {builder} (SHA-256 {digests[1]}): one of the two was not made from the version commit by the release's script")
     if name.endswith(".crate"):
         for builder in builders:
-            if builder not in copies and any(n.endswith(".crate") for n in os.listdir(builder)):
+            if builder in copies:
+                continue
+            if named is not None:
+                found.append(f"{builder} does not hold this crate: every builder named packages every crate of the release")
+            elif any(n.endswith(".crate") for n in os.listdir(builder)):
                 found.append(f"{builder} holds crates and not this one: its builder packaged fewer than the release has")
     return found
 
 
-def check(items, release, out=None, rebuilt=None):
+def check(items, release, out=None, rebuilt=None, builders=None):
     """Print a line for each artifact (more for one with several
     problems); how many are not clean or not there. With `rebuilt`, a
-    folder, each b3sum program and crate is also the second one there."""
+    folder, each b3sum program and crate is also the second one there;
+    `builders`: rebuilt_problems' `named`."""
     bad = 0
     seen = {}
     for label, name, data in items:
@@ -406,22 +423,22 @@ def check(items, release, out=None, rebuilt=None):
             seen[name] = data
             found = problems(name, data, release)
             if rebuilt is not None and (name.startswith("b3sum-") or name.endswith(".crate")):
-                found = found + rebuilt_problems(name, data, rebuilt)
+                found = found + rebuilt_problems(name, data, rebuilt, builders)
             lines = [f"NOT CLEAN  {label}: {problem}" for problem in found]
         bad += bool(lines)
         print("\n".join(lines or [f"clean      {label}"]), file=out or sys.stdout)
     return bad
 
 
-def directory(path, release, rebuilt=None):
+def directory(path, release, rebuilt=None, builders=None):
     """A release's artifacts gathered in the folder `path` before anything
     is published (the files there that carry its version): (True, [])
     where every one a release has is there and each is clean; (False, the
     lines of those that are not clean); (None, the names not there yet).
-    `rebuilt`: as check's."""
+    `rebuilt`, `builders`: as check's."""
     names = sorted((n for n in os.listdir(path) if release.version in n), key=lambda n: (is_digest(n), n)) if os.path.isdir(path) else []
     report = io.StringIO()
-    if check(((n, n, read(os.path.join(path, n))) for n in names), release, out=report, rebuilt=rebuilt):
+    if check(((n, n, read(os.path.join(path, n))) for n in names), release, out=report, rebuilt=rebuilt, builders=builders):
         return False, [line for line in report.getvalue().splitlines() if not line.startswith("clean")]
     missing = [n for n in expected(release) if n not in names]
     return (None, missing) if missing else (True, [])
@@ -429,13 +446,14 @@ def directory(path, release, rebuilt=None):
 
 def main(argv):
     argv, options = list(argv), {}
-    for option in ("--rebuilt", "--commit"):
+    for option in ("--rebuilt", "--commit", "--builders"):
         if option in argv[:-1]:
             at = argv.index(option)
             options[option] = argv[at + 1]
             del argv[at : at + 2]
     paths = sorted(argv[1:], key=is_digest)
-    if not paths or argv[0].startswith("-") or any(path.startswith("--") for path in paths if path != "--published"):
+    builders = options["--builders"].split(",") if "--builders" in options else None
+    if not paths or argv[0].startswith("-") or any(path.startswith("--") for path in paths if path != "--published") or (builders is not None and "--rebuilt" not in options):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         sys.exit(2)
     try:
@@ -451,7 +469,7 @@ def main(argv):
                       else "MISSING    origin/main in this clone, whose history a release's commit is in (git fetch origin main)")
         else:
             items = ((path, os.path.basename(path), read(path)) for path in paths)
-        bad += check(items, release, rebuilt=options.get("--rebuilt"))
+        bad += check(items, release, rebuilt=options.get("--rebuilt"), builders=builders)
     except NotARelease as e:
         sys.exit(f"release_artifacts: {e}")
     print(f"release_artifacts: {release.tag} is commit {release.commit}: " + (f"{bad} artifacts are not clean builds of it, or are missing" if bad else "every artifact is a clean build of it"))

@@ -175,7 +175,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ours tests, where official BLAKE3 supports it (#160, #180).
     let var = |name: &str| env::var(name).unwrap_or_default();
     let (arch, os) = (var("CARGO_CFG_TARGET_ARCH"), var("CARGO_CFG_TARGET_OS"));
+    // Pointers of 64 bits too: the 64-bit architectures have targets with
+    // pointers of 32 (x86_64-unknown-linux-gnux32,
+    // aarch64-unknown-linux-gnu_ilp32), where this library's sizes, which
+    // are checked for 64 bits, would wrap.
     let supported = var("CARGO_CFG_TARGET_ENDIAN") == "little"
+        && var("CARGO_CFG_TARGET_POINTER_WIDTH") == "64"
         && match arch.as_str() {
             "x86_64" => os == "linux",
             "aarch64" => os == "linux" || os == "macos",
