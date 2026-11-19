@@ -96,7 +96,10 @@ def check_copies(full):
     # X.Y.Z+<commit>, to the release's. A title such as "0.10.0+SHA"
     # made the 0.10.0 candidate's version commit one that check refused.
     title = Path("CHANGELOG.md").read_text().splitlines()[0]
-    if not re.fullmatch(r"# blake3-servil \d+\.\d+\.\d+\+(?:[0-9a-f]{40}|dev)\b.*", title):
+    # The whole token set_version replaces (up to a space or a comma): a
+    # title "0.10.0+dev-preview," passed a looser test here, and its stamp,
+    # which drops "-preview", was then refused by the release check.
+    if not re.fullmatch(r"# blake3-servil \d+\.\d+\.\d+\+(?:[0-9a-f]{40}|dev)(?:[\s,].*)?", title):
         sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> (found {title!r})")
     if f'#define B3_VERSION "{full}"' not in Path("capi/b3.h").read_text().splitlines():
         sys.exit(f"capi/b3.h: B3_VERSION must be {full}")

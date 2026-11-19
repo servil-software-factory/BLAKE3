@@ -2,8 +2,9 @@
 # b3sum's release binary for this machine, built from a fresh clone of the
 # release's version commit: statically linked on Linux (the recommended
 # build, b3sum/README.md), as the platform links elsewhere (macOS). Writes
-# dist/b3sum-VERSION-TARGET and its SHA-256 and BLAKE3 digests beside it,
-# for a GitHub release (CONTRIBUTING.md, "Releases").
+# dist/b3sum-VERSION-TARGET and its SHA-256 digest file beside it, for a
+# GitHub release (CONTRIBUTING.md, "Releases"). A BLAKE3 digest file beside
+# those waits for a check that can verify it (BLAKE3 #446).
 #
 #     sh tools/b3sum-release.sh
 #
