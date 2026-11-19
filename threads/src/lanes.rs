@@ -985,7 +985,7 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
         started(std::thread::Builder::new().name("blake3-sme2".into()).spawn(move || {
             #[cfg(target_os = "linux")]
             if let Some(node) = sme2_node {
-                node.bind_worker();
+                node.bind();
             }
             sme2_main();
         }));
@@ -995,7 +995,7 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
         // mask. The caller keeps its own affinity.
         #[cfg(target_os = "linux")]
         if let Some(node) = node {
-            node.bind_worker();
+            node.bind();
         }
         // The pool is published, and calls may already wait on these
         // workers: a failure from here on ends the process, as a
@@ -1428,33 +1428,37 @@ pub(crate) mod places {
         Some((0..CPUS).filter(|c| allowed[c / 64] >> (c % 64) & 1 == 1).collect())
     }
 
-    /// A kernel CPU list, such as `0-3,8,10-11`, in the affinity layout.
+    /// A kernel CPU list, such as `0-3,8,10-11`, in the affinity layout:
+    /// None for text that is no such list, or that names a CPU past the
+    /// set's last.
     #[cfg(target_os = "linux")]
-    fn cpu_set(list: &str) -> Set {
+    fn cpu_set(list: &str) -> Option<Set> {
         let mut set = [0; CPUS / 64];
         for range in list.trim().split(',') {
             let (first, last) = range.split_once('-').unwrap_or((range, range));
-            let first = first.parse::<usize>().expect("a Linux CPU number");
-            let last = last.parse::<usize>().expect("a Linux CPU number");
-            assert!(first <= last && last < CPUS, "CPU range {range} outside the worker mask");
-            for cpu in first..=last {
-                set[cpu / 64] |= 1u64.rotate_left(cpu as u32);
+            for cpu in first.parse::<usize>().ok()?..=last.parse::<usize>().ok()? {
+                *set.get_mut(cpu / 64)? |= 1u64.rotate_left(cpu as u32);
             }
         }
-        set
+        Some(set)
     }
 
+    /// Whether the system lists more than one memory node. Where it has
+    /// no list, or keeps the list from the process (a sandbox), there is
+    /// nothing to choose among.
     #[cfg(target_os = "linux")]
     fn multiple_nodes(online: std::io::Result<String>) -> bool {
-        match online {
-            Ok(list) => list.trim().parse::<usize>().is_err(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => panic!("read Linux memory nodes: {e}"),
-        }
+        online.is_ok_and(|list| list.trim().parse::<usize>().is_err())
     }
 
     /// The initiating thread's node, intersected with its allowed CPUs.
     /// None when there is no additional restriction to apply.
+    ///
+    /// Keeping to one node is for speed, and nothing else rests on it. So
+    /// it is done where the system allows it and tells what it needs, and
+    /// left undone anywhere else: a sandbox may show the list of nodes
+    /// and hide the rest of the topology, or refuse the binding, and the
+    /// pool then runs on the CPUs the process is allowed.
     #[cfg(target_os = "linux")]
     #[derive(Clone)]
     pub(super) struct Node(Set);
@@ -1462,26 +1466,34 @@ pub(crate) mod places {
     #[cfg(target_os = "linux")]
     impl Node {
         pub(super) fn current() -> Option<Self> {
-            if !multiple_nodes(std::fs::read_to_string("/sys/devices/system/node/online")) {
+            // Sound: sched_getcpu takes no arguments and accesses no caller memory.
+            let cpu = usize::try_from(unsafe { sched_getcpu() }).ok()?;
+            Self::find(std::path::Path::new("/sys/devices/system"), cpu, affinity().ok()?)
+        }
+
+        /// The node of `cpu` within the `allowed` CPUs, as the topology
+        /// under `system` tells it (`/sys/devices/system`; the tests give
+        /// directories of their own). None where that says one node, or
+        /// does not say which node the CPU is on or which CPUs the node
+        /// has.
+        fn find(system: &std::path::Path, cpu: usize, allowed: Set) -> Option<Self> {
+            if !multiple_nodes(std::fs::read_to_string(system.join("node/online"))) {
                 return None;
             }
-            // Sound: sched_getcpu takes no arguments and accesses no caller memory.
-            let cpu = unsafe { sched_getcpu() };
-            assert!(cpu >= 0, "find the initiating thread's CPU");
-            let node = std::fs::read_dir(format!("/sys/devices/system/cpu/cpu{cpu}"))
-                .expect("read the initiating CPU's topology")
-                .find_map(|entry| {
-                    let name = entry.expect("read a CPU topology entry").file_name();
-                    name.to_str()?.strip_prefix("node")?.parse::<usize>().ok()
-                })
-                .expect("the initiating CPU belongs to a memory node");
-            let list = std::fs::read_to_string(format!("/sys/devices/system/node/node{node}/cpulist")).expect("read the memory node's CPUs");
-            Self::within(affinity().expect("read the initiating thread's allowed CPUs"), cpu_set(&list))
+            let node = std::fs::read_dir(system.join(format!("cpu/cpu{cpu}")))
+                .ok()?
+                .find_map(|entry| entry.ok()?.file_name().to_str()?.strip_prefix("node")?.parse::<usize>().ok())?;
+            let list = std::fs::read_to_string(system.join(format!("node/node{node}/cpulist"))).ok()?;
+            Self::within(allowed, cpu_set(&list)?)
         }
 
         fn within(allowed: Set, node: Set) -> Option<Self> {
             let mask = Self(core::array::from_fn(|i| allowed[i] & node[i]));
-            assert!(mask.cpu_count() > 0, "the selected memory node has no allowed CPU");
+            // A node none of whose CPUs the thread may use is no node to
+            // keep to (and would make a pool of no threads).
+            if mask.cpu_count() == 0 {
+                return None;
+            }
             (mask.0 != allowed).then_some(mask)
         }
 
@@ -1489,27 +1501,19 @@ pub(crate) mod places {
             self.0.iter().map(|word| word.count_ones() as usize).sum()
         }
 
-        fn bind(&self) -> std::io::Result<()> {
+        /// Keep the calling thread to the node's CPUs. Where the system
+        /// refuses (a sandbox's filter), the thread stays on the CPUs it
+        /// has, as a worker does that cannot take its place ([`take`]).
+        pub(super) fn bind(&self) {
             // Sound: the set is `len` readable bytes.
-            if unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &self.0) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        }
-
-        pub(super) fn bind_worker(&self) {
-            if let Err(error) = self.bind() {
-                // The published pool requires this worker. Panicking only on
-                // this thread would strand calls waiting for it.
-                super::stop(&format!("BLAKE3: keep the worker on one memory node: {error}\n"));
-            }
+            unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &self.0) };
         }
     }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn confine_cli_thread() {
         if let Some(node) = Node::current() {
-            node.bind().expect("keep the command-line thread on one memory node");
+            node.bind();
         }
     }
 
@@ -1611,11 +1615,14 @@ pub(crate) mod places {
         #[test]
         #[cfg(target_os = "linux")]
         fn a_node_keeps_only_the_allowed_members() {
-            let allowed = cpu_set("1,3,5,60-68");
-            let node = Node::within(allowed, cpu_set("0-3,5,62-66")).unwrap();
+            let allowed = cpu_set("1,3,5,60-68").unwrap();
+            let node = Node::within(allowed, cpu_set("0-3,5,62-66").unwrap()).unwrap();
             assert_eq!(bits(&node.0), [1, 3, 5, 62, 63, 64, 65, 66]);
             assert_eq!(node.cpu_count(), 8);
-            assert!(Node::within(node.0, cpu_set("0-66")).is_none());
+            assert!(Node::within(node.0, cpu_set("0-66").unwrap()).is_none());
+            // A node with none of the allowed CPUs is no node to keep to:
+            // a pool confined to it would have no thread.
+            assert!(Node::within(allowed, cpu_set("0,2,4,6-59").unwrap()).is_none());
         }
 
         /// A set names every CPU a Linux kernel can have, so a node's list
@@ -1624,9 +1631,20 @@ pub(crate) mod places {
         #[test]
         #[cfg(target_os = "linux")]
         fn a_set_names_the_largest_kernels_cpus() {
-            assert_eq!(bits(&cpu_set("0,1024,4095-4096,8191")), [0, 1024, 4095, 4096, 8191]);
+            assert_eq!(bits(&cpu_set("0,1024,4095-4096,8191").unwrap()), [0, 1024, 4095, 4096, 8191]);
             let allowed = affinity().unwrap();
-            assert!(Node::within(allowed, cpu_set("0-8191")).is_none(), "every CPU: no further restriction");
+            assert!(Node::within(allowed, cpu_set("0-8191").unwrap()).is_none(), "every CPU: no further restriction");
+        }
+
+        /// Text that is no list of CPUs, or that names a CPU the set has
+        /// no place for, is no set: a caller binds to nothing for it.
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_list_that_is_none_gives_no_set() {
+            assert_eq!(bits(&cpu_set(" 3,5-6\n").unwrap()), [3, 5, 6]);
+            for text in ["", "\n", "x", "3-", "-3", "1,,2", "0-8192", "8192", "0-18446744073709551615", "1 2"] {
+                assert!(cpu_set(text).is_none(), "{text:?}");
+            }
         }
 
         #[test]
@@ -1636,31 +1654,65 @@ pub(crate) mod places {
             assert!(!multiple_nodes(Err(std::io::ErrorKind::NotFound.into())));
             assert!(multiple_nodes(Ok("0-1\n".into())));
             assert!(multiple_nodes(Ok("0,3\n".into())));
+            // A list the process may not read (a sandbox's) is no list.
+            assert!(!multiple_nodes(Err(std::io::ErrorKind::PermissionDenied.into())));
         }
 
+        /// A node is found only where the system tells all of it: more
+        /// than one node, the node of this CPU, and that node's CPUs.
+        /// Anything less (what a sandbox may show of a machine) gives no
+        /// node, so nothing is bound and the pool runs on the allowed
+        /// CPUs. Each case is a directory in the shape of
+        /// `/sys/devices/system`.
         #[test]
         #[cfg(target_os = "linux")]
-        #[should_panic(expected = "read Linux memory nodes")]
-        fn an_unreadable_topology_is_reported() {
-            multiple_nodes(Err(std::io::ErrorKind::PermissionDenied.into()));
+        fn a_node_is_found_only_where_the_system_tells_all_of_it() {
+            let root = tempfile::tempdir().unwrap();
+            // A machine of two nodes: CPUs 0-1 on node 0, CPUs 2-3 on node
+            // 1, as `find` reads it for CPU 2; `change` then takes
+            // something away.
+            let case = |name: &str, change: &dyn Fn(&std::path::Path)| {
+                let system = root.path().join(name);
+                std::fs::create_dir_all(system.join("cpu/cpu2/node1")).unwrap();
+                std::fs::create_dir_all(system.join("cpu/cpu2/cache")).unwrap();
+                std::fs::create_dir_all(system.join("node/node1")).unwrap();
+                std::fs::write(system.join("node/online"), "0-1\n").unwrap();
+                std::fs::write(system.join("node/node1/cpulist"), "2-3\n").unwrap();
+                change(&system);
+                Node::find(&system, 2, cpu_set("0-3").unwrap()).map(|node| bits(&node.0))
+            };
+            assert_eq!(case("whole", &|_| ()), Some(vec![2, 3]));
+            assert_eq!(case("one-node", &|system| std::fs::write(system.join("node/online"), "0\n").unwrap()), None);
+            assert_eq!(case("no-list-of-nodes", &|system| std::fs::remove_file(system.join("node/online")).unwrap()), None);
+            assert_eq!(case("cpu-on-no-node", &|system| std::fs::remove_dir(system.join("cpu/cpu2/node1")).unwrap()), None);
+            assert_eq!(case("cpu-hidden", &|system| std::fs::remove_dir_all(system.join("cpu")).unwrap()), None);
+            assert_eq!(case("node-hidden", &|system| std::fs::remove_dir_all(system.join("node/node1")).unwrap()), None);
+            assert_eq!(case("node-of-no-cpus", &|system| std::fs::write(system.join("node/node1/cpulist"), "\n").unwrap()), None);
+            assert_eq!(case("node-of-other-cpus", &|system| std::fs::write(system.join("node/node1/cpulist"), "8-9\n").unwrap()), None);
+            assert_eq!(case("node-of-every-cpu", &|system| std::fs::write(system.join("node/node1/cpulist"), "0-7\n").unwrap()), None);
+            assert_eq!(case("node-past-the-set", &|system| std::fs::write(system.join("node/node1/cpulist"), "2-9000\n").unwrap()), None);
         }
 
+        /// A binding keeps the calling thread to the node's CPUs; one the
+        /// system refuses (here a set of no CPUs, which no kernel takes)
+        /// leaves the thread on the CPUs it had, and running.
         #[test]
         #[cfg(target_os = "linux")]
-        fn a_worker_that_cannot_bind_stops_the_process() {
-            use std::os::unix::process::ExitStatusExt as _;
-            const CHILD: &str = "BLAKE3_TEST_WORKER_CANNOT_BIND";
-            if std::env::var_os(CHILD).is_some() {
-                Node([0; CPUS / 64]).bind_worker();
-                std::process::exit(0);
-            }
-            let out = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "lanes::places::test::a_worker_that_cannot_bind_stops_the_process", "--nocapture"])
-                .env(CHILD, "1")
-                .output()
-                .unwrap();
-            assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
-            assert!(String::from_utf8_lossy(&out.stderr).contains("keep the worker on one memory node"));
+        fn a_binding_holds_and_a_refused_one_leaves_the_thread_as_it_was() {
+            std::thread::spawn(|| {
+                let before = affinity().unwrap();
+                Node([0; CPUS / 64]).bind();
+                assert_eq!(affinity().unwrap(), before, "a refused binding changes nothing");
+                let cpus = bits(&before);
+                if cpus.len() < 2 {
+                    return;
+                }
+                let one = cpu_set(&cpus[0].to_string()).unwrap();
+                Node(one).bind();
+                assert_eq!(affinity().unwrap(), one, "the thread is kept to the node's CPUs");
+            })
+            .join()
+            .unwrap();
         }
 
         /// Inspect all exposed nodes independently of the code that chooses one.
@@ -1676,7 +1728,7 @@ pub(crate) mod places {
                 .filter(|entry| entry.file_name().to_str().and_then(|n| n.strip_prefix("node")).is_some_and(|n| n.parse::<usize>().is_ok()))
                 .map(|entry| std::fs::read_to_string(entry.path().join("cpulist")).unwrap())
                 .filter(|list| !list.trim().is_empty())
-                .map(|list| cpu_set(&list))
+                .map(|list| cpu_set(&list).unwrap())
                 .collect()
         }
 
@@ -1710,7 +1762,7 @@ pub(crate) mod places {
                     continue;
                 }
                 let status = std::fs::read_to_string(path.join("status")).unwrap();
-                let mask = cpu_set(status.lines().find_map(|l| l.strip_prefix("Cpus_allowed_list:")).unwrap());
+                let mask = cpu_set(status.lines().find_map(|l| l.strip_prefix("Cpus_allowed_list:")).unwrap()).unwrap();
                 for (all, current) in all_workers.iter_mut().zip(mask) {
                     *all |= current;
                 }

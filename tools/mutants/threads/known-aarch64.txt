@@ -54,7 +54,6 @@ src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, 
 src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace || with && in sources::visible	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 # The confined path needs at least two memory nodes in the allowed mask.
-src/lanes.rs	delete ! in places::Node::current	1	[cpu lacks multi_node] no second allowed node to confine to; the unbound two-node suite judges this
 src/lanes.rs	replace == with != in initialize	1	[cpu lacks multi_node] selecting a node cannot narrow the allowed mask here
 src/lanes.rs	replace places::Node::current -> Option<Self> with None	1	[cpu lacks multi_node] the allowed mask already fits at most one exposed node
 src/lanes.rs	replace places::confine_cli_thread with ()	1	[cpu lacks multi_node] the CLI already runs within one allowed node

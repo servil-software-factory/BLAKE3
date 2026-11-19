@@ -345,16 +345,16 @@ pub(crate) fn ran(kind: Ran) {
 /// call reads the node's CPUs from `/sys/devices/system`, and the first
 /// worker binds itself to them with `sched_setaffinity` before it starts
 /// the others, which inherit them (the SME2 thread binds itself too).
-/// Where the kernel shows no list
-/// of memory nodes at all (no `/sys/devices/system/node/online`), the
-/// machine is taken to have one node, and nothing more is read or bound.
-/// Where the list is there and a part of the topology cannot be read,
-/// this call panics, and where that binding is refused, the process ends,
-/// each saying why: a sandbox that shows the nodes and hides their CPUs,
-/// or refuses the binding, needs a pool of one thread
-/// (`NonZeroUsize::new(1)`), which reads and binds nothing. A request
-/// for `n` threads starts `n - 1` workers on that node whether or not it
-/// has `n` CPUs.
+/// Keeping to a node is for speed, and no call's result rests on it.
+/// Where the system shows no list of memory nodes, or keeps the list,
+/// the node of the initializing CPU or that node's CPUs from the
+/// process, nothing is bound and `None` counts every allowed CPU. Where
+/// it refuses the binding, the workers run on the allowed CPUs, as many
+/// workers as the node would hold. A sandbox may do any of these, and
+/// the calls work there as anywhere, without the node's speed. (A pool
+/// of one thread, `NonZeroUsize::new(1)`, reads and binds nothing.) A
+/// request for `n` threads starts `n - 1` workers on that node whether
+/// or not it has `n` CPUs.
 /// For each kind and size of call under 256 MiB, a caller with local
 /// workers learns whether they or all workers on the node finish sooner.
 ///
@@ -412,7 +412,9 @@ pub fn initialize_multithreaded(threads: Option<core::num::NonZeroUsize>) {
 }
 
 /// Keep the command-line tool's main thread on one memory node before
-/// it starts its file readers and hash workers.
+/// it starts its file readers and hash workers, where the system tells
+/// the node and allows the binding (as [`initialize_multithreaded`]
+/// does for its workers).
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub fn __confine_cli_to_one_node() {
