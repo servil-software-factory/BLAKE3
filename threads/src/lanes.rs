@@ -494,6 +494,32 @@ fn cut_messages(pieces: &mut Vec<Piece>, count: usize, message_len: usize, threa
     }
 }
 
+/// A pool thread just spawned, or the end of the process: the pool is
+/// published by then, and a panic on the spawning worker alone would
+/// leave calls waiting on workers that never start.
+fn started<T>(spawned: std::io::Result<T>) -> T {
+    spawned.unwrap_or_else(|error| stop(&format!("BLAKE3: start a worker thread: {error}\n")))
+}
+
+/// Say why, and end the process, from a thread the pool's callers may be
+/// waiting on. The words go straight to descriptor 2: `std::io::stderr`
+/// takes a lock, and a caller that holds it while it waits for this
+/// thread would wait for ever.
+fn stop(why: &str) -> ! {
+    unsafe extern "C" {
+        fn write(fd: i32, bytes: *const core::ffi::c_void, len: usize) -> isize;
+    }
+    // Sound: `why` is `len` readable bytes. Whether they were written
+    // changes nothing here.
+    let _ = unsafe { write(2, why.as_ptr().cast(), why.len()) };
+    std::process::abort()
+}
+
+#[cfg(test)]
+pub(crate) fn fail_worker_start_for_test() {
+    started::<()>(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)));
+}
+
 /// Ends the process if dropped: held while a job is published, or while a
 /// stream's body runs, and forgotten once the workers are done, so it drops
 /// only when the caller unwinds with workers possibly still reading its
@@ -899,8 +925,12 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
             if let Some(node) = node {
                 node.bind_worker();
             }
+            // The pool is published, and calls may already wait on these
+            // workers: a failure from here on ends the process, as a
+            // worker's own panic does (worker_main).
+            let _starting = AbortOnUnwind;
             for worker in 2..threads {
-                std::thread::Builder::new().name(format!("blake3-worker-{worker}")).spawn(move || worker_main(worker - 1)).expect("spawning a BLAKE3 worker");
+                started(std::thread::Builder::new().name(format!("blake3-worker-{worker}")).spawn(move || worker_main(worker - 1)));
             }
             // After the workers have started, never before: reading the
             // machine's caches takes 2 ms on a machine of 96 CPUs, and
@@ -1185,8 +1215,11 @@ pub(crate) mod places {
         }
     }
 
-    /// The most CPUs a set names: the kernel's own limit.
-    const CPUS: usize = 1024;
+    /// The most CPUs a set names: the most any Linux kernel is built for
+    /// (x86-64's 8192). A smaller set fails where the kernel has more
+    /// possible CPUs than it names: sched_getaffinity refuses it there,
+    /// whichever CPUs the process is allowed.
+    const CPUS: usize = 8192;
     type Set = [u64; CPUS / 64];
 
     /// A CPU the process may run on: its number, its last-level cache
@@ -1397,9 +1430,7 @@ pub(crate) mod places {
             if let Err(error) = self.bind() {
                 // The published pool requires this worker. Panicking only on
                 // this thread would strand calls waiting for it.
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "BLAKE3: keep the worker on one memory node: {error}");
-                std::process::abort();
+                super::stop(&format!("BLAKE3: keep the worker on one memory node: {error}\n"));
             }
         }
     }
@@ -1514,6 +1545,17 @@ pub(crate) mod places {
             assert_eq!(bits(&node.0), [1, 3, 5, 62, 63, 64, 65, 66]);
             assert_eq!(node.cpu_count(), 8);
             assert!(Node::within(node.0, cpu_set("0-66")).is_none());
+        }
+
+        /// A set names every CPU a Linux kernel can have, so a node's list
+        /// on the largest machine parses, and the kernel takes a set this
+        /// long (it refuses one shorter than its own).
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_set_names_the_largest_kernels_cpus() {
+            assert_eq!(bits(&cpu_set("0,1024,4095-4096,8191")), [0, 1024, 4095, 4096, 8191]);
+            let allowed = affinity().unwrap();
+            assert!(Node::within(allowed, cpu_set("0-8191")).is_none(), "every CPU: no further restriction");
         }
 
         #[test]
@@ -2231,6 +2273,12 @@ pub(crate) fn all_workers_parked() -> bool {
 /// thread if it has one.
 fn at_rest(parked: usize, workers: usize, sme2: bool, sme2_parked: bool) -> bool {
     parked == workers && (!sme2 || sme2_parked)
+}
+
+/// Whether any thread but a caller takes work: false in a pool of one
+/// thread, which starts no worker and no SME2 thread.
+pub(crate) fn pool_has_workers() -> bool {
+    pool().workers() > 0
 }
 
 /// The pool. The caller must have called
@@ -3708,6 +3756,15 @@ mod test {
         assert_eq!(pool().workers(), pool().threads - 1);
     }
 
+    /// A Pipeline gives its actions to the pool where the pool has a
+    /// worker to take them: in every pool of more than one thread. (In a
+    /// pool of one, tests/one_thread_external.rs.)
+    #[test]
+    fn a_pool_of_more_than_one_thread_has_workers() {
+        crate::initialize_multithreaded(None);
+        assert_eq!(pool_has_workers(), pool().threads > 1);
+    }
+
     /// A stream open is what makes an idle worker spin before it parks
     /// (sources::open, BLAKE3 #219): none open at rest; one open while a
     /// stream runs; none again when it has finished.
@@ -3875,8 +3932,18 @@ mod test {
 
     /// Check whole-KiB cuts near the transitions between piece sizes. The
     /// cut is independent of the kernels, so every target can check it.
+    /// Each cut is then merged, on values that stand for the pieces': the
+    /// merge joins siblings only (the tree's calls stop on any other
+    /// pair), finds something to join at every level, and ends at the
+    /// root's two children. (The merge needs a value at every size from
+    /// the workers' first piece up to the prefix's smallest: true of the
+    /// share `sme2_prefix` gives, and this is what would say so if a
+    /// change to that share made it false.)
     #[test]
     fn the_prefix_cut_keeps_subtrees_aligned() {
+        crate::initialize();
+        let tree = TreeHasher::new(crate::Mode::Plain);
+        let mut cvs = Vec::new();
         let mut pieces = Vec::new();
         for threads in 2..=64 {
             let limit = threads * MAX_PIECE_LEN + (1 << 20);
@@ -3893,6 +3960,13 @@ mod test {
                 );
                 let tail = pieces.last().unwrap();
                 assert_eq!(tail.offset + tail.len, len);
+                let (end, whole) = pieces.split_last().unwrap();
+                cvs.clear();
+                cvs.extend(whole.iter().map(|p| ChainingValue::at(level_of(p.len as u64), (p.offset / p.len) as u64, [1; 32])));
+                let last = LastCv::at((end.offset / CHUNK_LEN) as u64, end.len as u64, [2; 32]);
+                let (left, right) = merge_to_children(&pieces, &mut cvs, last, &tree);
+                assert_eq!((left.index(), right.first_chunk()), (0, 1 << left.level()), "{len} bytes, {threads} threads: the root's left child");
+                assert_eq!(((CHUNK_LEN as u64) << left.level()) + right.len(), len as u64, "{len} bytes, {threads} threads: the root's two children");
             }
         }
     }
