@@ -11,6 +11,9 @@
 #     sh tools/check-builds.sh
 set -eu
 cd "$(git rev-parse --show-toplevel)"
+# A run of the Pipeline model's controls that was killed leaves its
+# planted fault in the source, and the source as it was beside it.
+[ ! -e threads/src/pipeline.rs.before-fault ] || { echo "check-builds: threads/src/pipeline.rs may hold a planted fault: a run of tools/pipeline_model_controls.py was killed and left pipeline.rs.before-fault beside it. python3 tools/pipeline_model_controls.py --put-back puts the source back, or says why it does not." >&2; exit 1; }
 [ "${CARGO_TARGET_DIR:-}" != /tmp/target ] || unset CARGO_TARGET_DIR
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$PWD/target"}
 rustup target add x86_64-unknown-linux-gnu aarch64-apple-darwin 2>/dev/null

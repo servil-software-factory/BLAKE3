@@ -115,8 +115,29 @@ class Versions(unittest.TestCase):
         notes = self.root / "CHANGELOG.md"
         notes.write_text("# blake3-servil 0.8.0+SHA, against official BLAKE3\n")
         self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
-        notes.write_text("# blake3-servil 0.8.0+dev, against official BLAKE3\n")
-        self.stamp("--check")
+        # The stamp replaces the whole token up to a space or a comma, so
+        # the version must be that whole token: more after it would be lost.
+        for more in ("dev-preview", "devx", "dev.1", "a" * 41, "a" * 40 + "-dirty"):
+            with self.subTest(more=more):
+                notes.write_text(f"# blake3-servil 0.8.0+{more}, against official BLAKE3\n")
+                self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+        # Digits and spaces of other scripts are no part of a version: the
+        # release check reads the title's bytes.
+        for title in ("\uff10.\uff18.\uff10+dev, against official BLAKE3", "0.8.0+dev\u00a0against official BLAKE3"):
+            with self.subTest(title=title):
+                notes.write_text(f"# blake3-servil {title}\n")
+                self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+        # A stamp refuses such a title too, before it replaces it: after,
+        # the title would be the stamp's own, and look right.
+        notes.write_text("# blake3-servil 0.8.0+dev-preview, against official BLAKE3\n")
+        self.git("commit", "-qam", "a title no stamp may replace")
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}
+        self.assertIn("before a stamp replaces it", self.stamp("0.9.0", succeeds=False))
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}, before, "a refused stamp writes nothing")
+        for title in ("0.8.0+dev, against official BLAKE3", "0.8.0+dev against official BLAKE3", "0.8.0+dev", "0.8.0+" + "a" * 40 + ", against official BLAKE3"):
+            with self.subTest(title=title):
+                notes.write_text(f"# blake3-servil {title}\n")
+                self.stamp("--check")
 
     def test_check_rejects_each_stale_copy(self):
         cases = [(path, f'version = "{DEV}"') for path in MANIFESTS if path != "Cargo.toml"]

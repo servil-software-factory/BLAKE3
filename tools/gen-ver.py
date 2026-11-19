@@ -52,7 +52,11 @@ def edit(path, pattern, replacement):
         f.write(text)
 
 
-RELEASE = re.compile(r"(\d+\.\d+\.\d+)\+([0-9a-f]{40}|dev)")
+RELEASE = re.compile(r"([0-9]+\.[0-9]+\.[0-9]+)\+([0-9a-f]{40}|dev)")
+# The notes' title as a stamp can replace it: the version is the whole
+# token up to a space or a comma, in ASCII digits (the release check reads
+# bytes; Python's \d and \s also take other scripts' digits and spaces).
+TITLE = re.compile(r"# blake3-servil [0-9]+\.[0-9]+\.[0-9]+\+(?:[0-9a-f]{40}|dev)(?:[ \t,].*)?")
 
 
 def current():
@@ -96,7 +100,10 @@ def check_copies(full):
     # X.Y.Z+<commit>, to the release's. A title such as "0.10.0+SHA"
     # made the 0.10.0 candidate's version commit one that check refused.
     title = Path("CHANGELOG.md").read_text().splitlines()[0]
-    if not re.fullmatch(r"# blake3-servil \d+\.\d+\.\d+\+(?:[0-9a-f]{40}|dev)\b.*", title):
+    # The whole token set_version replaces (up to a space or a comma): a
+    # title "0.10.0+dev-preview," passed a looser test here, and its stamp,
+    # which drops "-preview", was then refused by the release check.
+    if not TITLE.fullmatch(title):
         sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> (found {title!r})")
     if f'#define B3_VERSION "{full}"' not in Path("capi/b3.h").read_text().splitlines():
         sys.exit(f"capi/b3.h: B3_VERSION must be {full}")
@@ -121,13 +128,20 @@ def check_copies(full):
 
 def set_version(full, notes=True):
     """Stamp the packages and their pins; keep a past release's notes with --dev."""
+    if notes:
+        # The title as it is must be one a stamp may replace, checked
+        # before anything is written: the stamp writes the whole token
+        # anew, and the check after it would see only the new one.
+        title = Path("CHANGELOG.md").read_text().splitlines()[0]
+        if not TITLE.fullmatch(title):
+            sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> before a stamp replaces it (found {title!r})")
     files = list(PACKAGES.values())
     for path in files:
         edit(path, r'^version = ".*"$', f'version = "{full}"')
     for path, dependency in PINS.items():
         edit(path, rf'^({dependency} = \{{ version = ")[^"]*', rf"\g<1>={full}")
     if notes:
-        edit("CHANGELOG.md", r"^# blake3-servil [^\s,]+", f"# blake3-servil {full}")
+        edit("CHANGELOG.md", r"^# blake3-servil [^ \t,]+", f"# blake3-servil {full}")
         files.append("CHANGELOG.md")
     edit("capi/b3.h", r'^#define B3_VERSION ".*"$', f'#define B3_VERSION "{full}"')
     # The CLI's tracked lock contains all four published packages.
