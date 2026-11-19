@@ -35,6 +35,7 @@ was killed outright left running there.
 
 import fcntl
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -157,7 +158,9 @@ def how_it_failed(said):
     elif stops:
         how = "the Pipeline stopped the process: " + stops[-1][len("blake3-servil: "):][:100]
     else:
-        how = "the process ended with no word of the model's"
+        # Cargo's line for a test process that a signal ended.
+        signalled = re.search(r"\(signal: [^)]*\)", said)
+        how = "the process ended with no word of the model's" + (f" {signalled[0]}" if signalled else "")
     return f"in {scenarios[-1] if scenarios else 'no scenario'}: {how}"
 
 
