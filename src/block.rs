@@ -11,6 +11,16 @@ use crate::BLOCK_LEN;
 /// message starts on a cache line. A [`Batch`] holds its messages in
 /// blocks, each message starting a block and taking whole blocks (one for
 /// an empty message).
+///
+/// # Trait implementations
+///
+/// - `Clone` duplicates all 64 bytes in another aligned block.
+/// - `Copy` preserves every byte, including any padding of a message within
+///   the block.
+/// - `Debug` prints every byte in hexadecimal, including message padding.
+/// - `Eq` treats blocks as equal exactly when their byte arrays agree.
+/// - `PartialEq` compares all contents as ordinary byte arrays, without a
+///   constant-time guarantee.
 #[repr(C, align(64))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Block(pub [u8; BLOCK_LEN]);
@@ -80,6 +90,13 @@ impl core::fmt::Debug for Block {
 /// assert_eq!(out[1], *convenience::hash(&[9u8; 100]).as_bytes());
 /// # }
 /// ```
+///
+/// # Trait implementations
+///
+/// - `Clone` copies owned blocks or shares a read-only borrow, keeping the
+///   same messages and padding.
+/// - `Prepared` presents the messages in order in whole-block slots, with
+///   at least one block per slot.
 #[derive(Clone)]
 pub struct Batch<'a> {
     #[cfg(feature = "std")]
@@ -103,7 +120,10 @@ impl Batch<'static> {
     /// making, not as its pages are first touched: make one and refill it.
     #[inline]
     pub fn new(message_len: usize, count: usize) -> Self {
-        let blocks = blocks_per(message_len).checked_mul(count).expect("batch capacity overflow");
+        // A message's blocks have a length in bytes, even where there are
+        // none of them: every call that hashes a batch multiplies it out.
+        let slot = message_len.checked_next_multiple_of(BLOCK_LEN);
+        let blocks = slot.and_then(|_| blocks_per(message_len).checked_mul(count)).expect("batch capacity overflow");
         Batch { blocks: std::vec![Block::ZERO; blocks].into(), message_len }
     }
 }
@@ -183,6 +203,15 @@ struct Line([u8; 128]);
 /// [`Batch`]; a layer's digests written into one are the next layer's
 /// input. The alignment is the type's: only this constructor makes one,
 /// so a call checks nothing.
+///
+/// # Trait implementations
+///
+/// - `Deref` borrows exactly the message arrays in order, excluding the
+///   allocation's trailing padding.
+/// - `DerefMut` lets the caller replace message bytes without changing the
+///   count or accessing trailing padding.
+/// - `Prepared` lends the contiguous 16- or 32-byte messages directly to
+///   batch calls.
 #[cfg(feature = "std")]
 pub struct Packed<const N: usize> {
     lines: std::vec::Vec<Line>,
@@ -284,6 +313,13 @@ pub trait Prepared: sealed::Sealed {
 }
 
 /// Some of a batch's messages, in place: [`Prepared::part`] makes it.
+///
+/// # Trait implementations
+///
+/// - `Clone` borrows the same range without copying its messages.
+/// - `Copy` preserves the read-only view and its stride.
+/// - `Prepared` presents the selected messages in their original order and
+///   layout.
 #[derive(Clone, Copy)]
 pub struct Part<'a> {
     bytes: &'a [u8],
@@ -351,7 +387,10 @@ impl Batch<'_> {
     /// borrowed batch copies its blocks first).
     pub fn message_mut(&mut self, i: usize) -> &mut [u8] {
         let per = blocks_per(self.message_len);
-        assert!((i + 1) * per <= self.blocks.len(), "message {i} of a batch of {}", self.len());
+        // Checked in every build: an index whose blocks wrapped around the
+        // address space would name another message's.
+        let end = i.checked_add(1).and_then(|next| next.checked_mul(per));
+        assert!(end.is_some_and(|end| end <= self.blocks.len()), "message {i} of a batch of {}", self.len());
         let len = self.message_len;
         &mut Block::bytes_mut(&mut self.blocks.to_mut()[i * per..][..per])[..len]
     }
@@ -385,6 +424,26 @@ mod test {
     use super::*;
     use crate::Mode;
     use crate::throughput::hash_many;
+
+    /// In every build: `(i + 1) * per` wrapped where overflow is not
+    /// checked, and these indices named messages 0 and 1.
+    #[test]
+    fn message_mut_refuses_an_index_whose_blocks_wrap() {
+        for (message_len, i) in [(100, 1usize << 63), (100, (1 << 63) + 1), (1000, 1 << 60), (64, usize::MAX)] {
+            let mut batch = Batch::new(message_len, 4);
+            let call = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| batch.message_mut(i).len()));
+            let said = *call.expect_err("an index out of range was accepted").downcast::<String>().unwrap();
+            assert_eq!(said, std::format!("message {i} of a batch of 4"));
+        }
+    }
+
+    /// A batch of no messages still has a message length whose blocks
+    /// have a length in bytes.
+    #[test]
+    #[should_panic(expected = "batch capacity overflow")]
+    fn a_batch_of_no_messages_needs_a_message_length_that_fits() {
+        let _ = Batch::new(usize::MAX, 0);
+    }
 
     #[test]
     fn batch_capacity_rejects_wrapping_block_counts() {

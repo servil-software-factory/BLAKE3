@@ -23,7 +23,9 @@ use crate::{CHUNK_END, CHUNK_LEN, CHUNK_START, CVBytes, CVWords, ChunkState, Has
 /// `pieces`. Call it once with all the pieces your program has in hand
 /// (one turn of its event loop): never slower than one
 /// [`update`](Hasher::update) each: many messages arriving at once, such
-/// as a server's uploads, each with its own [`Hasher`]. Requires each `i < hashers.len()`.
+/// as a server's uploads, each with its own [`Hasher`]. Requires each `i < hashers.len()`:
+/// a turn that panics on one that is not leaves its hashers as
+/// [after a panic](Hasher#after-a-panic).
 /// Finish the messages with [`finalize_each`]: on AArch64 a message of up
 /// to 1024 bytes waits whole in its hasher, and those that finish together
 /// hash side by side there.
@@ -52,6 +54,8 @@ pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
 /// As in [`update_each`], each hasher takes its pieces in order. The
 /// callback and `min_len` have [`Hasher::update_with`]'s contract, with
 /// `tree` prepared for the mode of whichever hasher needs the subtree.
+/// If the callback panics, every hasher of the turn is as
+/// [after a panic](Hasher#after-a-panic).
 pub fn update_each_with(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2]) {
     update_turn(hashers, pieces, Some(&crate::incremental::Pool { min_len, halves }));
 }
@@ -64,16 +68,34 @@ pub fn update_each_with(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], min_l
 /// the mark.
 #[inline]
 fn name_each(hashers: &mut [Hasher], which: &[usize]) {
-    for &i in which {
-        assert!(!core::mem::replace(&mut hashers[i].finishing, true), "each finalized index is distinct");
+    for (k, &i) in which.iter().enumerate() {
+        if i >= hashers.len() || core::mem::replace(&mut hashers[i].finishing, true) {
+            refuse_names(hashers, &which[..k], i);
+        }
     }
+}
+
+/// Refuse a `finalize_each` whose index `i` names no hasher, or one that
+/// `named` (the indices before it) names already. The marks come off
+/// first: the call hashes nothing, and a program that catches the panic
+/// finds every hasher as it was, where a mark left on would refuse each
+/// later call that named the hasher, and its clones'.
+#[cold]
+#[inline(never)]
+fn refuse_names(hashers: &mut [Hasher], named: &[usize], i: usize) -> ! {
+    for &j in named {
+        hashers[j].finishing = false;
+    }
+    assert!(i < hashers.len(), "finalize_each names hasher {i} of {}", hashers.len());
+    panic!("each finalized index is distinct");
 }
 
 /// The hash of each message `which` names: `out[k]` is what
 /// `hashers[which[k]].finalize()` would give, and that hasher is then
 /// reset for its next message (no length hint). Requires
 /// `out.len() == which.len()`, each index `< hashers.len()`, and distinct
-/// indices: it panics on an index named twice, in every build.
+/// indices: it panics on an index named twice, in every build. A call
+/// that is refused hashes nothing and leaves every hasher as it was.
 /// Messages that finish in one call hash side by side where the CPU has
 /// the lanes: sixteen at once on AVX-512, and on AArch64 the plain
 /// messages of up to 1024 bytes fed by [`update_each`].
@@ -174,19 +196,38 @@ fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]
 /// is not held has no earlier bytes waiting, and takes its piece now. Both
 /// lists live on the stack: a turn allocates nothing.
 fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option<&crate::incremental::Pool<'_>>) {
-    let mut held = arrayvec::ArrayVec::<usize, TABLE>::new();
+    /// The stages a turn holds, hashed however the turn ends. A turn that
+    /// panics part-way (an index that names no hasher, the caller's
+    /// callback) unwinds through here: a full stage that no list named
+    /// any more would have no room for its hasher's next update, and its
+    /// next turn would wait for ever for a pass to hash it. (A panic out
+    /// of the hashing itself, which runs none of the caller's code and so
+    /// would be this crate's own bug, meets its stages here a second
+    /// time: that second panic ends the process.)
+    struct Held<'h> {
+        hashers: &'h mut [Hasher],
+        held: arrayvec::ArrayVec<usize, TABLE>,
+    }
+    impl Drop for Held<'_> {
+        fn drop(&mut self) {
+            if !self.held.is_empty() {
+                flush_held(self.hashers, &mut self.held);
+            }
+        }
+    }
+    let mut turn = Held { hashers, held: arrayvec::ArrayVec::new() };
     let mut waiting = arrayvec::ArrayVec::<(usize, &[u8]), TABLE>::new();
     for &(i, bytes) in pieces {
-        if waiting.is_full() || held.is_full() {
-            drain(hashers, &mut held, &mut waiting, pooled);
+        if waiting.is_full() || turn.held.is_full() {
+            drain(turn.hashers, &mut turn.held, &mut waiting, pooled);
         }
-        if hashers[i].held_group().is_some() {
+        if turn.hashers[i].held_group().is_some() {
             waiting.push((i, bytes));
             continue;
         }
-        gather(hashers, i, bytes, pooled, &mut held, &mut waiting);
+        gather(turn.hashers, i, bytes, pooled, &mut turn.held, &mut waiting);
     }
-    drain(hashers, &mut held, &mut waiting, pooled);
+    drain(turn.hashers, &mut turn.held, &mut waiting, pooled);
 }
 
 /// `bytes` into hasher `i`, which is not held: as much as fills its stage;
@@ -947,6 +988,70 @@ mod test {
         let mut hashers: Vec<_> = (0..16).map(|_| Hasher::new(Mode::Plain, None)).collect();
         let which: Vec<_> = (0..16).chain(0..16).collect();
         finalize_each(&mut hashers, &which, &mut [[0; OUT_LEN]; 32]);
+    }
+
+    #[test]
+    #[should_panic(expected = "finalize_each names hasher 9 of 2")]
+    fn finalize_each_refuses_an_index_that_names_no_hasher() {
+        crate::initialize();
+        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        finalize_each(&mut hashers, &[0, 9], &mut [[0; OUT_LEN]; 2]);
+    }
+
+    /// A refused call leaves no mark: a program that catches the panic
+    /// may name the same hashers in its next call.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_refused_finalize_each_leaves_no_hasher_marked() {
+        crate::initialize();
+        for refused in [&[0usize, 1, 0][..], &[0, 1, 9]] {
+            let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+            update_each(&mut hashers, &[(0, b"abc"), (1, b"xyz")]);
+            let call = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| finalize_each(&mut hashers, refused, &mut [[0; OUT_LEN]; 3])));
+            assert!(call.is_err(), "{refused:?} was accepted");
+            assert!(hashers.iter().all(|h| !h.finishing), "{refused:?} left a mark");
+            let mut out = [[0; OUT_LEN]; 2];
+            finalize_each(&mut hashers, &[1, 0], &mut out);
+            assert_eq!(out, [*crate::convenience::hash(b"xyz").as_bytes(), *crate::convenience::hash(b"abc").as_bytes()]);
+        }
+    }
+
+    /// A turn that panics part-way leaves no hasher holding a full stage:
+    /// the hasher's next update has room, and its next turn ends.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_turn_that_unwinds_leaves_no_stage_held() {
+        crate::initialize();
+        let bytes: Vec<u8> = (0..2 * crate::STAGE_LEN).map(|i| (i % 251) as u8).collect();
+        let half = crate::STAGE_LEN / 2;
+        let then = |hashers: &mut [Hasher; 2], after: &str| {
+            assert!(hashers[0].held_group().is_none(), "{after}: hasher 0 is left holding a full stage");
+            // What the turn fed hasher 0 before it stopped is in: the
+            // stage that filled, and not the byte that waited behind it.
+            assert_eq!(hashers[0].count(), crate::STAGE_LEN as u64, "{after}");
+            hashers[0].update(b"y");
+            hashers[1].reset();
+            update_each(hashers, &[(0, b"z"), (1, b"abc")]);
+            let mut fed = bytes[..crate::STAGE_LEN].to_vec();
+            fed.extend_from_slice(b"yz");
+            assert_eq!(hashers[0].finalize(), crate::convenience::hash(&fed), "{after}");
+            assert_eq!(hashers[1].finalize(), crate::convenience::hash(b"abc"), "{after}");
+        };
+
+        // An index that names no hasher, after hasher 0's stage has filled.
+        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        let turn = [(0, &bytes[..half]), (0, &bytes[half..2 * half + 1]), (7, &bytes[..1])];
+        let call = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| update_each(&mut hashers, &turn)));
+        assert!(call.is_err(), "an index that names no hasher was accepted");
+        then(&mut hashers, "an index out of range");
+
+        // The caller's callback panics on hasher 1's subtree, after the same.
+        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        let turn = [(0, &bytes[..half]), (0, &bytes[half..2 * half + 1]), (1, &bytes[..])];
+        let panics = |_: &TreeHasher, _: u32, _: u64, _: &[u8]| -> [Cv; 2] { panic!("this callback panics") };
+        let call = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| update_each_with(&mut hashers, &turn, crate::STAGE_LEN, &panics)));
+        assert!(call.is_err(), "the callback was not called");
+        then(&mut hashers, "a callback that panics");
     }
 
     // Expected routes are independent of the implementation's predicate:

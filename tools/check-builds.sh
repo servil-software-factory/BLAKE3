@@ -37,7 +37,8 @@ step sh -c 'cd threads && taskset -c 0 cargo nextest run --cargo-quiet --release
 # November 15, 2026 they ran only inside the mutation check, so a change
 # that broke one could pass every gate that was not about its own lines.
 step sh -c 'cd threads && RUSTFLAGS="--cfg shuttle" cargo test -q --release --test shuttle_finish --test shuttle_park --test shuttle_waker --test shuttle_pipeline'
-# The Pipeline's model fails for each planted fault (a build of it each).
+# The Pipeline's model fails for each planted fault (a build of it each,
+# in a copy of this tree: no fault is ever planted here).
 step python3 tools/pipeline_model_controls.py
 # Shuttle's SC model cannot check the RCpc wake-publication barrier.
 step python3 tools/check-waker-order.py
@@ -65,8 +66,13 @@ step sh -c 'python3 tools/gen_x86_chunk_root.py | cmp - c/blake3_chunk_root_x86-
 step sh -c 'python3 tools/gen_avx512_32.py | cmp - c/blake3_avx512_32.S'
 step sh -c 'python3 tools/gen_output16.py | cmp - c/blake3_output16.S'
 step sh -c 'python3 tools/gen_output8.py | cmp - c/blake3_output8.S'
-# The core's API page lists what the crate offers, item for item.
-step sh -c 'RUSTC_BOOTSTRAP=1 cargo rustdoc -q --lib --features serde -- -Z unstable-options --output-format json && python3 tools/api.py "$CARGO_TARGET_DIR/doc/blake3_servil_core.json" --check docs/core-api.md'
+# Both crates document their traits and account for their lifecycle operations.
+step python3 tools/test_api.py
+for manifest in Cargo.toml threads/Cargo.toml; do
+    step sh -c 'RUSTC_BOOTSTRAP=1 cargo rustdoc -q --manifest-path "$0" --lib --features serde -- -Z unstable-options --output-format json' "$manifest"
+done
+step python3 tools/api.py "$CARGO_TARGET_DIR/doc/blake3_servil_core.json" --check docs/core-api.md
+step python3 tools/api.py "$CARGO_TARGET_DIR/doc/blake3_servil.json" --check
 # Each of b3sum's protections has a test that fails without it.
 step python3 tools/b3sum_controls.py
 echo "check-builds: every build passes"

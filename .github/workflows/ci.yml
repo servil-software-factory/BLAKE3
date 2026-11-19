@@ -35,7 +35,7 @@ jobs:
     - name: cargo fmt --check, in each crate
       run: for d in $(git ls-files '*Cargo.toml' | xargs -n1 dirname); do (cd "$d" && cargo fmt --all -- --check) || exit 1; done
     - name: Release-tool controls
-      run: python3 tools/test_one_assignee.py && python3 tools/test_release_check.py && python3 tools/test_release_artifacts.py && python3 tools/test_gen_ver.py && python3 tools/test_land.py && python3 tools/test_unsafe_reasons.py && python3 tools/unsafe_reasons.py
+      run: python3 tools/test_one_assignee.py && python3 tools/test_release_check.py && python3 tools/test_release_artifacts.py && python3 tools/test_gen_ver.py && python3 tools/test_land.py && python3 tools/test_unsafe_reasons.py && python3 tools/unsafe_reasons.py && python3 tools/test_pipeline_model_controls.py && python3 tools/test_api.py
 
   library_tests:
     name: ${{ matrix.target.name }} ${{ matrix.channel }}

@@ -193,6 +193,16 @@ mod lanes {
         Platform::detect()
     }
     pub(crate) fn require() {}
+    /// The stand-in pool has workers; a Pipeline with no slot (NO_SLOT)
+    /// models the unregistered path a one-thread pool takes.
+    pub(crate) fn pool_has_workers() -> bool {
+        true
+    }
+    /// The process's end, as the pool's own: the model counts it a fault shown.
+    pub(crate) fn stop(why: &str) -> ! {
+        eprint!("{why}");
+        std::process::abort()
+    }
     pub(crate) fn now() -> std::time::Instant {
         static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         *BASE.get_or_init(std::time::Instant::now)
@@ -317,7 +327,12 @@ mod lanes {
         /// asleep, and a worker that began to hold just after the last one
         /// had was never let go, which this model then reported as the
         /// Pipeline's deadlock (once in some two hundred runs).
-        fn hold_back() {
+        ///
+        /// A scenario's own thread that gives something back to a waiting
+        /// caller (a Room dropped on another thread) is held back the
+        /// same way: left to the schedulers it is done within a few
+        /// steps, always before the caller has fallen asleep.
+        pub(crate) fn hold_back() {
             use shuttle::rand::Rng;
             if shuttle::rand::thread_rng().gen_ratio(1, 4) {
                 let mut asleep = ASLEEP.lock().unwrap();
@@ -543,6 +558,38 @@ fn a_room_outlives_its_pipeline() {
     });
 }
 
+/// A wait for a Room while the Pipeline's one Room is alive on another
+/// thread, with bytes committed from it that a worker may still be
+/// reading: the wait ends when the Room has been dropped there and the
+/// worker is done, whichever comes last, and each wakes the caller (a
+/// wake lost at either leaves the caller asleep for good, which Shuttle
+/// reports). The thread that drops the Room is sometimes held back until
+/// the caller sleeps, as a worker is. `room()` refused this wait until
+/// November 19, 2026, by a count of the Rooms the calling program held.
+fn a_wait_for_a_room_ends_when_another_thread_drops_one() {
+    check(|| {
+        with_workers(1, || {
+            let (inputs, want) = inputs_of(&[ROOM_LEN + 7]);
+            let mut pipe = Pipeline::<usize, ()>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
+            let mut message = block_on(pipe.message(0, None));
+            let mut room = block_on(pipe.room());
+            room.bytes_mut().copy_from_slice(&inputs[0][..ROOM_LEN]);
+            pipe.commit(&mut message, &mut room, ROOM_LEN);
+            let giver = thread::spawn(move || {
+                lanes::sources::hold_back();
+                drop(room);
+            });
+            let mut room = block_on(pipe.room());
+            giver.join().unwrap();
+            room.bytes_mut()[..7].copy_from_slice(&inputs[0][ROOM_LEN..]);
+            pipe.commit(&mut message, &mut room, 7);
+            drop(room);
+            pipe.end(message);
+            drain(&mut pipe, 1, &want);
+        });
+    });
+}
+
 /// Messages lent by the caller: when a message's event has come, its
 /// guard can be dropped (a guard dropped before its loan is complete
 /// stops the process).
@@ -712,11 +759,12 @@ fn an_aborted_message_leaves_the_others_whole() {
 #[test]
 fn the_pipeline_under_shuttle() {
     blake3_servil_core::initialize();
-    let scenarios: [(&str, fn()); 8] = [
+    let scenarios: [(&str, fn()); 9] = [
         ("messages_through_rooms_complete_with_their_own_digests", messages_through_rooms_complete_with_their_own_digests),
         ("owned_messages_complete_and_wake_the_caller", owned_messages_complete_and_wake_the_caller),
         ("a_pipeline_after_another_reuses_its_storage_soundly", a_pipeline_after_another_reuses_its_storage_soundly),
         ("a_room_outlives_its_pipeline", a_room_outlives_its_pipeline),
+        ("a_wait_for_a_room_ends_when_another_thread_drops_one", a_wait_for_a_room_ends_when_another_thread_drops_one),
         ("lent_messages_are_complete_when_their_events_come", lent_messages_are_complete_when_their_events_come),
         ("an_aborted_message_leaves_the_others_whole", an_aborted_message_leaves_the_others_whole),
         ("batches_are_whole_when_their_events_come", batches_are_whole_when_their_events_come),

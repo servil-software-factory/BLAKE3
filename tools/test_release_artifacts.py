@@ -455,6 +455,34 @@ class Rebuilt(Gathered):
             self.assertTrue(lines[0].startswith(f"NOT CLEAN  {name}: its bytes (SHA-256 "), lines[0])
             self.assertIn(f"are not the second build's in {second} (SHA-256 ", lines[0])
 
+    def test_every_builders_copy_is_compared(self):
+        # The release workflow's jobs each leave a folder of their own. Both
+        # package the crates; merged into one folder, the later one's crate
+        # would stand for both.
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
+            self.fill(folder)
+            for builder in ("b3sum-ARM64", "b3sum-X64"):
+                os.mkdir(os.path.join(second, builder))
+                self.fill(os.path.join(second, builder))
+            self.assertEqual(ra.directory(folder, self.release, rebuilt=second), (True, []))
+            crate = f"sub-crate-{self.version}.crate"
+            with open(os.path.join(second, "b3sum-ARM64", crate), "ab") as f:
+                f.write(b"and one byte more")
+            ok, lines = ra.directory(folder, self.release, rebuilt=second)
+            self.assertIs(ok, False)
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn(f"are not the second build's in {os.path.join(second, 'b3sum-ARM64')} (SHA-256 ", lines[0])
+            # A builder that packaged fewer crates than the release has.
+            os.remove(os.path.join(second, "b3sum-ARM64", crate))
+            ok, lines = ra.directory(folder, self.release, rebuilt=second)
+            self.assertIs(ok, False)
+            self.assertEqual(lines, [f"NOT CLEAN  {crate}: {os.path.join(second, 'b3sum-ARM64')} holds crates and not this one: its builder packaged fewer than the release has"])
+            # A builder of programs alone (no crates at all) owes none.
+            for name in os.listdir(os.path.join(second, "b3sum-ARM64")):
+                if name.endswith(".crate"):
+                    os.remove(os.path.join(second, "b3sum-ARM64", name))
+            self.assertEqual(ra.directory(folder, self.release, rebuilt=second), (True, []))
+
     def test_a_program_or_a_crate_with_no_second_build_fails(self):
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
             self.fill(folder)
