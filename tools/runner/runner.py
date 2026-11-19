@@ -8,8 +8,8 @@ here, one folder per job). Code comes from GitHub alone, at the commits a
 job names. Done jobs are listed in ~/.benchrunner_done (the runner's home).
 Ctrl-C stops the runner after the current job.
 
-Jobs (commits as 7-40 hex digits; time_limit_seconds optional, default 1800
-(a whole mutation run: 7200), at most 7200):
+Jobs (commits as 7-40 hex digits; time_limit_seconds optional, default
+1800, up to 7200; mutants-whole defaults to 7200):
 
     {"type": "benchmark", "fork_commit": "...", "bench_commit": "...",
      "flags": ["--all", "--quick"], "contenders": [...], "points": [...],
@@ -36,12 +36,16 @@ every 500 ms beside it, in its results' powermetrics.txt. And "top": true:
 the twelve busiest processes every second beside it, each sample with its
 time, in its results' top.txt, to name the other programs a timing job's
 busy windows count.)
-    {"type": "b3sum", "fork_commit": "...", "bench_commit": "...", "quick": true}
+    {"type": "b3sum", "fork_commit": "...", "bench_commit": "...",
+     "against": "...", "quick": true}
 
 (A b3sum job builds the contenders, bench-hashes' tools/b3sum-contenders.py
 at the BLAKE3-Servil commit: official BLAKE3's b3sum, BLAKE3-Servil's as b3sum and
 b3sum-1-thread, the system's sum programs; and runs bench-hashes b3sum on
-the files in ~/b3sum-bench-files, made there once. The report, samples
+the files in ~/b3sum-bench-files, made there once. With optional "against"
+naming an earlier BLAKE3-Servil commit (such as the last release), both
+BLAKE3-Servil builds run in the same rounds with the earlier build first
+as the judged base, beside official b3sum. The report, samples
 and map land in the job's benchmark-results/. "quick" runs the small set.)
     {"type": "crowd", "fork_commit": "...", "bench_commit": "..."}
 
@@ -66,8 +70,7 @@ them: a time-out can be a crash in another run, #380). lists-diff.txt is
 what they change in the commit's, lists-written/ the lists as this run
 alone wrote them, and outcomes.tsv every mutant's outcome and seconds. Its exit is the verdict, as
 a mutants job's. One crate a job: the core's run took 39 minutes on an M6
-and the other crate's 23 (November 12, 2026), so its time limit is two
-hours unless the job names another.)
+and the other crate's 23 (November 12, 2026).)
     {"type": "example", "example": "scaling" | "host_lab" | "energy_probe" | "job_trace",
      "fork_commit": "...", "args": ["message", "1048576"]}
     {"type": "test", "fork_commit": "..."}
@@ -85,8 +88,10 @@ continuous-load proposal's tests: bench-hashes' --train and
 back, run i's files in run-i/, for calibrations.)
 
 Each result folder holds runner.log (every command and its output),
-verdict.json, and the job's own files: the benchmark's report, graph,
-and samples; host_lab's report.
+progress.json (the current step and completed samples), verdict.json,
+stacks.txt (when inspected, cancelled, or stopped by the job's time
+limit), and the job's own files: the benchmark's report, graph, and
+samples; host_lab's report.
 
 The checkouts persist between jobs (CHECKOUTS: BLAKE3-Servil, and bench-hashes
 beside it), moved to each job's commits with a forced checkout that
@@ -95,10 +100,13 @@ BLAKE3-Servil's target directory serves test and example jobs, check's
 sides (target/check/ in BLAKE3-Servil) its jobs, and bench-hashes' own build
 against BLAKE3-Servil as it is (`bench-hashes build-against`) benchmark jobs.
 """
+import ctypes
 import json
 import os
 import platform
 import re
+import select
+import selectors
 import shutil
 import signal
 import subprocess
@@ -123,8 +131,43 @@ EXAMPLES = {"host_lab", "energy_probe", "job_trace", "sme_units"}
 FEATURES = {"job-trace"}
 DEFAULT_LIMIT = 1800
 MAX_LIMIT = 7200
+CAPTURE_BUDGET = 30.0
+CAPTURE_SAMPLE_TIMEOUT = 15.0
 
 stopping = False
+inspect_requested = False
+cancel_requested = False
+_wake_pipe = None
+
+
+def _ensure_wake_pipe():
+    global _wake_pipe
+    if _wake_pipe is None:
+        r_fd, w_fd = os.pipe()
+        os.set_blocking(r_fd, False)
+        os.set_blocking(w_fd, False)
+        _wake_pipe = (r_fd, w_fd)
+    return _wake_pipe
+
+
+def _wake_supervisor():
+    if _wake_pipe is not None:
+        try:
+            os.write(_wake_pipe[1], b"1")
+        except OSError:
+            pass
+
+
+def _drain_wake_pipe():
+    if _wake_pipe is None:
+        return
+    r_fd = _wake_pipe[0]
+    while True:
+        try:
+            if not os.read(r_fd, 64):
+                break
+        except OSError:
+            break
 
 # The session of the command a job is running: its PID and start time. A
 # runner stopped some other way than Ctrl-C (its terminal closed, a kill)
@@ -148,7 +191,7 @@ def end_leftover_session():
     pid, recorded = SESSION_FILE.read_text().split("\t", 1)
     if started(int(pid)) == recorded.strip():
         print(f"runner: ending the session an earlier runner left running (PID {pid})", file=sys.stderr, flush=True)
-        os.killpg(int(pid), signal.SIGKILL)
+        kill_session(int(pid))
     SESSION_FILE.unlink()
 
 
@@ -156,6 +199,18 @@ def on_signal(signum, _frame):
     global stopping
     stopping = True
     print("runner: stopping after the current job", file=sys.stderr, flush=True)
+
+
+def on_inspect(signum, _frame):
+    global inspect_requested
+    inspect_requested = True
+    _wake_supervisor()
+
+
+def on_cancel(signum, _frame):
+    global cancel_requested
+    cancel_requested = True
+    _wake_supervisor()
 
 
 def hex_commit(job, key):
@@ -171,41 +226,473 @@ def environment():
     return env
 
 
+def _descendant_pids(root_pid, entries):
+    """PIDs in `root_pid`'s session (via os.getsid), or reachable by PPID
+    from `root_pid`, or in `root_pid`'s process group."""
+    children = {}
+    in_session = set()
+    for pid, pgrp, ppid, _line in entries:
+        children.setdefault(ppid, []).append(pid)
+        if pid == root_pid or pgrp == root_pid:
+            in_session.add(pid)
+            continue
+        try:
+            if os.getsid(pid) == root_pid:
+                in_session.add(pid)
+        except OSError:
+            pass
+    queue = list(in_session)
+    while queue:
+        cur = queue.pop()
+        for child in children.get(cur, ()):
+            if child not in in_session:
+                in_session.add(child)
+                queue.append(child)
+    return in_session
+
+
+def session_processes(sid):
+    """Live processes in `sid`'s session (across any child process groups,
+    such as cargo-nextest / cargo-mutants workers) as (pid, line) pairs."""
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,pgid=,ppid=,pcpu=,etime=,state=,command="],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    entries = []
+    for line in out.stdout.splitlines():
+        parts = line.split(None, 6)
+        if len(parts) < 7:
+            continue
+        try:
+            pid, pgrp, ppid = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        entries.append((pid, pgrp, ppid, line.strip()))
+    wanted = _descendant_pids(sid, entries)
+    return [(pid, line) for pid, _pgrp, _ppid, line in entries if pid in wanted]
+
+
+def kill_session(sid):
+    """SIGKILL every live process in `sid`'s session, including descendants
+    that moved into their own process groups."""
+    try:
+        os.killpg(sid, signal.SIGKILL)
+    except OSError:
+        pass
+    for _ in range(3):
+        procs = session_processes(sid)
+        if not procs:
+            return
+        for pid, _ in procs:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def capture_stacks(sid, out, reason, budget=CAPTURE_BUDGET):
+    """Record live processes and their thread stacks in `sid`'s session into
+    `out/stacks.txt` within `budget` seconds, without terminating the process.
+    Best effort: I/O or /proc errors are noted or skipped and never raise."""
+    out = Path(out)
+    capture_deadline = time.monotonic() + max(0.0, budget)
+    procs = session_processes(sid)
+    chunks = [f"=== {utc('%Y-%m-%dT%H:%M:%SZ')} ({reason}, session sid={sid}) ===\n"]
+    if not procs:
+        chunks.append("no live processes in session\n")
+    else:
+        chunks.append("PID PGID PPID %CPU ELAPSED STATE COMMAND\n")
+        for _, line in procs:
+            chunks.append(line + "\n")
+        for pid, _ in procs:
+            rem = capture_deadline - time.monotonic()
+            if rem <= 0:
+                chunks.append(f"\n--- stack capture budget ({budget:.1f}s) exhausted; remaining processes skipped ---\n")
+                break
+            chunks.append(f"\n--- pid {pid} ---\n")
+            if sys.platform == "darwin" and Path("/usr/bin/sample").exists():
+                sample_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(prefix="sample-", suffix=".txt", delete=False) as tf:
+                        sample_path = Path(tf.name)
+                    r = subprocess.run(
+                        ["/usr/bin/sample", str(pid), "1", "-file", str(sample_path)],
+                        capture_output=True, text=True, check=False,
+                        timeout=min(CAPTURE_SAMPLE_TIMEOUT, max(1.0, rem)),
+                    )
+                    text = sample_path.read_text(errors="replace") if sample_path.exists() else ""
+                    chunks.append(text if text.strip() else f"sample exited {r.returncode}: {r.stderr.strip()}\n")
+                except Exception as e:
+                    chunks.append(f"sample failed: {e}\n")
+                finally:
+                    if sample_path is not None:
+                        try:
+                            sample_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            elif Path(f"/proc/{pid}/task").is_dir():
+                def read_proc(path):
+                    try:
+                        return path.read_text(errors="replace").strip()
+                    except OSError:
+                        return ""
+                try:
+                    tasks = sorted(Path(f"/proc/{pid}/task").iterdir(), key=lambda p: p.name)
+                except OSError:
+                    tasks = []
+                for task in tasks:
+                    comm = read_proc(task / "comm")
+                    wchan = read_proc(task / "wchan")
+                    stack = read_proc(task / "stack")
+                    if not comm and not wchan and not stack:
+                        continue
+                    chunks.append(f"tid {task.name} ({comm or '?'}) wchan={wchan or '?'}\n")
+                    if stack:
+                        chunks.append(stack + "\n")
+            else:
+                chunks.append("no stack sampler available on this platform\n")
+    chunks.append("\n")
+    try:
+        with open(out / "stacks.txt", "a") as f:
+            f.write("".join(chunks))
+    except OSError as e:
+        print(f"runner: could not write stacks.txt: {e}", file=sys.stderr, flush=True)
+    return out / "stacks.txt"
+
+
+def _open_dir_watch(folder):
+    """An event-driven directory watch fd for `folder` (kqueue vnode on
+    macOS, inotify on Linux), or (None, None) when unavailable."""
+    if folder is None:
+        return None, None
+    folder = Path(folder)
+    if not folder.is_dir():
+        return None, None
+    if hasattr(select, "kqueue"):
+        flags = os.O_RDONLY | getattr(os, "O_EVTONLY", 0)
+        return "vnode", os.open(folder, flags)
+    if sys.platform == "linux":
+        try:
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            IN_NONBLOCK = 0o4000
+            IN_CLOEXEC = 0o2000000
+            IN_MASK = 0x00000100 | 0x00000080 | 0x00000008  # CREATE | MOVED_TO | CLOSE_WRITE
+            ifd = libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
+            if ifd >= 0:
+                wd = libc.inotify_add_watch(ifd, os.fsencode(folder), IN_MASK)
+                if wd >= 0:
+                    return "inotify", ifd
+                os.close(ifd)
+        except OSError:
+            pass
+    return None, None
+
+
+class Cancelled(Exception):
+    """A cancel request ended the job: its own verdict, "cancelled", never
+    "error" or "timed out"."""
+
+
 class TimedOut(Exception):
     """The job's time limit ended it: its own verdict, "timed out", never
-    "error" (a crash) or a handler's answer. A limit reached says nothing
-    about what the job would have found."""
+    "error" (a crash) or a handler's answer."""
 
 
 class Job:
-    """One job's log and deadline; every command runs through `run`. The
-    deadline is the job's one clock (wait_for.py keeps none over it)."""
+    """One job's log, progress record, and event-driven process supervisor.
+    Every command runs through `run`. A job's time limit is honored on the
+    clock, capturing thread stacks before terminating the session."""
 
-    def __init__(self, log, limit):
+    def __init__(self, log, limit=DEFAULT_LIMIT, out=None, control_dir=None, job_stem=None):
         self.log = log
         self.limit = limit
-        self.deadline = time.monotonic() + limit
+        self.deadline = (time.monotonic() + limit) if limit is not None else None
+        self.out = Path(out) if out is not None else None
+        self.control_dir = Path(control_dir) if control_dir is not None else None
+        self.job_stem = job_stem
+        self.started_utc = utc("%Y-%m-%dT%H:%M:%SZ")
+        self.step = 0
+        self.inspections = []
+        self._seen_controls = {}
+
+    def _control_path(self, kind):
+        if self.control_dir is None or not self.job_stem:
+            return None
+        return self.control_dir / f"{self.job_stem}.{kind}"
+
+    def _consume_control(self, kind):
+        path = self._control_path(kind)
+        if path is None:
+            return False
+        try:
+            st = path.stat()
+        except OSError:
+            self._seen_controls.pop(kind, None)
+            return False
+        token = (st.st_ino, st.st_mtime_ns)
+        if self._seen_controls.get(kind) == token:
+            return False
+        try:
+            path.unlink()
+            self._seen_controls.pop(kind, None)
+        except OSError:
+            self._seen_controls[kind] = token
+        return True
+
+    def write_progress(self, state, cmd=None, pid=None):
+        if self.out is None:
+            return
+        try:
+            samples_dir = self.out / "samples"
+            samples = sorted(p.name for p in samples_dir.glob("run-*.tsv")) if samples_dir.is_dir() else []
+            tail = []
+            log_name = getattr(self.log, "name", None)
+            if log_name and Path(log_name).is_file():
+                self.log.flush()
+                with open(log_name, "rb") as lf:
+                    lf.seek(0, os.SEEK_END)
+                    size = lf.tell()
+                    lf.seek(max(0, size - 8192))
+                    chunk = lf.read().decode("utf-8", errors="replace")
+                lines = [ln for ln in chunk.splitlines() if ln.strip()]
+                tail = lines[-5:]
+            payload = {
+                "state": state,
+                "step": self.step,
+                "started": self.started_utc,
+                "updated": utc("%Y-%m-%dT%H:%M:%SZ"),
+                "command": " ".join(cmd) if cmd else None,
+                "pid": pid,
+                "samples": samples,
+                "log_tail": tail,
+            }
+            tmp = self.out / "progress.json.tmp"
+            tmp.write_text(json.dumps(payload, indent=2) + "\n")
+            tmp.replace(self.out / "progress.json")
+        except OSError as e:
+            print(f"runner: could not write progress.json: {e}", file=sys.stderr, flush=True)
+
+    def check_between_steps(self, context):
+        """Enforce pending cancel or expired deadline outside a running child."""
+        global cancel_requested
+        if cancel_requested or self._consume_control("cancel"):
+            cancel_requested = False
+            self.write_progress("cancelled", [context], None)
+            raise Cancelled(f"cancelled {context}")
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.write_progress("timed_out", [context], None)
+            raise TimedOut(f"the job's {self.limit} s limit passed {context}")
+
+    def _check_controls(self, proc, cmd):
+        global inspect_requested, cancel_requested
+        if inspect_requested or self._consume_control("inspect"):
+            inspect_requested = False
+            if self.out is not None:
+                at = utc("%Y-%m-%dT%H:%M:%SZ")
+                t0 = time.monotonic()
+                rem_budget = CAPTURE_BUDGET
+                if self.deadline is not None:
+                    rem_budget = min(rem_budget, max(0.0, self.deadline - t0))
+                capture_stacks(proc.pid, self.out, "inspect", budget=rem_budget)
+                self.inspections.append({"at": at, "duration_seconds": round(time.monotonic() - t0, 3)})
+                self.write_progress("running", cmd, proc.pid)
+        if cancel_requested or self._consume_control("cancel"):
+            cancel_requested = False
+            try:
+                if self.out is not None:
+                    capture_stacks(proc.pid, self.out, "cancelled")
+            finally:
+                kill_session(proc.pid)
+                proc.wait()
+            self.write_progress("cancelled", cmd, None)
+            raise Cancelled(f"cancelled during: {' '.join(cmd)}")
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self._stop_on_timeout(proc, cmd)
+
+    def _stop_on_timeout(self, proc, cmd):
+        try:
+            if self.out is not None:
+                capture_stacks(proc.pid, self.out, "timed out")
+        finally:
+            kill_session(proc.pid)
+            proc.wait()
+        self.write_progress("timed_out", cmd, None)
+        raise TimedOut(f"the job's {self.limit} s limit ended: {' '.join(cmd)}")
+
+    def _wait_child(self, proc, cmd, capture):
+        """Wait for `proc` to exit using OS process-exit events (kqueue
+        EVFILT_PROC on macOS, pidfd_open on Linux) while draining captured
+        stdout and reacting immediately to inspect/cancel events."""
+        wake_r, _ = _ensure_wake_pipe()
+        watch_kind, watch_fd = _open_dir_watch(self.control_dir)
+        out_chunks = []
+        stdout_fd = proc.stdout.fileno() if (capture and proc.stdout is not None) else None
+        if stdout_fd is not None:
+            os.set_blocking(stdout_fd, False)
+
+        def read_stdout():
+            nonlocal stdout_fd
+            if stdout_fd is None:
+                return
+            while True:
+                try:
+                    data = os.read(stdout_fd, 65536)
+                except BlockingIOError:
+                    return
+                except OSError:
+                    data = b""
+                if not data:
+                    stdout_fd = None
+                    return
+                out_chunks.append(data)
+
+        def remaining():
+            if self.deadline is None:
+                return None
+            return max(0.0, self.deadline - time.monotonic())
+
+        need_control_poll = self.control_dir is not None and watch_fd is None
+        try:
+            if hasattr(select, "kqueue"):
+                kq = select.kqueue()
+                try:
+                    exited = proc.poll() is not None
+                    if not exited:
+                        try:
+                            kq.control([select.kevent(proc.pid, filter=select.KQ_FILTER_PROC,
+                                                      flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                                      fflags=select.KQ_NOTE_EXIT)], 0)
+                        except ProcessLookupError:
+                            exited = True
+                    kq.control([select.kevent(wake_r, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_ADD)], 0)
+                    if watch_fd is not None and watch_kind == "vnode":
+                        kq.control([select.kevent(watch_fd, filter=select.KQ_FILTER_VNODE,
+                                                  flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                                                  fflags=select.KQ_NOTE_WRITE)], 0)
+                    if stdout_fd is not None:
+                        kq.control([select.kevent(stdout_fd, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_ADD)], 0)
+                    # Check controls AFTER registering the directory watch so a
+                    # file created during setup is never missed.
+                    self._check_controls(proc, cmd)
+                    while not exited or stdout_fd is not None:
+                        rem = remaining()
+                        if rem is not None and rem <= 0:
+                            self._stop_on_timeout(proc, cmd)
+                        wait_timeout = (min(rem, 0.2) if rem is not None else 0.2) if need_control_poll else rem
+                        events = kq.control(None, 8, wait_timeout)
+                        if not events and not exited:
+                            self._check_controls(proc, cmd)
+                            continue
+                        for ev in events:
+                            if ev.filter == select.KQ_FILTER_PROC:
+                                exited = True
+                            elif ev.ident == wake_r:
+                                _drain_wake_pipe()
+                            elif stdout_fd is not None and ev.ident == stdout_fd:
+                                read_stdout()
+                                if stdout_fd is None:
+                                    try:
+                                        kq.control([select.kevent(ev.ident, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_DELETE)], 0)
+                                    except OSError:
+                                        pass
+                        self._check_controls(proc, cmd)
+                finally:
+                    kq.close()
+            else:
+                sel = selectors.DefaultSelector()
+                pidfd = None
+                try:
+                    exited = proc.poll() is not None
+                    if not exited and hasattr(os, "pidfd_open"):
+                        try:
+                            pidfd = os.pidfd_open(proc.pid, 0)
+                            sel.register(pidfd, selectors.EVENT_READ, "exit")
+                        except ProcessLookupError:
+                            exited = True
+                        except OSError:
+                            if pidfd is not None:
+                                os.close(pidfd)
+                                pidfd = None
+                    sel.register(wake_r, selectors.EVENT_READ, "wake")
+                    if watch_fd is not None and watch_kind == "inotify":
+                        sel.register(watch_fd, selectors.EVENT_READ, "watch")
+                    if stdout_fd is not None:
+                        sel.register(stdout_fd, selectors.EVENT_READ, "stdout")
+                    # Check controls AFTER registering the directory watch so a
+                    # file created during setup is never missed.
+                    self._check_controls(proc, cmd)
+                    while not exited or stdout_fd is not None:
+                        rem = remaining()
+                        if rem is not None and rem <= 0:
+                            self._stop_on_timeout(proc, cmd)
+                        need_poll = need_control_poll or (pidfd is None and not exited)
+                        poll_timeout = (min(rem, 0.2) if rem is not None else 0.2) if need_poll else rem
+                        ready = sel.select(timeout=poll_timeout)
+                        for key, _ in ready:
+                            tag = key.data
+                            if tag == "exit":
+                                exited = True
+                                sel.unregister(key.fileobj)
+                            elif tag == "wake":
+                                _drain_wake_pipe()
+                            elif tag == "watch":
+                                while True:
+                                    try:
+                                        if not os.read(watch_fd, 4096):
+                                            break
+                                    except OSError:
+                                        break
+                            elif tag == "stdout":
+                                prev_fd = stdout_fd
+                                read_stdout()
+                                if stdout_fd is None and prev_fd is not None:
+                                    sel.unregister(prev_fd)
+                        if not exited and pidfd is None and proc.poll() is not None:
+                            exited = True
+                        self._check_controls(proc, cmd)
+                finally:
+                    sel.close()
+                    if pidfd is not None:
+                        os.close(pidfd)
+            proc.wait()
+            # Re-check cancel/deadline even if the child just exited cleanly.
+            self.check_between_steps(f"after: {' '.join(cmd)}")
+            return b"".join(out_chunks).decode("utf-8", errors="replace") if capture else None
+        except BaseException:
+            if proc.poll() is None:
+                kill_session(proc.pid)
+                proc.wait()
+            raise
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if watch_fd is not None:
+                os.close(watch_fd)
 
     def run(self, cmd, cwd, capture=False):
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimedOut(f"the job's {self.limit} s limit passed before: {' '.join(cmd)}")
+        self.check_between_steps(f"before: {' '.join(cmd)}")
+        self.step += 1
         print(f"$ (cd {cwd} && {' '.join(cmd)})", file=self.log, flush=True)
         # A new session, so Ctrl-C in the runner's terminal reaches the
         # runner alone and the current job finishes.
         proc = subprocess.Popen(cmd, cwd=cwd, env=environment(), start_new_session=True,
-                                stdout=subprocess.PIPE if capture else self.log, stderr=self.log, text=True)
-        SESSION_FILE.write_text(f"{proc.pid}\t{started(proc.pid)}\n")
+                                stdout=subprocess.PIPE if capture else self.log, stderr=self.log)
         try:
-            stdout, _ = proc.communicate(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            # The whole session, not the command alone: cargo's children (a
-            # benchmark it runs) would otherwise go on into the next job.
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
-            raise TimedOut(f"the job's {self.limit} s limit ended: {' '.join(cmd)}")
+            SESSION_FILE.write_text(f"{proc.pid}\t{started(proc.pid)}\n")
+            self.write_progress("running", cmd, proc.pid)
+            stdout = self._wait_child(proc, cmd, capture)
+        except BaseException:
+            if proc.poll() is None:
+                kill_session(proc.pid)
+                proc.wait()
+            raise
         if proc.returncode != 0:
+            self.write_progress("failed", cmd, None)
             raise subprocess.CalledProcessError(proc.returncode, cmd)
+        self.write_progress("step_done", cmd, None)
         return stdout
 
     def sync(self, url, dest, commit):
@@ -216,7 +703,7 @@ class Job:
         if not (dest / ".git").exists():
             self.run(["git", "clone", "--quiet", url, str(dest)], cwd=dest.parent)
         else:
-            self.run(["git", "fetch", "--quiet", "--prune", "origin"], cwd=dest)
+            self.run(["git", "fetch", "--quiet", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/remotes/origin/tags/*"], cwd=dest)
         self.run(["git", "fetch", "--quiet", "origin", "+refs/pull/*/head:refs/remotes/origin/pr/*"], cwd=dest)
         self.run(["git", "checkout", "--quiet", "--force", "--detach", commit], cwd=dest)
         full = self.run(["git", "rev-parse", "HEAD"], cwd=dest, capture=True).strip()
@@ -288,10 +775,21 @@ def benchmark(job, run, work, out):
 
 def b3sum(job, run, work, out):
     fork_commit = hex_commit(job, "fork_commit")
+    old_commit = hex_commit(job, "against") if "against" in job else None
     fork, bench = run.checkouts(fork_commit, hex_commit(job, "bench_commit"))
+    revs = [old_commit, fork_commit] if old_commit else [fork_commit]
     # One contender a line, each one argument (a command may hold flags).
-    contenders = [line for line in run.run([sys.executable, "tools/b3sum-contenders.py", str(fork), str(HOME / "b3sum-contenders"), fork_commit],
+    contenders = [line for line in run.run([sys.executable, "tools/b3sum-contenders.py", str(fork), str(HOME / "b3sum-contenders"), *revs],
                                            cwd=bench, capture=True).splitlines() if "=" in line]
+    if old_commit:
+        def matches(line, commit):
+            key = line.split("=", 1)[0]
+            return key.startswith("b3sum-") and commit.startswith(key.removeprefix("b3sum-"))
+        old_lines = [c for c in contenders if matches(c, old_commit)]
+        new_lines = [c for c in contenders if matches(c, fork_commit)]
+        off_lines = [c for c in contenders if c.split("=", 1)[0] == "official"]
+        assert old_lines and new_lines, f"b3sum-contenders.py did not return builds for both {old_commit[:7]} and {fork_commit[:7]}"
+        contenders = old_lines + new_lines + off_lines
     exe = run.run(["cargo", "run", "--release", "--quiet", "--", "build-against", str(fork)],
                   cwd=bench, capture=True).strip().splitlines()[-1]
     quick = ["--quick"] if job.get("quick") else []
@@ -516,7 +1014,10 @@ def power():
     thread that sleeps between calls moved to the efficiency cores at
     about 1 GHz (job 351), so every job records it."""
     def pmset(*args):
-        return subprocess.run(["pmset", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+        try:
+            return subprocess.run(["pmset", *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+        except FileNotFoundError:
+            return ""
     batt = pmset("-g", "batt").splitlines()
     source = batt[0].removeprefix("Now drawing from ").strip("'") if batt else "unreported"
     charge = next((word.rstrip(";") for line in batt[1:] for word in line.split() if word.rstrip(";").endswith("%")), None)
@@ -537,7 +1038,10 @@ TOP = ["/usr/bin/top", "-l", "7200", "-s", "1", "-o", "cpu", "-n", "12", "-stats
 assert 7200 * 1 >= MAX_LIMIT
 
 
-def process(path, out):
+def process(path, out, control_dir=None):
+    global inspect_requested, cancel_requested
+    inspect_requested = False
+    cancel_requested = False
     print(f"runner: {path.name}: started, log in {out / 'runner.log'} until it ends", file=sys.stderr, flush=True)
     verdict = {"job": path.name, "started": utc("%Y-%m-%dT%H:%M:%SZ"), "power at start": power()}
     with open(out / "runner.log", "w") as log:
@@ -549,16 +1053,27 @@ def process(path, out):
             assert job["type"] not in TIMED or on_mains(verdict["power at start"]), \
                 f"a {job['type']} job times, so it runs on mains power alone; the Mac is on {verdict['power at start']}: plug it in and queue the job again"
             limit = job.get("time_limit_seconds", LIMITS.get(job["type"], DEFAULT_LIMIT))
-            assert isinstance(limit, int) and 0 < limit <= MAX_LIMIT, f"time_limit_seconds must be 1-{MAX_LIMIT}"
+            assert isinstance(limit, int) and not isinstance(limit, bool) and 0 < limit <= MAX_LIMIT, \
+                f"time_limit_seconds must be 1-{MAX_LIMIT}"
             meters = {}
+            meter_files = []
             for name, command in [("powermetrics", POWERMETRICS), ("top", TOP)]:
                 assert isinstance(job.get(name, False), bool), f"{name}: true or false"
                 if job.get(name):
-                    meters[name] = subprocess.Popen(command, stdout=open(out / f"{name}.txt", "w"), stderr=log)
+                    mf = open(out / f"{name}.txt", "w")
+                    meter_files.append(mf)
+                    meters[name] = subprocess.Popen(command, stdout=mf, stderr=log)
+            runner_job = None
             try:
+                (HOME / "tmp").mkdir(exist_ok=True)
                 with tempfile.TemporaryDirectory(dir=HOME / "tmp") as work:
-                    verdict["status"] = HANDLERS[job["type"]](job, Job(log, limit), Path(work), out)
+                    runner_job = Job(log, limit=limit, out=out, control_dir=control_dir, job_stem=path.stem)
+                    status = HANDLERS[job["type"]](job, runner_job, Path(work), out)
+                    runner_job.check_between_steps(f"after handler {job['type']}")
+                    verdict["status"] = status
             finally:
+                if runner_job is not None and runner_job.inspections:
+                    verdict["inspections"] = runner_job.inspections
                 for name, meter in meters.items():
                     # sudo passes the signal on to powermetrics, which ends its
                     # last sample and exits, as top does. A meter that outlasts
@@ -572,6 +1087,12 @@ def process(path, out):
                         meter.kill()
                         meter.wait()
                         verdict[name] = "did not exit within 10 s of SIGINT; killed (its last samples may be missing)"
+                for mf in meter_files:
+                    mf.close()
+        except Cancelled as e:
+            verdict["status"] = "cancelled"
+            verdict["cancelled"] = str(e)
+            print(f"runner: cancelled: {e}", file=log, flush=True)
         except TimedOut as e:
             verdict["status"] = "timed out"
             verdict["timed out"] = str(e)
@@ -582,7 +1103,7 @@ def process(path, out):
             print(f"runner: {verdict['error']}", file=log, flush=True)
     verdict["finished"] = utc("%Y-%m-%dT%H:%M:%SZ")
     verdict["power at end"] = power()
-    if verdict.get("type") in TIMED and verdict.get("status") not in (None, "error") and not verdict["power at end"].startswith("AC Power"):
+    if verdict.get("type") in TIMED and verdict.get("status") not in (None, "error", "cancelled", "timed out") and not verdict["power at end"].startswith("AC Power"):
         verdict["status"] = f"power left mains during the job ({verdict['status']}): its results are no evidence of speed"
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
     print(f"runner: {path.name}: {verdict['status']} -> {out}", file=sys.stderr, flush=True)
@@ -602,8 +1123,11 @@ def main():
     # and a machine's local time and zone say where it is.
     os.environ["TZ"] = "UTC"
     time.tzset()
+    _ensure_wake_pipe()
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGUSR1, on_inspect)
+    signal.signal(signal.SIGUSR2, on_cancel)
     end_leftover_session()
     print(f"runner: {machine} watching {exchange.jobs}{' (shared through Git)' if exchange.shared else ''}; Ctrl-C stops after the current job", file=sys.stderr, flush=True)
     while not stopping:
@@ -621,7 +1145,8 @@ def main():
         # a job times is that process's work beside the measurement.
         stage = HOME / "tmp" / out.name
         stage.mkdir()
-        status = process(pending[0], stage)
+        control_dir = None if exchange.shared else exchange.jobs
+        status = process(pending[0], stage, control_dir=control_dir)
         shutil.copytree(stage, out, dirs_exist_ok=True)
         shutil.rmtree(stage)
         exchange.publish(out, f"{pending[0].stem}: {status} ({machine})")

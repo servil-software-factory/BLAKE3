@@ -18,8 +18,8 @@ with no verdict: the runner was killed or the Mac shut down).
 Exit status, one outcome each, never merged:
   0  the job passed ("ok", "passed", "no regression")
   1  it failed ("regression", "error", or any other status)
-  2  it reached no verdict: "timed out" (its time limit ended it) or
-     "no verdict" (other programs kept the machine busy)
+  2  it reached no verdict: "cancelled", "timed out" (its time limit ended
+     it), or "no verdict" (other programs kept the machine busy)
   3  the runner is not running, or stopped without writing a verdict
 The VM stays idle meanwhile, as a Mac measurement needs.
 """
@@ -39,15 +39,20 @@ IDLE_SECONDS = 180
 GRACE = 600
 # runner.py's default and largest time limits.
 DEFAULT_LIMIT, MAX_LIMIT = 1800, 7200
+LIMITS = {"mutants-whole": MAX_LIMIT}
 PASSED = ("ok", "passed", "no regression")
-NO_VERDICT = ("timed out", "no verdict")
+NO_VERDICT = ("cancelled", "timed out", "no verdict")
+
+
+def exit_code_for(status):
+    return 0 if status in PASSED else 2 if status in NO_VERDICT else 1
 
 
 def main():
     assert len(sys.argv) in (2, 3), __doc__
     stem = sys.argv[1].removesuffix(".json")
     job = json.loads((EXCHANGE / "jobs" / f"{stem}.json").read_text())
-    limit = job.get("time_limit_seconds", DEFAULT_LIMIT)
+    limit = job.get("time_limit_seconds", LIMITS.get(job.get("type"), DEFAULT_LIMIT))
     idle_since = time.monotonic()
     results = EXCHANGE / "results"
     while True:
@@ -62,8 +67,7 @@ def main():
         if mine and (results / mine[-1] / "verdict.json").exists():
             verdict = json.loads((results / mine[-1] / "verdict.json").read_text())
             print(f"{results / mine[-1]}\n{json.dumps(verdict, indent=2)}")
-            status = verdict["status"]
-            return 0 if status in PASSED else 2 if status in NO_VERDICT else 1
+            return exit_code_for(verdict["status"])
         if mine and time.time() - (results / mine[-1]).stat().st_mtime > limit + GRACE:
             print(f"wait_for: {mine[-1]} started more than {limit + GRACE} s ago (its limit, {limit} s, and {GRACE} s) "
                   "and has no verdict: the runner stopped inside the job; restart it on the Mac (tools/runner/setup-mac.sh)")
