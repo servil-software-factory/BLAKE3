@@ -1126,6 +1126,40 @@ pub(crate) mod guard_pages {
         }
     }
 
+    /// SME2's entry for blocks that lie in one buffer
+    /// (`sme2::hash_block_run`), the run flush against an inaccessible
+    /// page, after it and before it, and its values' places likewise: the
+    /// parent kernel reads a group of sixteen blocks through the run's
+    /// own pointer, and a byte read or written outside either buffer
+    /// faults here. 1 to 49 blocks: fewer than a group, whole groups, and
+    /// every count left over after a group (the NEON kernels up to
+    /// twelve, the overlapping last group from thirteen), after two
+    /// groups and after three. In two modes, each value official BLAKE3's
+    /// (its portable kernel).
+    #[test]
+    #[cfg(blake3_sme2)]
+    fn test_a_run_of_blocks_against_a_guard_page() {
+        if platform::Platform::sme2().is_none() {
+            return;
+        }
+        let keyed: CVWords = [7, 6, 5, 4, 3, 2, 1, 0];
+        for (key, flags) in [(IV, PARENT), (&keyed, KEYED_HASH | CHUNK_START | CHUNK_END | ROOT)] {
+            for count in 1..=49usize {
+                for at_end in [true, false] {
+                    let mut pages = filled(count * BLOCK_LEN, at_end);
+                    let run: &[u8] = pages.bytes();
+                    let (_places, got) = digests(count, at_end);
+                    // Sound: SME2 was found above, and NEON is wherever it is.
+                    unsafe { crate::sme2::hash_block_run(run, key, flags, got.as_flattened_mut()) };
+                    let table: Vec<&[u8; BLOCK_LEN]> = run.as_chunks::<BLOCK_LEN>().0.iter().collect();
+                    let mut want = vec![0u8; count * OUT_LEN];
+                    crate::test::official::hash_many::<BLOCK_LEN>(&table, key, 0, false, flags, 0, 0, &mut want);
+                    assert!(got.as_flattened() == &want[..], "{count} blocks under flags {flags:#x}, flush against the page after them: {at_end}");
+                }
+            }
+        }
+    }
+
     /// Every platform's `hash_many` with each input in its own pages,
     /// flush against an inaccessible page: a kernel that reads past an
     /// input's end (into what, in a contiguous buffer, would be the next
@@ -1525,6 +1559,61 @@ mod dispatch {
         for (blocks, want) in cases {
             assert_eq!(at(blocks), names(want), "extended output of {blocks} blocks");
         }
+    }
+
+    /// Blocks that lie in one buffer reach SME2's parent kernel as that
+    /// buffer, uncopied: a batch of one-block messages, a tree's parents,
+    /// and the parent level of hashers fed together. A table of sixteen
+    /// separate borrows is copied first (`Ran::Gathered`), and also where
+    /// the sixteen lie one after another in memory: none of their
+    /// pointers may read its neighbours, so their addresses decide
+    /// nothing.
+    #[test]
+    fn test_blocks_in_one_buffer_reach_the_parent_kernel_uncopied() {
+        use crate::{BLOCK_LEN, IV, IncrementCounter, Mode, OUT_LEN, PARENT};
+        let Some(sme2) = crate::platform::Platform::sme2() else { return };
+        // Whether the call copied blocks for the parent kernel, which it
+        // must have run.
+        let gathered = |call: &dyn Fn()| {
+            crate::initialize();
+            loop {
+                RAN.with(|r| r.set(0));
+                RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                call();
+                let ran = RAN.with(|r| r.get());
+                if ran & Ran::TurnTaken as u32 == 0 {
+                    let parents = crate::sme2::ffi::blake3_servil_sme2_hash16_parents_512 as *const () as usize;
+                    assert!(RAN_ENTRIES.with(|r| r.borrow().contains(&parents)), "the call ran SME2's parent kernel");
+                    return ran & Ran::Gathered as u32 != 0;
+                }
+            }
+        };
+        let mut bytes = vec![0u8; 48 * BLOCK_LEN];
+        crate::test::paint_test_input(&mut bytes);
+        let blocks = crate::test::blocks(&bytes);
+        for count in [16, 32, 48] {
+            let batch = crate::throughput::Batch::from_blocks(&blocks[..count], BLOCK_LEN);
+            let copied = gathered(&|| crate::throughput::hash_many(Mode::Plain, &batch, &mut vec![[0u8; OUT_LEN]; count]));
+            assert!(!copied, "a batch of {count} one-block messages");
+        }
+        let copied = gathered(&|| {
+            crate::compress_parents_parallel(&bytes[..32 * BLOCK_LEN], IV, 0, sme2, &mut [0u8; 32 * OUT_LEN]);
+        });
+        assert!(!copied, "a tree's 32 parents");
+        let mut input = vec![0u8; 100 + crate::STAGE_LEN];
+        crate::test::paint_test_input(&mut input);
+        let copied = gathered(&|| {
+            let mut pair = [crate::Hasher::new(Mode::Plain, None), crate::Hasher::new(Mode::Plain, None)];
+            crate::throughput::update_each(&mut pair, &[(0, &input[..100]), (1, &input[..100])]);
+            crate::throughput::update_each(&mut pair, &[(0, &input[100..]), (1, &input[100..])]);
+            for hasher in pair {
+                assert_eq!(hasher.finalize(), crate::test::official::hash(Mode::Plain, &input));
+            }
+        });
+        assert!(!copied, "the sixteen parents over two hashers' stages");
+        let table: Vec<&[u8; BLOCK_LEN]> = bytes.as_chunks::<BLOCK_LEN>().0[..16].iter().collect();
+        let copied = gathered(&|| sme2.hash_many(&table, IV, 0, IncrementCounter::No, PARENT, 0, 0, &mut [0u8; 16 * OUT_LEN]));
+        assert!(copied, "a table of sixteen borrows, one after another in memory");
     }
 
     fn names(list: &[&str]) -> BTreeSet<String> {

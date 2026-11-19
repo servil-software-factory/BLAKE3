@@ -493,8 +493,10 @@ pub(crate) fn sme2_sized(len: usize, count: usize) -> bool {
 
 /// Up to TABLE one-block messages (N = BLOCK_LEN, whole blocks) in
 /// `messages`: whole SME2 groups on the message kernel, the last padded,
-/// where the count calls for it; otherwise the platform's `hash_many` (the
-/// parent kernels and the NEON plans). Kept out of line:
+/// where the count calls for it; otherwise on SME2 as the run of blocks
+/// they are (its parent kernel, `sme2::hash_block_run`), and elsewhere
+/// the platform's `hash_many` (the parent kernels and the NEON plans).
+/// Kept out of line:
 /// with all sixteen lengths inlined into hash_many_on, batches of two
 /// 64-byte messages took 30% longer (VM, bench-hashes); out of line they
 /// cost what they did before.
@@ -503,6 +505,17 @@ fn hash_run<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: 
     #[cfg(blake3_sme2)]
     if platform_is_sme2(platform) && outputs.len() % 16 >= if outputs.len() > 16 { ONE_BLOCK_PAD_AFTER_GROUPS } else { ONE_BLOCK_PAD_MIN } {
         return hash_run_padded::<N>(messages, key, flags, outputs, BLOCK_LEN);
+    }
+    #[cfg(blake3_sme2)]
+    if platform_is_sme2(platform) {
+        // The messages are one block each (this function's only N) and
+        // lie one after another: a run of blocks. SME2's parent kernel
+        // reads a group of sixteen through one pointer, so they go to it
+        // as that run, not as a table of sixteen borrows.
+        const { assert!(N == BLOCK_LEN, "one-block messages") };
+        let run = messages.as_chunks::<BLOCK_LEN>().0[..outputs.len()].as_flattened();
+        // Sound: the caller found SME2 (platform_is_sme2).
+        return unsafe { crate::sme2::hash_block_run(run, key, flags | CHUNK_START | CHUNK_END | ROOT, outputs.as_flattened_mut()) };
     }
     let mut table: [core::mem::MaybeUninit<&[u8; N]>; TABLE] = [core::mem::MaybeUninit::uninit(); TABLE];
     for (slot, message) in table[..outputs.len()].iter_mut().zip(messages.chunks_exact(N)) {
@@ -514,7 +527,9 @@ fn hash_run<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: 
 }
 
 /// The kernel call for one message of whole blocks in each lane. Both a
-/// contiguous batch and a table of separately borrowed messages use it.
+/// contiguous batch and a table of separately borrowed messages use it
+/// (on SME2 a batch of one-block messages goes as a run instead:
+/// [`hash_run`]).
 #[inline(always)]
 fn whole_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     const { assert!(N >= BLOCK_LEN && N <= CHUNK_LEN && N % BLOCK_LEN == 0) };

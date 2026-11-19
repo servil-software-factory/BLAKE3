@@ -56,6 +56,15 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
   never sees a partial outboard. `--keyed --outboard -` is an error.
 - `throughput::finalize_each` panics on an index named twice, in every
   build. 0.9 gave the second the empty message's hash in release builds.
+- On SME2, the kernel for parent nodes and one-block messages reads
+  sixteen blocks through one pointer. Where the blocks lie in one buffer
+  (a batch of one-block messages, a tree's parents, the parents over
+  hashers fed together) the pointer is now that buffer's own; a table of
+  separately borrowed blocks is copied into one buffer first. 0.9 took a
+  table's blocks for one buffer when their addresses followed one
+  another, which gives no pointer the right to read them all under
+  Rust's rules for pointers. No fault was observed, and the bytes hashed
+  were the same.
 - `Pipeline::with_owners` and `owned` need an owner that borrows nothing
   (`B: 'static`): a `Vec<u8>`, not a `&[u8]`.
 - `b3sum`'s Linux release binaries and the four crates are

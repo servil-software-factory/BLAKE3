@@ -379,8 +379,9 @@ impl<const N: usize> HeldWorkspace<N> {
 
 /// Hash 1..=N distinct held stages: plain hashers together, or one keyed
 /// or derive-key hasher. Keep chunks and each parent level together so
-/// one SME2 entry covers the cohort; contiguous parents use its direct
-/// path. Spare descriptor slots repeat a readable block and stay unused.
+/// one SME2 entry covers the cohort; each parent level goes to it as the
+/// run of blocks it is. Spare descriptor slots repeat a readable block
+/// and stay unused.
 #[cfg(feature = "std")]
 // Keep the workspace frame out of empty turns and the other mode's caller.
 #[inline(never)]
@@ -400,6 +401,10 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     let platform = turn.platform();
     let mut work = HeldWorkspace::<N>::new();
     let (mut level, mut next) = work.buffers(alike.len());
+    #[cfg(blake3_sme2)]
+    let on_sme2 = matches!(platform, Platform::SME2);
+    #[cfg(not(blake3_sme2))]
+    let on_sme2 = false;
     {
         let mut refs = arrayvec::ArrayVec::<[&[u8; CHUNK_LEN]; ALONE_CHUNKS], N>::new();
         refs.extend(alike.iter().map(|&i| {
@@ -413,10 +418,6 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
         let refs = refs.as_slice().as_flattened();
         let mut counters = arrayvec::ArrayVec::<u64, N>::new();
         counters.extend(alike.iter().map(|&i| hashers[i].held_group().unwrap().0));
-        #[cfg(blake3_sme2)]
-        let on_sme2 = matches!(platform, Platform::SME2);
-        #[cfg(not(blake3_sme2))]
-        let on_sme2 = false;
         if on_sme2 {
             #[cfg(blake3_sme2)]
             // Sound: the turn detects SME2. Borrowed stages and stack output
@@ -439,11 +440,21 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
             }
         }
     }
+    let parent_flags = flags | PARENT;
     let mut per = ALONE_CHUNKS;
     while per > 1 {
         let count = alike.len() * per / 2;
-        {
-            let bytes = level[..2 * count].as_flattened();
+        let bytes = level[..2 * count].as_flattened();
+        if on_sme2 {
+            // SME2's parent kernel reads a group of sixteen blocks through
+            // one pointer: the level goes to it as the run of memory it
+            // is, not as a table of sixteen borrows.
+            #[cfg(blake3_sme2)]
+            // Sound: the turn detects SME2.
+            unsafe {
+                crate::sme2::hash_block_run(bytes, &key, parent_flags, next[..count].as_flattened_mut())
+            };
+        } else {
             // Eight parent blocks per full stage. Derive descriptor rows
             // from that layout, including its readable final padding.
             let (full, tail) = bytes.as_chunks::<BLOCK_LEN>().0.as_chunks::<STAGE_PARENTS>();
@@ -452,7 +463,7 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
             if let Some(first) = tail.first() {
                 rows.push(core::array::from_fn(|i| tail.get(i).unwrap_or(first)));
             }
-            platform.hash_many(&rows.as_slice().as_flattened()[..count], &key, 0, IncrementCounter::No, flags | PARENT, 0, 0, next[..count].as_flattened_mut());
+            platform.hash_many(&rows.as_slice().as_flattened()[..count], &key, 0, IncrementCounter::No, parent_flags, 0, 0, next[..count].as_flattened_mut());
         }
         core::mem::swap(&mut level, &mut next);
         per /= 2;
