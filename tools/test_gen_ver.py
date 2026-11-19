@@ -151,6 +151,35 @@ class Versions(unittest.TestCase):
         self.assertRegex(title, r"^# blake3-servil 0\.9\.0\+[0-9a-f]{40}$")
         self.assertEqual(rest, "\nFaster,\nand the same hashes.\n")
 
+    def test_the_check_and_the_stamp_end_the_title_where_a_line_feed_does(self):
+        # Python's splitlines ends a line at a form feed, a next-line
+        # character and others, and the stamp's pattern read through them:
+        # the check saw "0.8.0+dev", and the stamp replaced "-preview" too.
+        notes = self.root / "CHANGELOG.md"
+        for end in ("\x0c", "\x1c", "\x85", "\u2028"):
+            with self.subTest(end=repr(end)):
+                notes.write_text(f"# blake3-servil 0.8.0+dev{end}-preview, against official BLAKE3\n")
+                self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+        self.git("commit", "-qam", "a title that ends at a line separator no file ends a line with")
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}
+        self.assertIn("before a stamp replaces it", self.stamp("0.9.0", succeeds=False))
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}, before, "a refused stamp writes nothing")
+
+    def test_a_stamp_keeps_the_notes_line_ends(self):
+        # A carriage return before each line feed stays: read as text and
+        # written back, the notes lost them all, a change to every line.
+        notes = self.root / "CHANGELOG.md"
+        notes.write_bytes(b"# blake3-servil 0.8.0+dev, against official BLAKE3\r\n\r\nFaster.\r\n")
+        self.git("commit", "-qam", "notes with carriage returns")
+        self.stamp("0.9.0")
+        title, rest = notes.read_bytes().split(b"\n", 1)
+        self.assertRegex(title, rb"^# blake3-servil 0\.9\.0\+[0-9a-f]{40}, against official BLAKE3\r$")
+        self.assertEqual(rest, b"\r\nFaster.\r\n")
+        # With nothing after the version but the carriage return, the title
+        # is not one the pattern knows, and nothing is stamped.
+        notes.write_bytes(b"# blake3-servil 0.8.0+dev\r\n\r\nFaster.\r\n")
+        self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+
     def test_check_holds_a_version_commits_title_to_its_release(self):
         self.stamp("99.2.0")
         self.stamp("--check")

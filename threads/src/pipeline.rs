@@ -2320,20 +2320,24 @@ fn prepare_thread() {
 /// }
 /// ```
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    struct Guard(u8);
+    /// The state of the `block_on` this one runs inside (0: none), and
+    /// whether this one took a wake.
+    struct Guard(u8, bool);
     impl Drop for Guard {
         fn drop(&mut self) {
             BLOCK_ON_STATE.with(|f| f.set(self.0));
-            if self.0 != 0 {
+            if self.0 != 0 && self.1 {
                 // This `block_on` ran inside a poll of another, on the one
                 // waker the two share: a wake it took may have been the
-                // other's, which polls once more before it sleeps.
+                // other's, which polls once more before it sleeps. Only
+                // where it took one: an outer future that runs a
+                // `block_on` in each poll would otherwise never sleep.
                 BLOCK_ON_PARK.with(|park| park.woken.store(true, Ordering::Release));
             }
         }
     }
     let prev = BLOCK_ON_STATE.with(|f| f.replace(1));
-    let _guard = Guard(prev);
+    let mut guard = Guard(prev, false);
     let mut future = core::pin::pin!(future);
     BLOCK_ON_PARK.with(|park| {
         BLOCK_ON_WAKER.with(|waker| {
@@ -2355,6 +2359,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
                     while !park.woken.swap(false, Ordering::Acquire) {
                         thread::park();
                     }
+                    guard.1 = true;
                 } else if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                     return output;
                 }
@@ -3275,6 +3280,31 @@ mod test {
     }
 
     #[test]
+    fn a_block_on_that_took_no_wake_leaves_the_outer_one_none() {
+        // The outer block_on's poll runs one that is ready at once: it
+        // took no wake, and notes none. (It noted one whenever it ended
+        // inside another, and an outer future that runs a block_on in
+        // each poll was then polled without end and never slept.)
+        let mut polls = 0;
+        block_on(core::future::poll_fn(|cx| {
+            if block_on_spinning() {
+                return Poll::Pending;
+            }
+            polls += 1;
+            block_on(async {});
+            assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+            if polls == 1 {
+                assert!(!BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)), "a block_on that took no wake noted one");
+                // This future's one wake: its next poll is its last.
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Poll::Ready(())
+        }));
+        assert_eq!(polls, 2);
+    }
+
+    #[test]
     #[should_panic(expected = "no ended messages are in flight")]
     fn contract_ready_with_nothing_ended_panics() {
         let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 0 });
@@ -3436,6 +3466,65 @@ mod test {
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(stderr.contains(needle), "case {case} stderr: {stderr}");
         }
+    }
+
+    /// A stop says why where a person reads it: on a terminal. A stop
+    /// writes only where `poll` says descriptor 2 takes words, and what
+    /// `poll` says of a terminal is each system's own (the manual of
+    /// macOS says its `poll` does not support devices).
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_stop_says_why_on_a_terminal() {
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        unsafe extern "C" {
+            fn posix_openpt(flags: i32) -> i32;
+            fn grantpt(fd: i32) -> i32;
+            fn unlockpt(fd: i32) -> i32;
+            fn ptsname(fd: i32) -> *const core::ffi::c_char;
+        }
+        const O_RDWR: i32 = 2;
+        #[cfg(target_os = "linux")]
+        const O_NOCTTY: i32 = 0o400;
+        #[cfg(target_os = "macos")]
+        const O_NOCTTY: i32 = 0x20000;
+        // Sound: the descriptor posix_openpt returns is this function's
+        // own, and ptsname's string is copied before any call that could
+        // write over it.
+        let (mut ours, name) = unsafe {
+            let fd = posix_openpt(O_RDWR | O_NOCTTY);
+            assert!(fd >= 0, "this test needs a pseudo-terminal: {}", std::io::Error::last_os_error());
+            assert_eq!((grantpt(fd), unlockpt(fd)), (0, 0), "{}", std::io::Error::last_os_error());
+            let name = ptsname(fd);
+            assert!(!name.is_null(), "{}", std::io::Error::last_os_error());
+            (std::fs::File::from_raw_fd(fd), core::ffi::CStr::from_ptr(name).to_str().unwrap().to_owned())
+        };
+        // The terminal as a program has it: the child's descriptor 2. It
+        // stays open here until the words are read: a terminal that
+        // nobody has open any more may drop what was written to it.
+        let mut terminal = std::fs::OpenOptions::new().read(true).write(true).custom_flags(O_NOCTTY).open(&name).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
+            .env("BLAKE3_PIPELINE_ABORT_CASE", "worker_start")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(terminal.try_clone().unwrap())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(6), "{status:?}");
+        // A mark after whatever the child said, so that the reading ends.
+        terminal.write_all(b"\nTHE END\n").unwrap();
+        let mut said = Vec::new();
+        let mut some = [0u8; 256];
+        while !said.windows(7).any(|bytes| bytes == b"THE END") {
+            let count = ours.read(&mut some).unwrap();
+            assert_ne!(count, 0, "the terminal closed");
+            said.extend_from_slice(&some[..count]);
+        }
+        let said = String::from_utf8_lossy(&said);
+        assert!(said.contains("BLAKE3: start a worker thread"), "the terminal got {said:?}");
     }
 
     #[test]

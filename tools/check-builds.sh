@@ -11,9 +11,6 @@
 #     sh tools/check-builds.sh
 set -eu
 cd "$(git rev-parse --show-toplevel)"
-# A run of the Pipeline model's controls that was killed leaves its
-# planted fault in the source, and the source as it was beside it.
-[ ! -e threads/src/pipeline.rs.before-fault ] || { echo "check-builds: threads/src/pipeline.rs may hold a planted fault: a run of tools/pipeline_model_controls.py was killed and left pipeline.rs.before-fault beside it. python3 tools/pipeline_model_controls.py --put-back puts the source back, or says why it does not." >&2; exit 1; }
 [ "${CARGO_TARGET_DIR:-}" != /tmp/target ] || unset CARGO_TARGET_DIR
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$PWD/target"}
 rustup target add x86_64-unknown-linux-gnu aarch64-apple-darwin 2>/dev/null
@@ -40,7 +37,8 @@ step sh -c 'cd threads && taskset -c 0 cargo nextest run --cargo-quiet --release
 # November 15, 2026 they ran only inside the mutation check, so a change
 # that broke one could pass every gate that was not about its own lines.
 step sh -c 'cd threads && RUSTFLAGS="--cfg shuttle" cargo test -q --release --test shuttle_finish --test shuttle_park --test shuttle_waker --test shuttle_pipeline'
-# The Pipeline's model fails for each planted fault (a build of it each).
+# The Pipeline's model fails for each planted fault (a build of it each,
+# in a copy of this tree: no fault is ever planted here).
 step python3 tools/pipeline_model_controls.py
 # Shuttle's SC model cannot check the RCpc wake-publication barrier.
 step python3 tools/check-waker-order.py
