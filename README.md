@@ -22,8 +22,8 @@ with several memory nodes this needs the node topology under
 allowed: where a sandbox shows the nodes and refuses either, the library
 and `b3sum` stop and say why. Where it hides the list of nodes
 altogether, they take the machine for one node and bind nothing. (A pool
-of one thread, `initialize_multithreaded(Some(1))`, reads and binds
-nothing; `b3sum` binds its own thread at any thread count.)
+of one thread, `initialize_multithreaded(NonZeroUsize::new(1))`, reads
+and binds nothing; `b3sum` binds its own thread at any thread count.)
 
 ## How it is checked
 

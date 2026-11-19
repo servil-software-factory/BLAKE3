@@ -70,7 +70,7 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
   file error.
 - The build check runs Shuttle's finish, park and wake-up models on each
   candidate, and a model of the whole Pipeline against a stand-in pool:
-  nine faults planted in the Pipeline one at a time each make it fail.
+  ten faults planted in the Pipeline one at a time each make it fail.
   Every `unsafe` block of the Pipeline and of `b3sum` states why it is
   sound, and a check refuses one that does not. The development branch
   requires explicit checks or waivers on the exact commit before it can

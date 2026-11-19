@@ -316,7 +316,8 @@ pub(crate) fn ran(kind: Ran) {
 /// threads wait asleep whenever no call has work for them (their memory:
 /// see [Memory](crate#memory)). Later calls return at once, and must ask
 /// for the same number: another `Some` panics. A panic on a worker thread
-/// (a bug in this crate) ends the process, its message printed, rather
+/// (a bug in this crate, or a waker of the program's that panics when a
+/// worker wakes it) ends the process, its message printed, rather
 /// than leaving the call that waits for that worker's piece waiting
 /// forever.
 ///
@@ -341,16 +342,19 @@ pub(crate) fn ran(kind: Ran) {
 /// A call wakes workers under its own cache first where it has any there.
 /// Calling threads keep their own affinity and their buffer placement.
 /// To do this, on a Linux machine with more than one memory node, the
-/// call reads the node's CPUs from `/sys/devices/system` and each worker
-/// binds itself with `sched_setaffinity`. Where the kernel shows no list
+/// call reads the node's CPUs from `/sys/devices/system`, and the first
+/// worker binds itself to them with `sched_setaffinity` before it starts
+/// the others, which inherit them (the SME2 thread binds itself too).
+/// Where the kernel shows no list
 /// of memory nodes at all (no `/sys/devices/system/node/online`), the
 /// machine is taken to have one node, and nothing more is read or bound.
 /// Where the list is there and a part of the topology cannot be read,
-/// this call panics, and where a worker cannot bind, the process ends,
+/// this call panics, and where that binding is refused, the process ends,
 /// each saying why: a sandbox that shows the nodes and hides their CPUs,
-/// or refuses the binding, needs `Some(1)`, which reads and binds
-/// nothing. `Some(n)` starts `n - 1` workers on that node whether or not
-/// it has `n` CPUs.
+/// or refuses the binding, needs a pool of one thread
+/// (`NonZeroUsize::new(1)`), which reads and binds nothing. A request
+/// for `n` threads starts `n - 1` workers on that node whether or not it
+/// has `n` CPUs.
 /// For each kind and size of call under 256 MiB, a caller with local
 /// workers learns whether they or all workers on the node finish sooner.
 ///
@@ -370,7 +374,11 @@ pub(crate) fn ran(kind: Ran) {
 /// them), and so does a new [`Pipeline`](throughput::Pipeline). A
 /// Pipeline made before the fork is not to be used in the child: its
 /// calls panic the same way once one needs a worker, and one made while
-/// the parent's workers were hashing for it may wait for ever instead. A
+/// the parent's workers were hashing for it may wait for ever instead.
+/// Nor is it to be dropped there with work in flight at the fork, which
+/// the child never sees finished: that drop, or the drop of a
+/// [`Lent`](throughput::Lent) guard for such work, stops the child (a
+/// child that leaves by `_exit` or `exec` drops neither). A
 /// program that forks initializes the pool in the process that hashes,
 /// after any fork; its single-threaded calls work anywhere.
 ///

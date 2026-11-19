@@ -3,7 +3,3 @@ target
 __pycache__/
 /dist
 /tools/verify/bob/.lake
-# The source as it was while tools/pipeline_model_controls.py has a fault planted in it:
-# tools/check-builds.sh refuses a tree that holds one.
-*.before-fault
-*.before-fault.part

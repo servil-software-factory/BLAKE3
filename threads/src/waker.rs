@@ -20,6 +20,16 @@ const WAKING: usize = 3;
 #[repr(align(128))]
 pub(crate) struct Line<T>(pub(crate) T);
 
+/// Ends the process if it is dropped: held across a call that must not
+/// unwind, and forgotten when the call returns.
+struct EndOnUnwind;
+
+impl Drop for EndOnUnwind {
+    fn drop(&mut self) {
+        std::process::abort()
+    }
+}
+
 pub(crate) struct WakerSlot {
     state: Line<AtomicUsize>,
     waker: UnsafeCell<Option<Waker>>,
@@ -81,7 +91,17 @@ impl WakerSlot {
             let waker = unsafe { with_mut(&self.waker, Option::take) };
             self.state.0.store(IDLE, Ordering::SeqCst);
             if let Some(w) = waker {
+                // The waker is the program's code, and it runs here in the
+                // middle of whatever gave the notice: a worker's task, or
+                // a call of the Pipeline's owner that has just freed a
+                // room and not yet recorded what it freed. A panic out of
+                // it would leave that half done for the program to find (a
+                // room's credit given back twice, a room handed out while
+                // in use). It ends the process, on whichever thread, as a
+                // panic on a worker does; the panic's own words come first.
+                let ends = EndOnUnwind;
                 w.wake();
+                core::mem::forget(ends);
             }
         }
     }

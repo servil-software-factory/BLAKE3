@@ -200,7 +200,10 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option
     /// panics part-way (an index that names no hasher, the caller's
     /// callback) unwinds through here: a full stage that no list named
     /// any more would have no room for its hasher's next update, and its
-    /// next turn would wait for ever for a pass to hash it.
+    /// next turn would wait for ever for a pass to hash it. (A panic out
+    /// of the hashing itself, which runs none of the caller's code and so
+    /// would be this crate's own bug, meets its stages here a second
+    /// time: that second panic ends the process.)
     struct Held<'h> {
         hashers: &'h mut [Hasher],
         held: arrayvec::ArrayVec<usize, TABLE>,

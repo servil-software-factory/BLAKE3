@@ -209,7 +209,7 @@ const fn level(&self) -> u32
 const fn index(&self) -> u64
 ```
 
-Implements: `Clone`, `Copy`, `Debug`, `Eq`, `From`, `PartialEq`.
+Implements: `Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`.
 
 
 ### `struct LastCv`

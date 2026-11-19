@@ -54,6 +54,17 @@ use crate::throughput::{Cv, TreeHasher};
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # Trait implementations
+///
+/// - `Clone` copies the hashing state (26 KiB: the key, the tree so far and
+///   up to the last 16 KiB of the message's bytes), so both hashers go on
+///   with the same message, each alone; nothing wipes either copy when it
+///   is dropped.
+/// - `Debug` shows the mode flags and platform, keeping the key and message
+///   private.
+/// - `Write` (with `std`) feeds every written byte in order; flushing
+///   leaves the message unchanged.
 pub struct Hasher {
     pub(crate) core: HasherCore,
     /// The message's bytes from its last 16 KiB boundary, gathered while

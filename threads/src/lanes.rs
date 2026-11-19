@@ -502,11 +502,19 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 }
 
 /// Say why, and end the process, from a thread the pool's callers may be
-/// waiting on. The end does not wait for the words. They go straight to
-/// descriptor 2, and only if it takes them at once: `std::io::stderr`
-/// takes a lock, and a caller that holds it while it waits for this
-/// thread would wait for ever; so would a write to a full pipe whose
-/// reader waits for that caller.
+/// waiting on. The end does not wait long for the words. They go straight
+/// to descriptor 2, and only if it says within a tenth of a second that
+/// it takes words: `std::io::stderr` takes a lock, and a caller that
+/// holds it while it waits for this thread would wait for ever; so would
+/// a write to a full pipe whose reader waits for that caller. A reader
+/// that is only behind has that tenth of a second to make room. (A pipe
+/// that has room for a line when asked has it for these words, unless
+/// another writer fills it between the asking and the writing.)
+///
+/// A panic is not this: it goes through the process's panic hook before
+/// anything here runs, and the standard hook writes through
+/// `std::io::stderr`, lock and all. The stops that follow a panic on a
+/// pool thread (`AbortOnUnwind`, a worker's own) say their words that way.
 pub(crate) fn stop(why: &str) -> ! {
     #[repr(C)]
     struct PollFd {
@@ -526,11 +534,11 @@ pub(crate) fn stop(why: &str) -> ! {
         fn write(fd: i32, bytes: *const core::ffi::c_void, len: usize) -> isize;
     }
     let mut stderr = PollFd { fd: 2, events: POLLOUT, revents: 0 };
-    // Sound: one PollFd, written by poll; a timeout of zero returns at once.
+    // Sound: one PollFd, written by poll, which returns within its 100 ms.
     // What poll returns is not asked: a poll that fails leaves `revents`
     // zero, and one that reports an error beside the room to write (a
     // pipe nobody reads) has nobody to tell.
-    let _ = unsafe { poll(&mut stderr, 1, 0) };
+    let _ = unsafe { poll(&mut stderr, 1, 100) };
     if stderr.revents == POLLOUT {
         // Sound: `why` is `len` readable bytes. Whether they were written
         // changes nothing here.

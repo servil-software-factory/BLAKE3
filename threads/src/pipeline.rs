@@ -134,6 +134,14 @@ fn unpack_arg(arg: u64) -> (u64, usize, usize) {
 }
 
 /// Fixed memory bounds for a [`Pipeline`].
+///
+/// # Trait implementations
+///
+/// - `Clone` duplicates both capacity bounds.
+/// - `Copy` preserves both counts without reserving any storage.
+/// - `Debug` reports the message and room counts.
+/// - `Eq` identifies limits with equal bounds.
+/// - `PartialEq` compares both counts by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Messages open or in flight at once; as many finished [`Event`]s
@@ -156,6 +164,11 @@ pub enum Event<T, B = ()> {
 /// [`Pipeline::abort`] when its bytes will not all come. Dropping one
 /// panics. In async code an early return through `?` drops what the task
 /// holds, so give the message to `abort` before returning the error.
+///
+/// # Trait implementations
+///
+/// - `Drop` panics on an unfinished message unless the thread is already
+///   unwinding; dropping is not cancellation.
 #[must_use = "end, abort, or hand the message's bytes over; dropping an unfinished Message stops the program"]
 pub struct Message {
     pipeline_id: u64,
@@ -184,6 +197,13 @@ impl Drop for Message {
 /// Hold this guard until its message's event has been taken. Dropped
 /// while a worker may still read the bytes (before the message is
 /// hashed), it stops the process: no worker reads freed memory.
+///
+/// # Trait implementations
+///
+/// - `Drop` stops the process (an abort, not a panic) unless the loan's
+///   hashing has finished, even where no worker has been given it yet or
+///   its Pipeline is gone; once it has finished, the guard may be dropped
+///   before its event is taken.
 #[must_use = "hold the guard until the message's event; dropping an active loan aborts the process"]
 pub struct Lent<'a> {
     completed: &'static AtomicU64,
@@ -329,9 +349,10 @@ process_static! {
     /// one), so one that is not kept here is lost for good: a list of 16 lost
     /// every storage past the sixteenth, and a server with a Pipeline per
     /// connection grew by one at each connection beyond 16 at once (BLAKE3
-    /// #427). The process now holds, of each number of rooms it has asked
-    /// for (`acquire` gives a storage only to a Pipeline of that many), as
-    /// many as its most such Pipelines at once.
+    /// #427). The process now holds, for Pipelines of the same Limits, as
+    /// many as its most such Pipelines at once (`acquire` gives a storage
+    /// only to a Pipeline of as many rooms and no more messages: one of
+    /// another size takes a new storage).
     static FREE_STORAGES: Mutex<Vec<&'static PipeStorage>> = Mutex::new(Vec::new());
 }
 
@@ -399,6 +420,15 @@ impl PipeStorage {
 }
 
 /// Reusable `ROOM_LEN`-byte buffer for arriving message bytes.
+///
+/// # Trait implementations
+///
+/// - `Drop` returns the unused credits; workers retain access to committed
+///   bytes until they finish.
+/// - `Send` lets another thread take the token and its exclusive access to
+///   the writable bytes.
+/// - `Sync` permits sharing a reference; writing still requires an
+///   exclusive borrow.
 #[must_use = "commit from the room; a dropped Room gives back what is left of it"]
 pub struct Room {
     pipeline_id: u64,
@@ -791,24 +821,28 @@ process_static! {
 /// Streaming multithreaded hasher with bounded memory and pull-based
 /// [`Event`] delivery.
 ///
-/// In a pool of one thread (`initialize_multithreaded(Some(1))`, or a
-/// machine with one CPU) there is no worker: the calls that hand work over
+/// In a pool of one thread (`initialize_multithreaded` asked for one, or
+/// a machine with one CPU) there is no worker, and the calling thread
+/// hashes: in the calls that hand work over
 /// ([`commit`](Pipeline::commit), [`end`](Pipeline::end),
 /// [`owned`](Pipeline::owned), [`lent`](Pipeline::lent) and
-/// [`batch`](Pipeline::batch)) hash it themselves before they return.
+/// [`batch`](Pipeline::batch)), and, for the short messages that are
+/// gathered into groups, in the next wait ([`ready`](Pipeline::ready),
+/// [`room`](Pipeline::room) or [`message`](Pipeline::message)). So a
+/// short message's event comes only after a wait, there as with
+/// workers, and its [`Lent`] guard is held until then.
 ///
 /// # Memory
 ///
 /// A Pipeline's storage (its Rooms, about 64 KiB each, and its queues) is
 /// kept when the Pipeline is dropped, for a later Pipeline with the same
 /// number of Rooms and no more messages: it is never returned to the
-/// system. So a process holds, for each number of Rooms it has ever asked
-/// for, as much as its most such Pipelines alive at once: a process that
-/// sizes each Pipeline differently grows with every new size, and one
-/// that keeps to a few sizes does not. The storage is not cleared: a
-/// keyed Pipeline's key and the bytes last written to its Rooms stay in
-/// the process's memory until another Pipeline writes over them, and no
-/// call of this crate wipes them.
+/// system. So a process whose Pipelines all have the same `Limits` holds
+/// as much as its most Pipelines alive at once, and one that sizes each
+/// Pipeline differently grows with every new size. The storage is not
+/// cleared: a keyed Pipeline's key and the bytes last written to its
+/// Rooms stay in the process's memory until another Pipeline writes over
+/// them, and no call of this crate wipes them.
 ///
 /// # Giving up a message
 ///
@@ -836,10 +870,15 @@ process_static! {
 /// Each call says what it refuses. A call that panics has taken the
 /// [`Message`] it was given, and the Pipeline is then good only for
 /// dropping: used further, it may refuse later calls or wait for ever.
+/// ([`commit`](Pipeline::commit) borrows its `Message`: after its panic
+/// the `Message` is still the program's, and its drop panics as any open
+/// Message's does, unless the thread is unwinding already.)
 /// The same holds after a panic in the program's own code that a call
 /// here runs: an owner's `as_ref`, or a [`Waker`](core::task::Waker)
-/// that panics when it is woken or dropped. Such a waker, woken from a
-/// worker thread, ends the process.
+/// that panics when it is cloned or dropped. A waker that panics when
+/// it is woken ends the process, on whichever thread it is woken: the
+/// wake comes in the middle of other work, which a panic would leave
+/// half done.
 ///
 /// ```
 /// # blake3_servil::initialize_multithreaded(None);
@@ -881,6 +920,15 @@ process_static! {
 ///     assert_eq!(seen, [(0, hello), (1, None), (2, hello)]);
 /// });
 /// ```
+///
+/// # Trait implementations
+///
+/// - `Drop` stops the process (an abort) if a worker is still hashing one
+///   of its messages; otherwise it drops quietly, with the messages not
+///   yet hashed, the events not taken and their owners, and keeps its
+///   buffers for a later Pipeline.
+/// - `Send` lets a pipeline move between threads when its tags and owners
+///   are `Send`, keeping the same messages and tokens.
 pub struct Pipeline<T, B = ()> {
     id: u64,
     limits: Limits,
@@ -924,6 +972,14 @@ unsafe impl<T: Send, B: Send> Send for Pipeline<T, B> {}
 
 impl<T> Pipeline<T, ()> {
     /// Create a pipeline in `mode` with fixed memory `limits`.
+    ///
+    /// # Panics
+    ///
+    /// If `limits.messages` is zero, or if `limits.messages` and
+    /// `limits.rooms` together reach 2^29 - 1 (the Pipeline numbers its
+    /// work in 29 bits). Before
+    /// [`initialize_multithreaded`](crate::initialize_multithreaded), and
+    /// in a child process forked after it.
     pub fn new(mode: Mode, limits: Limits) -> Self {
         Self::create(mode, limits)
     }
@@ -959,12 +1015,21 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
     ///     Pipeline::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 })
     /// }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// As [`new`](Pipeline::new).
     pub fn with_owners(mode: Mode, limits: Limits) -> Self {
         Self::create(mode, limits)
     }
 
     /// Hash `owner`'s bytes in place and return `owner` in the message's
     /// [`Event::Hashed`].
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's, or has bytes committed from a
+    /// Room already: a message's bytes come one way.
     #[inline]
     pub fn owned(&mut self, message: Message, owner: B) {
         let (pid, s) = message.take();
@@ -996,6 +1061,9 @@ impl<T, B> Pipeline<T, B> {
         assert!(limits.messages > 0, "Pipeline Limits.messages must be at least 1");
         let tree = TreeHasher::new(mode);
         let m = limits.messages;
+        // Each limit alone first: their sum, next, could wrap round to a
+        // small one (`rooms: usize::MAX` passed the check below so).
+        assert!(m < 1 << 29 && limits.rooms < 1 << 29, "Pipeline Limits beyond what an action can name");
         let p_cap = limits.rooms + m + 1;
         let g_cap = m.clamp(4, 256);
         let actions_cap = m * MAX_SLOT_PIECES + p_cap + g_cap;
@@ -1121,9 +1189,10 @@ impl<T, B> Pipeline<T, B> {
     ///
     /// # Panics
     ///
-    /// If waiting cannot free a slot: every slot is held by a message
-    /// still open, or by an event not yet taken ([`next_event`](Pipeline::next_event)).
-    /// Only this task could free one, and it is here.
+    /// If waiting cannot free a slot: as many messages as
+    /// `Limits.messages` are open, or as many events wait to be taken
+    /// ([`next_event`](Pipeline::next_event)). Only this task could end
+    /// one or take one, and it is here.
     #[inline(always)]
     pub fn message(&mut self, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + '_ {
         let _ = length_hint;
@@ -1275,6 +1344,12 @@ impl<T, B> Pipeline<T, B> {
     ///
     /// `room` advances to the next 64-byte boundary. Every commit to a
     /// message except its last must be a whole room (`ROOM_LEN` bytes).
+    ///
+    /// # Panics
+    ///
+    /// If `message` or `room` is another Pipeline's; if `written` is more
+    /// than `room` has left ([`Room::len`]); if an earlier commit to
+    /// `message` was of less than a whole Room.
     #[inline(always)]
     pub fn commit(&mut self, message: &mut Message, room: &mut Room, written: usize) {
         assert_eq!(message.pipeline_id, self.id, "Message belongs to a different Pipeline");
@@ -1388,6 +1463,10 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Finish `message` and queue its [`Event::Hashed`] in end order.
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's.
     #[inline(always)]
     pub fn end(&mut self, message: Message) {
         let (pid, s) = message.take();
@@ -1432,6 +1511,10 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Abort `message` and queue its [`Event::Aborted`] in end order.
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's.
     pub fn abort(&mut self, message: Message) {
         let (pid, s) = message.take();
         assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
@@ -1443,9 +1526,11 @@ impl<T, B> Pipeline<T, B> {
             }
             SlotKind::OpenShort { room: room_idx, .. } => {
                 // The record first, whole, and the wake last: the wake runs
-                // the program's waker, which may panic, and a slot that
-                // still said it held the room's credit would give it back
-                // a second time (at this Pipeline's drop, or as a group).
+                // the program's waker in the middle of this call. (A waker
+                // that panics ends the process, in the waker slot's wake.
+                // Until it did, such a panic, caught, could leave a slot
+                // that still said it held the room's credit, to be given
+                // back a second time.)
                 self.slots[s].kind = SlotKind::WaitAborted { group: NONE, epoch: 0 };
                 self.end_queue.push_back(s as u32);
                 if self.shared().storage.rooms.release_n(room_idx, 1) {
@@ -1471,6 +1556,11 @@ impl<T, B> Pipeline<T, B> {
     /// The returned [`Lent`] guard must be dropped and never leaked
     /// (`core::mem::forget`, `Box::leak`, a reference cycle, or a leaked
     /// task holding it).
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's, or has bytes committed from a
+    /// Room already: a message's bytes come one way.
     #[inline(always)]
     pub unsafe fn lent<'a>(&mut self, message: Message, bytes: &'a [u8]) -> Lent<'a> {
         let (pid, s) = message.take();
@@ -1494,6 +1584,12 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Hash `batch` into `digests` and return both in [`Event::Batch`].
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's, or has bytes committed from a
+    /// Room already; if `digests` has not one place for each message of
+    /// `batch`.
     pub fn batch(&mut self, message: Message, batch: Batch<'static>, digests: Box<[[u8; OUT_LEN]]>) {
         let (pid, s) = message.take();
         assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
@@ -2280,20 +2376,24 @@ fn prepare_thread() {
 /// }
 /// ```
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    struct Guard(u8);
+    /// The state of the `block_on` this one runs inside (0: none), and
+    /// whether this one took a wake.
+    struct Guard(u8, bool);
     impl Drop for Guard {
         fn drop(&mut self) {
             BLOCK_ON_STATE.with(|f| f.set(self.0));
-            if self.0 != 0 {
+            if self.0 != 0 && self.1 {
                 // This `block_on` ran inside a poll of another, on the one
                 // waker the two share: a wake it took may have been the
-                // other's, which polls once more before it sleeps.
+                // other's, which polls once more before it sleeps. Only
+                // where it took one: an outer future that runs a
+                // `block_on` in each poll would otherwise never sleep.
                 BLOCK_ON_PARK.with(|park| park.woken.store(true, Ordering::Release));
             }
         }
     }
     let prev = BLOCK_ON_STATE.with(|f| f.replace(1));
-    let _guard = Guard(prev);
+    let mut guard = Guard(prev, false);
     let mut future = core::pin::pin!(future);
     BLOCK_ON_PARK.with(|park| {
         BLOCK_ON_WAKER.with(|waker| {
@@ -2315,6 +2415,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
                     while !park.woken.swap(false, Ordering::Acquire) {
                         thread::park();
                     }
+                    guard.1 = true;
                 } else if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                     return output;
                 }
@@ -2940,6 +3041,16 @@ mod test {
         let _ = Pipeline::<()>::new(Mode::Plain, Limits { messages: 0, rooms: 1 });
     }
 
+    #[test]
+    fn contract_limits_beyond_what_an_action_names_panic() {
+        // The last of these wraps the sum of the two limits round to 1.
+        for limits in [Limits { messages: 1 << 29, rooms: 0 }, Limits { messages: 1, rooms: (1 << 29) - 2 }, Limits { messages: 1, rooms: usize::MAX }] {
+            let refused = std::panic::catch_unwind(|| Pipeline::<()>::new(Mode::Plain, limits)).err().expect("limits past 29 bits are refused");
+            let why = refused.downcast_ref::<&str>().copied().map(String::from).or_else(|| refused.downcast_ref::<String>().cloned()).unwrap_or_default();
+            assert!(why.contains("Pipeline Limits beyond what an action can name"), "{limits:?}: {why}");
+        }
+    }
+
     fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
         let mut cx = Context::from_waker(Waker::noop());
         core::pin::pin!(f).poll(&mut cx)
@@ -3235,41 +3346,28 @@ mod test {
     }
 
     #[test]
-    fn an_abort_records_the_message_before_it_wakes_anyone() {
-        struct Panics;
-        impl std::task::Wake for Panics {
-            fn wake(self: Arc<Self>) {
-                panic!("this waker panics");
+    fn a_block_on_that_took_no_wake_leaves_the_outer_one_none() {
+        // The outer block_on's poll runs one that is ready at once: it
+        // took no wake, and notes none. (It noted one whenever it ended
+        // inside another, and an outer future that runs a block_on in
+        // each poll was then polled without end and never slept.)
+        let mut polls = 0;
+        block_on(core::future::poll_fn(|cx| {
+            if block_on_spinning() {
+                return Poll::Pending;
             }
-        }
-        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-        let storage = p.shared().storage;
-        let mut message = block_on(p.message(1, None));
-        let mut room = block_on(p.room());
-        p.commit(&mut message, &mut room, 3);
-        drop(room);
-        // The room is now the open message's alone, by the one credit of
-        // its three bytes. A wait for another message's event keeps the
-        // program's waker.
-        let other = message_in_flight(&mut p);
-        let waker = Waker::from(Arc::new(Panics));
-        assert!(p.poll_ready(&mut Context::from_waker(&waker)).is_pending());
-        // The abort gives the credit back, which frees the room and wakes
-        // whoever waits: the program's waker, which panics.
-        let woke = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.abort(message)));
-        assert!(woke.is_err(), "the abort woke no one");
-        // The message's record was whole by then: the room is free, its
-        // credit given back once, and the event comes in its turn.
-        assert_eq!(storage.rooms.refs[0].load(Ordering::SeqCst), 0);
-        p.shared().slot_done[other].store(true, Ordering::SeqCst);
-        assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 7, .. })));
-        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 1, .. })));
-        assert!(p.next_event().is_none());
-        let again = block_on(p.room());
-        assert!(poll_once(p.room()).is_pending(), "the one room was handed out twice");
-        drop(again);
-        drop(p);
-        assert_eq!(storage.rooms.refs[0].load(Ordering::SeqCst), 0, "a credit was given back twice");
+            polls += 1;
+            block_on(async {});
+            assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+            if polls == 1 {
+                assert!(!BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)), "a block_on that took no wake noted one");
+                // This future's one wake: its next poll is its last.
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Poll::Ready(())
+        }));
+        assert_eq!(polls, 2);
     }
 
     #[test]
@@ -3372,6 +3470,28 @@ mod test {
                 "worker_start" => {
                     crate::lanes::fail_worker_start_for_test();
                 }
+                // A waker that panics ends the process, on the owner's
+                // thread too: an abort of a short message frees its room
+                // and wakes the wait before the call has returned.
+                "waker_panics" => {
+                    struct Panics;
+                    impl std::task::Wake for Panics {
+                        fn wake(self: Arc<Self>) {
+                            panic!("this waker panics");
+                        }
+                    }
+                    let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
+                    let mut message = block_on(p.message(1, None));
+                    let mut room = block_on(p.room());
+                    p.commit(&mut message, &mut room, 3);
+                    drop(room);
+                    let _other = message_in_flight(&mut p);
+                    let waker = Waker::from(Arc::new(Panics));
+                    assert!(p.poll_ready(&mut Context::from_waker(&waker)).is_pending());
+                    let _ = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.abort(message)));
+                    // Not reached: the panic did not unwind into the catch.
+                    std::process::exit(0);
+                }
                 // The stop takes no lock: this thread holds stderr's and
                 // waits for the one that stops.
                 "lent_stderr_locked" => {
@@ -3396,6 +3516,7 @@ mod test {
         for (case, needle) in [
             ("lent", "Lent guard was dropped before its message finished"),
             ("lent_stderr_locked", "Lent guard was dropped before its message finished"),
+            ("waker_panics", "this waker panics"),
             ("pipeline", "Pipeline dropped while worker tasks are still in flight"),
             ("pipeline_multi", "Pipeline dropped while worker tasks are still in flight"),
             ("abort_on_unwind", ""),
@@ -3411,6 +3532,65 @@ mod test {
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(stderr.contains(needle), "case {case} stderr: {stderr}");
         }
+    }
+
+    /// A stop says why where a person reads it: on a terminal. A stop
+    /// writes only where `poll` says descriptor 2 takes words, and what
+    /// `poll` says of a terminal is each system's own (the manual of
+    /// macOS says its `poll` does not support devices).
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_stop_says_why_on_a_terminal() {
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        unsafe extern "C" {
+            fn posix_openpt(flags: i32) -> i32;
+            fn grantpt(fd: i32) -> i32;
+            fn unlockpt(fd: i32) -> i32;
+            fn ptsname(fd: i32) -> *const core::ffi::c_char;
+        }
+        const O_RDWR: i32 = 2;
+        #[cfg(target_os = "linux")]
+        const O_NOCTTY: i32 = 0o400;
+        #[cfg(target_os = "macos")]
+        const O_NOCTTY: i32 = 0x20000;
+        // Sound: the descriptor posix_openpt returns is this function's
+        // own, and ptsname's string is copied before any call that could
+        // write over it.
+        let (mut ours, name) = unsafe {
+            let fd = posix_openpt(O_RDWR | O_NOCTTY);
+            assert!(fd >= 0, "this test needs a pseudo-terminal: {}", std::io::Error::last_os_error());
+            assert_eq!((grantpt(fd), unlockpt(fd)), (0, 0), "{}", std::io::Error::last_os_error());
+            let name = ptsname(fd);
+            assert!(!name.is_null(), "{}", std::io::Error::last_os_error());
+            (std::fs::File::from_raw_fd(fd), core::ffi::CStr::from_ptr(name).to_str().unwrap().to_owned())
+        };
+        // The terminal as a program has it: the child's descriptor 2. It
+        // stays open here until the words are read: a terminal that
+        // nobody has open any more may drop what was written to it.
+        let mut terminal = std::fs::OpenOptions::new().read(true).write(true).custom_flags(O_NOCTTY).open(&name).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
+            .env("BLAKE3_PIPELINE_ABORT_CASE", "worker_start")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(terminal.try_clone().unwrap())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(6), "{status:?}");
+        // A mark after whatever the child said, so that the reading ends.
+        terminal.write_all(b"\nTHE END\n").unwrap();
+        let mut said = Vec::new();
+        let mut some = [0u8; 256];
+        while !said.windows(7).any(|bytes| bytes == b"THE END") {
+            let count = ours.read(&mut some).unwrap();
+            assert_ne!(count, 0, "the terminal closed");
+            said.extend_from_slice(&some[..count]);
+        }
+        let said = String::from_utf8_lossy(&said);
+        assert!(said.contains("BLAKE3: start a worker thread"), "the terminal got {said:?}");
     }
 
     #[test]
