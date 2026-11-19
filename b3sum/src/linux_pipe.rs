@@ -559,6 +559,24 @@ fn buffer_with_start(buf: &mut Vec<u8>, hint: usize, start: Option<(*const u8, u
     n
 }
 
+/// The most one read of the ring is asked for: less than the 4 GiB a
+/// request's 32-bit length can say.
+const RING_READ_MAX: usize = 1 << 30;
+
+/// The length to ask a ring's read for, where the buffer has `spare`
+/// bytes of room: all of it, up to [`RING_READ_MAX`]. A buffer of
+/// gigabytes (a file that reported a small size and has more, or that
+/// grew) can have 4 GiB of room and more, and a request's length is 32
+/// bits: the room cast to them asked for its low bits alone, so for
+/// exactly 4 GiB of room it asked for no byte, the read gave none, and no
+/// byte is how a file's end is known. The hash printed was then of the
+/// file's first 4 GiB. A request is for at least one byte, in every
+/// build: nothing else may end a file.
+fn ring_read_len(spare: usize) -> u32 {
+    assert!(spare > 0, "a read is asked for at least one byte");
+    spare.min(RING_READ_MAX) as u32
+}
+
 fn read_rest_sync_uninit(file: &File, buf: &mut Vec<u8>, mut at: usize) -> io::Result<usize> {
     loop {
         if at == buf.capacity() {
@@ -685,7 +703,7 @@ impl ColdRingState {
         let fd = file.as_raw_fd();
         // Sound: `partial_at` is inside the capacity (buffer_with_start).
         let ptr = unsafe { buf.as_mut_ptr().add(partial_at) };
-        let rlen = (buf.capacity() - partial_at) as u32;
+        let rlen = ring_read_len(buf.capacity() - partial_at);
         self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at });
         // Sound: the read's buffer stays where it is, written by no one else,
         // until its completion is reaped: the buffer goes into `slots[sid]`
@@ -728,7 +746,7 @@ impl ColdRingState {
                     // Sound: `st.at` is below the capacity (the read that
                     // failed had room).
                     let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
-                    let len = (st.buf.capacity() - st.at) as u32;
+                    let len = ring_read_len(st.buf.capacity() - st.at);
                     let off = st.at as u64;
                     self.slots[slot_id] = Some(st);
                     // Sound: as queue_file's read; the slot goes back into
@@ -806,7 +824,7 @@ impl ColdRingState {
                 // Sound: `st.at` is below the capacity (grown above if it was
                 // full).
                 let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
-                let len = (st.buf.capacity() - st.at) as u32;
+                let len = ring_read_len(st.buf.capacity() - st.at);
                 let off = st.at as u64;
                 self.slots[slot_id] = Some(st);
                 // Sound: as queue_file's read; the slot goes back into
@@ -1502,6 +1520,31 @@ mod test {
         let mut none = vec![1u8; 7];
         assert_eq!(super::buffer_with_start(&mut none, 10_000, None), 0);
         assert!(none.capacity() > 10_000 && none.is_empty());
+    }
+
+    /// A ring's read is asked for at least one byte and at most what its
+    /// 32-bit length can say, whatever room the buffer has: at 4 GiB of
+    /// room and at its multiples the cast length was 0, which reads like
+    /// the file's end.
+    #[test]
+    fn a_rings_read_asks_for_bytes_whatever_the_room() {
+        for spare in [
+            1,
+            4096,
+            super::RING_READ_MAX - 1,
+            super::RING_READ_MAX,
+            super::RING_READ_MAX + 1,
+            (1 << 32) - 1,
+            1 << 32,
+            (1 << 32) + 1,
+            1 << 33,
+            3 << 32,
+            usize::MAX,
+        ] {
+            let len = super::ring_read_len(spare) as usize;
+            assert!(0 < len && len <= spare && len <= super::RING_READ_MAX, "{spare}: {len}");
+            assert_eq!(len, spare.min(super::RING_READ_MAX), "{spare}");
+        }
     }
 
     /// The file opened is the file hashed, where there is no io_uring too:

@@ -158,6 +158,12 @@ impl Args {
         if inner.sigilcode && inner.length == 0 && !inner.check {
             bail!("--sigilcode writes at least one output byte; --length is 0");
         }
+        // BLAKE3's output is 2^64 - 1 bytes long. A request past its end
+        // was a panic for text, and for --raw fewer bytes than asked for,
+        // with success.
+        if inner.seek.checked_add(inner.length).is_none() {
+            bail!("--seek {} and --length {} ask for output past its end, at 2^64 - 1 bytes", inner.seek, inner.length);
+        }
         // Crash-only: leak the single key or context string once for `'static` Mode.
         let mode: blake3::Mode<'static> = if inner.keyed {
             let key: &'static [u8; blake3::KEY_LEN] = Box::leak(Box::new(read_key_from_stdin()?));
@@ -362,10 +368,17 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path) -> anyhow::Result<blake3:
         if args.keyed() {
             bail!("Cannot open `-` in keyed mode");
         }
-        // `b3sum < file`: a file, hashed as a file named is.
+        // `b3sum < file`: a file, hashed as a file named is. Its position
+        // is shared with whoever gave it, and a map or a read by position
+        // moves none: it is left at the file's end, where reading the
+        // stream to its end leaves it, so that the next reader (a second
+        // `-`, the parent) finds no byte, and not the same file again.
         #[cfg(unix)]
         if let Some(file) = stdin_file() {
-            return hash_open_file(args, file);
+            let position = file.try_clone()?;
+            let hash = hash_open_file(args, file)?;
+            io::Seek::seek(&mut &position, io::SeekFrom::End(0))?;
+            return Ok(hash);
         }
         let mut hasher = args.base_hasher.clone();
         update_from(&mut hasher, io::stdin())?;
@@ -375,7 +388,8 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path) -> anyhow::Result<blake3:
 }
 
 /// Standard input as a file, where it is a regular file read from its
-/// start (`b3sum < file`): the same file, its position shared. A pipe, a
+/// start (`b3sum < file`): the same file, its position shared (the
+/// caller moves it to the end once the file is hashed). A pipe, a
 /// terminal, or a file some reader has already advanced is read as a
 /// stream, from where it stands.
 #[cfg(unix)]
@@ -767,8 +781,10 @@ fn write_hex_output(mut output: blake3::OutputReader, args: &Args, out: &mut Out
     let mut block = [0u8; blake3::BLOCK_LEN];
     let mut hex_buf = [0u8; 2 * blake3::BLOCK_LEN];
     while len > 0 {
-        output.fill(&mut block);
+        // Only the bytes asked for: the output's last bytes are no whole
+        // block, and filling one past its end is a panic.
         let take_bytes = cmp::min(len, block.len() as u64) as usize;
+        output.fill(&mut block[..take_bytes]);
         encode_hex_stack(&block[..take_bytes], &mut hex_buf[..2 * take_bytes]);
         out.write_bytes(&hex_buf[..2 * take_bytes])?;
         len -= take_bytes as u64;
@@ -972,6 +988,18 @@ fn hash_paths_32(args: &Args, paths: &[PathBuf], on_ordered: &mut dyn FnMut(usiz
     }
     if paths.len() == 1 {
         let _ = on_ordered(0, hash_path_hash(args, &paths[0]));
+        return;
+    }
+    // Standard input is one stream. Named more than once, it goes to its
+    // names in the order they are given: the first reads it to its end
+    // and the others find it there. File threads would each take a part
+    // of it, so these operands are hashed one after another.
+    if paths.iter().filter(|path| path.as_path() == Path::new("-")).count() > 1 {
+        for (i, path) in paths.iter().enumerate() {
+            if !on_ordered(i, hash_path_hash(args, path)) {
+                break;
+            }
+        }
         return;
     }
 
@@ -1379,7 +1407,14 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
                     false
                 }
                 Entry::Stdin(parsed) => {
-                    let res = hash_path_hash(args, &parsed.file_path);
+                    // Standard input cannot be the checkfile and a file it
+                    // names: this function holds its lock, and reading it
+                    // here waited for that lock for ever.
+                    let res = if path == Path::new("-") {
+                        Err(anyhow::anyhow!("standard input is the checkfile; it cannot also be a file to check"))
+                    } else {
+                        hash_path_hash(args, &parsed.file_path)
+                    };
                     emit_checked_entry(parsed, res, args, out)?
                 }
                 Entry::File { parsed, batch_idx } => {

@@ -973,28 +973,90 @@ fn test_outboard_files_are_bao_trees() {
 /// `b3sum < file` hashes the file as `b3sum file` does, at every size
 /// class (a stack buffer's, a map's, a direct read's where the file is
 /// cold), and a file whose reader has moved on is hashed from where it
-/// stands.
+/// stands. Either way the file's position, which the caller shares, is
+/// left at its end, as a stream read to its end leaves it: standard
+/// input named a second time is the empty input, however the first was
+/// taken in (a map and a read by position move no position themselves,
+/// and gave the second name the same file again).
 #[test]
 #[cfg(unix)]
 fn test_stdin_from_a_file_is_hashed_as_the_file() {
     use std::io::{Seek, SeekFrom};
     blake3::initialize();
     let dir = tempfile::tempdir().unwrap();
-    for len in [0usize, 1, 4096, 65_536, 600_000, 5_000_000] {
+    let empty = blake3::convenience::hash(b"").to_hex();
+    for len in [0usize, 1, 4096, 65_536, 600_000, 2 << 20, 5_000_000] {
         let data: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 7)) as u8).collect();
         let path = dir.path().join(format!("in-{len}"));
         fs::write(&path, &data).unwrap();
-        let run = |file: fs::File| {
-            let out = std::process::Command::new(b3sum_exe()).stdin(file).output().unwrap();
+        // b3sum's standard input is a copy of `file`'s descriptor, so the
+        // two share one position: where b3sum leaves it is read here.
+        let run = |file: &mut fs::File, args: &[&str]| {
+            let out = std::process::Command::new(b3sum_exe()).args(args).stdin(file.try_clone().unwrap()).output().unwrap();
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-            String::from_utf8(out.stdout).unwrap()
+            (String::from_utf8(out.stdout).unwrap(), file.stream_position().unwrap())
         };
-        let whole = run(fs::File::open(&path).unwrap());
-        assert_eq!(whole, format!("{}  -\n", blake3::convenience::hash(&data).to_hex()), "len={len}");
+        let hash = blake3::convenience::hash(&data).to_hex();
+        for args in [&[][..], &["--no-mmap"], &["--num-threads", "1"]] {
+            let mut file = fs::File::open(&path).unwrap();
+            assert_eq!(run(&mut file, args), (format!("{hash}  -\n"), len as u64), "len={len} {args:?}");
+            let mut file = fs::File::open(&path).unwrap();
+            let twice = [args, &["-", "-"]].concat();
+            assert_eq!(run(&mut file, &twice), (format!("{hash}  -\n{empty}  -\n"), len as u64), "len={len} {twice:?}");
+        }
         if len > 100 {
             let mut file = fs::File::open(&path).unwrap();
             file.seek(SeekFrom::Start(100)).unwrap();
-            assert_eq!(run(file), format!("{}  -\n", blake3::convenience::hash(&data[100..]).to_hex()), "len={len}, from byte 100");
+            let rest = blake3::convenience::hash(&data[100..]).to_hex();
+            assert_eq!(run(&mut file, &[]), (format!("{rest}  -\n"), len as u64), "len={len}, from byte 100");
         }
+    }
+}
+
+/// BLAKE3's output is 2^64 - 1 bytes long. Its last byte is printed, in
+/// text as in raw bytes (text filled a whole block, which stopped the
+/// process there), and a request for a byte past the end is refused
+/// (raw output gave fewer bytes than were asked for, with success).
+#[test]
+fn test_the_outputs_last_byte_and_none_past_it() {
+    blake3::initialize();
+    let last = u64::MAX - 1;
+    let mut reader = blake3::convenience::Hasher::new(blake3::Mode::Plain, None);
+    reader.update(b"foo");
+    let mut reader = reader.finalize_xof();
+    reader.set_position(last);
+    let mut byte = [0u8; 1];
+    reader.fill(&mut byte);
+    let seek = format!("--seek={last}");
+    let text = cmd!(b3sum_exe(), "--no-names", "--length=1", &seek).stdin_bytes("foo").read().unwrap();
+    assert_eq!(text, hex::encode(byte));
+    let raw = cmd!(b3sum_exe(), "--raw", "--length=1", &seek).stdin_bytes("foo").stdout_capture().run().unwrap().stdout;
+    assert_eq!(raw, byte);
+    for args in
+        [&["--length=2", &seek][..], &["--raw", "--length=2", &seek], &["--length=1", "--seek=18446744073709551615"], &["--sigilcode", "--length=2", &seek]]
+    {
+        let refused = cmd(b3sum_exe(), args).stdin_bytes("foo").stdout_capture().stderr_capture().unchecked().run().unwrap();
+        assert_eq!(refused.status.code(), Some(1), "{args:?}");
+        assert!(refused.stdout.is_empty(), "{args:?}");
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("past its end"), "{args:?}");
+    }
+}
+
+/// A checkfile read from standard input that names standard input as a
+/// file to check: the entry fails, and the others are checked. (b3sum
+/// waited for ever there, for the lock on standard input it held.)
+#[test]
+fn test_a_checkfile_on_stdin_cannot_check_stdin() {
+    blake3::initialize();
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("f"), b"foo").unwrap();
+    let foo = blake3::convenience::hash(b"foo").to_hex();
+    let checkfile = format!("{foo}  -\n{foo}  f\n");
+    for args in [&["--check"][..], &["--check", "-"]] {
+        let out = cmd(b3sum_exe(), args).stdin_bytes(checkfile.as_bytes()).dir(dir.path()).stdout_capture().stderr_capture().unchecked().run().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.starts_with("-: FAILED (standard input is the checkfile"), "{stdout}");
+        assert!(stdout.ends_with("f: OK\n"), "{stdout}");
     }
 }
