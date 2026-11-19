@@ -1735,9 +1735,18 @@ mod dispatch {
             (CHUNK_LEN, &["c1"]),
             (CHUNK_LEN + 1, &["c1", "k1", "p1"]),
             (2 * CHUNK_LEN, &["c1", "k2"]),
-            (16 * CHUNK_LEN - 1, &["c1", "k6", "p2", "p4", "p8", "q9"]),
+            // Fifteen chunks and a part: Apple's cores take nine at
+            // once and six, others (SME2 under emulation) five at a time.
+            (16 * CHUNK_LEN - 1, if crate::neon_hybrid::apple_cores() { &["c1", "k6", "p2", "p4", "p8", "q9"] } else { &["c1", "k5", "p2", "p4", "p8"] }),
             (16 * CHUNK_LEN, &["c1", "hash16_chunks", "p2", "p4", "p8"]),
-            (lane - CHUNK_LEN, &["c1", "hash16_chunks", "hash16_parents", "k10", "k5", "p2", "p4", "p8"]),
+            (
+                lane - CHUNK_LEN,
+                if crate::neon_hybrid::apple_cores() {
+                    &["c1", "hash16_chunks", "hash16_parents", "k10", "k5", "p2", "p4", "p8"]
+                } else {
+                    &["c1", "hash16_chunks", "hash16_parents", "k5", "p2", "p4", "p8"]
+                },
+            ),
             (lane, &["c1", "hash16_chunks", "hash16_parents", "sme2x2_chunks"]),
             (2 * lane, &["c1", "hash16_chunks", "hash16_parents", "sme2x2_chunks"]),
         ];

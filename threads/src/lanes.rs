@@ -323,9 +323,11 @@ struct Scratch {
 
 /// The pieces a thread's scratch holds after [`initialize`]: a 64 MiB
 /// input cut into [`MAX_PIECE_LEN`] pieces, and the shorter tail pieces
-/// and prefix beside them (48 KiB of storage: a piece is 16 bytes, a
-/// chaining value 32).
+/// and prefix beside them (56 KiB of storage: a piece is 16 bytes, and
+/// its chaining value, which carries its place, 40).
 const PREPARED_PIECES: usize = 1024;
+// The crate's "Memory" section gives these 56 bytes.
+const _: () = assert!(core::mem::size_of::<Piece>() + core::mem::size_of::<ChainingValue>() == 56);
 
 std::thread_local! {
     static SCRATCH: core::cell::RefCell<Scratch> = const { core::cell::RefCell::new(Scratch { pieces: Vec::new(), cvs: Vec::new() }) };
@@ -1475,8 +1477,11 @@ pub(crate) mod places {
         cpu_set(&online.ok()?).filter(|nodes| nodes.iter().map(|word| word.count_ones()).sum::<u32>() > 1)
     }
 
-    /// The initiating thread's node, intersected with its allowed CPUs.
-    /// None when there is no additional restriction to apply.
+    /// The node the pool keeps to, intersected with the initiating
+    /// thread's allowed CPUs: that thread's own node, or the node that
+    /// holds the most of those CPUs where another holds more than its
+    /// own does ([`Node::largest`]). None when there is no additional
+    /// restriction to apply.
     ///
     /// Keeping to one node is for speed, and nothing else rests on it. So
     /// it is done where the system allows it and tells what it needs, and
@@ -1496,7 +1501,7 @@ pub(crate) mod places {
             let online = online_nodes(std::fs::read_to_string(system.join("node/online")))?;
             // Sound: sched_getcpu takes no arguments and accesses no caller memory.
             let cpu = usize::try_from(unsafe { sched_getcpu() }).ok()?;
-            Self::find(system, &online, cpu, affinity().ok()?)
+            Self::largest(system, &online, cpu, affinity().ok()?)
         }
 
         /// The node of `cpu` within the `allowed` CPUs, as the topology
@@ -1520,6 +1525,43 @@ pub(crate) mod places {
                 return None;
             }
             Self::within(allowed, cpus)
+        }
+
+        /// The node to keep to, for a thread on `cpu` that may run on the
+        /// `allowed` CPUs: the thread's own ([`Node::find`]), unless
+        /// another node holds more of the allowed CPUs, and then the one
+        /// that holds the most of them (of several such, the one with
+        /// the lowest-numbered CPU). None where `find` gives none for
+        /// `cpu`.
+        ///
+        /// The CPUs a process is allowed need not lie evenly over the
+        /// nodes (cores handed out without regard to them, a set widened
+        /// by hand), and the thread that starts the pool may be on the
+        /// node that has one of them while the next has sixteen: a pool
+        /// kept to the first would have no workers. Every other node is
+        /// read as the thread's own is, through one of its allowed CPUs,
+        /// and is passed over unless all of it agrees and none of its
+        /// CPUs was read before, as another node's or as a CPU of none.
+        fn largest(system: &std::path::Path, online: &Set, cpu: usize, allowed: Set) -> Option<Self> {
+            let mut best = Self::find(system, online, cpu, allowed)?;
+            // The allowed CPUs not yet read.
+            let mut rest: Set = core::array::from_fn(|i| allowed[i] & !best.0[i]);
+            for other in 0..CPUS {
+                if !has(&rest, other) {
+                    continue;
+                }
+                let node = Self::find(system, online, other, allowed).filter(|node| node.0.iter().zip(&rest).all(|(node, rest)| node & !rest == 0));
+                rest[other / 64] &= !1u64.rotate_left(other as u32);
+                if let Some(node) = node {
+                    for (rest, node) in rest.iter_mut().zip(&node.0) {
+                        *rest &= !node;
+                    }
+                    if node.cpu_count() > best.cpu_count() {
+                        best = node;
+                    }
+                }
+            }
+            Some(best)
         }
 
         fn within(allowed: Set, node: Set) -> Option<Self> {
@@ -1769,6 +1811,100 @@ pub(crate) mod places {
             assert_eq!(case("node-past-the-set", &|system| std::fs::write(system.join("node/node1/cpulist"), "2-9000\n").unwrap()), None);
             assert_eq!(case("node-without-this-cpu", &|system| std::fs::write(system.join("node/node1/cpulist"), "0-1,3\n").unwrap()), None);
             assert_eq!(case("node-of-a-list-half-wrong", &|system| std::fs::write(system.join("node/node1/cpulist"), "2-3,7-5\n").unwrap()), None);
+        }
+
+        /// The pool keeps to the node that holds the most of the allowed
+        /// CPUs, and to the starting thread's own where no other holds
+        /// more. Each case is a machine of three nodes of four CPUs, in
+        /// the shape of `/sys/devices/system`, with a thread on `cpu`
+        /// that may run on `allowed`; `change` takes something away.
+        /// Another node is taken only where all of it agrees, as the
+        /// thread's own is, and it is read through its allowed CPUs.
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn the_node_that_holds_the_most_allowed_cpus_is_kept_to() {
+            let root = tempfile::tempdir().unwrap();
+            let case = |name: &str, cpu: usize, allowed: &str, change: &dyn Fn(&std::path::Path)| {
+                let system = root.path().join(name);
+                for cpu in 0..12 {
+                    std::fs::create_dir_all(system.join(format!("cpu/cpu{cpu}/node{}", cpu / 4))).unwrap();
+                }
+                for node in 0..3 {
+                    std::fs::create_dir_all(system.join(format!("node/node{node}"))).unwrap();
+                    std::fs::write(system.join(format!("node/node{node}/cpulist")), format!("{}-{}\n", 4 * node, 4 * node + 3)).unwrap();
+                }
+                std::fs::write(system.join("node/online"), "0-2\n").unwrap();
+                change(&system);
+                let online = online_nodes(std::fs::read_to_string(system.join("node/online")))?;
+                Node::largest(&system, &online, cpu, cpu_set(allowed).unwrap()).map(|node| bits(&node.0))
+            };
+            let hidden = |cpus: &'static [usize]| {
+                move |system: &std::path::Path| cpus.iter().for_each(|cpu| std::fs::remove_dir_all(system.join(format!("cpu/cpu{cpu}"))).unwrap())
+            };
+            // Every CPU allowed, or as many on each node: the thread's own.
+            assert_eq!(case("every-cpu-from-node-0", 0, "0-11", &|_| ()), Some(vec![0, 1, 2, 3]));
+            assert_eq!(case("every-cpu-from-node-1", 5, "0-11", &|_| ()), Some(vec![4, 5, 6, 7]));
+            assert_eq!(case("as-many-on-each", 4, "0-1,4-5", &|_| ()), Some(vec![4, 5]));
+            assert_eq!(case("as-many-on-each-from-the-other", 1, "0-1,4-5", &|_| ()), Some(vec![0, 1]));
+            // One CPU here and three there: there, from either side.
+            assert_eq!(case("more-on-the-next", 0, "0,4-6", &|_| ()), Some(vec![4, 5, 6]));
+            assert_eq!(case("more-on-its-own", 5, "0,4-6", &|_| ()), Some(vec![4, 5, 6]));
+            assert_eq!(case("more-on-the-one-before", 9, "1-3,9", &|_| ()), Some(vec![1, 2, 3]));
+            // Of the other nodes the one with the most; of two alike, the
+            // one with the lowest CPU.
+            assert_eq!(case("most-of-three", 0, "0,4-5,8-10", &|_| ()), Some(vec![8, 9, 10]));
+            assert_eq!(case("most-of-three-in-the-middle", 0, "0,4-6,8-9", &|_| ()), Some(vec![4, 5, 6]));
+            assert_eq!(case("two-alike", 0, "0,5-6,9-10", &|_| ()), Some(vec![5, 6]));
+            // All the allowed CPUs on one node: nothing to restrict.
+            assert_eq!(case("all-on-its-own", 1, "0-3", &|_| ()), None);
+            // The thread's own node untold: none, whatever the others show.
+            assert_eq!(case("its-own-untold", 0, "0,4-6", &hidden(&[0])), None);
+            // Another node that does not all agree is passed over.
+            assert_eq!(case("next-not-online", 0, "0,4-6", &|system| std::fs::write(system.join("node/online"), "0,2\n").unwrap()), Some(vec![0]));
+            assert_eq!(case("next-without-its-list", 0, "0,4-6", &|system| std::fs::remove_file(system.join("node/node1/cpulist")).unwrap()), Some(vec![0]));
+            assert_eq!(
+                case("next-claims-a-cpu-of-this", 0, "0,3-6", &|system| std::fs::write(system.join("node/node1/cpulist"), "3-7\n").unwrap()),
+                Some(vec![0, 3])
+            );
+            assert_eq!(case("next-with-a-cpu-untold", 0, "0,4-6", &hidden(&[4])), Some(vec![0]));
+            // It is read through the CPUs the thread may use, not another
+            // of its CPUs: not at first, and not after a node was taken.
+            assert_eq!(case("next-told-by-a-cpu-not-allowed", 0, "0,5-7", &hidden(&[5, 6, 7])), Some(vec![0]));
+            assert_eq!(case("one-after-told-by-a-cpu-not-allowed", 0, "0,4-5,9-11", &hidden(&[9, 10, 11])), Some(vec![4, 5]));
+            // A node passed over does not hide the one after it.
+            assert_eq!(case("next-untold-and-one-after", 0, "0,4-6,8-9", &hidden(&[4, 5, 6])), Some(vec![8, 9]));
+        }
+
+        /// The same on this machine, where it has several nodes, as its
+        /// own `/sys/devices/system` tells them: a thread allowed one
+        /// CPU of one node and every CPU it has of another keeps to the
+        /// other, from whichever it starts on; allowed all of both, it
+        /// keeps to the one with more, and to its own where they hold
+        /// as many.
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn on_a_machine_of_several_nodes_the_larger_share_is_kept_to() {
+            let allowed = affinity().unwrap();
+            let shares: Vec<Vec<usize>> = node_masks()
+                .iter()
+                .map(|node| bits(&core::array::from_fn::<u64, { CPUS / 64 }, _>(|i| node[i] & allowed[i])))
+                .filter(|cpus| !cpus.is_empty())
+                .collect();
+            let [a, b, ..] = shares.as_slice() else { return };
+            if b.len() < 2 {
+                return;
+            }
+            let system = std::path::Path::new("/sys/devices/system");
+            let online = online_nodes(std::fs::read_to_string(system.join("node/online"))).unwrap();
+            let kept = |cpu: usize, cpus: &[&[usize]]| {
+                let list = cpus.concat().iter().map(|cpu| cpu.to_string()).collect::<Vec<_>>().join(",");
+                Node::largest(system, &online, cpu, cpu_set(&list).unwrap()).map(|node| bits(&node.0))
+            };
+            assert_eq!(kept(a[0], &[&a[..1], b]), Some(b.clone()), "from the node with one CPU");
+            assert_eq!(kept(b[0], &[&a[..1], b]), Some(b.clone()), "from the node with the most");
+            let larger = if b.len() > a.len() { b } else { a };
+            assert_eq!(kept(a[0], &[a, b]), Some(if a.len() == b.len() { a.clone() } else { larger.clone() }));
+            assert_eq!(kept(b[0], &[a, b]), Some(if a.len() == b.len() { b.clone() } else { larger.clone() }));
         }
 
         /// A binding keeps the calling thread to the node's CPUs; one the
@@ -2601,8 +2737,9 @@ impl Pool {
     /// finds nothing.
     fn serve(&self, me: usize) -> ! {
         let mut placed = false;
+        let mut turn = sources::Turn::default();
         loop {
-            if sources::run_one() {
+            if sources::run_one(&mut turn) {
                 continue;
             }
             if sources::open() && spin_for_work() {
@@ -2981,18 +3118,36 @@ pub(crate) mod sources {
     }
 
     /// The first registered source for which `f` says yes.
-    fn find(mut f: impl FnMut(&'static Source) -> bool) -> bool {
-        let mut active = ACTIVE.load(Ordering::SeqCst);
+    fn find(f: impl FnMut(&'static Source) -> bool) -> bool {
+        find_from(0, f).is_some()
+    }
+
+    /// The slot of the first registered source for which `f` says yes, in
+    /// a walk of the slots from `start` up and then of those below it.
+    fn find_from(start: usize, mut f: impl FnMut(&'static Source) -> bool) -> Option<usize> {
+        let mut active = ACTIVE.load(Ordering::SeqCst).rotate_right(start as u32);
         while active != 0 {
-            let slot = active.trailing_zeros() as usize;
+            let slot = (active.trailing_zeros() as usize + start) % SLOTS;
             active &= active - 1;
             let ptr = REGISTERED[slot].load(Ordering::Acquire);
             // Sound: sources are never freed (they are recycled).
             if !ptr.is_null() && f(unsafe { &*ptr }) {
-                return true;
+                return Some(slot);
             }
         }
-        false
+        None
+    }
+
+    /// The items a worker takes lowest slot first before it takes one in
+    /// turn ([`run_one`]).
+    pub(crate) const TURN: u32 = 16;
+
+    /// A worker's count toward its next turn, and where that turn's walk
+    /// begins.
+    #[derive(Default)]
+    pub(crate) struct Turn {
+        taken: u32,
+        cursor: u32,
     }
 
     /// Run one item from any source: whether there was one. The walk
@@ -3007,18 +3162,40 @@ pub(crate) mod sources {
     /// the other's pieces before its last one finishes. When two or more
     /// wait and a worker is parked, this one wakes the next first (the
     /// chain).
-    pub(crate) fn run_one() -> bool {
-        run_one_from(serve)
+    ///
+    /// That argument is of calls that end. A Pipeline that streams
+    /// publishes its next item before its last is taken, so a source in a
+    /// higher slot could wait behind it for as long as it streamed (a
+    /// 1 MiB message of a second Pipeline, waited for under an executor
+    /// that sleeps: from 9 ms to 8 s, where alone it took 50 us; the
+    /// audits of November 19). So after every [`TURN`] items a worker
+    /// takes one in turn: that walk begins where its last such walk ended,
+    /// and goes round. One source alone is served as before, and several
+    /// each get a share of every worker that their slot does not decide
+    /// (the same message then took about 1 ms).
+    pub(crate) fn run_one(turn: &mut Turn) -> bool {
+        run_one_from(turn, serve)
     }
 
     /// [`run_one`]'s walk, with `serve` what is done with the item taken
     /// (the test's way in: a recording `serve`).
-    fn run_one_from(mut serve: impl FnMut(&'static Source, Item)) -> bool {
-        find(|source| {
+    fn run_one_from(turn: &mut Turn, mut serve: impl FnMut(&'static Source, Item)) -> bool {
+        let in_turn = turn.taken >= TURN;
+        let start = if in_turn { turn.cursor as usize } else { 0 };
+        let taken_from = find_from(start, |source| {
             let Some(item) = source.take() else { return false };
             serve(source, item);
             true
-        })
+        });
+        let Some(slot) = taken_from else { return false };
+        if in_turn {
+            // The slot after this one (after the last, the first: the
+            // walk takes its start round).
+            *turn = Turn { taken: 0, cursor: (slot + 1) as u32 };
+        } else {
+            turn.taken += 1;
+        }
+        true
     }
 
     /// Hash `item` of `source` on this thread, waking the next worker first
@@ -3180,7 +3357,9 @@ pub(crate) mod sources {
         /// served a, a, a, b, b, b (run_one's own walk, its item recorded,
         /// not run). The order is the pool's by choice (run_one's comment:
         /// serving them in turn cost the shared cells 6-16%, #241), and a
-        /// test states it so a change to it is a decision.
+        /// test states it so a change to it is a decision. After TURN
+        /// items a worker takes one in turn, whichever slot it is in: the
+        /// second half.
         #[test]
         fn test_a_worker_serves_the_lowest_source_until_it_is_empty() {
             // A pool of one, so no worker starts: the sources below hold
@@ -3195,7 +3374,8 @@ pub(crate) mod sources {
                 s.finish.published.store(3, Ordering::SeqCst);
             }
             let mut served = Vec::new();
-            while run_one_from(|source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
+            let mut turn = Turn::default();
+            while run_one_from(&mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
             let (a, b) = (slots[0], slots[1]);
             assert_eq!(served, [a, a, a, b, b, b], "the lower slot whole, then the higher");
             // An item published to the lower slot meanwhile is served before
@@ -3203,9 +3383,40 @@ pub(crate) mod sources {
             sources[0].finish.published.store(4, Ordering::SeqCst);
             sources[1].finish.published.store(5, Ordering::SeqCst);
             served.clear();
-            while run_one_from(|source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
+            while run_one_from(&mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
             assert_eq!(served, [a, b, b]);
-            for slot in slots {
+            // A lower source that is never empty (it streams) does not keep
+            // the higher ones waiting for ever: after every TURN items the
+            // worker takes one in turn, round the sources that hold any.
+            let third: &'static Source = Box::leak(Box::new(Source::new()));
+            let c = third.register().expect("a free slot");
+            let all = [sources[0], sources[1], third];
+            let slot_of = |source: &Source| [a, b, c][all.iter().position(|s| core::ptr::eq(*s, source)).unwrap()];
+            // A claim takes half of what waits (run_len, in a pool of one
+            // thread): enough for every claim below to find some.
+            let many = 1 << 62;
+            for (source, at) in all.iter().zip([4, 5, 0]) {
+                source.finish.published.store(at + many, Ordering::SeqCst);
+            }
+            let mut turn = Turn::default();
+            served.clear();
+            for _ in 0..3 * (TURN as usize + 1) {
+                assert!(run_one_from(&mut turn, |source, _| served.push(slot_of(source))));
+            }
+            let lowest = a.min(b).min(c);
+            let mut in_turn = Vec::new();
+            for (i, &slot) in served.iter().enumerate() {
+                if i % (TURN as usize + 1) == TURN as usize {
+                    in_turn.push(slot);
+                } else {
+                    assert_eq!(slot, lowest, "item {i} is the lowest slot's");
+                }
+            }
+            in_turn.sort_unstable();
+            let mut each = [a, b, c];
+            each.sort_unstable();
+            assert_eq!(in_turn, each, "three turns serve the three sources once each");
+            for slot in [a, b, c] {
                 Source::unregister(slot);
             }
         }

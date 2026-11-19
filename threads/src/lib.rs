@@ -155,8 +155,12 @@
 //! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction and allocates nothing thereafter on the calling thread or the workers.
 //! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
 //!   where it hashes on the calling thread. Above that length it keeps a list
-//!   of pieces it hands out, freed when it returns: 48 bytes for each 128 KiB of
-//!   input, and at most 200 bytes for each CPU (1 GiB on 16 CPUs: 390 KiB).
+//!   of the pieces it hands out, 56 bytes for each piece of up to 128 KiB.
+//!   The list is the calling thread's and stays with it: 56 KiB are made
+//!   ready with the thread's first call, enough for 64 MiB; a longer input
+//!   grows the list, and the thread keeps it at that size (after 1 GiB on
+//!   16 CPUs, 578 KiB), so a later call on an input no longer allocates
+//!   nothing.
 //! - **Once per process**: the startup self-test's buffers, about 45 KiB
 //!   of the calling thread's stack while it runs (it allocates nothing),
 //!   and the threads: by default a worker per CPU beyond the first, each with the
@@ -172,12 +176,22 @@
 //! # Panics
 //!
 //! A broken precondition of a call panics on the calling thread, and
-//! unwinds as usual. Two breaches stop the whole process instead, since
-//! worker threads may be reading memory that the unwinding would free: a
-//! [`Pipeline`](throughput::Pipeline) dropped while its messages are
-//! still being hashed, and a [`Lent`](throughput::Lent) guard dropped
-//! before its message's event. A server keeps both from happening when
-//! a client goes away: see "Giving up a message" on the Pipeline.
+//! unwinds as usual. Some things end the whole process instead, with one
+//! line on standard error where it takes one, and no unwinding:
+//!
+//! - Two breaches, since worker threads may be reading memory that the
+//!   unwinding would free: a [`Pipeline`](throughput::Pipeline) dropped
+//!   while its messages are still being hashed, and a
+//!   [`Lent`](throughput::Lent) guard dropped while its message's hashing
+//!   has not finished. A server keeps both from happening when a client
+//!   goes away: see "Giving up a message" on the Pipeline. In a child
+//!   forked while such work was in flight, either drop ends the child
+//!   ([`initialize_multithreaded`]).
+//! - A worker thread that the system refuses to start, and a panic on a
+//!   worker thread ([`initialize_multithreaded`] tells both).
+//! - A [`Waker`](core::task::Waker) of the program's that panics when it
+//!   is woken, on whichever thread (the Pipeline's "Panics").
+//! - A startup self-test that fails ([`initialize`]).
 //!
 //! # Startup self-test
 //!
@@ -307,8 +321,8 @@ pub(crate) fn ran(kind: Ran) {
 /// and each multithreaded call hashes on its calling thread and the
 /// workers (calls made at once share the workers), and on CPUs with SME2
 /// (Apple M4) the SME2 thread too. `None` uses the available logical CPUs,
-/// limited on Linux to the allowed CPUs of the initializing thread's
-/// memory node. With 1, calls hash on their calling
+/// limited on Linux to the allowed CPUs of one memory node (below). With
+/// 1, calls hash on their calling
 /// thread alone: no workers start, nor the SME2 thread. Otherwise it
 /// starts the first worker and returns; the first worker starts the others
 /// (each 20-30 us on Linux x86-64), and calls run on the workers started
@@ -318,8 +332,16 @@ pub(crate) fn ran(kind: Ran) {
 /// for the same number: another `Some` panics. A panic on a worker thread
 /// (a bug in this crate, or a waker of the program's that panics when a
 /// worker wakes it) ends the process, once the process's panic hook has
-/// returned (the standard one prints the panic's message), rather than
-/// leaving the call that waits for that worker's piece waiting forever.
+/// returned (the standard one prints the panic's message, and waits
+/// where standard error does not take it), rather than leaving the call
+/// that waits for that worker's piece waiting forever. A worker thread
+/// that the system refuses to start ends the process too, for the same
+/// reason, with one line on standard error: a limit on the process's
+/// threads (`RLIMIT_NPROC`, a container's `pids.max`) or a lack of
+/// memory can refuse one. The first worker is started by this call and
+/// the others by the first worker, so the end can come shortly after
+/// this call has returned, and the program cannot catch it: one that
+/// runs under such a limit passes a count of threads that fits.
 ///
 /// `None` counts logical CPUs, so on a CPU with SMT (Hyper-Threading) both
 /// threads of each core, and that is the faster default. On an EPYC 9255,
@@ -337,15 +359,22 @@ pub(crate) fn ran(kind: Ran) {
 /// open one that finds no work looks for 5 us before it sleeps.
 ///
 /// On Linux where the node topology is available and the system allows
-/// it, workers stay on the memory node of the initializing thread's CPU.
+/// it, workers stay on one memory node: the node of the initializing
+/// thread's CPU or, where another node holds more of the CPUs that
+/// thread is allowed, the node that holds the most of them. (The CPUs a
+/// process is allowed need not lie evenly over the nodes, and its first
+/// thread may start on a node that has one of them.)
 /// On a machine with more than one last-level cache, each worker is kept
 /// to a cache within that node.
 /// A call wakes workers under its own cache first where it has any there.
-/// Calling threads keep their own affinity and their buffer placement.
+/// Calling threads keep their own affinity and their buffer placement,
+/// the initializing thread too: it may run on another node than the
+/// workers.
 /// To do this, on a Linux machine with more than one memory node, the
-/// call reads the node's CPUs from `/sys/devices/system`, and the first
-/// worker binds itself to them with `sched_setaffinity` before it starts
-/// the others, which inherit them (the SME2 thread binds itself too).
+/// call reads the nodes' CPUs from `/sys/devices/system`, and the first
+/// worker binds itself to the chosen node's with `sched_setaffinity`
+/// before it starts the others, which inherit them (the SME2 thread
+/// binds itself too).
 /// All of this is for speed, and no call's result rests on it: what the
 /// system does not tell or allow is left undone, each part by itself,
 /// and the calls work as anywhere. Where the system shows no list of
@@ -353,7 +382,9 @@ pub(crate) fn ran(kind: Ran) {
 /// initializing CPU, that node's CPUs or the thread's own (a sandbox
 /// may), or shows parts that do not agree (a node that is not online,
 /// or does not hold its CPU), no node is chosen, and the workers start
-/// with the initializing thread's CPUs. Where it refuses a thread's
+/// with the initializing thread's CPUs. Another node is taken in place
+/// of the initializing CPU's only where what the system shows of that
+/// node agrees in the same way. Where it refuses a thread's
 /// binding, to the node or later to a cache, that thread keeps the CPUs
 /// it has. (A pool of one thread asked for by number,
 /// `NonZeroUsize::new(1)`, has no workers: it reads no topology and
@@ -397,7 +428,7 @@ pub(crate) fn ran(kind: Ran) {
 /// after any fork; its single-threaded calls work anywhere.
 ///
 /// Each thread that makes multithreaded calls keeps a little storage for
-/// them (its cut of the input, 48 KiB for inputs up to 64 MiB, and its
+/// them (its cut of the input, 56 KiB for inputs up to 64 MiB, and its
 /// job record), grown on its first call and on the first call that
 /// outgrows it, and otherwise untouched: after that, a call allocates
 /// nothing. This call prepares the calling thread's; a call from another
