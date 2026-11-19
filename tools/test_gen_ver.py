@@ -139,6 +139,30 @@ class Versions(unittest.TestCase):
                 notes.write_text(f"# blake3-servil {title}\n")
                 self.stamp("--check")
 
+    def test_a_stamp_replaces_the_title_alone(self):
+        # The title's version runs to a space, a comma or the line's end: a
+        # title with nothing after its version once let the stamp run on
+        # into the lines below it, up to their first space or comma.
+        notes = self.root / "CHANGELOG.md"
+        notes.write_text("# blake3-servil 0.8.0+dev\n\nFaster,\nand the same hashes.\n")
+        self.git("commit", "-qam", "a title that ends with its version")
+        self.stamp("0.9.0")
+        title, rest = notes.read_text().split("\n", 1)
+        self.assertRegex(title, r"^# blake3-servil 0\.9\.0\+[0-9a-f]{40}$")
+        self.assertEqual(rest, "\nFaster,\nand the same hashes.\n")
+
+    def test_check_holds_a_version_commits_title_to_its_release(self):
+        self.stamp("99.2.0")
+        self.stamp("--check")
+        notes = self.root / "CHANGELOG.md"
+        stamped = notes.read_text()
+        for title in ("0.8.0+dev", "0.8.0+" + "a" * 40, "99.2.0+dev"):
+            with self.subTest(title=title):
+                notes.write_text(f"# blake3-servil {title}, against official BLAKE3\n")
+                self.assertIn("CHANGELOG.md: its title names the release 99.2.0+", self.stamp("--check", succeeds=False))
+        notes.write_text(stamped)
+        self.stamp("--check")
+
     def test_check_rejects_each_stale_copy(self):
         cases = [(path, f'version = "{DEV}"') for path in MANIFESTS if path != "Cargo.toml"]
         cases += [(path, f'version = "={DEV}"') for path in ("Cargo.toml", "threads/Cargo.toml", "b3sum/Cargo.toml")]

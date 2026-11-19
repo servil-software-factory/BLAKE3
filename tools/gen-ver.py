@@ -105,6 +105,11 @@ def check_copies(full):
     # which drops "-preview", was then refused by the release check.
     if not TITLE.fullmatch(title):
         sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> (found {title!r})")
+    # On a version commit the title names the release, as every other copy
+    # does: the stamp writes it, and a title put back by hand to X.Y.Z+dev
+    # or to an older release's would go out over the new release's notes.
+    if not full.endswith("+dev") and not title.startswith((f"# blake3-servil {full} ", f"# blake3-servil {full},", f"# blake3-servil {full}\t")) and title != f"# blake3-servil {full}":
+        sys.exit(f"CHANGELOG.md: its title names the release {full} on its version commit (found {title!r})")
     if f'#define B3_VERSION "{full}"' not in Path("capi/b3.h").read_text().splitlines():
         sys.exit(f"capi/b3.h: B3_VERSION must be {full}")
     lock = tomllib.loads(Path("b3sum/Cargo.lock").read_text())
@@ -141,7 +146,7 @@ def set_version(full, notes=True):
     for path, dependency in PINS.items():
         edit(path, rf'^({dependency} = \{{ version = ")[^"]*', rf"\g<1>={full}")
     if notes:
-        edit("CHANGELOG.md", r"^# blake3-servil [^ \t,]+", f"# blake3-servil {full}")
+        edit("CHANGELOG.md", r"^# blake3-servil [^ \t,\n]+", f"# blake3-servil {full}")
         files.append("CHANGELOG.md")
     edit("capi/b3.h", r'^#define B3_VERSION ".*"$', f'#define B3_VERSION "{full}"')
     # The CLI's tracked lock contains all four published packages.

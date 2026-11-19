@@ -5,6 +5,7 @@
     python3 tools/release_artifacts.py TAG --published   what users download: the GitHub
                                                          release's assets, crates.io's packages
     ... --rebuilt DIR    each b3sum program and each crate is also, byte for byte, the one in DIR
+                         (and the one in each folder inside DIR: a builder's each)
     ... --commit COMMIT  the version commit, where its tag is not made yet
 
 TAG is a release's tag, vX.Y.Z+<code commit>: it names the version commit
@@ -48,6 +49,11 @@ What makes an artifact clean, by its kind:
   Cargo writes too. Before a release the two builders are our machine
   and GitHub's (tools/release-check.py); after it, the `release
   artifacts` workflow makes again what was published, and so can anyone.
+  DIR may hold a folder for each of several builders (the workflow's
+  jobs each put theirs in one): the artifact is then compared with every
+  builder's copy, and a builder that made crates made this one. Copied
+  into one folder instead, a later builder's file would replace an
+  earlier one's unread, and a builder that disagreed would go unseen.
 
   A .crate: Cargo's record in it (.cargo_vcs_info.json) names the version
   commit and no dirty tree, and every file in it is that commit's file,
@@ -363,16 +369,26 @@ def published(release):
 
 def rebuilt_problems(name, data, rebuilt):
     """Why the b3sum program or crate `name` is not the second one in the
-    folder `rebuilt`: nothing where the two are the same bytes."""
-    path = os.path.join(rebuilt, name)
-    if not os.path.isfile(path):
+    folder `rebuilt`: nothing where the two are the same bytes. A folder
+    inside `rebuilt` is one builder's files: `name` is then compared with
+    every builder's copy, and a builder that made any crate made this
+    one."""
+    builders = [rebuilt] + sorted(os.path.join(rebuilt, sub) for sub in os.listdir(rebuilt) if os.path.isdir(os.path.join(rebuilt, sub)))
+    copies = [builder for builder in builders if os.path.isfile(os.path.join(builder, name))]
+    if not copies:
         script = "crates-release" if name.endswith(".crate") else "b3sum-release"
         return [f"no second build of it in {rebuilt} to compare with (sh tools/{script}.sh at the version commit, on another machine)"]
-    other = read(path)
-    if other == data:
-        return []
-    digests = [hashlib.sha256(d).hexdigest() for d in (data, other)]
-    return [f"its bytes (SHA-256 {digests[0]}) are not the second build's in {rebuilt} (SHA-256 {digests[1]}): one of the two was not made from the version commit by the release's script"]
+    found = []
+    for builder in copies:
+        other = read(os.path.join(builder, name))
+        if other != data:
+            digests = [hashlib.sha256(d).hexdigest() for d in (data, other)]
+            found.append(f"its bytes (SHA-256 {digests[0]}) are not the second build's in {builder} (SHA-256 {digests[1]}): one of the two was not made from the version commit by the release's script")
+    if name.endswith(".crate"):
+        for builder in builders:
+            if builder not in copies and any(n.endswith(".crate") for n in os.listdir(builder)):
+                found.append(f"{builder} holds crates and not this one: its builder packaged fewer than the release has")
+    return found
 
 
 def check(items, release, out=None, rebuilt=None):

@@ -348,9 +348,10 @@ pub(crate) fn ran(kind: Ran) {
 /// Where the list is there and a part of the topology cannot be read,
 /// this call panics, and where a worker cannot bind, the process ends,
 /// each saying why: a sandbox that shows the nodes and hides their CPUs,
-/// or refuses the binding, needs `Some(1)`, which reads and binds
-/// nothing. `Some(n)` starts `n - 1` workers on that node whether or not
-/// it has `n` CPUs.
+/// or refuses the binding, needs a pool of one thread
+/// (`NonZeroUsize::new(1)`), which reads and binds nothing. A request
+/// for `n` threads starts `n - 1` workers on that node whether or not it
+/// has `n` CPUs.
 /// For each kind and size of call under 256 MiB, a caller with local
 /// workers learns whether they or all workers on the node finish sooner.
 ///

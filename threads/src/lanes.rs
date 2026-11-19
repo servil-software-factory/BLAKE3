@@ -503,10 +503,12 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 
 /// Say why, and end the process, from a thread the pool's callers may be
 /// waiting on. The end does not wait for the words. They go straight to
-/// descriptor 2, and only if it takes them at once: `std::io::stderr`
+/// descriptor 2, and only if it says it takes words now: `std::io::stderr`
 /// takes a lock, and a caller that holds it while it waits for this
 /// thread would wait for ever; so would a write to a full pipe whose
-/// reader waits for that caller.
+/// reader waits for that caller. (A pipe that has room for a line when
+/// asked has it for these words, unless another writer fills it between
+/// the asking and the writing.)
 pub(crate) fn stop(why: &str) -> ! {
     #[repr(C)]
     struct PollFd {

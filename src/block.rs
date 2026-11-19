@@ -11,6 +11,16 @@ use crate::BLOCK_LEN;
 /// message starts on a cache line. A [`Batch`] holds its messages in
 /// blocks, each message starting a block and taking whole blocks (one for
 /// an empty message).
+///
+/// # Trait implementations
+///
+/// - `Clone` duplicates all 64 bytes in another aligned block.
+/// - `Copy` preserves every byte, including any padding of a message within
+///   the block.
+/// - `Debug` prints every byte in hexadecimal, including message padding.
+/// - `Eq` treats blocks as equal exactly when their byte arrays agree.
+/// - `PartialEq` compares all contents as ordinary byte arrays, without a
+///   constant-time guarantee.
 #[repr(C, align(64))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Block(pub [u8; BLOCK_LEN]);
@@ -80,6 +90,13 @@ impl core::fmt::Debug for Block {
 /// assert_eq!(out[1], *convenience::hash(&[9u8; 100]).as_bytes());
 /// # }
 /// ```
+///
+/// # Trait implementations
+///
+/// - `Clone` copies owned blocks or shares a read-only borrow, keeping the
+///   same messages and padding.
+/// - `Prepared` presents the messages in order in whole-block slots, with
+///   at least one block per slot.
 #[derive(Clone)]
 pub struct Batch<'a> {
     #[cfg(feature = "std")]
@@ -186,6 +203,15 @@ struct Line([u8; 128]);
 /// [`Batch`]; a layer's digests written into one are the next layer's
 /// input. The alignment is the type's: only this constructor makes one,
 /// so a call checks nothing.
+///
+/// # Trait implementations
+///
+/// - `Deref` borrows exactly the message arrays in order, excluding the
+///   allocation's trailing padding.
+/// - `DerefMut` lets the caller replace message bytes without changing the
+///   count or accessing trailing padding.
+/// - `Prepared` lends the contiguous 16- or 32-byte messages directly to
+///   batch calls.
 #[cfg(feature = "std")]
 pub struct Packed<const N: usize> {
     lines: std::vec::Vec<Line>,
@@ -287,6 +313,13 @@ pub trait Prepared: sealed::Sealed {
 }
 
 /// Some of a batch's messages, in place: [`Prepared::part`] makes it.
+///
+/// # Trait implementations
+///
+/// - `Clone` borrows the same range without copying its messages.
+/// - `Copy` preserves the read-only view and its stride.
+/// - `Prepared` presents the selected messages in their original order and
+///   layout.
 #[derive(Clone, Copy)]
 pub struct Part<'a> {
     bytes: &'a [u8],

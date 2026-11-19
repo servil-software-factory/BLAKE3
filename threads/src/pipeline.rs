@@ -134,6 +134,14 @@ fn unpack_arg(arg: u64) -> (u64, usize, usize) {
 }
 
 /// Fixed memory bounds for a [`Pipeline`].
+///
+/// # Trait implementations
+///
+/// - `Clone` duplicates both capacity bounds.
+/// - `Copy` preserves both counts without reserving any storage.
+/// - `Debug` reports the message and room counts.
+/// - `Eq` identifies limits with equal bounds.
+/// - `PartialEq` compares both counts by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Messages open or in flight at once; as many finished [`Event`]s
@@ -156,6 +164,11 @@ pub enum Event<T, B = ()> {
 /// [`Pipeline::abort`] when its bytes will not all come. Dropping one
 /// panics. In async code an early return through `?` drops what the task
 /// holds, so give the message to `abort` before returning the error.
+///
+/// # Trait implementations
+///
+/// - `Drop` panics on an unfinished message unless the thread is already
+///   unwinding; dropping is not cancellation.
 #[must_use = "end, abort, or hand the message's bytes over; dropping an unfinished Message stops the program"]
 pub struct Message {
     pipeline_id: u64,
@@ -184,6 +197,13 @@ impl Drop for Message {
 /// Hold this guard until its message's event has been taken. Dropped
 /// while a worker may still read the bytes (before the message is
 /// hashed), it stops the process: no worker reads freed memory.
+///
+/// # Trait implementations
+///
+/// - `Drop` stops the process (an abort, not a panic) unless the loan's
+///   hashing has finished, even where no worker has been given it yet or
+///   its Pipeline is gone; once it has finished, the guard may be dropped
+///   before its event is taken.
 #[must_use = "hold the guard until the message's event; dropping an active loan aborts the process"]
 pub struct Lent<'a> {
     completed: &'static AtomicU64,
@@ -399,6 +419,15 @@ impl PipeStorage {
 }
 
 /// Reusable `ROOM_LEN`-byte buffer for arriving message bytes.
+///
+/// # Trait implementations
+///
+/// - `Drop` returns the unused credits; workers retain access to committed
+///   bytes until they finish.
+/// - `Send` lets another thread take the token and its exclusive access to
+///   the writable bytes.
+/// - `Sync` permits sharing a reference; writing still requires an
+///   exclusive borrow.
 #[must_use = "commit from the room; a dropped Room gives back what is left of it"]
 pub struct Room {
     pipeline_id: u64,
@@ -791,8 +820,8 @@ process_static! {
 /// Streaming multithreaded hasher with bounded memory and pull-based
 /// [`Event`] delivery.
 ///
-/// In a pool of one thread (`initialize_multithreaded(Some(1))`, or a
-/// machine with one CPU) there is no worker: the calls that hand work over
+/// In a pool of one thread (`initialize_multithreaded` asked for one, or
+/// a machine with one CPU) there is no worker: the calls that hand work over
 /// ([`commit`](Pipeline::commit), [`end`](Pipeline::end),
 /// [`owned`](Pipeline::owned), [`lent`](Pipeline::lent) and
 /// [`batch`](Pipeline::batch)) hash it themselves before they return.
@@ -802,10 +831,10 @@ process_static! {
 /// A Pipeline's storage (its Rooms, about 64 KiB each, and its queues) is
 /// kept when the Pipeline is dropped, for a later Pipeline with the same
 /// number of Rooms and no more messages: it is never returned to the
-/// system. So a process holds, for each number of Rooms it has ever asked
-/// for, as much as its most such Pipelines alive at once: a process that
-/// sizes each Pipeline differently grows with every new size, and one
-/// that keeps to a few sizes does not. The storage is not cleared: a
+/// system. So a process whose Pipelines all have the same `Limits` holds
+/// as much as its most Pipelines alive at once, and one that sizes each
+/// Pipeline differently grows with every new size. The storage is not
+/// cleared: a
 /// keyed Pipeline's key and the bytes last written to its Rooms stay in
 /// the process's memory until another Pipeline writes over them, and no
 /// call of this crate wipes them.
@@ -838,8 +867,10 @@ process_static! {
 /// dropping: used further, it may refuse later calls or wait for ever.
 /// The same holds after a panic in the program's own code that a call
 /// here runs: an owner's `as_ref`, or a [`Waker`](core::task::Waker)
-/// that panics when it is woken or dropped. Such a waker, woken from a
-/// worker thread, ends the process.
+/// that panics when it is cloned or dropped. A waker that panics when
+/// it is woken ends the process, on whichever thread it is woken: the
+/// wake comes in the middle of other work, which a panic would leave
+/// half done.
 ///
 /// ```
 /// # blake3_servil::initialize_multithreaded(None);
@@ -881,6 +912,15 @@ process_static! {
 ///     assert_eq!(seen, [(0, hello), (1, None), (2, hello)]);
 /// });
 /// ```
+///
+/// # Trait implementations
+///
+/// - `Drop` stops the process (an abort) if a worker is still hashing one
+///   of its messages; otherwise it drops quietly, with the messages not
+///   yet hashed, the events not taken and their owners, and keeps its
+///   buffers for a later Pipeline.
+/// - `Send` lets a pipeline move between threads when its tags and owners
+///   are `Send`, keeping the same messages and tokens.
 pub struct Pipeline<T, B = ()> {
     id: u64,
     limits: Limits,
@@ -3235,44 +3275,6 @@ mod test {
     }
 
     #[test]
-    fn an_abort_records_the_message_before_it_wakes_anyone() {
-        struct Panics;
-        impl std::task::Wake for Panics {
-            fn wake(self: Arc<Self>) {
-                panic!("this waker panics");
-            }
-        }
-        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-        let storage = p.shared().storage;
-        let mut message = block_on(p.message(1, None));
-        let mut room = block_on(p.room());
-        p.commit(&mut message, &mut room, 3);
-        drop(room);
-        // The room is now the open message's alone, by the one credit of
-        // its three bytes. A wait for another message's event keeps the
-        // program's waker.
-        let other = message_in_flight(&mut p);
-        let waker = Waker::from(Arc::new(Panics));
-        assert!(p.poll_ready(&mut Context::from_waker(&waker)).is_pending());
-        // The abort gives the credit back, which frees the room and wakes
-        // whoever waits: the program's waker, which panics.
-        let woke = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.abort(message)));
-        assert!(woke.is_err(), "the abort woke no one");
-        // The message's record was whole by then: the room is free, its
-        // credit given back once, and the event comes in its turn.
-        assert_eq!(storage.rooms.refs[0].load(Ordering::SeqCst), 0);
-        p.shared().slot_done[other].store(true, Ordering::SeqCst);
-        assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 7, .. })));
-        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 1, .. })));
-        assert!(p.next_event().is_none());
-        let again = block_on(p.room());
-        assert!(poll_once(p.room()).is_pending(), "the one room was handed out twice");
-        drop(again);
-        drop(p);
-        assert_eq!(storage.rooms.refs[0].load(Ordering::SeqCst), 0, "a credit was given back twice");
-    }
-
-    #[test]
     #[should_panic(expected = "no ended messages are in flight")]
     fn contract_ready_with_nothing_ended_panics() {
         let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 0 });
@@ -3372,6 +3374,28 @@ mod test {
                 "worker_start" => {
                     crate::lanes::fail_worker_start_for_test();
                 }
+                // A waker that panics ends the process, on the owner's
+                // thread too: an abort of a short message frees its room
+                // and wakes the wait before the call has returned.
+                "waker_panics" => {
+                    struct Panics;
+                    impl std::task::Wake for Panics {
+                        fn wake(self: Arc<Self>) {
+                            panic!("this waker panics");
+                        }
+                    }
+                    let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
+                    let mut message = block_on(p.message(1, None));
+                    let mut room = block_on(p.room());
+                    p.commit(&mut message, &mut room, 3);
+                    drop(room);
+                    let _other = message_in_flight(&mut p);
+                    let waker = Waker::from(Arc::new(Panics));
+                    assert!(p.poll_ready(&mut Context::from_waker(&waker)).is_pending());
+                    let _ = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.abort(message)));
+                    // Not reached: the panic did not unwind into the catch.
+                    std::process::exit(0);
+                }
                 // The stop takes no lock: this thread holds stderr's and
                 // waits for the one that stops.
                 "lent_stderr_locked" => {
@@ -3396,6 +3420,7 @@ mod test {
         for (case, needle) in [
             ("lent", "Lent guard was dropped before its message finished"),
             ("lent_stderr_locked", "Lent guard was dropped before its message finished"),
+            ("waker_panics", "this waker panics"),
             ("pipeline", "Pipeline dropped while worker tasks are still in flight"),
             ("pipeline_multi", "Pipeline dropped while worker tasks are still in flight"),
             ("abort_on_unwind", ""),

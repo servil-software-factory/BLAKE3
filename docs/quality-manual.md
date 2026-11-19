@@ -358,10 +358,28 @@ AI agents, using different leading-edge models. This is a release
 practice, in addition to the executable checks above, not a claim that
 any revision with passing tests has been audited.
 
+Different models are not by themselves coverage. Before 0.10.0,
+fourteen audits of one candidate, by ten models, were held against the
+seven defects it was later known to have: one model reported the wrong
+hash among them, in both of its runs, and the two audits this practice
+then asked for, from different model families, reported none of the
+seven
+([the record](https://gist.github.com/johnservil/08e776af83103177001101793a538b61)).
+So an audit counts as one of a release's two only when its model, with
+a brief of the same form, has been run on a tree of ours that holds
+known severe defects, and the release's record says what it found
+there. The candidate `1b8e2847ec11a76cee7041a0901b4d6721c41c3a` is
+such a tree (BLAKE3 #461 lists its defects). A "no findings" report
+from an auditor with no such measure is one more review, not one of
+the two.
+
 The agents first review independently, without the other agent's
 conclusions. Give each the exact source revision, the previous stable
 release, the contracts and build instructions. Ask each to inspect the
-implementation and changes, not merely summarize these documents. The
+implementation and changes, not merely summarize these documents. A
+brief asks, and asserts nothing about the code: "is the wipe still
+right, and what is a wiped value?", not "zeroization unchanged" (that
+sentence stood in the brief of the fourteen audits above). The
 scope includes:
 
 - `unsafe` code, aliasing, initialization and arithmetic bounds;
@@ -383,6 +401,15 @@ with a reason, or an explicitly accepted residual risk. Verify claims
 against the code; model agreement is not verification. Handle disclosure
 of vulnerabilities affecting released versions before publishing
 reproduction details.
+
+An audit is not the only form of review. For a type that keeps state,
+ask also for its contract: what a value means, the invariant every
+value keeps, and each operation, trait implementations included,
+checked against that. On the wrong hash above, nine models were given
+the type and its grouped calls: three reported it when asked to audit
+them, six when asked to write the contract and check the code against
+it, and the other three of those wrote down the value that no
+constructor makes.
 
 Re-review affected findings when code changes after the audit. Review
 the diff to the final version commit as well; a review of an earlier
@@ -877,7 +904,20 @@ these model tests are run with Shuttle's own scheduling.
 - **Constant-time behaviour**: see "Timing and secrets", below.
 - **Fuzzing (cargo-fuzz)**: not used. The tests enumerate every kernel
   at every input shape, count, and boundary against fixed answers, the
-  paths a fuzzer would search for.
+  paths a fuzzer of one call's input would search for. Until 0.10 they
+  did not enumerate sequences of operations on a value that keeps
+  state, and 0.9's wrong hash (GHSA-v237-j9h9-8pf7) was such a
+  sequence: a trait implementation that left a `Hasher` no constructor
+  makes, then a grouped call that relied on every `Hasher` being one a
+  constructor makes. Each had tests of its own. The lifecycle tests
+  (`tests/lifecycle.rs`, `threads/tests/lifecycle.rs`) now walk such
+  sequences: every one to a small depth, and long seeded ones, on
+  several values at once, each step compared with official BLAKE3 for
+  every value in play. `tools/api.py --check` refuses a public method
+  or trait implementation of those types that no walk names, and a
+  trait implementation of any public type whose documentation has no
+  sentence for it. A fuzzer guided by coverage over such sequences has
+  not been tried.
 
 ## Timing and secrets
 
