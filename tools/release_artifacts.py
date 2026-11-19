@@ -7,7 +7,8 @@
     ... --rebuilt DIR    each b3sum program and each crate is also, byte for byte, the one in DIR
                          (and the one in each folder inside DIR: a builder's each)
     ... --builders A,B   with --rebuilt: the builders are the folders A and B inside DIR, and no
-                         others; each must be there, and must hold every crate
+                         others; each must be there, and must hold every crate and a program;
+                         DIR holds nothing else to compare with
     ... --commit COMMIT  the version commit, where its tag is not made yet
 
 TAG is a release's tag, vX.Y.Z+<code commit>: it names the version commit
@@ -378,14 +379,25 @@ def rebuilt_problems(name, data, rebuilt, named=None):
     others: each is there, and each holds every crate (which builders
     there should be is then the caller's word, not the folder's: a
     builder that left no crate at all, or one folder holding everyone's
-    files, was not told from two builders that agree)."""
+    files, was not told from two builders that agree). The names are
+    folders' own, each once, and the folders real ones; `rebuilt` holds
+    no other folder and no copy of `name` beside them; and each builder
+    holds a b3sum program (a third folder that disagreed, one builder
+    named twice, and one builder holding both programs each passed)."""
     if named is None:
         builders = [rebuilt] + sorted(os.path.join(rebuilt, sub) for sub in os.listdir(rebuilt) if os.path.isdir(os.path.join(rebuilt, sub)))
     else:
+        if len(set(named)) != len(named) or any(sub in ("", ".", "..") or os.path.basename(sub) != sub for sub in named):
+            return [f"the builders named are not folders' names, each once: {', '.join(named)}"]
         builders = [os.path.join(rebuilt, sub) for sub in named]
-        absent = [builder for builder in builders if not os.path.isdir(builder)]
+        absent = [builder for builder in builders if not os.path.isdir(builder) or os.path.islink(builder)]
         if absent:
             return [f"no files of the builder {os.path.basename(builder)} in {rebuilt}: each builder named has a folder of its own there" for builder in absent]
+        others = sorted(sub for sub in os.listdir(rebuilt) if sub not in named and os.path.isdir(os.path.join(rebuilt, sub)))
+        if others:
+            return [f"{rebuilt} holds a folder that is no builder named ({', '.join(others)}): its files would go uncompared"]
+        if os.path.lexists(os.path.join(rebuilt, name)):
+            return [f"a copy of it lies in {rebuilt} outside the builders' folders: with builders named, every copy is one builder's"]
     copies = [builder for builder in builders if os.path.isfile(os.path.join(builder, name))]
     if not copies:
         script = "crates-release" if name.endswith(".crate") else "b3sum-release"
@@ -404,6 +416,12 @@ def rebuilt_problems(name, data, rebuilt, named=None):
                 found.append(f"{builder} does not hold this crate: every builder named packages every crate of the release")
             elif any(n.endswith(".crate") for n in os.listdir(builder)):
                 found.append(f"{builder} holds crates and not this one: its builder packaged fewer than the release has")
+    elif named is not None:
+        # The release's programs are named alike but for their machine.
+        release = next((name[: -len(target)] for target in B3SUM_TARGETS if name.endswith("-" + target)), None)
+        for builder in builders:
+            if release is not None and not any(os.path.isfile(os.path.join(builder, release + target)) for target in B3SUM_TARGETS):
+                found.append(f"{builder} holds no b3sum program of the release: every builder named builds one")
     return found
 
 

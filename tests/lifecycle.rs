@@ -72,6 +72,7 @@ enum Step {
     Turn,
     TurnWith,
     TurnSome,
+    TurnOne,
     TurnNone,
     Finish,
     Debug,
@@ -79,7 +80,8 @@ enum Step {
     New,
 }
 use Step::*;
-const STEPS: [Step; 16] = [Update, With, Reader, Write, WriteAll, Flush, Clone, CloneFrom, Turn, TurnWith, TurnSome, TurnNone, Finish, Debug, Xof, New];
+const STEPS: [Step; 17] =
+    [Update, With, Reader, Write, WriteAll, Flush, Clone, CloneFrom, Turn, TurnWith, TurnSome, TurnOne, TurnNone, Finish, Debug, Xof, New];
 
 struct Walk {
     h: Vec<Hasher>,
@@ -135,13 +137,19 @@ impl Walk {
                     self.m[k].bytes.extend_from_slice(b);
                 }
             }
-            // A turn that names some of the hashers, and one that names
-            // none: the others hold what they held. (Every turn named
-            // every hasher until an auditor's fault, an `update_each`
-            // that fed a hasher its pieces did not name, passed.)
-            TurnSome | TurnNone => {
-                let pieces: Vec<_> =
-                    if matches!(op, TurnSome) { (0..n).step_by(2).map(|k| ((i + k) % n, &bytes[k.min(bytes.len())..])).collect() } else { vec![] };
+            // A turn that names some of the hashers, one that names one,
+            // and one that names none: the others hold what they held.
+            // (Every turn named every hasher until an auditor's fault, an
+            // `update_each` that fed a hasher its pieces did not name,
+            // passed; and no turn was one piece alone, the plainest call
+            // there is, until a second fault, an `update_each` that
+            // dropped a lone piece, passed.)
+            TurnSome | TurnOne | TurnNone => {
+                let pieces: Vec<_> = match op {
+                    TurnSome => (0..n).step_by(2).map(|k| ((i + k) % n, &bytes[k.min(bytes.len())..])).collect(),
+                    TurnOne => vec![(i, bytes)],
+                    _ => vec![],
+                };
                 if i % 2 == 0 {
                     update_each(&mut self.h, &pieces)
                 } else {
@@ -203,7 +211,7 @@ fn short_histories_preserve_every_message() {
     }
 }
 /// Every step after every other, after every pair and after every three:
-/// the 16 steps to depth four (65,536 sequences), on three hashers (two
+/// the 17 steps to depth four (83,521 sequences), on three hashers (two
 /// plain and one keyed at the start; a step makes new ones in the other
 /// modes), the first step on hasher 0, the second on 1, and so on, with
 /// lengths on both sides of the 16 KiB group. A step that leaves a value

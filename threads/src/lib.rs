@@ -318,8 +318,8 @@ pub(crate) fn ran(kind: Ran) {
 /// for the same number: another `Some` panics. A panic on a worker thread
 /// (a bug in this crate, or a waker of the program's that panics when a
 /// worker wakes it) ends the process, once the process's panic hook has
-/// printed its message, rather than leaving the call that waits for
-/// that worker's piece waiting forever.
+/// returned (the standard one prints the panic's message), rather than
+/// leaving the call that waits for that worker's piece waiting forever.
 ///
 /// `None` counts logical CPUs, so on a CPU with SMT (Hyper-Threading) both
 /// threads of each core, and that is the faster default. On an EPYC 9255,
