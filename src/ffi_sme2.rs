@@ -531,7 +531,11 @@ unsafe fn walk_in(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, ke
         // Parent levels: pairs of adjacent chaining values, contiguous, from
         // `src` into `dst`, until `keep` values remain. A level of fewer than
         // sixteen parents reads 32 values from `src` and writes 16 into
-        // `dst`, within the room scratch_layout leaves.
+        // `dst`, within the room scratch_layout leaves. The values past the
+        // level's own are whatever the scratch holds there (on a new block,
+        // bytes never written): the kernel makes of them parents that
+        // nothing reads, in lanes of their own, and no branch or address
+        // depends on a value.
         let mut count = n;
         while count > keep {
             let parents = count / 2;

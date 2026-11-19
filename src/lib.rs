@@ -176,7 +176,12 @@
 //! The `zeroize` feature (off by default, on for [docs.rs])
 //! implements
 //! [`Zeroize`](https://docs.rs/zeroize/latest/zeroize/trait.Zeroize.html) for
-//! this crate's types.
+//! this crate's types. A wiped value holds nothing of what it held, and is
+//! one its constructors make: a [`Hasher`] is a new [`Mode::Plain`] one
+//! (whatever its mode was: wiping forgets the key), a
+//! [`TreeHasher`](throughput::TreeHasher) is plain, an [`OutputReader`]
+//! reads the empty message's output from its start, and a [`struct@Hash`]
+//! is all zero.
 //!
 //! The build needs a C compiler that assembles the kernels (GCC 12 or
 //! later, or Clang); without one it stops and says so. This crate runs its
@@ -697,6 +702,10 @@ impl Zeroize for Output {
         block_len.zeroize();
         counter.zeroize();
         flags.zeroize();
+        // Wiped, it is the empty plain message's output: a state its
+        // constructors make, as every wiped value of this crate is.
+        *input_chaining_value = *IV;
+        *flags = CHUNK_START | CHUNK_END;
     }
 }
 

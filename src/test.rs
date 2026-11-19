@@ -930,7 +930,9 @@ fn test_zeroize() {
     hasher.zeroize();
     assert_eq!(hasher.staged, 0);
     assert!(hasher.stage.iter().all(|b| unsafe { b.assume_init() } == 0));
-    assert_eq!(hasher.core.key, [0; 8]);
+    assert_eq!(hasher.core.key, *crate::IV, "wiped, a plain hasher");
+    hasher.update(&[42; 3000]);
+    assert_eq!(hasher.finalize().as_bytes(), blake3::hash(&[42; 3000]).as_bytes(), "wiped, an empty plain hasher");
 
     let mut hasher = crate::HasherCore {
         chunk_state: crate::hasher::ChunkState {
@@ -950,7 +952,7 @@ fn test_zeroize() {
         hasher.cv_stack.push([42; 32]);
     }
     hasher.zeroize();
-    assert_eq!(hasher.chunk_state.cv, [0; 8]);
+    assert_eq!(hasher.chunk_state.cv, *crate::IV);
     assert_eq!(hasher.chunk_state.chunk_counter, 0);
     assert_eq!(hasher.chunk_state.buf, [0; 64]);
     assert_eq!(hasher.chunk_state.buf_len, 0);
@@ -958,7 +960,7 @@ fn test_zeroize() {
     assert_eq!(hasher.chunk_state.flags, 0);
     assert_eq!(hasher.chunk_state.platform, crate::Platform::detect_unchecked(), "zeroize leaves the platform");
     assert_eq!(hasher.initial_chunk_counter, 0);
-    assert_eq!(hasher.key, [0; 8]);
+    assert_eq!(hasher.key, *crate::IV);
     assert_eq!(hasher.cv_stack.len(), 0, "its values and rows: hasher.rs's own test");
 
     let mut output_reader = crate::OutputReader {
@@ -976,15 +978,21 @@ fn test_zeroize() {
     };
 
     output_reader.zeroize();
-    assert_eq!(output_reader.inner.input_chaining_value, [0; 8]);
+    assert_eq!(output_reader.inner.input_chaining_value, *crate::IV);
     assert_eq!(output_reader.inner.block, [0; 64]);
     assert_eq!(output_reader.inner.counter, 0);
     assert_eq!(output_reader.inner.block_len, 0);
-    assert_eq!(output_reader.inner.flags, 0);
+    assert_eq!(output_reader.inner.flags, crate::CHUNK_START | crate::CHUNK_END);
     assert_eq!(output_reader.inner.platform, crate::Platform::detect_unchecked(), "zeroize leaves the platform");
     assert_eq!(output_reader.position_within_block, 0);
     assert_eq!(output_reader.cached_block, [0; crate::BLOCK_LEN]);
     assert!(!output_reader.cache_valid);
+    // Wiped, it reads what a new plain Hasher's output reads.
+    let (mut wiped, mut fresh) = ([0u8; 200], [0u8; 200]);
+    output_reader.fill(&mut wiped);
+    crate::Hasher::new(crate::Mode::Plain, None).finalize_xof().fill(&mut fresh);
+    assert_eq!(wiped, fresh);
+    assert_eq!(wiped[..32], *blake3::hash(b"").as_bytes());
 }
 
 #[test]

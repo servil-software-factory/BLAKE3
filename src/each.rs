@@ -350,7 +350,11 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     HELD_GROUPS.with(|groups| groups.borrow_mut().push(alike.to_vec()));
     #[cfg(all(test, feature = "std"))]
     crate::counted(crate::Counted::HeldPass);
-    let (key, flags) = (hashers[first].core.key, hashers[first].core.chunk_state.flags);
+    let flags = hashers[first].core.chunk_state.flags;
+    // A plain cohort hashes under the IV itself, never under a member's
+    // copy of it: no hasher's words reach another hasher's hash. A keyed
+    // or derive-key hasher is alone here, under its own key.
+    let key = if flags == 0 { *crate::IV } else { hashers[first].core.key };
     let turn = crate::platform::Sme2Turn::take(hashers[first].core.chunk_state.platform, true);
     let platform = turn.platform();
     let mut work = HeldWorkspace::<N>::new();
@@ -825,6 +829,28 @@ mod test {
             h.stage(&[0; crate::STAGE_LEN]);
         }
         hash_cohort::<2>(&mut hashers, &[0, 1]);
+    }
+
+    /// A plain cohort's key is the constant, not what a member holds: a
+    /// hasher whose words were overwritten changes no other hasher's hash.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_plain_cohort_takes_the_iv_not_a_members_words() {
+        crate::initialize();
+        let mut input = vec![0u8; 4 * crate::STAGE_LEN];
+        crate::test::paint_test_input(&mut input);
+        for spoiled in 0..3 {
+            let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+            hashers[spoiled].core.key = [0x5a5a_5a5a; 8];
+            for piece in input.chunks(4096) {
+                update_each(&mut hashers, &[(0, piece), (1, piece), (2, piece)]);
+            }
+            for (i, hasher) in hashers.iter().enumerate() {
+                if i != spoiled {
+                    assert_eq!(hasher.clone().finalize(), crate::test::official::hash(Mode::Plain, &input), "hasher {i} beside spoiled hasher {spoiled}");
+                }
+            }
+        }
     }
 
     #[test]

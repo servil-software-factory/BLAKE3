@@ -768,6 +768,8 @@ impl std::io::Write for Hasher {
     }
 }
 
+/// Clears the key, the message bytes held and every chaining value, and
+/// leaves an empty [`Mode::Plain`] hasher.
 #[cfg(feature = "zeroize")]
 impl Zeroize for Hasher {
     fn zeroize(&mut self) {
@@ -787,6 +789,12 @@ impl Zeroize for HasherCore {
         chunk_state.zeroize();
         initial_chunk_counter.zeroize();
         cv_stack.zeroize();
+        // Wiped, it is an empty plain hasher: zero flags say "plain", and a
+        // plain hasher's key is the public IV. Grouped calls hash plain
+        // hashers' data together under one of their keys (each.rs), so a
+        // zero key here would enter a neighbour's hash.
+        *key = *crate::IV;
+        chunk_state.cv = *crate::IV;
     }
 }
 

@@ -263,7 +263,9 @@ pub struct Cv {
 
 impl Cv {
     /// A slot not yet filled, for an array that a call will fill: every
-    /// call that reads a `Cv` refuses it. Zeroed memory is the same value.
+    /// call that takes a `Cv` as a subtree's value refuses it
+    /// ([`as_bytes`](Cv::as_bytes) gives its 32 zero bytes). Zeroed memory
+    /// is the same value.
     pub const fn unset() -> Self {
         Cv { value: BareCv([0; OUT_LEN]), place: UNSET }
     }
@@ -607,6 +609,12 @@ impl TreeHasher {
 
     /// A worker's slice of a batch. Slot shape and output count are
     /// checked by the same code as `hash_many`.
+    ///
+    /// Requires each slot's bytes past its message to be zero, as a
+    /// `Batch` and a `Packed` keep them (checked in debug builds only: a
+    /// kernel that takes whole blocks hashes those bytes too). Outside the
+    /// documented API: the thread library passes its batches' slices here,
+    /// until it passes a checked view (BLAKE3 #458).
     #[doc(hidden)]
     #[inline]
     pub fn hash_slots_on(&self, platform: crate::platform::Platform, bytes: &[u8], len: usize, slot: usize, out: &mut [[u8; OUT_LEN]]) {
@@ -828,6 +836,9 @@ impl zeroize::Zeroize for TreeHasher {
         key.zeroize();
         flags.zeroize();
         on_this_core.zeroize();
+        // Wiped, it is `TreeHasher::new(Mode::Plain)`: zero flags say
+        // "plain", and plain's key words are the public IV.
+        *key = *crate::IV;
     }
 }
 
@@ -1047,7 +1058,7 @@ mod tree_test {
     }
 
     /// Chaining values compare by their bytes, and a `TreeHasher` zeroized
-    /// holds no key.
+    /// holds no key: it is a plain one.
     #[test]
     fn chaining_values_compare_and_a_tree_zeroizes() {
         let (one, other) = (BareCv::from_bytes([1; 32]), BareCv::from_bytes([2; 32]));
@@ -1059,7 +1070,9 @@ mod tree_test {
             let mut tree = TreeHasher::new(Mode::Keyed(&KEY)).on_this_core();
             assert_ne!((tree.key, tree.flags, tree.on_this_core), ([0; 8], 0, false));
             tree.zeroize();
-            assert_eq!((tree.key, tree.flags, tree.on_this_core), ([0; 8], 0, false));
+            let plain = TreeHasher::new(Mode::Plain);
+            assert_eq!((tree.key, tree.flags, tree.on_this_core), (plain.key, plain.flags, plain.on_this_core));
+            assert_eq!((tree.key, tree.flags, tree.on_this_core), (*crate::IV, 0, false));
         }
     }
 
