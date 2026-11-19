@@ -193,6 +193,11 @@ mod lanes {
         Platform::detect()
     }
     pub(crate) fn require() {}
+    /// The stand-in pool has workers; a Pipeline with no slot (NO_SLOT)
+    /// models the unregistered path a one-thread pool takes.
+    pub(crate) fn pool_has_workers() -> bool {
+        true
+    }
     pub(crate) fn now() -> std::time::Instant {
         static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         *BASE.get_or_init(std::time::Instant::now)

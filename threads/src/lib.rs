@@ -340,6 +340,13 @@ pub(crate) fn ran(kind: Ran) {
 /// last-level cache, each worker is kept to a cache within that node.
 /// A call wakes workers under its own cache first where it has any there.
 /// Calling threads keep their own affinity and their buffer placement.
+/// To do this, on a Linux machine with more than one memory node, the
+/// call reads the node's CPUs from `/sys/devices/system` and each worker
+/// binds itself with `sched_setaffinity`. Where the topology cannot be
+/// read this call panics, and where a worker cannot bind the process
+/// ends, each saying why: a sandbox that hides the topology or refuses
+/// the binding needs `Some(1)`, which reads and binds nothing. `Some(n)`
+/// starts `n - 1` workers on that node whether or not it has `n` CPUs.
 /// For each kind and size of call under 256 MiB, a caller with local
 /// workers learns whether they or all workers on the node finish sooner.
 ///
