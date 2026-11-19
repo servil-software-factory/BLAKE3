@@ -908,29 +908,31 @@ these model tests are run with Shuttle's own scheduling.
 - **Fuzzing (cargo-fuzz)**: not used. The tests enumerate every kernel
   at every input shape, count, and boundary against fixed answers, the
   paths a fuzzer of one call's input would search for. Until 0.10 they
-  did not enumerate sequences of operations on a value that keeps
-  state, and 0.9's wrong hash (GHSA-v237-j9h9-8pf7) was such a
-  sequence: a trait implementation that left a `Hasher` no constructor
-  makes, then a grouped call that relied on every `Hasher` being one a
-  constructor makes. Each had tests of its own. The lifecycle tests
+  did not enumerate sequences of operations on a value that keeps state,
+  and 0.9's wrong hash (GHSA-v237-j9h9-8pf7) was such a sequence: a
+  trait implementation that left a `Hasher` no constructor makes, then a
+  grouped call that relied on every `Hasher` being one a constructor
+  makes. Each had tests of its own. The lifecycle tests
   (`tests/lifecycle.rs`, `threads/tests/lifecycle.rs`) now walk such
   sequences: every sequence of their steps to a small depth, and long
-  seeded ones, on several values at once. A step is one public
-  operation with a few lengths and neighbours, not every argument it
-  takes. After each step every `Hasher` in play is compared with
+  seeded ones, on several values at once. A step is one public operation
+  with a few lengths and neighbours, not every argument it takes (the
+  Pipeline's step for its next event is up to three calls: ask, wait,
+  ask again). After each step every `Hasher` in play is compared with
   official BLAKE3, the ones the step did not name included; the
-  Pipeline's walk compares every event with official BLAKE3 and with
-  the order its messages ended in. `tools/api.py --check` refuses a
-  public method or trait implementation of those types that neither
-  walk's list names, and a trait implementation of any public type
-  whose documentation has no sentence for it. Both are lists of names
-  kept complete, for the features the documentation is built with and
-  for the implementations a crate writes for the type itself (not the
-  automatic or blanket ones, nor those for references to it): they
-  make a new operation's author say where it is walked, and do not show
-  that a walk tests what it names. A second model checked that, once,
-  with faults of its own (BLAKE3 #461). A fuzzer guided by coverage
-  over such sequences has not been tried.
+  Pipeline's walk compares every event with official BLAKE3 and with the
+  order its messages ended in. `tools/api.py --check` refuses a public
+  method or trait implementation of those types that neither walk's list
+  names, and a trait implementation of any public type whose
+  documentation has no sentence for it. Both are lists of names kept
+  complete, for the features the documentation is built with and for the
+  implementations a crate writes for the type itself (not the automatic
+  or blanket ones, nor those for references to it): they make a new
+  operation's author name it as walked or give the reason it is not, and
+  do not show that a walk tests what it names. Other models checked that
+  three times, with faults of their own (BLAKE3 #461); each time some
+  passed, and the walks gained the steps that catch them. We have not
+  tried a fuzzer guided by coverage over such sequences.
 
 ## Timing and secrets
 

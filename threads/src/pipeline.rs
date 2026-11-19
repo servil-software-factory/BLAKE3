@@ -840,15 +840,18 @@ process_static! {
 ///
 /// # Memory
 ///
-/// A Pipeline's storage (its Rooms, about 64 KiB each, and its queues) is
-/// never returned to the system. It is in use while its Pipeline or any
-/// [`Room`] of that Pipeline is alive, and is then kept for a later
-/// Pipeline of as many Rooms and no more messages. So a process holds as
-/// many storages of a size as it has had in use at once: a Room kept past
-/// its Pipeline's drop keeps that Pipeline's storage, and the next
-/// Pipeline takes another. A process that asks for other numbers of
-/// Rooms, or for more messages than before, is given new storages and
-/// keeps the old. The storage is not cleared: a keyed Pipeline's key and
+/// A Pipeline's storage (its Rooms, about 64 KiB each, and what it
+/// shares with the pool's workers) is never returned to the system. It
+/// is in use while its Pipeline or any [`Room`] of that Pipeline is
+/// alive, and is then kept for a later Pipeline of as many Rooms that it
+/// has room for (a storage is made with room for 64 messages at the
+/// least, so Pipelines of few messages are served alike). A process
+/// whose Pipelines all have the same [`Limits`] so holds as many
+/// storages as it has had in use at once: a Room kept past its
+/// Pipeline's drop keeps that Pipeline's storage, and the next Pipeline
+/// takes another. A Pipeline of another number of Rooms, or of more
+/// messages than a kept storage has room for, is given new storage, and
+/// the old is kept. The storage is not cleared: a keyed Pipeline's key and
 /// the bytes last written to its Rooms stay in the process's memory until
 /// another Pipeline writes over them, and no call of this crate wipes
 /// them.
@@ -2242,10 +2245,11 @@ fn prepare_thread() {
 /// A `block_on` may run inside a poll of another on the same thread (a
 /// future whose poll calls a helper built on this function). The two
 /// share the thread's waker, and the inner one may take a wake that was
-/// the outer one's: so when the inner one has slept and been woken, the
-/// outer future is polled once more before it sleeps, whether or not
-/// the wake was its own. A future that runs a `block_on` which sleeps
-/// on every one of its polls is therefore polled again after each.
+/// the outer one's: so when the inner one has taken a wake (whether it
+/// slept for it or found it noted already), the outer future is polled
+/// once more before it sleeps, whether or not the wake was its own. A
+/// future whose every poll runs a `block_on` that takes a wake is
+/// therefore polled again after each, with no wake of its own.
 ///
 /// # Examples
 ///

@@ -502,12 +502,12 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 }
 
 /// Say why, and end the process, from a thread the pool's callers may be
-/// waiting on. The end does not wait long for the words. They go straight
-/// to descriptor 2, and only if it says within a tenth of a second that
-/// it takes words: `std::io::stderr` takes a lock, and a caller that
-/// holds it while it waits for this thread would wait for ever; so would
-/// a write to a full pipe whose reader waits for that caller. A reader
-/// that is only behind has that tenth of a second to make room.
+/// waiting on. The words go straight to descriptor 2, and only if it
+/// says, asked for up to a tenth of a second, that it takes words:
+/// `std::io::stderr` takes a lock, and a caller that holds it while it
+/// waits for this thread would wait for ever; so would a write to a full
+/// pipe whose reader waits for that caller. A reader that is only behind
+/// has that tenth of a second to make room.
 ///
 /// The tenth of a second bounds the asking, not the writing. A
 /// descriptor that took words when asked may not when written to: another
@@ -516,9 +516,11 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 /// end with it.
 ///
 /// A panic is not this: it goes through the process's panic hook before
-/// anything here runs, and the standard hook writes through
-/// `std::io::stderr`, lock and all. The stops that follow a panic on a
-/// pool thread (`AbortOnUnwind`, a worker's own) say their words that way.
+/// anything here runs. The standard hook writes its message to
+/// descriptor 2 without asking first (a write that can wait, as above),
+/// and a hook of the program's does what it does, for as long as it
+/// takes. The stops that follow a panic on a pool thread
+/// (`AbortOnUnwind`, a worker's own) say their words that way.
 pub(crate) fn stop(why: &str) -> ! {
     #[repr(C)]
     struct PollFd {
@@ -538,7 +540,7 @@ pub(crate) fn stop(why: &str) -> ! {
         fn write(fd: i32, bytes: *const core::ffi::c_void, len: usize) -> isize;
     }
     let mut stderr = PollFd { fd: 2, events: POLLOUT, revents: 0 };
-    // Sound: one PollFd, written by poll, which returns within its 100 ms.
+    // Sound: one PollFd, written by poll, which is asked for 100 ms at most.
     let ready = unsafe { poll(&mut stderr, 1, 100) };
     // One descriptor ready, and for writing alone: a poll that failed or
     // timed out says nothing of `revents`, and one that reports an error

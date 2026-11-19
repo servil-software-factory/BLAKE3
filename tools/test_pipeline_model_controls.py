@@ -8,7 +8,8 @@ These tests run a copy of the script in a small tree of their own (a Git
 checkout with a source that holds each fault's place), with a stand-in
 for Cargo that passes on the source as it was and, for a planted fault,
 fails, passes, or never ends, as each test asks: every fault caught, a
-fault missed, a model that fails with no fault, a fault's place gone, a
+fault missed, a model that fails with no fault, a build Cargo did not
+make anew, a run with no test in it, a fault's place gone, a
 file saved to the tree while a run goes on and while the copy is made,
 a run stopped by each signal it handles, a run killed outright and what
 it left running, two runs at once, and what the copy holds from one run
@@ -30,12 +31,28 @@ SCRIPT = os.path.join(TOOLS, "pipeline_model_controls.py")
 
 # Run in the copy's threads/ as `cargo test ... --test shuttle_pipeline`.
 CARGO = """#!/bin/sh
-echo "running 1 test"
 echo "$(pwd) $CARGO_TARGET_DIR" >> "$CONTROLS_RAN_IN"
-cmp -s src/pipeline.rs "$CONTROLS_ORIGINAL" && exit "${CONTROLS_AS_IT_IS:-0}"
+passes() { echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"; exit 0; }
+compiles() { echo "   Compiling blake3-servil v0.0.0 ($(pwd))" >&2; }
+if cmp -s src/pipeline.rs "$CONTROLS_ORIGINAL"; then
+    compiles
+    echo "running 1 test"
+    [ "${CONTROLS_AS_IT_IS:-0}" = 0 ] && passes
+    exit "$CONTROLS_AS_IT_IS"
+fi
+# Cargo takes the fault's source for unchanged: the build before it runs.
+[ "$CONTROLS_FAULT" = stale ] || compiles
+[ "$CONTROLS_FAULT" = runs-no-test ] && { echo "running 0 tests"; exit 0; }
+echo "running 1 test"
 case "$CONTROLS_FAULT" in
-caught) exit 101 ;;
-missed) exit 0 ;;
+caught|stale) exit 101 ;;
+missed) passes ;;
+allocator)
+    echo "shuttle_pipeline: messages_through_rooms_complete_with_their_own_digests" >&2
+    echo "free(): invalid pointer" >&2
+    echo "error: test failed (signal: 6, SIGABRT: process abort signal)" >&2
+    exit 101
+    ;;
 saves)
     # Someone saves the tree's source while a fault's model runs.
     echo "// saved during the run" >> "$CONTROLS_TREE/threads/src/pipeline.rs"
@@ -187,6 +204,44 @@ class Controls(unittest.TestCase):
             ran_in = f.read().split("\n")[:-1]
         home = os.path.realpath(os.path.dirname(self.copy))
         self.assertEqual(ran_in, [f"{os.path.join(home, 'tree', 'threads')} {os.path.join(home, 'target')}"] * (1 + len(faults())))
+
+    def test_a_run_that_cargo_built_nothing_for_is_no_verdict(self):
+        # A fault's source that Cargo takes for unchanged runs the build
+        # before it: the fault before it, which failed. Each such run
+        # counted as its own fault caught.
+        run = self.run_script("stale")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("Cargo compiled nothing of blake3-servil for this run", run.stderr)
+        self.assertNotIn("caught  ", run.stdout)
+        self.assert_untouched()
+
+    def test_a_run_that_ends_well_without_the_models_test_is_no_verdict(self):
+        run = self.run_script("runs-no-test")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("the model's one test did not run", run.stderr)
+        self.assertNotIn("MISSED  ", run.stdout)
+        self.assert_untouched()
+
+    def test_each_faults_run_is_kept_whole_and_the_allocators_stop_is_named(self):
+        run = self.run_script("allocator")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        lines = [line for line in run.stdout.splitlines() if line.startswith("caught  ")]
+        self.assertEqual(len(lines), len(faults()))
+        for (name, _, _), line in zip(faults(), lines):
+            self.assertEqual(line, f"caught  {name} (in messages_through_rooms_complete_with_their_own_digests: the allocator stopped the process: free(): invalid pointer)")
+        logs = os.path.join(os.path.dirname(self.copy), "logs")
+        self.assertEqual(sorted(os.listdir(logs)), [f"{n:02}.log" for n in range(len(faults()))])
+        for n, (name, _, _) in enumerate(faults()):
+            with open(os.path.join(logs, f"{n:02}.log")) as f:
+                said = f.read()
+            self.assertTrue(said.startswith(name + "\n"), said[:200])
+            self.assertIn("free(): invalid pointer", said)
+        # The next run's logs are its own.
+        run = self.run_script("caught")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        with open(os.path.join(logs, "00.log")) as f:
+            self.assertNotIn("free(): invalid pointer", f.read())
+        self.assert_untouched()
 
     def test_a_fault_the_model_passes_fails_the_run(self):
         run = self.run_script("missed")
