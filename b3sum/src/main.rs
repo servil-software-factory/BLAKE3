@@ -437,8 +437,8 @@ pub(crate) fn hash_open_file(args: &Args, mut file: File) -> anyhow::Result<blak
                     drop(map);
                     return Ok(h);
                 }
-                // Multi-threaded single cold file (`>= 512 KiB`): start pool and fault
-                // disjoint subtrees in parallel across all NUMA nodes and NVMe RAID stripes.
+                // Multi-threaded single cold file (`>= 512 KiB`): start the pool,
+                // whose workers fault disjoint subtrees in parallel.
                 init_pool_once(pool_threads().get());
                 let h = hash_slice_32(args.mode, &map);
                 hold(map);
