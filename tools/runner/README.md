@@ -101,6 +101,25 @@ read with `bench-hashes compare`; a calibration is one job with
 `probe/<topic>` branch with its own `examples/host_lab.rs`; the branch
 becomes a tag of the same name once its finding is written down.
 
+## Event-driven supervision, inspection, and cancellation
+
+`runner.py` imposes no default wall-clock ceiling (`time_limit_seconds` is
+optional, with no 7200 s cap). Each child process is watched with OS
+process-exit events (`kqueue` `EVFILT_PROC` on macOS, `pidfd_open` on
+Linux), so the runner wakes within a millisecond of exit and stops any
+`top` or `powermetrics` meter immediately.
+
+While a job runs, `progress.json` records each step and completed sample
+files. To capture thread stacks without stopping the job, send `SIGUSR1`
+to `runner.py` (or, on a private exchange, create `jobs/<stem>.inspect`):
+the runner samples every live process in the child session into
+`stacks.txt` (`/usr/bin/sample` on macOS, `/proc/<pid>/task/*/stack` on
+Linux). To cancel a running job cleanly, send `SIGUSR2` (or create
+`jobs/<stem>.cancel` on a private exchange): the runner captures
+`stacks.txt` first, ends the child session, writes `"status": "cancelled"`
+to `verdict.json`, and publishes the folder. The same stack capture runs
+before termination whenever a caller-supplied `time_limit_seconds` expires.
+
 ## Tested
 
 Every job type runs on the Mac. A thorough `--all` benchmark run under the
