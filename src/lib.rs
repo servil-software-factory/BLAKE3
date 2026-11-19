@@ -1420,8 +1420,10 @@ impl OutputReader {
     }
 
     /// Fill a buffer with output bytes and advance the position of the
-    /// `OutputReader`. This is equivalent to [`Read::read`], except that it
-    /// doesn't return a `Result`. Both methods always fill the entire buffer.
+    /// `OutputReader`. It always fills the entire buffer. [`Read::read`]
+    /// does the same up to the output's end, and differs there: it reads
+    /// the bytes that are left and after them 0 bytes, where this call
+    /// panics (below).
     ///
     /// A partial output block is retained for subsequent short reads, so
     /// sequential reads don't recompute that block. Whole blocks continue

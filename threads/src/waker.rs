@@ -35,7 +35,13 @@ pub(crate) struct WakerSlot {
     waker: UnsafeCell<Option<Waker>>,
 }
 
+// Sound: the cell is the one part that is not an atomic, and it is
+// reached only by the thread whose compare-and-swap moved `state` to
+// WRITING (`register`, `clear`) or to WAKING (`wake_slow`). That is one
+// thread at a time, and it leaves the state by its own store when it has
+// done with the cell. The `Waker` in it is `Send` and `Sync` itself.
 unsafe impl Send for WakerSlot {}
+// Sound: as above. Every method takes `&self` and goes through `state`.
 unsafe impl Sync for WakerSlot {}
 
 impl WakerSlot {
@@ -49,6 +55,9 @@ impl WakerSlot {
         loop {
             let s = self.state.0.load(Ordering::SeqCst);
             if (s == IDLE || s == REGISTERED) && self.state.0.compare_exchange(s, WRITING, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                // Sound: this thread's compare-and-swap made the state
+                // WRITING, and no other touches the cell until the store
+                // below ends that.
                 let old = unsafe { with_mut(&self.waker, |slot| slot.replace(next)) };
                 self.state.0.store(REGISTERED, Ordering::SeqCst);
                 // The completion re-check may load with Acquire (RCpc
@@ -68,6 +77,8 @@ impl WakerSlot {
                 return;
             }
             if s == REGISTERED && self.state.0.compare_exchange(REGISTERED, WRITING, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                // Sound: as in `register`: WRITING is this thread's, until
+                // the store below.
                 let old = unsafe { with_mut(&self.waker, Option::take) };
                 self.state.0.store(IDLE, Ordering::SeqCst);
                 drop(old);
@@ -88,6 +99,9 @@ impl WakerSlot {
     #[inline(never)]
     fn wake_slow(&self) {
         if self.state.0.compare_exchange(REGISTERED, WAKING, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            // Sound: this thread's compare-and-swap made the state
+            // WAKING, which keeps `register` and `clear` out of the cell
+            // (they spin) until the store below.
             let waker = unsafe { with_mut(&self.waker, Option::take) };
             self.state.0.store(IDLE, Ordering::SeqCst);
             if let Some(w) = waker {

@@ -7,7 +7,12 @@
 //! is the standard library's. Nothing here names the rest of the crate,
 //! so that the two builds see one source.
 //!
-//! Every atomic here is SeqCst. Shuttle (like a reader) assumes one total
+//! Every atomic operation in this file is SeqCst. (One field,
+//! `published`, is also written and read in `lanes.rs`: a Release store
+//! before a SeqCst fence, Acquire loads, and its one writer's own
+//! Relaxed loads, for the reasons given there.
+//! The model stores it SeqCst, as this file's tests do, so those
+//! orderings are outside what the model checks.) Shuttle (like a reader) assumes one total
 //! order of the operations; a weaker ordering would open a class of bug
 //! the model cannot see, and Sam Shackleton found one (October 24): a
 //! Relaxed count load let `wait` return on its polling path before the

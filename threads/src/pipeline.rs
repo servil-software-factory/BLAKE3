@@ -841,6 +841,15 @@ process_static! {
 /// been awaited, there as with workers, and its [`Lent`] guard is held
 /// until its event.
 ///
+/// Pipelines, and the other multithreaded calls made beside them, share
+/// the pool's workers. A worker looks for work among them in one order,
+/// and after every 16 takings it takes once from the next of them
+/// that has any, going round (a taking is one action, or a run of a
+/// call's pieces): a Pipeline that streams without a pause slows
+/// another's messages, and does not keep them waiting while it streams.
+/// The thread kept for SME2, where there is one, takes in the one order
+/// only.
+///
 /// # Memory
 ///
 /// A Pipeline's storage (its Rooms, about 64 KiB each, and what it
@@ -888,6 +897,10 @@ process_static! {
 /// Each call says what it refuses. A call that panics has taken the
 /// [`Message`] it was given, and the Pipeline is then good only for
 /// dropping: used further, it may refuse later calls or wait for ever.
+/// (A `Message` given by value and refused because it is another Pipeline's is lost to
+/// that other Pipeline, which is the one good only for dropping: the
+/// message stays open there, with no `Message` left to name it. The
+/// Pipeline that refused it goes on as it was.)
 /// ([`commit`](Pipeline::commit) borrows its `Message`: after its panic
 /// the `Message` is still the program's, and its drop panics as any open
 /// Message's does, unless the thread is unwinding already.)
@@ -1048,8 +1061,8 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
     ///
     /// # Panics
     ///
-    /// If `message` is another Pipeline's, or has bytes committed from a
-    /// Room already: a message's bytes come one way.
+    /// If `message` is another Pipeline's, or has had a commit from a
+    /// Room already, even one of no bytes: a message's bytes come one way.
     #[inline]
     pub fn owned(&mut self, message: Message, owner: B) {
         let (pid, s) = message.take();
@@ -1060,9 +1073,30 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
         // Sound: the slot is open and has no owner yet (assert_uncommitted);
         // the owner stays in the slot, where its bytes cannot move, until the
         // slot's event reads it out or the Pipeline's drop drops it.
-        let b_ref = unsafe { (*self.owners[s].get()).write(owner) };
-        let bytes: &[u8] = b_ref.as_ref();
+        let slot: *mut B = unsafe { (*self.owners[s].get()).write(owner) };
+        // `as_ref` is the program's code. Until the slice is submitted
+        // nothing records that the slot holds an owner, so if `as_ref`
+        // unwinds, the owner is dropped here, where it lies (the
+        // Pipeline's drop would never have found it). The guard holds
+        // the slot by a raw pointer: an owner may hold its bytes inside
+        // itself (`[u8; 8]`), and a `&mut` to it moved into `forget`
+        // after the bytes' pointer was taken would end that pointer's
+        // right to them (a reviewer's Miri run, November 20).
+        struct Unrecorded<B>(*mut B);
+        impl<B> Drop for Unrecorded<B> {
+            fn drop(&mut self) {
+                // Sound: the owner was written just above and nothing else
+                // holds or records it; this runs only while `as_ref`
+                // unwinds (the guard is forgotten once it has returned).
+                unsafe { core::ptr::drop_in_place(self.0) };
+            }
+        }
+        let unrecorded = Unrecorded(slot);
+        // Sound: the owner just written, in its slot, read through a
+        // shared borrow; nothing else names it.
+        let bytes: &[u8] = unsafe { &*slot }.as_ref();
         let (ptr, len) = (bytes.as_ptr(), bytes.len());
+        core::mem::forget(unrecorded);
         self.submit_slice(s, ptr, len, true);
         self.end_queue.push_back(s as u32);
     }
@@ -1274,8 +1308,10 @@ impl<T, B> Pipeline<T, B> {
     /// Wait for a [`Room`] of [`ROOM_LEN`] bytes.
     ///
     /// A Room is free again when it has been dropped, on any thread, and
-    /// the bytes committed from it have been hashed. A program that keeps
-    /// every Room alive waits here for ever.
+    /// the bytes committed from it have been hashed. (A message's last
+    /// commit of less than a whole Room may keep its Room until the
+    /// message is ended or aborted, or until a wait here sends it on.) A
+    /// program that keeps every Room alive waits here for ever.
     ///
     /// # Panics
     ///
@@ -1579,8 +1615,8 @@ impl<T, B> Pipeline<T, B> {
     ///
     /// # Panics
     ///
-    /// If `message` is another Pipeline's, or has bytes committed from a
-    /// Room already: a message's bytes come one way.
+    /// If `message` is another Pipeline's, or has had a commit from a
+    /// Room already, even one of no bytes: a message's bytes come one way.
     #[inline(always)]
     pub unsafe fn lent<'a>(&mut self, message: Message, bytes: &'a [u8]) -> Lent<'a> {
         let (pid, s) = message.take();
@@ -1607,8 +1643,9 @@ impl<T, B> Pipeline<T, B> {
     ///
     /// # Panics
     ///
-    /// If `message` is another Pipeline's, or has bytes committed from a
-    /// Room already; if `digests` has not one place for each message of
+    /// If `message` is another Pipeline's, or has had a commit from a
+    /// Room already (even one of no bytes); if `digests` has not one place
+    /// for each message of
     /// `batch`, or `batch`'s bytes are not that many whole slots (blocks
     /// borrowed by `Batch::from_blocks` that end in a part of a slot).
     pub fn batch(&mut self, message: Message, batch: Batch<'static>, digests: Box<[[u8; OUT_LEN]]>) {
@@ -2257,6 +2294,13 @@ fn prepare_thread() {
 /// future whose every poll runs a `block_on` that takes a wake is
 /// therefore polled again after each, with no wake of its own.
 ///
+/// # Panics
+///
+/// On a thread that is ending, once its thread-local values are being
+/// destroyed: `block_on` keeps its waker and its state in thread-local
+/// storage, and a call from the destructor of another thread-local value
+/// may find them gone (the standard library's panic for that).
+///
 /// # Examples
 ///
 /// Two messages open at once, fed in turns, with `Pipeline` called again while
@@ -2422,7 +2466,14 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             }
         }
     }
-    let prev = BLOCK_ON_STATE.with(|f| f.replace(1));
+    // Spinning, unless this `block_on` runs inside a poll of one that
+    // sleeps between its polls: that one sleeps on whatever its poll left
+    // registered, so a wait under this one keeps its waker from the first
+    // poll. (An inner `block_on` whose future polled a wait once and gave
+    // the `Poll` back as its value "spun", the wait kept no waker for it,
+    // and the outer one slept through the Room being given back.)
+    let prev = BLOCK_ON_STATE.with(core::cell::Cell::get);
+    BLOCK_ON_STATE.with(|f| f.set(if prev == 2 { 2 } else { 1 }));
     let mut guard = Guard(prev, false);
     let mut future = core::pin::pin!(future);
     BLOCK_ON_PARK.with(|park| {
@@ -3357,15 +3408,13 @@ mod test {
                 // sleeps: the two share the thread's waker, and the inner
                 // one takes the wake for its own.
                 cx.waker().wake_by_ref();
-                let mut inner_polls = 0;
-                block_on(core::future::poll_fn(|_| {
-                    if block_on_spinning() {
-                        return Poll::Pending;
-                    }
-                    inner_polls += 1;
-                    if inner_polls == 1 { Poll::Pending } else { Poll::Ready(()) }
-                }));
-                assert_eq!(inner_polls, 2);
+                // The inner future is ready only once that wake is gone:
+                // it stays pending until the inner block_on has slept on
+                // it. (An inner one that only spun would leave the wake
+                // where it was, and prove nothing of the giving back.)
+                let woken = || BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst));
+                assert!(woken());
+                block_on(core::future::poll_fn(|_| if woken() { Poll::Pending } else { Poll::Ready(()) }));
                 assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
                 assert!(BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)), "the inner block_on took the wake and left none");
                 return Poll::Pending;
@@ -3373,6 +3422,61 @@ mod test {
             Poll::Ready(())
         }));
         assert_eq!(polls, 2);
+    }
+
+    /// A `block_on` inside a poll of one that sleeps between its polls
+    /// keeps a wait's waker from its first poll: the outer one sleeps on
+    /// it. Here the inner one's future polls the wait for a Room once and
+    /// gives the `Poll` back as its value, with the only Room out; the
+    /// notice a Room's return sends then wakes the thread. (The inner
+    /// `block_on` spun, the wait kept no waker for a `block_on` that
+    /// spins, and the outer one slept on with the Room free.)
+    #[test]
+    fn a_wait_polled_once_by_a_block_on_inside_a_sleeping_one_keeps_its_waker() {
+        let own_woken = || BLOCK_ON_PARK.with(|park| park.woken.swap(false, Ordering::SeqCst));
+        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
+        let room = block_on(p.room());
+        let mut polls = 0;
+        block_on(core::future::poll_fn(|_| {
+            if block_on_spinning() {
+                return Poll::Pending;
+            }
+            // From here the outer block_on sleeps between polls.
+            polls += 1;
+            own_woken();
+            let pending = block_on(core::future::poll_fn(|cx| Poll::Ready(p.poll_room(cx).is_pending())));
+            assert!(pending, "the only Room is out");
+            assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+            p.shared().storage.waker.notify_after_seqcst();
+            assert!(own_woken(), "the wait kept no waker, and the outer block_on would sleep on");
+            Poll::Ready(())
+        }));
+        assert_eq!(polls, 1);
+        drop(room);
+    }
+
+    /// An owner whose `as_ref` panics is dropped: nothing recorded it yet,
+    /// so the Pipeline's drop, which is all that may follow, would never
+    /// have found it.
+    #[test]
+    fn an_owner_whose_as_ref_panics_is_dropped() {
+        struct Owner {
+            _held: Arc<()>,
+        }
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                panic!("an owner that cannot give its bytes")
+            }
+        }
+        let held = Arc::new(());
+        let mut p = Pipeline::<u32, Owner>::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 });
+        let message = block_on(p.message(7, None));
+        let owner = Owner { _held: Arc::clone(&held) };
+        let refused = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.owned(message, owner)));
+        assert!(refused.is_err());
+        assert_eq!(Arc::strong_count(&held), 1, "the owner was not dropped");
+        drop(p);
+        assert_eq!(Arc::strong_count(&held), 1);
     }
 
     #[test]
