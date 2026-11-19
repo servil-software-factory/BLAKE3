@@ -1428,19 +1428,29 @@ pub(crate) mod places {
         Some((0..CPUS).filter(|c| allowed[c / 64] >> (c % 64) & 1 == 1).collect())
     }
 
+    /// A number as the kernel writes one (decimal digits, no sign, no
+    /// zero before another digit) that a set has a place for: a CPU's, or
+    /// a memory node's (Linux numbers its nodes below 1,024).
+    #[cfg(target_os = "linux")]
+    fn number(text: &str) -> Option<usize> {
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) || (text.len() > 1 && text.starts_with('0')) {
+            return None;
+        }
+        text.parse::<usize>().ok().filter(|&number| number < CPUS)
+    }
+
+    /// Whether `set` holds `member`.
+    #[cfg(target_os = "linux")]
+    fn has(set: &Set, member: usize) -> bool {
+        set.get(member / 64).is_some_and(|word| word & 1u64.rotate_left(member as u32) != 0)
+    }
+
     /// A kernel CPU list, such as `0-3,8,10-11`, in the affinity layout:
-    /// None for text that is no such list (the kernel writes numbers in
-    /// decimal digits, each range from its lower end), or that names a
-    /// CPU past the set's last. No part of such text is used.
+    /// None for text that is no such list (each range runs from its
+    /// lower end), or that names a CPU past the set's last. No part of
+    /// such text is used.
     #[cfg(target_os = "linux")]
     fn cpu_set(list: &str) -> Option<Set> {
-        // A number as the kernel writes one, of a CPU the set has a place for.
-        fn number(text: &str) -> Option<usize> {
-            if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-                return None;
-            }
-            text.parse::<usize>().ok().filter(|&cpu| cpu < CPUS)
-        }
         let mut set = [0; CPUS / 64];
         for range in list.trim().split(',') {
             let (first, last) = range.split_once('-').unwrap_or((range, range));
@@ -1455,14 +1465,14 @@ pub(crate) mod places {
         Some(set)
     }
 
-    /// Whether the system lists more than one memory node: its list of
-    /// them (the kernel's, in the form of a CPU list) names two or more.
-    /// Where it has no list, keeps the list from the process (a
-    /// sandbox), or shows text that is no list, there is nothing to
-    /// choose among.
+    /// The memory nodes the system lists as online, where it lists more
+    /// than one (the kernel's list of them has the form of a CPU list).
+    /// None where it has no list, keeps the list from the process (a
+    /// sandbox), shows text that is no list, or lists one node: there is
+    /// nothing to choose among.
     #[cfg(target_os = "linux")]
-    fn multiple_nodes(online: std::io::Result<String>) -> bool {
-        online.ok().and_then(|list| cpu_set(&list)).is_some_and(|nodes| nodes.iter().map(|word| word.count_ones()).sum::<u32>() > 1)
+    fn online_nodes(online: std::io::Result<String>) -> Option<Set> {
+        cpu_set(&online.ok()?).filter(|nodes| nodes.iter().map(|word| word.count_ones()).sum::<u32>() > 1)
     }
 
     /// The initiating thread's node, intersected with its allowed CPUs.
@@ -1483,27 +1493,30 @@ pub(crate) mod places {
             let system = std::path::Path::new("/sys/devices/system");
             // One node, or no list of them: nothing more is read, and the
             // system is asked nothing (as before this could be refused).
-            if !multiple_nodes(std::fs::read_to_string(system.join("node/online"))) {
-                return None;
-            }
+            let online = online_nodes(std::fs::read_to_string(system.join("node/online")))?;
             // Sound: sched_getcpu takes no arguments and accesses no caller memory.
             let cpu = usize::try_from(unsafe { sched_getcpu() }).ok()?;
-            Self::find(system, cpu, affinity().ok()?)
+            Self::find(system, &online, cpu, affinity().ok()?)
         }
 
         /// The node of `cpu` within the `allowed` CPUs, as the topology
-        /// under `system` tells it (`/sys/devices/system`, on a machine
-        /// that lists more than one node; the tests give directories of
-        /// their own). None where it does not say which node the CPU is
-        /// on or which CPUs that node has, or says a node that does not
-        /// hold the CPU: what a sandbox shows of a machine need not hang
-        /// together, and a wrong node is worse than none.
-        fn find(system: &std::path::Path, cpu: usize, allowed: Set) -> Option<Self> {
-            let node = std::fs::read_dir(system.join(format!("cpu/cpu{cpu}")))
+        /// under `system` tells it (`/sys/devices/system`, whose `online`
+        /// nodes are more than one; the tests give directories of their
+        /// own). None unless all of it agrees: the CPU's directory names
+        /// one node, by a number as the kernel writes it; that node is
+        /// online; its list of CPUs can be read, and holds this CPU.
+        /// What a sandbox shows of a machine need not hang together, and
+        /// a wrong node is worse than none.
+        fn find(system: &std::path::Path, online: &Set, cpu: usize, allowed: Set) -> Option<Self> {
+            let mut nodes = std::fs::read_dir(system.join(format!("cpu/cpu{cpu}")))
                 .ok()?
-                .find_map(|entry| entry.ok()?.file_name().to_str()?.strip_prefix("node")?.parse::<usize>().ok())?;
+                .filter_map(|entry| number(entry.ok()?.file_name().to_str()?.strip_prefix("node")?));
+            let node = nodes.next()?;
+            if nodes.next().is_some() || !has(online, node) {
+                return None;
+            }
             let cpus = cpu_set(&std::fs::read_to_string(system.join(format!("node/node{node}/cpulist"))).ok()?)?;
-            if cpus.get(cpu / 64)? & 1u64.rotate_left(cpu as u32) == 0 {
+            if !has(&cpus, cpu) {
                 return None;
             }
             Self::within(allowed, cpus)
@@ -1664,9 +1677,27 @@ pub(crate) mod places {
         #[cfg(target_os = "linux")]
         fn a_list_that_is_none_gives_no_set() {
             assert_eq!(bits(&cpu_set(" 3,5-6,8-8,8191\n").unwrap()), [3, 5, 6, 8, 8191]);
-            for text in
-                ["", "\n", "x", "3-", "-3", "1,,2", "0-8192", "8192", "0-18446744073709551615", "1 2", "7-3", "2,8193-8192", "2,7-3", "+3", "3-+4", "0x3"]
-            {
+            let none = [
+                "",
+                "\n",
+                "x",
+                "3-",
+                "-3",
+                "1,,2",
+                "0-8192",
+                "8192",
+                "0-18446744073709551615",
+                "1 2",
+                "7-3",
+                "2,8193-8192",
+                "2,7-3",
+                "+3",
+                "3-+4",
+                "0x3",
+                "03",
+                "0-07",
+            ];
+            for text in none {
                 assert!(cpu_set(text).is_none(), "{text:?}");
             }
         }
@@ -1674,24 +1705,26 @@ pub(crate) mod places {
         #[test]
         #[cfg(target_os = "linux")]
         fn the_online_nodes_report_distinguishes_uma_and_numa() {
-            assert!(!multiple_nodes(Ok("0\n".into())));
-            assert!(!multiple_nodes(Ok("3\n".into())));
-            assert!(!multiple_nodes(Err(std::io::ErrorKind::NotFound.into())));
-            assert!(multiple_nodes(Ok("0-1\n".into())));
-            assert!(multiple_nodes(Ok("0,3\n".into())));
+            assert!(online_nodes(Ok("0\n".into())).is_none());
+            assert!(online_nodes(Ok("3\n".into())).is_none());
+            assert!(online_nodes(Err(std::io::ErrorKind::NotFound.into())).is_none());
+            assert_eq!(online_nodes(Ok("0-1\n".into())).map(|nodes| bits(&nodes)), Some(vec![0, 1]));
+            assert_eq!(online_nodes(Ok("0,3\n".into())).map(|nodes| bits(&nodes)), Some(vec![0, 3]));
             // A list the process may not read (a sandbox's) is no list,
             // nor is text that is none.
-            assert!(!multiple_nodes(Err(std::io::ErrorKind::PermissionDenied.into())));
-            assert!(!multiple_nodes(Ok("".into())));
-            assert!(!multiple_nodes(Ok("garbage\n".into())));
+            assert!(online_nodes(Err(std::io::ErrorKind::PermissionDenied.into())).is_none());
+            assert!(online_nodes(Ok("".into())).is_none());
+            assert!(online_nodes(Ok("garbage\n".into())).is_none());
         }
 
-        /// A node is found only where the system tells all of it: the
-        /// node of this CPU, and that node's CPUs, this one among them.
+        /// A node is found only where the system tells all of it, and all
+        /// it tells agrees: more than one node online, one node for this
+        /// CPU, that node online, and its CPUs, this one among them.
         /// Anything less (what a sandbox may show of a machine) gives no
         /// node, so nothing is bound and the pool runs on the allowed
         /// CPUs. Each case is a directory in the shape of
-        /// `/sys/devices/system`.
+        /// `/sys/devices/system`, read as `Node::current` reads the
+        /// machine's: the list of nodes first.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_node_is_found_only_where_the_system_tells_all_of_it() {
@@ -1703,13 +1736,30 @@ pub(crate) mod places {
                 let system = root.path().join(name);
                 std::fs::create_dir_all(system.join("cpu/cpu2/node1")).unwrap();
                 std::fs::create_dir_all(system.join("cpu/cpu2/cache")).unwrap();
+                std::fs::create_dir_all(system.join("node/node0")).unwrap();
                 std::fs::create_dir_all(system.join("node/node1")).unwrap();
                 std::fs::write(system.join("node/online"), "0-1\n").unwrap();
+                std::fs::write(system.join("node/node0/cpulist"), "0-1\n").unwrap();
                 std::fs::write(system.join("node/node1/cpulist"), "2-3\n").unwrap();
                 change(&system);
-                Node::find(&system, 2, cpu_set("0-3").unwrap()).map(|node| bits(&node.0))
+                let online = online_nodes(std::fs::read_to_string(system.join("node/online")))?;
+                Node::find(&system, &online, 2, cpu_set("0-3").unwrap()).map(|node| bits(&node.0))
             };
+            let renamed =
+                |to: &'static str| move |system: &std::path::Path| std::fs::rename(system.join("cpu/cpu2/node1"), system.join("cpu/cpu2").join(to)).unwrap();
             assert_eq!(case("whole", &|_| ()), Some(vec![2, 3]));
+            assert_eq!(case("one-node", &|system| std::fs::write(system.join("node/online"), "1\n").unwrap()), None);
+            assert_eq!(case("no-list-of-nodes", &|system| std::fs::remove_file(system.join("node/online")).unwrap()), None);
+            assert_eq!(case("node-not-online", &|system| std::fs::write(system.join("node/online"), "0,4-5\n").unwrap()), None);
+            assert_eq!(
+                case("cpu-on-two-nodes", &|system| {
+                    std::fs::create_dir(system.join("cpu/cpu2/node0")).unwrap();
+                    std::fs::write(system.join("node/node0/cpulist"), "0-2\n").unwrap();
+                }),
+                None
+            );
+            assert_eq!(case("node-written-with-a-sign", &renamed("node+1")), None);
+            assert_eq!(case("node-written-with-a-zero", &renamed("node01")), None);
             assert_eq!(case("cpu-on-no-node", &|system| std::fs::remove_dir(system.join("cpu/cpu2/node1")).unwrap()), None);
             assert_eq!(case("cpu-hidden", &|system| std::fs::remove_dir_all(system.join("cpu")).unwrap()), None);
             assert_eq!(case("node-hidden", &|system| std::fs::remove_dir_all(system.join("node/node1")).unwrap()), None);

@@ -336,9 +336,10 @@ pub(crate) fn ran(kind: Ran) {
 /// every thread started may be woken by a call, and while a `Pipeline` is
 /// open one that finds no work looks for 5 us before it sleeps.
 ///
-/// On Linux where node topology is available, workers stay on the memory
-/// node of the initializing thread's CPU. On a machine with more than one
-/// last-level cache, each worker is kept to a cache within that node.
+/// On Linux where the node topology is available and the system allows
+/// it, workers stay on the memory node of the initializing thread's CPU.
+/// On a machine with more than one last-level cache, each worker is kept
+/// to a cache within that node.
 /// A call wakes workers under its own cache first where it has any there.
 /// Calling threads keep their own affinity and their buffer placement.
 /// To do this, on a Linux machine with more than one memory node, the
@@ -350,25 +351,26 @@ pub(crate) fn ran(kind: Ran) {
 /// and the calls work as anywhere. Where the system shows no list of
 /// memory nodes, or keeps from the process that list, the node of the
 /// initializing CPU, that node's CPUs or the thread's own (a sandbox
-/// may), or shows a node that does not hold its CPU, no node is chosen,
-/// and the workers start with the initializing thread's CPUs. Where it
-/// refuses a thread's binding, to the node or later to a cache, that
-/// thread keeps the CPUs it has. (A pool of one thread asked for by
-/// number, `NonZeroUsize::new(1)`, has no workers: it reads no topology
-/// and binds nothing.)
+/// may), or shows parts that do not agree (a node that is not online,
+/// or does not hold its CPU), no node is chosen, and the workers start
+/// with the initializing thread's CPUs. Where it refuses a thread's
+/// binding, to the node or later to a cache, that thread keeps the CPUs
+/// it has. (A pool of one thread asked for by number,
+/// `NonZeroUsize::new(1)`, has no workers: it reads no topology and
+/// binds nothing.)
 /// For each kind and size of call under 256 MiB, a caller with local
-/// workers learns whether they or all workers on the node finish sooner.
+/// workers learns whether they or all the workers finish sooner.
 ///
-/// The count `None` takes is the standard library's
-/// ([`std::thread::available_parallelism`]) and, where a node is chosen,
-/// the smaller of that and the node's allowed CPUs. It is taken before
-/// any thread is bound. The standard library counts the CPUs the process
-/// is allowed, or fewer under a CPU quota. Where the system will not
-/// tell the process its CPUs (it refuses `sched_getaffinity`), that
-/// count is every CPU that is online: a program kept to fewer CPUs there
-/// does better to pass its number. A request for `n` threads starts
-/// `n - 1` workers, on the node where one is chosen, whether or not it
-/// has `n` CPUs.
+/// The count `None` takes is the standard library's estimate
+/// ([`std::thread::available_parallelism`], or 1 where it gives none)
+/// and, where a node is chosen, the smaller of that and the node's
+/// allowed CPUs. It is taken before any thread is bound, and a binding
+/// refused afterwards does not change it. Where the system will not tell
+/// a process its CPUs (it refuses `sched_getaffinity`), the estimate can
+/// be more than the process may use, as many as the machine has online:
+/// a program kept to fewer CPUs there does better to pass its number. A
+/// request for `n` threads starts `n - 1` workers whether or not the
+/// node, or the process, has `n` CPUs.
 ///
 /// Several programs each with a full pool share the machine without
 /// trouble, and unevenly. On an i7-12700K (20 CPUs), N programs each
