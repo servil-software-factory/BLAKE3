@@ -281,6 +281,10 @@ pub(crate) enum Ran {
     /// Whole chunks or parents were hashed on a wider kernel than their
     /// count, the spare lanes a copy of the last (rounded_lanes).
     RoundedUp = 256,
+    /// A table's one-block inputs were copied into one buffer for SME2's
+    /// parent kernel (sme2::hash_many): what blocks that lie in one
+    /// buffer already never pay (sme2::hash_block_run).
+    Gathered = 512,
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -982,17 +986,34 @@ pub(crate) fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWo
     for parent in &mut parents_exact {
         parents_array.push(parent.try_into().unwrap());
     }
-    hash_many_rounded(
-        platform,
-        &parents_array,
-        key,
-        0, // Parents always use counter 0.
-        IncrementCounter::No,
-        flags | PARENT,
-        0, // Parents have no start flags.
-        0, // Parents have no end flags.
-        out,
-    );
+    let flags = flags | PARENT;
+    #[cfg(blake3_sme2)]
+    let on_sme2 = matches!(platform, Platform::SME2);
+    #[cfg(not(blake3_sme2))]
+    let on_sme2 = false;
+    if on_sme2 {
+        // SME2's parent kernel reads a group of sixteen blocks through
+        // one pointer: the parents go to it as the run of memory they
+        // are, not as a table of sixteen borrows.
+        #[cfg(blake3_sme2)]
+        // Sound: the platform is SME2 only where detection found SME2
+        // with 512-bit streaming vectors.
+        unsafe {
+            sme2::hash_block_run(child_chaining_values.as_chunks::<BLOCK_LEN>().0.as_flattened(), key, flags, out)
+        };
+    } else {
+        hash_many_rounded(
+            platform,
+            &parents_array,
+            key,
+            0, // Parents always use counter 0.
+            IncrementCounter::No,
+            flags,
+            0, // Parents have no start flags.
+            0, // Parents have no end flags.
+            out,
+        );
+    }
 
     // If there's an odd child left over, it becomes an output.
     let parents_so_far = parents_array.len();

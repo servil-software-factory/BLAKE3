@@ -126,40 +126,32 @@ pub unsafe fn hash_many<const N: usize>(
         crate::ran_kernel(kernel as *const ());
         let count = full_groups * GROUP;
         let lanes = if N == BLOCK_LEN {
-            // The parent kernel reads its sixteen 64-byte blocks from one
-            // contiguous run. Every caller in this crate already stores
-            // parent inputs that way; anyone else gets a copy.
+            // The parent kernel reads a group's sixteen 64-byte blocks
+            // through one pointer, and a table's inputs are sixteen
+            // borrows of 64 bytes each: no pointer of theirs may read a
+            // neighbour's bytes, wherever in memory the inputs lie (to
+            // find them one after another by their addresses would give
+            // no pointer leave to read them all). So a table's blocks are
+            // copied into one buffer, which the kernel reads. The callers
+            // whose blocks lie in one buffer already have
+            // [`hash_block_run`], which copies nothing.
             //
-            // The kernel reads the whole run through one pointer, and no
-            // input's own pointer may read its neighbours: it is the
-            // pointer of a borrow of 64 bytes. So the addresses are
-            // compared as numbers, each input's pointer is exposed as it
-            // is compared, and the kernel's pointer is made from the first
-            // address, with leave to read what the exposed pointers may
-            // (`core::ptr::with_exposed_provenance`).
-            let first = inputs[0].as_ptr().expose_provenance();
-            let contiguous = inputs[..count].iter().enumerate().all(|(i, input)| input.as_ptr().expose_provenance() == first.wrapping_add(i * BLOCK_LEN));
-            if contiguous {
-                let base = core::ptr::with_exposed_provenance::<u8>(first);
-                unsafe { kernel(base, key.as_ptr(), counter, packed_flags, out.as_mut_ptr(), full_groups as u64) }
-            } else {
-                // Gather up to GATHER groups per kernel call, so one entry
-                // into streaming mode covers them all.
-                const GATHER: usize = DEGREE / GROUP;
-                let mut buf = [0u8; GATHER * GROUP * BLOCK_LEN];
-                let mut group = 0;
-                while group < full_groups {
-                    let groups = (full_groups - group).min(GATHER);
-                    for (i, input) in inputs[group * GROUP..][..groups * GROUP].iter().enumerate() {
-                        buf[i * BLOCK_LEN..][..BLOCK_LEN].copy_from_slice(&input[..]);
-                    }
-                    let lanes =
-                        unsafe { kernel(buf.as_ptr(), key.as_ptr(), counter, packed_flags, out[group * GROUP * OUT_LEN..].as_mut_ptr(), groups as u64) };
-                    assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
-                    group += groups;
+            // Gather up to GATHER groups per kernel call, so one entry
+            // into streaming mode covers them all.
+            crate::ran(crate::Ran::Gathered);
+            const GATHER: usize = DEGREE / GROUP;
+            let mut buf = [0u8; GATHER * GROUP * BLOCK_LEN];
+            let mut group = 0;
+            while group < full_groups {
+                let groups = (full_groups - group).min(GATHER);
+                for (i, input) in inputs[group * GROUP..][..groups * GROUP].iter().enumerate() {
+                    buf[i * BLOCK_LEN..][..BLOCK_LEN].copy_from_slice(&input[..]);
                 }
-                16
+                let lanes = unsafe { kernel(buf.as_ptr(), key.as_ptr(), counter, packed_flags, out[group * GROUP * OUT_LEN..].as_mut_ptr(), groups as u64) };
+                assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+                group += groups;
             }
+            16
         } else {
             unsafe { kernel(inputs.as_ptr() as *const u8, key.as_ptr(), counter, packed_flags, out.as_mut_ptr(), full_groups as u64) }
         };
@@ -192,6 +184,53 @@ pub unsafe fn hash_many<const N: usize>(
         unsafe {
             crate::neon_hybrid::hash_many(&inputs[done..], key, rest_counter, increment_counter, flags, flags_start, flags_end, &mut out[done * OUT_LEN..]);
         }
+    }
+}
+
+/// One-block inputs that lie one after another in `run` (whole 64-byte
+/// blocks, nothing between them), each compressed alone at counter zero
+/// with `flags`, their values to `out` in order: what [`hash_many`] does
+/// for a table of them, without the table. Parent blocks and one-block
+/// messages come here from every caller that holds them in one buffer.
+///
+/// The parent kernel reads a group's sixteen blocks through one pointer.
+/// Here that pointer is the run's own, a borrow of every byte the kernel
+/// reads; a table of sixteen separate borrows has no such pointer, which
+/// is why `hash_many` copies its blocks first.
+///
+/// As in `hash_many`: the whole groups in one kernel call; with
+/// OVERLAP_MIN or more blocks left over after a group, the run's last
+/// sixteen as one more group; otherwise what is left on the NEON kernels.
+///
+/// Unsafe because this may only be called on CPUs that report SME2 with a
+/// 512-bit streaming vector length, and on which NEON is also available.
+pub unsafe fn hash_block_run(run: &[u8], key: &CVWords, flags: u8, out: &mut [u8]) {
+    let (blocks, beyond) = run.as_chunks::<BLOCK_LEN>();
+    assert!(beyond.is_empty() && out.len() >= blocks.len() * OUT_LEN, "whole blocks, and room for the value of each");
+    let full_groups = blocks.len() / GROUP;
+    let done = full_groups * GROUP;
+    if full_groups > 0 {
+        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
+        // Sound: the kernel reads `done` blocks from the run's first byte,
+        // through the run's own pointer, and writes `done` values from
+        // `out`'s first byte; the assertion above found both that long.
+        let lanes = unsafe { ffi::blake3_servil_sme2_hash16_parents_512(run.as_ptr(), key.as_ptr(), 0, flags as u32, out.as_mut_ptr(), full_groups as u64) };
+        assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+    }
+    let left = blocks.len() - done;
+    // The overlapping last group, for the reason `hash_many` gives.
+    if done > 0 && left >= OVERLAP_MIN {
+        let mut last = [0u8; GROUP * OUT_LEN];
+        // Sound: the caller's CPU, as this function requires.
+        unsafe { hash_block_run(&run[(blocks.len() - GROUP) * BLOCK_LEN..], key, flags, &mut last) };
+        out[done * OUT_LEN..blocks.len() * OUT_LEN].copy_from_slice(&last[(GROUP - left) * OUT_LEN..]);
+        return;
+    }
+    if left > 0 {
+        let table: arrayvec::ArrayVec<&[u8; BLOCK_LEN], GROUP> = blocks[done..].iter().collect();
+        // Sound: NEON is available wherever SME2 is, as this function
+        // requires; the outputs reach `left` values past `done`.
+        unsafe { crate::neon_hybrid::hash_many(&table, key, 0, IncrementCounter::No, flags, 0, 0, &mut out[done * OUT_LEN..]) };
     }
 }
 
