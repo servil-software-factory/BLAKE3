@@ -111,9 +111,50 @@ class WholeMutationRun(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 runner.mutants_whole({"fork_commit": "1" * 40, "crate": crate}, FakeRun(), None, Path("/results"))
 
-    def test_a_whole_run_has_two_hours_unless_the_job_says(self):
-        self.assertEqual(runner.LIMITS["mutants-whole"], runner.MAX_LIMIT)
+    def test_a_whole_run_has_no_default_time_ceiling(self):
+        self.assertFalse(hasattr(runner, "MAX_LIMIT"))
+        self.assertFalse(hasattr(runner, "DEFAULT_LIMIT"))
         self.assertIs(runner.HANDLERS["mutants-whole"], runner.mutants_whole)
+
+
+class B3sumAgainst(unittest.TestCase):
+    def test_b3sum_with_against_runs_old_as_base_with_new_and_official(self):
+        old_c = "2c60420c2bccbf6073e35e668691d98520f9b096"
+        new_c = "abcdef0123456789abcdef0123456789abcdef01"
+        bench_c = "3" * 40
+        commands = []
+
+        class StubRun:
+            def checkouts(self, *_):
+                return Path("/code/fork"), Path("/code/bench")
+
+            def run(self, command, capture=False, **_):
+                commands.append(command)
+                if "b3sum-contenders.py" in command[1]:
+                    return "\n".join([
+                        "official=/bins/official",
+                        "official-1-thread=/bins/official --num-threads 1",
+                        f"b3sum-{old_c[:7]}=/bins/old",
+                        f"b3sum-{new_c[:7]}=/bins/new",
+                        "sha256sum=/usr/bin/sha256sum",
+                    ]) + "\n"
+                if "build-against" in command:
+                    return "/bins/bench-hashes\n"
+                return ""
+
+        status = runner.b3sum(
+            {"fork_commit": new_c, "against": old_c, "bench_commit": bench_c},
+            StubRun(),
+            None,
+            Path("/results"),
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(commands[0][-2:], [old_c, new_c])
+        b3sum_cmd = commands[-1]
+        self.assertEqual(
+            b3sum_cmd[-3:],
+            [f"b3sum-{old_c[:7]}=/bins/old", f"b3sum-{new_c[:7]}=/bins/new", "official=/bins/official"],
+        )
 
 
 if __name__ == "__main__":

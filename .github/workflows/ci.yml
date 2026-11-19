@@ -308,3 +308,15 @@ jobs:
       with:
         name: b3sum-${{ runner.arch }}
         path: dist/
+
+  runner_tests:
+    name: runner tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+    - run: python3 -W default -m unittest discover -s tools/runner -p 'test_*.py' -v
