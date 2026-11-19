@@ -255,6 +255,17 @@ const fn last_max(first_chunk: u64) -> u64 {
 /// Equality compares the place and, in constant time, the bytes. `Debug`
 /// shows the place alone, so that a refusal's message carries no chaining
 /// value of a keyed tree.
+///
+/// # Trait implementations
+///
+/// - `Clone` reproduces both the value and its place, including an unset
+///   slot.
+/// - `Copy` copies the bytes and place together.
+/// - `Debug` shows the place or the unset state without exposing chaining
+///   bytes.
+/// - `Eq` identifies values with equal bytes and place.
+/// - `PartialEq` compares the place and compares the chaining bytes in
+///   constant time.
 #[derive(Clone, Copy)]
 pub struct Cv {
     value: BareCv,
@@ -352,6 +363,19 @@ impl Eq for Cv {}
 /// the program says that the message ends there.
 ///
 /// Equality and `Debug` are as [`Cv`]'s.
+///
+/// # Trait implementations
+///
+/// - `Clone` reproduces the value, starting chunk and length.
+/// - `Copy` copies those coordinates along with the chaining bytes.
+/// - `Debug` shows the starting chunk and length without exposing chaining
+///   bytes.
+/// - `Eq` identifies values with equal coordinates and bytes.
+/// - `From` (of a `Cv`) keeps a whole subtree's bytes and records its first
+///   chunk and full length, on the caller's word that the message ends
+///   there; it panics on a `Cv` that was never set.
+/// - `PartialEq` compares both coordinates and compares the chaining bytes
+///   in constant time.
 #[derive(Clone, Copy)]
 pub struct LastCv {
     value: BareCv,
@@ -490,6 +514,11 @@ impl From<Cv> for LastCv {
 /// A keyed `TreeHasher`'s work depends on the lengths it is given and on the
 /// kind of its mode, never on the key's value.
 /// See the [key-independence contract](crate#key-dependent-timing).
+///
+/// # Trait implementations
+///
+/// - `Clone` prepares an independent tree hasher with the same key, mode
+///   and core selection.
 #[derive(Clone)]
 pub struct TreeHasher {
     key: crate::CVWords,

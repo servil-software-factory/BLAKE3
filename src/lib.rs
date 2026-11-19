@@ -148,9 +148,11 @@
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] holds and the chaining values made from them stay in the
-//!   value and in the copies the kernels leave on the stack, until
-//!   something else overwrites them. Official BLAKE3 offers `Zeroize` for
-//!   its types.
+//!   value, in the copies the kernels leave on the stack, and in the
+//!   storage a thread keeps (`hash_each`'s, above; on CPUs with SME2,
+//!   a 64 KiB block for the chaining values of the inputs the thread
+//!   hashes, keyed ones included), until something else overwrites
+//!   them. Official BLAKE3 offers `Zeroize` for its types.
 //!
 //! # Panics
 //!
@@ -440,6 +442,30 @@ pub(crate) const DERIVE_KEY_MATERIAL: u8 = 1 << 6;
 /// [`from_hex`]: #method.from_hex
 /// [`Display`]: https://doc.rust-lang.org/std/fmt/trait.Display.html
 /// [`FromStr`]: https://doc.rust-lang.org/std/str/trait.FromStr.html
+///
+/// # Trait implementations
+///
+/// - `Clone` reproduces the digest byte for byte.
+/// - `Copy` leaves the same digest available at both places.
+/// - `Debug` includes the full digest in hexadecimal, even for a derived
+///   key.
+/// - `Deserialize` (with `serde`) reads a sequence of exactly 32 bytes (in
+///   JSON an array of 32 numbers, not the hex string) and takes them as
+///   the digest, hashing nothing.
+/// - `Display` prints all 32 bytes in lowercase hexadecimal, even for a
+///   derived key.
+/// - `Eq` treats digests with identical bytes as equal.
+/// - `From` converts between the digest and its 32-byte array without
+///   changing the bytes; array equality is not constant-time.
+/// - `FromStr` decodes exactly 64 hexadecimal digits, accepting either
+///   case.
+/// - `Hash` feeds the length 32 and then the 32 digest bytes to whatever
+///   `core::hash::Hasher` the caller supplies, whose running time may
+///   depend on those bytes.
+/// - `PartialEq` compares digests, arrays and slices in constant time for
+///   32-byte operands; a different length is unequal.
+/// - `Serialize` (with `serde`) writes the digest as a sequence of 32 bytes
+///   (in JSON an array of 32 numbers, not a hex string).
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Hash, Eq)]
 #[repr(transparent)]
@@ -620,6 +646,15 @@ impl fmt::Debug for Hash {
 /// The `.to_string()` representation of this error currently distinguishes between bad length
 /// errors and bad character errors. This is to help with logging and debugging, but it isn't a
 /// stable API detail, and it may change at any time.
+///
+/// # Trait implementations
+///
+/// - `Clone` copies the reason decoding failed.
+/// - `Debug` shows the error variant and its invalid byte or length.
+/// - `Display` describes the invalid byte or length without promising
+///   stable wording.
+/// - `Error` (with `std`) lets a caller report the decoding failure as a
+///   standard error.
 #[derive(Clone, Debug)]
 pub struct HexError(HexErrorInner);
 
@@ -1056,6 +1091,8 @@ pub mod thread_support {
 }
 
 /// An alias to distinguish [`context_key`](throughput::context_key) outputs from other keys.
+/// It is a plain byte array, and so are its traits: its `Debug` prints the
+/// key, and its `==` promises no constant time.
 pub type ContextKey = [u8; KEY_LEN];
 
 /// The most bytes a subtree starting at byte `input_offset` of a message
@@ -1078,6 +1115,12 @@ pub(crate) fn max_subtree_len(input_offset: u64) -> Option<u64> {
 /// speed, but for `DeriveKey`, which first hashes its context string (once
 /// per call; [`DeriveKeyWith`](Mode::DeriveKeyWith) takes it hashed
 /// once for many calls).
+///
+/// # Trait implementations
+///
+/// - `Clone` preserves the function selected and any borrowed key or
+///   context.
+/// - `Copy` copies the selection without copying the bytes it borrows.
 #[derive(Clone, Copy)]
 pub enum Mode<'a> {
     /// The plain hash function, as [`hash`](convenience::hash).
@@ -1309,6 +1352,16 @@ pub(crate) use incremental::*;
 /// from an unknown position in the output stream to recover its block index. Callers with strong
 /// secret keys aren't affected in practice, but secret offsets are a [design
 /// smell](https://en.wikipedia.org/wiki/Design_smell) in any case.
+///
+/// # Trait implementations
+///
+/// - `Clone` reads the same output from the same position, with an
+///   independent cursor.
+/// - `Debug` reports the position without disclosing the output or key.
+/// - `Read` (with `std`) advances by the bytes returned, stopping at
+///   position `u64::MAX`.
+/// - `Seek` (with `std`) moves within the same output, clamping past its
+///   end and refusing negative positions and seeks relative to the end.
 #[derive(Clone)]
 pub struct OutputReader {
     inner: Output,

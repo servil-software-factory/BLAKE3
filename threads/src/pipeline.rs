@@ -134,6 +134,14 @@ fn unpack_arg(arg: u64) -> (u64, usize, usize) {
 }
 
 /// Fixed memory bounds for a [`Pipeline`].
+///
+/// # Trait implementations
+///
+/// - `Clone` duplicates both capacity bounds.
+/// - `Copy` preserves both counts without reserving any storage.
+/// - `Debug` reports the message and room counts.
+/// - `Eq` identifies limits with equal bounds.
+/// - `PartialEq` compares both counts by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Messages open or in flight at once; as many finished [`Event`]s
@@ -156,6 +164,11 @@ pub enum Event<T, B = ()> {
 /// [`Pipeline::abort`] when its bytes will not all come. Dropping one
 /// panics. In async code an early return through `?` drops what the task
 /// holds, so give the message to `abort` before returning the error.
+///
+/// # Trait implementations
+///
+/// - `Drop` panics on an unfinished message unless the thread is already
+///   unwinding; dropping is not cancellation.
 #[must_use = "end, abort, or hand the message's bytes over; dropping an unfinished Message stops the program"]
 pub struct Message {
     pipeline_id: u64,
@@ -181,8 +194,20 @@ impl Drop for Message {
 
 /// Guard for a message hashed in place on loan ([`Pipeline::lent`]).
 ///
-/// Dropping this guard before its message's event exists aborts the
-/// process so worker threads never read freed caller memory.
+/// Hold this guard until its message's event has been taken. Dropped
+/// while a worker may still read the bytes (before the message is
+/// hashed), it stops the process: no worker reads freed memory.
+///
+/// # Trait implementations
+///
+/// - `Drop` stops the process (an abort, not a panic) while the loan's
+///   hashing has not finished, even where no worker has been given it yet
+///   or its Pipeline is gone; once it has finished, the guard may be
+///   dropped before its event is taken. The guard reads a count of its
+///   storage's finished work: after its Pipeline was dropped with the
+///   loan still not handed to a worker, and a later Pipeline has used the
+///   same storage, the drop may pass though the loan was never hashed,
+///   and no worker reads its bytes then either.
 #[must_use = "hold the guard until the message's event; dropping an active loan aborts the process"]
 pub struct Lent<'a> {
     completed: &'static AtomicU64,
@@ -194,17 +219,19 @@ impl Drop for Lent<'_> {
     #[inline]
     fn drop(&mut self) {
         if self.completed.load(Ordering::Acquire) < self.epoch {
-            stop_process("blake3-servil: a Pipeline Lent guard was dropped before its message finished hashing");
+            stop_process("blake3-servil: a Pipeline Lent guard was dropped before its message finished hashing\n");
         }
     }
 }
 
+/// Say why, and end the process: a breach after which a worker would read
+/// freed memory. As the pool's own stop, the words go straight to
+/// descriptor 2: `std::io::stderr` takes a lock, and a thread that holds
+/// it while it waits for this one would wait for ever.
 #[cold]
 #[inline(never)]
-fn stop_process(msg: &str) -> ! {
-    use std::io::Write as _;
-    let _ = std::writeln!(std::io::stderr(), "{msg}");
-    std::process::abort()
+fn stop_process(why: &str) -> ! {
+    crate::lanes::stop(why)
 }
 
 use crate::waker::WakerSlot;
@@ -221,7 +248,6 @@ struct Rooms {
     backing: (*mut u8, usize),
     count: usize,
     refs: Box<[OwnLine<AtomicUsize>]>,
-    caller_held: OwnLine<AtomicUsize>,
 }
 
 // Sound: `buf` points into the rooms' own allocation, which is never freed or
@@ -258,7 +284,6 @@ impl Rooms {
             backing: whole,
             count,
             refs: (0..count).map(|_| OwnLine(AtomicUsize::new(0))).collect(),
-            caller_held: OwnLine(AtomicUsize::new(0)),
         }
     }
 
@@ -274,7 +299,6 @@ impl Rooms {
     #[inline(always)]
     fn init_taken(&self, idx: u32) {
         self.refs[idx as usize].store(ROOM_CREDITS, Ordering::Relaxed);
-        self.caller_held.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -329,7 +353,10 @@ process_static! {
     /// one), so one that is not kept here is lost for good: a list of 16 lost
     /// every storage past the sixteenth, and a server with a Pipeline per
     /// connection grew by one at each connection beyond 16 at once (BLAKE3
-    /// #427). The process now holds as many as its most Pipelines at once.
+    /// #427). The process now holds, for Pipelines of the same Limits, as
+    /// many as its most such Pipelines at once (`acquire` gives a storage
+    /// only to a Pipeline of as many rooms and no more messages: one of
+    /// another size takes a new storage).
     static FREE_STORAGES: Mutex<Vec<&'static PipeStorage>> = Mutex::new(Vec::new());
 }
 
@@ -397,6 +424,15 @@ impl PipeStorage {
 }
 
 /// Reusable `ROOM_LEN`-byte buffer for arriving message bytes.
+///
+/// # Trait implementations
+///
+/// - `Drop` returns the unused credits; workers retain access to committed
+///   bytes until they finish.
+/// - `Send` lets another thread take the token and its exclusive access to
+///   the writable bytes.
+/// - `Sync` permits sharing a reference; writing still requires an
+///   exclusive borrow.
 #[must_use = "commit from the room; a dropped Room gives back what is left of it"]
 pub struct Room {
     pipeline_id: u64,
@@ -469,7 +505,6 @@ impl Room {
 impl Drop for Room {
     #[inline]
     fn drop(&mut self) {
-        self.storage.rooms.caller_held.fetch_sub(1, Ordering::Release);
         let unused = ROOM_CREDITS - (self.commits as usize);
         if self.storage.rooms.release_n(self.index, unused) {
             self.storage.waker.notify_after_seqcst();
@@ -531,7 +566,12 @@ fn finished(storage: &'static PipeStorage, publish: impl FnOnce()) {
 /// storage for the next Pipeline of its size (`create`), as the storage
 /// does, so nothing a worker can reach is memory an owner gives back.
 struct Shared {
-    tree: TreeHasher,
+    /// This Pipeline's mode. In a cell: the next Pipeline to take this
+    /// `Shared` writes its own mode here (`create`), and a worker of the
+    /// Pipeline before may still be returning from its last task, its
+    /// `&Shared` alive. Workers borrow the mode only to hash, before they
+    /// publish a task done (`Shared::tree`).
+    tree: UnsafeCell<TreeHasher>,
     storage: &'static PipeStorage,
     hashes: Box<[UnsafeCell<[u8; OUT_LEN]>]>,
     cvs: Box<[UnsafeCell<PieceValues>]>,
@@ -543,12 +583,23 @@ struct Shared {
 
 // Sound: each UnsafeCell here has one writer at a time, by the slot's or
 // piece's state: the owner before it dispatches the work, the workers of that
-// work until they publish it done, the owner again after. Nothing here is ever
-// freed.
+// work until they publish it done, the owner again after. The mode's cell
+// (`tree`) has its own rule, at `Shared::tree`: written by `create` alone,
+// between Pipelines. Nothing here is ever freed.
 unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
 impl Shared {
+    /// The mode, for hashing one task's bytes or folding its values.
+    #[inline(always)]
+    fn tree(&self) -> &TreeHasher {
+        // Sound: `create` alone writes the mode, when every task of the
+        // Pipeline before is published done; a worker uses this borrow
+        // before it publishes its task, and the owner while its Pipeline
+        // lives.
+        unsafe { &*self.tree.get() }
+    }
+
     unsafe fn run_action(ctx: *const (), arg: u64, platform: Platform) {
         // Sound: `ctx` is the `*const Shared` its Pipeline dispatched with
         // (dispatch_one, dispatch_many), and a Shared is never freed.
@@ -572,7 +623,7 @@ impl Shared {
         let task = unsafe { &*group.task.get() };
         let count = task.members;
         let epoch = unsafe { *group.epoch.get() };
-        task.run_members(&self.tree, platform);
+        task.run_members(self.tree(), platform);
         let metas = unsafe { &*group.metas.get() };
 
         // Coalesce consecutive members sharing a Room into a single atomic subtraction.
@@ -617,11 +668,11 @@ impl Shared {
         let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };
         let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
         let value = if index == 0 {
-            RoomValue::First(self.tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))
+            RoomValue::First(self.tree().subtree_halves_on(platform, ROOM_LEVEL, index, bytes))
         } else if len == ROOM_LEN {
-            RoomValue::Whole(self.tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))
+            RoomValue::Whole(self.tree().subtree_cv_on(platform, ROOM_LEVEL, index, bytes))
         } else {
-            RoomValue::Last(self.tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))
+            RoomValue::Last(self.tree().last_cv_on(platform, index << ROOM_LEVEL, bytes))
         };
         // Sound: this piece's output is its worker's alone until `done`.
         unsafe { *pnode.out.0.get() = value };
@@ -647,7 +698,7 @@ impl Shared {
             // `count`).
             let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(first * slot_len), count * slot_len) };
             let digests = unsafe { core::slice::from_raw_parts_mut(desc.digests.add(first), count) };
-            self.tree.hash_slots_on(platform, bytes, message_len, slot_len, digests);
+            self.tree().hash_slots_on(platform, bytes, message_len, slot_len, digests);
             let storage = self.storage;
             if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {
                 finished(storage, || {
@@ -665,11 +716,11 @@ impl Shared {
         let bytes = input.chunks(CHUNK_LEN << level).nth(piece_idx).expect("a piece within its message");
         let values = self.cvs[slot].get();
         if piece_idx + 1 == desc.pieces {
-            let value = self.tree.last_cv_on(platform, (piece_idx as u64) << level, bytes);
+            let value = self.tree().last_cv_on(platform, (piece_idx as u64) << level, bytes);
             // Sound: only the last piece writes this field.
             unsafe { (*values).last = Some(value) };
         } else {
-            let value = self.tree.subtree_cv_on(platform, level, piece_idx as u64, bytes);
+            let value = self.tree().subtree_cv_on(platform, level, piece_idx as u64, bytes);
             // Sound: a separate slot for each index (submit_multi_slice
             // limits the count); form no borrow of other workers' slots.
             unsafe { core::ptr::addr_of_mut!((*values).whole).cast::<Cv>().add(piece_idx).write(value) };
@@ -682,7 +733,7 @@ impl Shared {
             // writes the slot's values or hash until `slot_done` below.
             let values = unsafe { &mut *values };
             let last = values.last.take().expect("the last piece supplied its value");
-            let hash = fold_multi_cvs(&self.tree, &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
+            let hash = fold_multi_cvs(self.tree(), &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
             unsafe { *self.hashes[slot].get() = *hash.as_bytes() };
             if desc.loan_epoch != 0 {
                 self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);
@@ -774,15 +825,33 @@ process_static! {
 /// Streaming multithreaded hasher with bounded memory and pull-based
 /// [`Event`] delivery.
 ///
+/// In a pool of one thread (`initialize_multithreaded` asked for one, or
+/// a machine with one CPU) there is no worker, and the calling thread
+/// hashes: in the calls that hand work over
+/// ([`commit`](Pipeline::commit), [`end`](Pipeline::end),
+/// [`owned`](Pipeline::owned), [`lent`](Pipeline::lent) and
+/// [`batch`](Pipeline::batch)), and in the waits
+/// ([`ready`](Pipeline::ready), [`room`](Pipeline::room) and
+/// [`message`](Pipeline::message)). Short messages are gathered into
+/// groups, and a group that is not yet full is hashed by a later call or
+/// by a wait: so a short message's event may come only after `ready` has
+/// been awaited, there as with workers, and its [`Lent`] guard is held
+/// until its event.
+///
 /// # Memory
 ///
 /// A Pipeline's storage (its Rooms, about 64 KiB each, and its queues) is
-/// kept when the Pipeline is dropped and given to the next Pipeline with
-/// the same `Limits`: it is never returned to the system, so a process
-/// holds as much as its most Pipelines alive at once. The storage is not
-/// cleared: a keyed Pipeline's key and the bytes last written to its
-/// Rooms stay in the process's memory until another Pipeline writes over
-/// them, and no call of this crate wipes them.
+/// never returned to the system. It is in use while its Pipeline or any
+/// [`Room`] of that Pipeline is alive, and is then kept for a later
+/// Pipeline of as many Rooms and no more messages. So a process holds as
+/// many storages of a size as it has had in use at once: a Room kept past
+/// its Pipeline's drop keeps that Pipeline's storage, and the next
+/// Pipeline takes another. A process that asks for other numbers of
+/// Rooms, or for more messages than before, is given new storages and
+/// keeps the old. The storage is not cleared: a keyed Pipeline's key and
+/// the bytes last written to its Rooms stay in the process's memory until
+/// another Pipeline writes over them, and no call of this crate wipes
+/// them.
 ///
 /// # Giving up a message
 ///
@@ -795,12 +864,30 @@ process_static! {
 ///   dropped instead panics.
 /// - A Pipeline is dropped only when it has nothing left to hash: every
 ///   message ended or aborted, and every message's event taken with
-///   [`next_event`](Pipeline::next_event). Dropped earlier, it stops the
-///   whole process: its workers may still be reading its buffers.
+///   [`next_event`](Pipeline::next_event). Dropped while a worker may
+///   still be reading its buffers, it stops the whole process. (Dropped
+///   earlier than this rule allows at a moment when nothing it has handed
+///   to the pool is unfinished, it drops what it holds, and what it had
+///   not handed over is never hashed.)
 ///
 /// So keep a Pipeline in a task that outlives its clients (one for a
 /// thread's connections, not one a connection), and do not let a
 /// time-out or a cancelled task drop it mid-message.
+///
+/// # Panics
+///
+/// Each call says what it refuses. A call that panics has taken the
+/// [`Message`] it was given, and the Pipeline is then good only for
+/// dropping: used further, it may refuse later calls or wait for ever.
+/// ([`commit`](Pipeline::commit) borrows its `Message`: after its panic
+/// the `Message` is still the program's, and its drop panics as any open
+/// Message's does, unless the thread is unwinding already.)
+/// The same holds after a panic in the program's own code that a call
+/// here runs: an owner's `as_ref`, or a [`Waker`](core::task::Waker)
+/// that panics when it is cloned or dropped. A waker that panics when
+/// it is woken ends the process, on whichever thread it is woken: the
+/// wake comes in the middle of other work, which a panic would leave
+/// half done.
 ///
 /// ```
 /// # blake3_servil::initialize_multithreaded(None);
@@ -842,6 +929,16 @@ process_static! {
 ///     assert_eq!(seen, [(0, hello), (1, None), (2, hello)]);
 /// });
 /// ```
+///
+/// # Trait implementations
+///
+/// - `Drop` stops the process (an abort) if work it has handed to the
+///   pool is unfinished, whether a worker is hashing it or it still waits
+///   for one; otherwise it drops quietly, with the messages not yet handed
+///   over, the events not taken and their owners, and keeps its buffers
+///   for a later Pipeline.
+/// - `Send` lets a pipeline move between threads when its tags and owners
+///   are `Send`, keeping the same messages and tokens.
 pub struct Pipeline<T, B = ()> {
     id: u64,
     limits: Limits,
@@ -885,6 +982,15 @@ unsafe impl<T: Send, B: Send> Send for Pipeline<T, B> {}
 
 impl<T> Pipeline<T, ()> {
     /// Create a pipeline in `mode` with fixed memory `limits`.
+    ///
+    /// # Panics
+    ///
+    /// If `limits.messages` is zero, or if `limits.messages` and
+    /// `limits.rooms` together reach 2^29 - 1 (the Pipeline numbers its
+    /// work in 29 bits). Before
+    /// [`initialize_multithreaded`](crate::initialize_multithreaded), and
+    /// in a child process forked after that call started the pool's
+    /// threads.
     pub fn new(mode: Mode, limits: Limits) -> Self {
         Self::create(mode, limits)
     }
@@ -920,12 +1026,21 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
     ///     Pipeline::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 })
     /// }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// As [`new`](Pipeline::new).
     pub fn with_owners(mode: Mode, limits: Limits) -> Self {
         Self::create(mode, limits)
     }
 
     /// Hash `owner`'s bytes in place and return `owner` in the message's
     /// [`Event::Hashed`].
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's, or has bytes committed from a
+    /// Room already: a message's bytes come one way.
     #[inline]
     pub fn owned(&mut self, message: Message, owner: B) {
         let (pid, s) = message.take();
@@ -957,6 +1072,9 @@ impl<T, B> Pipeline<T, B> {
         assert!(limits.messages > 0, "Pipeline Limits.messages must be at least 1");
         let tree = TreeHasher::new(mode);
         let m = limits.messages;
+        // Each limit alone first: their sum, next, could wrap round to a
+        // small one (`rooms: usize::MAX` passed the check below so).
+        assert!(m < 1 << 29 && limits.rooms < 1 << 29, "Pipeline Limits beyond what an action can name");
         let p_cap = limits.rooms + m + 1;
         let g_cap = m.clamp(4, 256);
         let actions_cap = m * MAX_SLOT_PIECES + p_cap + g_cap;
@@ -968,7 +1086,11 @@ impl<T, B> Pipeline<T, B> {
         // (PipeStorage::acquire), and these cells are its holder's.
         let next_loan_epoch = unsafe { *storage.saved_loan_epoch.get() };
         let next_group_epoch = unsafe { *storage.saved_group_epoch.get() };
-        let source_slot = storage.source.register();
+        // A pool of one thread has no worker to take a published action,
+        // and only this crate's block_on would run it: an outside executor
+        // waited for ever. Unregistered, every action runs where it is
+        // dispatched, as when no slot is free.
+        let source_slot = if crate::lanes::pool_has_workers() { storage.source.register() } else { None };
         crate::lanes::sources::opened();
 
         let mut local_free_rooms = Ring::new(limits.rooms.max(1));
@@ -979,21 +1101,25 @@ impl<T, B> Pipeline<T, B> {
         // of the Pipeline before is done (its drop saw to that), and only
         // the mode is this Pipeline's own.
         // Sound: as the saved epochs above. A Shared the storage keeps was the
-        // Pipeline before's, whose every task is done (its drop saw to that),
-        // so reading its lengths and writing its mode race with no worker.
+        // Pipeline before's, whose every task is published done (its drop saw
+        // to that), so reading its lengths races with no worker.
         let held = unsafe { *storage.shared.get() };
         let shared: *mut Shared = if !held.is_null() && unsafe { (&(*held).hashes).len() >= m } {
             // A storage has one count of rooms, so pieces enough too.
             assert!(unsafe { (&(*held).pieces).len() } >= p_cap, "a Shared of as many messages has as many pieces");
+            // Sound: nor does writing its mode. A worker may still be
+            // returning from that last task with its `&Shared`: the mode is
+            // in a cell, and the worker's borrow of it ended before it
+            // published the task (Shared::tree).
             unsafe {
-                (*held).tree = tree;
+                *(*held).tree.get() = tree;
             }
             held
         } else {
             // One it replaces stays allocated: a worker of an earlier
             // Pipeline may still be reading it.
             let new = Box::into_raw(Box::new(Shared {
-                tree,
+                tree: UnsafeCell::new(tree),
                 storage,
                 hashes: (0..m).map(|_| UnsafeCell::new([0u8; OUT_LEN])).collect(),
                 cvs: (0..m).map(|_| UnsafeCell::new(PieceValues { whole: [Cv::unset(); MAX_SLOT_PIECES], last: None })).collect(),
@@ -1071,6 +1197,13 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Wait for a free message slot and open a [`Message`].
+    ///
+    /// # Panics
+    ///
+    /// If no slot is free and waiting cannot free one: as many messages
+    /// as `Limits.messages` are open, or as many events wait to be taken
+    /// ([`next_event`](Pipeline::next_event)). Only this task could end
+    /// one or take one, and it is here.
     #[inline(always)]
     pub fn message(&mut self, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + '_ {
         let _ = length_hint;
@@ -1096,7 +1229,7 @@ impl<T, B> Pipeline<T, B> {
                     return Poll::Ready(slot);
                 }
             }
-            if block_on_spinning() {
+            if block_on_polls_again(cx) {
                 if self.source_slot.is_some() {
                     self.shared().storage.source.wake_for_waiting();
                 }
@@ -1130,6 +1263,14 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Wait for a [`Room`] of [`ROOM_LEN`] bytes.
+    ///
+    /// A Room is free again when it has been dropped, on any thread, and
+    /// the bytes committed from it have been hashed. A program that keeps
+    /// every Room alive waits here for ever.
+    ///
+    /// # Panics
+    ///
+    /// If the Pipeline has no Rooms (`Limits.rooms` is 0).
     #[inline(always)]
     pub fn room(&mut self) -> impl Future<Output = Room> + '_ {
         RoomFut { pipe: self }
@@ -1177,7 +1318,7 @@ impl<T, B> Pipeline<T, B> {
                     return Poll::Ready(r);
                 }
             }
-            if block_on_spinning() {
+            if block_on_polls_again(cx) {
                 if self.source_slot.is_some() {
                     self.shared().storage.source.wake_for_waiting();
                 }
@@ -1203,19 +1344,23 @@ impl<T, B> Pipeline<T, B> {
         Room { pipeline_id: self.id, index, offset: 0, commits: 0, ptr: storage.rooms.room_ptr(index as usize), storage }
     }
 
+    /// A Pipeline with no Rooms has none to wait for. One whose Rooms are
+    /// all alive may be waited on: a Room is `Send`, and another thread's
+    /// drop of one ends the wait (`Room::drop` wakes it).
     fn assert_room_can_progress(&self) {
         assert!(self.limits.rooms > 0, "Pipeline::room called on a Pipeline with Limits.rooms == 0");
-        assert!(
-            self.shared().storage.rooms.caller_held.load(Ordering::Acquire) < self.limits.rooms,
-            "Pipeline::room cannot make progress: all {} rooms are held by the caller",
-            self.limits.rooms
-        );
     }
 
     /// Commit the first `written` bytes of `room` as `message`'s next bytes.
     ///
     /// `room` advances to the next 64-byte boundary. Every commit to a
     /// message except its last must be a whole room (`ROOM_LEN` bytes).
+    ///
+    /// # Panics
+    ///
+    /// If `message` or `room` is another Pipeline's; if `written` is more
+    /// than `room` has left ([`Room::len`]); if an earlier commit to
+    /// `message` was of less than a whole Room.
     #[inline(always)]
     pub fn commit(&mut self, message: &mut Message, room: &mut Room, written: usize) {
         assert_eq!(message.pipeline_id, self.id, "Message belongs to a different Pipeline");
@@ -1308,6 +1453,17 @@ impl<T, B> Pipeline<T, B> {
         loop {
             self.drain_slot_pieces(current_slot);
             self.reap();
+            if self.free_pieces.is_empty() {
+                // Every node may be another open message's: its later
+                // pieces finished while a worker was on an earlier one,
+                // and only a commit to it or its end would fold them.
+                // (A slot with no pieces has none to fold.)
+                for other in 0..self.slots.len() {
+                    if other != current_slot {
+                        self.drain_pieces(other, true);
+                    }
+                }
+            }
             if let Some(p) = self.free_pieces.pop_front() {
                 return p;
             }
@@ -1318,6 +1474,10 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Finish `message` and queue its [`Event::Hashed`] in end order.
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's.
     #[inline(always)]
     pub fn end(&mut self, message: Message) {
         let (pid, s) = message.take();
@@ -1342,7 +1502,7 @@ impl<T, B> Pipeline<T, B> {
     fn end_slow(&mut self, s: usize) {
         match self.slots[s].kind {
             SlotKind::OpenEmpty => {
-                let empty_hash = self.shared().tree.hash(&[]);
+                let empty_hash = self.shared().tree().hash(&[]);
                 // Sound: no task runs for an empty message, so the slot's hash
                 // is the owner's to write.
                 unsafe { *self.shared().hashes[s].get() = *empty_hash.as_bytes() };
@@ -1362,6 +1522,10 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Abort `message` and queue its [`Event::Aborted`] in end order.
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's.
     pub fn abort(&mut self, message: Message) {
         let (pid, s) = message.take();
         assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
@@ -1372,10 +1536,18 @@ impl<T, B> Pipeline<T, B> {
                 self.slots[s].kind = SlotKind::WaitAborted { group: NONE, epoch: 0 };
             }
             SlotKind::OpenShort { room: room_idx, .. } => {
+                // The record first, whole, and the wake last: the wake runs
+                // the program's waker in the middle of this call. (A waker
+                // that panics ends the process, in the waker slot's wake.
+                // Until it did, such a panic, caught, could leave a slot
+                // that still said it held the room's credit, to be given
+                // back a second time.)
+                self.slots[s].kind = SlotKind::WaitAborted { group: NONE, epoch: 0 };
+                self.end_queue.push_back(s as u32);
                 if self.shared().storage.rooms.release_n(room_idx, 1) {
                     self.shared().storage.waker.notify_after_seqcst();
                 }
-                self.slots[s].kind = SlotKind::WaitAborted { group: NONE, epoch: 0 };
+                return;
             }
             SlotKind::OpenShortDispatched { group, epoch } => {
                 self.slots[s].kind = SlotKind::WaitAborted { group, epoch };
@@ -1395,6 +1567,11 @@ impl<T, B> Pipeline<T, B> {
     /// The returned [`Lent`] guard must be dropped and never leaked
     /// (`core::mem::forget`, `Box::leak`, a reference cycle, or a leaked
     /// task holding it).
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's, or has bytes committed from a
+    /// Room already: a message's bytes come one way.
     #[inline(always)]
     pub unsafe fn lent<'a>(&mut self, message: Message, bytes: &'a [u8]) -> Lent<'a> {
         let (pid, s) = message.take();
@@ -1418,6 +1595,13 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Hash `batch` into `digests` and return both in [`Event::Batch`].
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's, or has bytes committed from a
+    /// Room already; if `digests` has not one place for each message of
+    /// `batch`, or `batch`'s bytes are not that many whole slots (blocks
+    /// borrowed by `Batch::from_blocks` that end in a part of a slot).
     pub fn batch(&mut self, message: Message, batch: Batch<'static>, digests: Box<[[u8; OUT_LEN]]>) {
         let (pid, s) = message.take();
         assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
@@ -1471,6 +1655,12 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Pull the next finished [`Event`], if one is ready.
+    ///
+    /// This takes what is finished and starts nothing. A message's work
+    /// may wait for [`ready`](Pipeline::ready) (or another wait of this
+    /// Pipeline) to hand it to the workers, so a loop that calls only
+    /// this may never be given an event: where this gives `None`, await
+    /// `ready`.
     #[inline(always)]
     pub fn next_event(&mut self) -> Option<Event<T, B>> {
         if let Some(ev) = self.events.pop_front() {
@@ -1480,6 +1670,11 @@ impl<T, B> Pipeline<T, B> {
     }
 
     /// Wait until [`Pipeline::next_event`] has an [`Event`] ready.
+    ///
+    /// # Panics
+    ///
+    /// If no message has been ended (or aborted, or handed over whole)
+    /// whose event is still to come: nothing would end the wait.
     #[inline(always)]
     pub fn ready(&mut self) -> impl Future<Output = ()> + '_ {
         ReadyFut { pipe: self }
@@ -1505,7 +1700,7 @@ impl<T, B> Pipeline<T, B> {
                     return Poll::Ready(());
                 }
             }
-            if block_on_spinning() {
+            if block_on_polls_again(cx) {
                 if self.source_slot.is_some() {
                     self.shared().storage.source.wake_for_waiting();
                 }
@@ -1722,15 +1917,22 @@ impl<T, B> Pipeline<T, B> {
     }
 
     fn drain_slot_pieces(&mut self, s: usize) {
+        self.drain_pieces(s, false);
+    }
+
+    /// Fold slot `s`'s finished pieces, in order, up to the first still
+    /// being hashed. `keep_last` leaves the newest piece: an open
+    /// message may end with it, and the last piece folds as the root.
+    fn drain_pieces(&mut self, s: usize, keep_last: bool) {
         // Sound: as `shared()`.
         let shared = unsafe { &*self.shared };
-        let tree = &shared.tree;
+        let tree = shared.tree();
         let ended = matches!(self.slots[s].kind, SlotKind::WaitRoomMulti);
         let aborted = matches!(self.slots[s].kind, SlotKind::WaitAborted { .. });
 
         loop {
             let head = self.room_streams[s].head_piece;
-            if head == NONE || !shared.pieces[head as usize].done.load(Ordering::Acquire) {
+            if head == NONE || (keep_last && head == self.room_streams[s].tail_piece) || !shared.pieces[head as usize].done.load(Ordering::Acquire) {
                 return;
             }
             // Sound: the piece is done (checked above), so its `next` and
@@ -1871,7 +2073,7 @@ impl<T, B> Pipeline<T, B> {
 impl<T, B> Drop for Pipeline<T, B> {
     fn drop(&mut self) {
         if self.has_in_flight_work() {
-            stop_process("blake3-servil: Pipeline dropped while worker tasks are still in flight");
+            stop_process("blake3-servil: Pipeline dropped while worker tasks are still in flight\n");
         }
         // Release any credits held on uncommitted short rooms sitting in un-ended slots
         // (e.g. during panic unwind after a precondition check failed with zero workers running).
@@ -1983,19 +2185,29 @@ impl<T, B> Future for ReadyFut<'_, T, B> {
     }
 }
 
-struct ThreadPark(thread::Thread);
+/// `block_on`'s waker: it wakes its thread, and remembers that it did.
+struct ThreadPark {
+    thread: thread::Thread,
+    /// Set by a wake; taken by `block_on` before it sleeps. The thread's
+    /// park token alone would not do: another wait on the same thread (a
+    /// `block_on` inside a poll, a blocking receive) takes the token, and
+    /// the wake with it.
+    woken: AtomicBool,
+}
 
 impl std::task::Wake for ThreadPark {
     fn wake(self: Arc<Self>) {
-        self.0.unpark();
+        self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
+        self.woken.store(true, Ordering::Release);
+        self.thread.unpark();
     }
 }
 
 crate::pipeline_sync::thread_local! {
-    static BLOCK_ON_WAKER: Waker = Waker::from(Arc::new(ThreadPark(thread::current())));
+    static BLOCK_ON_PARK: Arc<ThreadPark> = Arc::new(ThreadPark { thread: thread::current(), woken: AtomicBool::new(false) });
+    static BLOCK_ON_WAKER: Waker = BLOCK_ON_PARK.with(|park| Waker::from(Arc::clone(park)));
     static BLOCK_ON_STATE: core::cell::Cell<u8> = const { core::cell::Cell::new(0) };
 }
 
@@ -2009,11 +2221,31 @@ fn block_on_spinning() -> bool {
     BLOCK_ON_STATE.with(core::cell::Cell::get) == 1
 }
 
+/// Whether the poll that `cx` is of will be made again with no wake:
+/// `block_on`, while it spins, polls its future again and again, and a
+/// wait under it keeps no waker. Only where the waker is `block_on`'s
+/// own: a future between the two that polls a child only when the child's
+/// own waker has woken (as `FuturesUnordered` does) gives it another
+/// waker, and a wait that kept none of that one would never be polled
+/// again.
+#[inline(always)]
+fn block_on_polls_again(cx: &Context<'_>) -> bool {
+    block_on_spinning() && BLOCK_ON_WAKER.with(|own| cx.waker().will_wake(own))
+}
+
 fn prepare_thread() {
     BLOCK_ON_WAKER.with(|_| {});
 }
 
 /// Drive `future` to completion on the current thread, parking between polls.
+///
+/// A `block_on` may run inside a poll of another on the same thread (a
+/// future whose poll calls a helper built on this function). The two
+/// share the thread's waker, and the inner one may take a wake that was
+/// the outer one's: so when the inner one has slept and been woken, the
+/// outer future is polled once more before it sleeps, whether or not
+/// the wake was its own. A future that runs a `block_on` which sleeps
+/// on every one of its polls is therefore polled again after each.
 ///
 /// # Examples
 ///
@@ -2164,34 +2396,51 @@ fn prepare_thread() {
 /// }
 /// ```
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    struct Guard(u8);
+    /// The state of the `block_on` this one runs inside (0: none), and
+    /// whether this one took a wake.
+    struct Guard(u8, bool);
     impl Drop for Guard {
         fn drop(&mut self) {
             BLOCK_ON_STATE.with(|f| f.set(self.0));
+            if self.0 != 0 && self.1 {
+                // This `block_on` ran inside a poll of another, on the one
+                // waker the two share: a wake it took may have been the
+                // other's, which polls once more before it sleeps. Only
+                // where it took one: an outer future that runs a
+                // `block_on` in each poll would otherwise never sleep.
+                BLOCK_ON_PARK.with(|park| park.woken.store(true, Ordering::Release));
+            }
         }
     }
     let prev = BLOCK_ON_STATE.with(|f| f.replace(1));
-    let _guard = Guard(prev);
+    let mut guard = Guard(prev, false);
     let mut future = core::pin::pin!(future);
-    BLOCK_ON_WAKER.with(|waker| {
-        let mut cx = Context::from_waker(waker);
-        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-            return output;
-        }
-        let started = crate::lanes::now();
-        let mut yielded = started;
-        loop {
-            crate::lanes::poll_pause(&mut yielded);
-            if crate::lanes::now() - started >= crate::lanes::SPIN_BEFORE_SLEEP {
-                BLOCK_ON_STATE.with(|f| f.set(2));
-                match future.as_mut().poll(&mut cx) {
-                    Poll::Ready(output) => return output,
-                    Poll::Pending => thread::park(),
-                }
-            } else if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+    BLOCK_ON_PARK.with(|park| {
+        BLOCK_ON_WAKER.with(|waker| {
+            let mut cx = Context::from_waker(waker);
+            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                 return output;
             }
-        }
+            let started = crate::lanes::now();
+            let mut yielded = started;
+            loop {
+                crate::lanes::poll_pause(&mut yielded);
+                if crate::lanes::now() - started >= crate::lanes::SPIN_BEFORE_SLEEP {
+                    BLOCK_ON_STATE.with(|f| f.set(2));
+                    if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                        return output;
+                    }
+                    // Asleep until a wake, one that came during the poll
+                    // included, whoever took the thread's park token since.
+                    while !park.woken.swap(false, Ordering::Acquire) {
+                        thread::park();
+                    }
+                    guard.1 = true;
+                } else if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                    return output;
+                }
+            }
+        })
     })
 }
 
@@ -2812,6 +3061,16 @@ mod test {
         let _ = Pipeline::<()>::new(Mode::Plain, Limits { messages: 0, rooms: 1 });
     }
 
+    #[test]
+    fn contract_limits_beyond_what_an_action_names_panic() {
+        // The last of these wraps the sum of the two limits round to 1.
+        for limits in [Limits { messages: 1 << 29, rooms: 0 }, Limits { messages: 1, rooms: (1 << 29) - 2 }, Limits { messages: 1, rooms: usize::MAX }] {
+            let refused = std::panic::catch_unwind(|| Pipeline::<()>::new(Mode::Plain, limits)).err().expect("limits past 29 bits are refused");
+            let why = refused.downcast_ref::<&str>().copied().map(String::from).or_else(|| refused.downcast_ref::<String>().cloned()).unwrap_or_default();
+            assert!(why.contains("Pipeline Limits beyond what an action can name"), "{limits:?}: {why}");
+        }
+    }
+
     fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
         let mut cx = Context::from_waker(Waker::noop());
         core::pin::pin!(f).poll(&mut cx)
@@ -2885,6 +3144,57 @@ mod test {
         });
     }
 
+    /// A commit that finds no piece node free takes back the finished ones
+    /// of every open message, not only its own. One message's later
+    /// pieces finish while a worker is still on an earlier one, and they
+    /// then hold every node; a commit to another message waited for ever,
+    /// even once all of them had finished (the 0.10 delta audit, BLAKE3
+    /// #461). The earlier piece is held back here by its done flag.
+    /// Without the taking back, the commit to the second message never
+    /// returns, and the run's clock ends the test (.config/nextest.toml).
+    #[test]
+    fn a_commit_takes_back_piece_nodes_another_open_message_holds() {
+        crate::initialize_multithreaded(None);
+        let data: Vec<u8> = (0..5 * ROOM_LEN).map(|i| (i % 251) as u8).collect();
+        let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+        block_on(async {
+            let mut a = pipe.message(0, None).await;
+            let mut b = pipe.message(1, None).await;
+            let mut held = NONE;
+            for part in data.chunks_exact(ROOM_LEN) {
+                let mut room = pipe.room().await;
+                room.bytes_mut().copy_from_slice(part);
+                pipe.commit(&mut a, &mut room, ROOM_LEN);
+                if held == NONE {
+                    held = pipe.room_streams.iter().map(|stream| stream.head_piece).find(|&head| head != NONE).unwrap();
+                    // A lone action waits for its owner's next await
+                    // (publish_actions wakes a worker at two): run it
+                    // here, unless a worker that was awake has it.
+                    let done = &pipe.shared().pieces[held as usize].done;
+                    while !done.load(Ordering::SeqCst) {
+                        if !pipe.shared().storage.source.run_waiting_action() {
+                            std::thread::yield_now();
+                        }
+                    }
+                    done.store(false, Ordering::SeqCst);
+                }
+            }
+            assert!(pipe.free_pieces.is_empty(), "the first message holds every node");
+            pipe.shared().pieces[held as usize].done.store(true, Ordering::SeqCst);
+            // Two whole rooms: a piece each.
+            for part in data[ROOM_LEN - 5..].chunks(ROOM_LEN).take(2) {
+                let mut room = pipe.room().await;
+                room.bytes_mut()[..part.len()].copy_from_slice(part);
+                pipe.commit(&mut b, &mut room, part.len());
+            }
+            pipe.end(b);
+            pipe.end(a);
+        });
+        let events = drain_all(&mut pipe, 2);
+        let hashes: Vec<_> = events.iter().map(|event| if let Event::Hashed { tag, hash, .. } = event { (*tag, *hash) } else { panic!("a hash") }).collect();
+        assert_eq!(hashes, [(1, crate::convenience::hash(&data[ROOM_LEN - 5..3 * ROOM_LEN - 5])), (0, crate::convenience::hash(&data[..5 * ROOM_LEN]))]);
+    }
+
     /// Storage is reused however many Pipelines were alive at once, and
     /// whichever of a Pipeline and its Rooms is dropped last: a second
     /// wave of as many Pipelines makes no new storage. (BLAKE3 #427: the
@@ -2926,11 +3236,158 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "all 1 rooms are held by the caller")]
-    fn contract_room_deadlock_all_held_panics() {
+    fn a_wait_for_a_room_ends_when_another_thread_drops_one() {
         let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
-        let _r1 = block_on(pipe.room());
-        let _ = poll_once(pipe.room());
+        let held = block_on(pipe.room());
+        let index = held.index;
+        // Every Room is alive, and the wait is no deadlock: a Room is
+        // Send, and whoever holds this one may drop it.
+        assert!(poll_once(pipe.room()).is_pending());
+        std::thread::spawn(move || drop(held)).join().unwrap();
+        assert_eq!(block_on(pipe.room()).index, index);
+    }
+
+    /// A message of `p` ended and, for all `p` can see, still being
+    /// hashed: its slot.
+    fn message_in_flight(p: &mut Pipeline<u32>) -> usize {
+        let (_, s) = block_on(p.message(7, None)).take();
+        p.open_messages -= 1;
+        p.slots[s].kind = SlotKind::WaitMulti { has_owner: false };
+        p.shared().slot_done[s].store(false, Ordering::SeqCst);
+        p.end_queue.push_back(s as u32);
+        s
+    }
+
+    #[test]
+    fn a_wait_keeps_no_waker_only_where_block_on_itself_polls_again() {
+        struct Count(AtomicUsize);
+        impl std::task::Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn notify(p: &Pipeline<u32>) {
+            p.shared().storage.waker.notify_after_seqcst();
+        }
+        let wakes = Arc::new(Count(AtomicUsize::new(0)));
+        let other = Waker::from(Arc::clone(&wakes));
+        let own_woken = || BLOCK_ON_PARK.with(|park| park.woken.swap(false, Ordering::SeqCst));
+
+        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
+        let mut room = Some(block_on(p.room()));
+        let s = message_in_flight(&mut p);
+        block_on(core::future::poll_fn(|own| {
+            assert!(block_on_spinning());
+            // Under block_on's own waker, while it spins: none is kept,
+            // and a notice wakes nobody.
+            own_woken();
+            assert!(p.poll_ready(own).is_pending());
+            notify(&p);
+            assert!(p.poll_message(own).is_pending());
+            notify(&p);
+            assert!(p.poll_room(own).is_pending());
+            notify(&p);
+            assert!(!own_woken(), "a wait kept block_on's waker while block_on spins");
+            // Under another waker (a future between the two gave the wait
+            // its own, and polls it again only when that one wakes): kept.
+            let mut cx = Context::from_waker(&other);
+            assert!(p.poll_ready(&mut cx).is_pending());
+            notify(&p);
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "ready() kept no waker");
+            assert!(p.poll_message(&mut cx).is_pending());
+            notify(&p);
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 2, "message() kept no waker");
+            assert!(p.poll_room(&mut cx).is_pending());
+            // A Room's drop is the notice a wait for a Room has.
+            drop(room.take());
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 3, "room() kept no waker");
+            // Once block_on sleeps between polls, its own waker is kept.
+            BLOCK_ON_STATE.with(|state| state.set(2));
+            assert!(p.poll_ready(own).is_pending());
+            notify(&p);
+            assert!(own_woken(), "a wait kept no waker though block_on sleeps between polls");
+            Poll::Ready(())
+        }));
+        // The hashing ends, and the Pipeline is as any other.
+        p.shared().slot_done[s].store(true, Ordering::SeqCst);
+        assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 7, .. })));
+    }
+
+    #[test]
+    fn a_wake_is_kept_though_another_wait_takes_the_park_token() {
+        let mut polls = 0;
+        block_on(core::future::poll_fn(|cx| {
+            if block_on_spinning() {
+                return Poll::Pending;
+            }
+            // From here block_on sleeps between polls.
+            polls += 1;
+            if polls == 1 {
+                cx.waker().wake_by_ref();
+                // A wait of the poll's own (a blocking receive, say) takes
+                // the park token that wake left: this returns at once.
+                std::thread::park();
+                return Poll::Pending;
+            }
+            Poll::Ready(())
+        }));
+        assert_eq!(polls, 2);
+    }
+
+    #[test]
+    fn a_block_on_inside_a_poll_leaves_the_outer_one_its_wake() {
+        let mut polls = 0;
+        block_on(core::future::poll_fn(|cx| {
+            if block_on_spinning() {
+                return Poll::Pending;
+            }
+            polls += 1;
+            if polls == 1 {
+                // This future's wake comes, and then a block_on that
+                // sleeps: the two share the thread's waker, and the inner
+                // one takes the wake for its own.
+                cx.waker().wake_by_ref();
+                let mut inner_polls = 0;
+                block_on(core::future::poll_fn(|_| {
+                    if block_on_spinning() {
+                        return Poll::Pending;
+                    }
+                    inner_polls += 1;
+                    if inner_polls == 1 { Poll::Pending } else { Poll::Ready(()) }
+                }));
+                assert_eq!(inner_polls, 2);
+                assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+                assert!(BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)), "the inner block_on took the wake and left none");
+                return Poll::Pending;
+            }
+            Poll::Ready(())
+        }));
+        assert_eq!(polls, 2);
+    }
+
+    #[test]
+    fn a_block_on_that_took_no_wake_leaves_the_outer_one_none() {
+        // The outer block_on's poll runs one that is ready at once: it
+        // took no wake, and notes none. (It noted one whenever it ended
+        // inside another, and an outer future that runs a block_on in
+        // each poll was then polled without end and never slept.)
+        let mut polls = 0;
+        block_on(core::future::poll_fn(|cx| {
+            if block_on_spinning() {
+                return Poll::Pending;
+            }
+            polls += 1;
+            block_on(async {});
+            assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+            if polls == 1 {
+                assert!(!BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)), "a block_on that took no wake noted one");
+                // This future's one wake: its next poll is its last.
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Poll::Ready(())
+        }));
+        assert_eq!(polls, 2);
     }
 
     #[test]
@@ -3030,6 +3487,47 @@ mod test {
                 "abort_on_unwind" => {
                     crate::lanes::drop_abort_on_unwind_for_test();
                 }
+                "worker_start" => {
+                    crate::lanes::fail_worker_start_for_test();
+                }
+                // A waker that panics ends the process, on the owner's
+                // thread too: an abort of a short message frees its room
+                // and wakes the wait before the call has returned.
+                "waker_panics" => {
+                    struct Panics;
+                    impl std::task::Wake for Panics {
+                        fn wake(self: Arc<Self>) {
+                            panic!("this waker panics");
+                        }
+                    }
+                    let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
+                    let mut message = block_on(p.message(1, None));
+                    let mut room = block_on(p.room());
+                    p.commit(&mut message, &mut room, 3);
+                    drop(room);
+                    let _other = message_in_flight(&mut p);
+                    let waker = Waker::from(Arc::new(Panics));
+                    assert!(p.poll_ready(&mut Context::from_waker(&waker)).is_pending());
+                    let _ = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.abort(message)));
+                    // Not reached: the panic did not unwind into the catch.
+                    std::process::exit(0);
+                }
+                // The stop takes no lock: this thread holds stderr's and
+                // waits for the one that stops.
+                "lent_stderr_locked" => {
+                    let _held = std::io::stderr().lock();
+                    let breach = || {
+                        let completed: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
+                        drop(Lent { completed, epoch: 1, _bytes: PhantomData });
+                    };
+                    std::thread::spawn(breach).join().unwrap();
+                }
+                // The stop does not wait for its words: stderr is a full
+                // pipe here, and a write to it would never return.
+                "worker_start_stderr_full" => {
+                    crate::lanes::fill_stderr_for_test();
+                    crate::lanes::fail_worker_start_for_test();
+                }
                 _ => unreachable!(),
             }
             std::process::exit(0);
@@ -3037,9 +3535,13 @@ mod test {
 
         for (case, needle) in [
             ("lent", "Lent guard was dropped before its message finished"),
+            ("lent_stderr_locked", "Lent guard was dropped before its message finished"),
+            ("waker_panics", "this waker panics"),
             ("pipeline", "Pipeline dropped while worker tasks are still in flight"),
             ("pipeline_multi", "Pipeline dropped while worker tasks are still in flight"),
             ("abort_on_unwind", ""),
+            ("worker_start", "BLAKE3: start a worker thread"),
+            ("worker_start_stderr_full", ""),
         ] {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
@@ -3050,6 +3552,65 @@ mod test {
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(stderr.contains(needle), "case {case} stderr: {stderr}");
         }
+    }
+
+    /// A stop says why where a person reads it: on a terminal. A stop
+    /// writes only where `poll` says descriptor 2 takes words, and what
+    /// `poll` says of a terminal is each system's own (the manual of
+    /// macOS says its `poll` does not support devices).
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_stop_says_why_on_a_terminal() {
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        unsafe extern "C" {
+            fn posix_openpt(flags: i32) -> i32;
+            fn grantpt(fd: i32) -> i32;
+            fn unlockpt(fd: i32) -> i32;
+            fn ptsname(fd: i32) -> *const core::ffi::c_char;
+        }
+        const O_RDWR: i32 = 2;
+        #[cfg(target_os = "linux")]
+        const O_NOCTTY: i32 = 0o400;
+        #[cfg(target_os = "macos")]
+        const O_NOCTTY: i32 = 0x20000;
+        // Sound: the descriptor posix_openpt returns is this function's
+        // own, and ptsname's string is copied before any call that could
+        // write over it.
+        let (mut ours, name) = unsafe {
+            let fd = posix_openpt(O_RDWR | O_NOCTTY);
+            assert!(fd >= 0, "this test needs a pseudo-terminal: {}", std::io::Error::last_os_error());
+            assert_eq!((grantpt(fd), unlockpt(fd)), (0, 0), "{}", std::io::Error::last_os_error());
+            let name = ptsname(fd);
+            assert!(!name.is_null(), "{}", std::io::Error::last_os_error());
+            (std::fs::File::from_raw_fd(fd), core::ffi::CStr::from_ptr(name).to_str().unwrap().to_owned())
+        };
+        // The terminal as a program has it: the child's descriptor 2. It
+        // stays open here until the words are read: a terminal that
+        // nobody has open any more may drop what was written to it.
+        let mut terminal = std::fs::OpenOptions::new().read(true).write(true).custom_flags(O_NOCTTY).open(&name).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
+            .env("BLAKE3_PIPELINE_ABORT_CASE", "worker_start")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(terminal.try_clone().unwrap())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(6), "{status:?}");
+        // A mark after whatever the child said, so that the reading ends.
+        terminal.write_all(b"\nTHE END\n").unwrap();
+        let mut said = Vec::new();
+        let mut some = [0u8; 256];
+        while !said.windows(7).any(|bytes| bytes == b"THE END") {
+            let count = ours.read(&mut some).unwrap();
+            assert_ne!(count, 0, "the terminal closed");
+            said.extend_from_slice(&some[..count]);
+        }
+        let said = String::from_utf8_lossy(&said);
+        assert!(said.contains("BLAKE3: start a worker thread"), "the terminal got {said:?}");
     }
 
     #[test]
@@ -3083,15 +3644,17 @@ mod test {
         assert!(!rooms.release_n(0, 5));
         assert!(rooms.release_n(0, ROOM_CREDITS - 5));
 
-        let tp = Arc::new(ThreadPark(std::thread::current()));
+        let tp = Arc::new(ThreadPark { thread: std::thread::current(), woken: AtomicBool::new(false) });
         std::thread::park_timeout(std::time::Duration::ZERO);
         std::task::Wake::wake_by_ref(&tp);
+        assert!(tp.woken.swap(false, Ordering::SeqCst), "a wake is remembered");
         let t0 = std::time::Instant::now();
         std::thread::park_timeout(std::time::Duration::from_millis(200));
         assert!(t0.elapsed() < std::time::Duration::from_millis(150));
 
         std::thread::park_timeout(std::time::Duration::ZERO);
-        std::task::Wake::wake(tp);
+        std::task::Wake::wake(Arc::clone(&tp));
+        assert!(tp.woken.load(Ordering::SeqCst), "a wake is remembered");
         let t1 = std::time::Instant::now();
         std::thread::park_timeout(std::time::Duration::from_millis(200));
         assert!(t1.elapsed() < std::time::Duration::from_millis(150));

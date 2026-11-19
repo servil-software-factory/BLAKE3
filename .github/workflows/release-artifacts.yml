@@ -68,13 +68,18 @@ jobs:
         git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
         git checkout --quiet --detach "${TAG#*+}"
         test -f tools/release_artifacts.py || { echo "this release is from before the check (0.9.0 and earlier): run a later commit's checker on its tag by hand"; exit 1; }
+    # Each job's files in a folder of their own under rebuilt/, not merged
+    # into one: merged, the later job's crates replace the earlier job's
+    # unread, and a builder whose crate differed would go unseen. The
+    # check compares what was published with every builder's copy, and is
+    # told which builders there are (the two jobs above, by their
+    # artifacts' names): each must have left its folder, with every crate.
     - uses: actions/download-artifact@v4
       with:
         pattern: b3sum-*
         path: rebuilt
-        merge-multiple: true
-    - name: tools/release_artifacts.py TAG --published --rebuilt rebuilt
+    - name: tools/release_artifacts.py TAG --published --rebuilt rebuilt --builders b3sum-X64,b3sum-ARM64
       env:
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
         GITHUB_TOKEN: ${{ github.token }}
-      run: python3 tools/release_artifacts.py "$TAG" --published --rebuilt rebuilt
+      run: python3 tools/release_artifacts.py "$TAG" --published --rebuilt rebuilt --builders b3sum-X64,b3sum-ARM64

@@ -494,6 +494,99 @@ fn cut_messages(pieces: &mut Vec<Piece>, count: usize, message_len: usize, threa
     }
 }
 
+/// A pool thread just spawned, or the end of the process: the pool is
+/// published by then, and a panic on the spawning worker alone would
+/// leave calls waiting on workers that never start.
+fn started<T>(spawned: std::io::Result<T>) -> T {
+    spawned.unwrap_or_else(|error| stop(&format!("BLAKE3: start a worker thread: {error}\n")))
+}
+
+/// Say why, and end the process, from a thread the pool's callers may be
+/// waiting on. The end does not wait long for the words. They go straight
+/// to descriptor 2, and only if it says within a tenth of a second that
+/// it takes words: `std::io::stderr` takes a lock, and a caller that
+/// holds it while it waits for this thread would wait for ever; so would
+/// a write to a full pipe whose reader waits for that caller. A reader
+/// that is only behind has that tenth of a second to make room.
+///
+/// The tenth of a second bounds the asking, not the writing. A
+/// descriptor that took words when asked may not when written to: another
+/// writer filled the pipe in between, a terminal's flow was stopped, a
+/// file's storage waits. The write then waits as any write does, and the
+/// end with it.
+///
+/// A panic is not this: it goes through the process's panic hook before
+/// anything here runs, and the standard hook writes through
+/// `std::io::stderr`, lock and all. The stops that follow a panic on a
+/// pool thread (`AbortOnUnwind`, a worker's own) say their words that way.
+pub(crate) fn stop(why: &str) -> ! {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    // The count's type in poll's declaration: Linux's nfds_t is an
+    // unsigned long, macOS's an unsigned int.
+    #[cfg(target_os = "linux")]
+    type Count = core::ffi::c_ulong;
+    #[cfg(not(target_os = "linux"))]
+    type Count = core::ffi::c_uint;
+    const POLLOUT: i16 = 4;
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, count: Count, timeout_ms: i32) -> i32;
+        fn write(fd: i32, bytes: *const core::ffi::c_void, len: usize) -> isize;
+    }
+    let mut stderr = PollFd { fd: 2, events: POLLOUT, revents: 0 };
+    // Sound: one PollFd, written by poll, which returns within its 100 ms.
+    let ready = unsafe { poll(&mut stderr, 1, 100) };
+    // One descriptor ready, and for writing alone: a poll that failed or
+    // timed out says nothing of `revents`, and one that reports an error
+    // beside the room to write (a pipe nobody reads) has nobody to tell.
+    if (ready, stderr.revents) == (1, POLLOUT) {
+        // Sound: `why` is `len` readable bytes. Whether they were written
+        // changes nothing here.
+        let _ = unsafe { write(2, why.as_ptr().cast(), why.len()) };
+    }
+    std::process::abort()
+}
+
+#[cfg(test)]
+pub(crate) fn fail_worker_start_for_test() {
+    started::<()>(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)));
+}
+
+/// For the tests: descriptor 2 becomes the writing end of a pipe that is
+/// full and that nobody reads, as a caller's stderr is while its reader
+/// waits for the caller.
+#[cfg(test)]
+pub(crate) fn fill_stderr_for_test() {
+    unsafe extern "C" {
+        fn pipe(ends: *mut i32) -> i32;
+        fn dup2(from: i32, to: i32) -> i32;
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+        fn write(fd: i32, bytes: *const core::ffi::c_void, len: usize) -> isize;
+    }
+    const F_SETFL: i32 = 4;
+    #[cfg(target_os = "linux")]
+    const O_NONBLOCK: i32 = 0o4000;
+    #[cfg(not(target_os = "linux"))]
+    const O_NONBLOCK: i32 = 4;
+    let mut ends = [0i32; 2];
+    let block = [0u8; 4096];
+    // Sound: pipe writes two descriptors, which this process then owns;
+    // each write reads bytes of `block`.
+    unsafe {
+        assert_eq!(pipe(ends.as_mut_ptr()), 0);
+        assert_eq!(fcntl(ends[1], F_SETFL, O_NONBLOCK), 0);
+        // Whole pages, then single bytes, until it takes no more.
+        while write(ends[1], block.as_ptr().cast(), block.len()) > 0 {}
+        while write(ends[1], block.as_ptr().cast(), 1) > 0 {}
+        assert_eq!(fcntl(ends[1], F_SETFL, 0), 0);
+        assert_eq!(dup2(ends[1], 2), 2);
+    }
+}
+
 /// Ends the process if dropped: held while a job is published, or while a
 /// stream's body runs, and forgotten once the workers are done, so it drops
 /// only when the caller unwinds with workers possibly still reading its
@@ -864,52 +957,57 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
     // With one thread, none beside the caller: no SME2 thread either.
     let sme2 = threads > 1 && cfg!(blake3_sme2) && !matches!(pool_platform(), p if core::mem::discriminant(&p) == core::mem::discriminant(&Platform::detect()));
     let pool = Pool { callers: AtomicUsize::new(0), threads, sme2, park: crate::park::Park::new(Pool::workers_of(threads), crate::park::FANOUT) };
+    if threads > 1 {
+        // Before any thread starts: a child forked from here on has none
+        // of them, and its multithreaded calls stop at `pool` (FORKED).
+        // Before the pool is published, too: a refusal here is a panic
+        // that leaves no pool behind.
+        unsafe extern "C" {
+            fn pthread_atfork(prepare: Option<extern "C" fn()>, parent: Option<extern "C" fn()>, child: Option<extern "C" fn()>) -> i32;
+        }
+        // Sound: the handler only stores to an atomic, which a forked
+        // child may do.
+        assert_eq!(unsafe { pthread_atfork(None, None, Some(mark_forked)) }, 0, "registering the fork handler");
+    }
     assert!(POOL.set(pool).is_ok(), "initialize_multithreaded creates the pool once");
     if threads == 1 {
         return threads;
     }
-    // Before any thread starts: a child forked from here on has none of
-    // them, and its multithreaded calls stop at `pool` (FORKED).
-    unsafe extern "C" {
-        fn pthread_atfork(prepare: Option<extern "C" fn()>, parent: Option<extern "C" fn()>, child: Option<extern "C" fn()>) -> i32;
-    }
-    // Sound: the handler only stores to an atomic, which a forked child
-    // may do.
-    assert_eq!(unsafe { pthread_atfork(None, None, Some(mark_forked)) }, 0, "registering the fork handler");
+    // The pool is published and says it has workers: from here a thread
+    // that cannot start ends the process (`started`). A panic would leave
+    // that pool to a caller that caught it, and to every other thread.
     if sme2 {
         #[cfg(target_os = "linux")]
         let sme2_node = node.clone();
-        std::thread::Builder::new()
-            .name("blake3-sme2".into())
-            .spawn(move || {
-                #[cfg(target_os = "linux")]
-                if let Some(node) = sme2_node {
-                    node.bind_worker();
-                }
-                sme2_main();
-            })
-            .expect("spawning the SME2 thread");
-    }
-    std::thread::Builder::new()
-        .name("blake3-worker-1".into())
-        .spawn(move || {
-            // Bind before starting the other workers, which inherit this
-            // mask. The caller keeps its own affinity.
+        started(std::thread::Builder::new().name("blake3-sme2".into()).spawn(move || {
             #[cfg(target_os = "linux")]
-            if let Some(node) = node {
+            if let Some(node) = sme2_node {
                 node.bind_worker();
             }
-            for worker in 2..threads {
-                std::thread::Builder::new().name(format!("blake3-worker-{worker}")).spawn(move || worker_main(worker - 1)).expect("spawning a BLAKE3 worker");
-            }
-            // After the workers have started, never before: reading the
-            // machine's caches takes 2 ms on a machine of 96 CPUs, and
-            // b3sum has hashed a 16 MiB file by then (read first, it made
-            // b3sum's warm 16 MiB 1.4 ms slower on two servers).
-            places::settle(Pool::workers_of(threads));
-            worker_main(0)
-        })
-        .expect("spawning a BLAKE3 worker");
+            sme2_main();
+        }));
+    }
+    started(std::thread::Builder::new().name("blake3-worker-1".into()).spawn(move || {
+        // Bind before starting the other workers, which inherit this
+        // mask. The caller keeps its own affinity.
+        #[cfg(target_os = "linux")]
+        if let Some(node) = node {
+            node.bind_worker();
+        }
+        // The pool is published, and calls may already wait on these
+        // workers: a failure from here on ends the process, as a
+        // worker's own panic does (worker_main).
+        let _starting = AbortOnUnwind;
+        for worker in 2..threads {
+            started(std::thread::Builder::new().name(format!("blake3-worker-{worker}")).spawn(move || worker_main(worker - 1)));
+        }
+        // After the workers have started, never before: reading the
+        // machine's caches takes 2 ms on a machine of 96 CPUs, and
+        // b3sum has hashed a 16 MiB file by then (read first, it made
+        // b3sum's warm 16 MiB 1.4 ms slower on two servers).
+        places::settle(Pool::workers_of(threads));
+        worker_main(0)
+    }));
     threads
 }
 
@@ -1185,8 +1283,11 @@ pub(crate) mod places {
         }
     }
 
-    /// The most CPUs a set names: the kernel's own limit.
-    const CPUS: usize = 1024;
+    /// The most CPUs a set names: the most any Linux kernel is built for
+    /// (x86-64's 8192). A smaller set fails where the kernel has more
+    /// possible CPUs than it names: sched_getaffinity refuses it there,
+    /// whichever CPUs the process is allowed.
+    const CPUS: usize = 8192;
     type Set = [u64; CPUS / 64];
 
     /// A CPU the process may run on: its number, its last-level cache
@@ -1397,9 +1498,7 @@ pub(crate) mod places {
             if let Err(error) = self.bind() {
                 // The published pool requires this worker. Panicking only on
                 // this thread would strand calls waiting for it.
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "BLAKE3: keep the worker on one memory node: {error}");
-                std::process::abort();
+                super::stop(&format!("BLAKE3: keep the worker on one memory node: {error}\n"));
             }
         }
     }
@@ -1514,6 +1613,17 @@ pub(crate) mod places {
             assert_eq!(bits(&node.0), [1, 3, 5, 62, 63, 64, 65, 66]);
             assert_eq!(node.cpu_count(), 8);
             assert!(Node::within(node.0, cpu_set("0-66")).is_none());
+        }
+
+        /// A set names every CPU a Linux kernel can have, so a node's list
+        /// on the largest machine parses, and the kernel takes a set this
+        /// long (it refuses one shorter than its own).
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_set_names_the_largest_kernels_cpus() {
+            assert_eq!(bits(&cpu_set("0,1024,4095-4096,8191")), [0, 1024, 4095, 4096, 8191]);
+            let allowed = affinity().unwrap();
+            assert!(Node::within(allowed, cpu_set("0-8191")).is_none(), "every CPU: no further restriction");
         }
 
         #[test]
@@ -2231,6 +2341,12 @@ pub(crate) fn all_workers_parked() -> bool {
 /// thread if it has one.
 fn at_rest(parked: usize, workers: usize, sme2: bool, sme2_parked: bool) -> bool {
     parked == workers && (!sme2 || sme2_parked)
+}
+
+/// Whether any thread but a caller takes work: false in a pool of one
+/// thread, which starts no worker and no SME2 thread.
+pub(crate) fn pool_has_workers() -> bool {
+    pool().workers() > 0
 }
 
 /// The pool. The caller must have called
@@ -3699,6 +3815,21 @@ mod test {
         assert!(code.contains("    std::time::Instant::now()\n}"), "the read is now()'s last line");
     }
 
+    /// Every thread the pool starts goes through `started`, which ends the
+    /// process when the thread cannot start: by then the pool is published
+    /// and counts that thread, and a panic would leave the pool to whoever
+    /// caught it (the 0.10 fixes' own audit, BLAKE3 #461). What can be
+    /// refused before the pool is published, the fork handler, is.
+    #[test]
+    fn every_pool_thread_starts_through_started() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lanes.rs")).expect("lanes.rs, beside the crate's manifest");
+        let (code, _tests) = source.split_once("#[cfg(test)]\nmod test {").expect("the tests' module");
+        assert_eq!(code.matches(".spawn(").count(), 3, "the SME2 thread, worker 1, and the workers that worker 1 starts");
+        assert_eq!(code.matches("started(std::thread::Builder::new()").count(), 3, "each spawn's result goes to `started`");
+        let (handler, published) = (code.find("pthread_atfork(None").expect("the fork handler"), code.find("POOL.set(pool)").expect("the pool's publication"));
+        assert!(handler < published, "the fork handler is registered before the pool is published");
+    }
+
     /// The pool's workers are every thread but the calling one.
     #[test]
     fn test_the_workers_are_every_thread_but_the_caller() {
@@ -3706,6 +3837,15 @@ mod test {
             assert_eq!(Pool::workers_of(threads), threads - 1);
         }
         assert_eq!(pool().workers(), pool().threads - 1);
+    }
+
+    /// A Pipeline gives its actions to the pool where the pool has a
+    /// worker to take them: in every pool of more than one thread. (In a
+    /// pool of one, tests/one_thread_external.rs.)
+    #[test]
+    fn a_pool_of_more_than_one_thread_has_workers() {
+        crate::initialize_multithreaded(None);
+        assert_eq!(pool_has_workers(), pool().threads > 1);
     }
 
     /// A stream open is what makes an idle worker spin before it parks
@@ -3875,8 +4015,18 @@ mod test {
 
     /// Check whole-KiB cuts near the transitions between piece sizes. The
     /// cut is independent of the kernels, so every target can check it.
+    /// Each cut is then merged, on values that stand for the pieces': the
+    /// merge joins siblings only (the tree's calls stop on any other
+    /// pair), finds something to join at every level, and ends at the
+    /// root's two children. (The merge needs a value at every size from
+    /// the workers' first piece up to the prefix's smallest: true of the
+    /// share `sme2_prefix` gives, and this is what would say so if a
+    /// change to that share made it false.)
     #[test]
     fn the_prefix_cut_keeps_subtrees_aligned() {
+        crate::initialize();
+        let tree = TreeHasher::new(crate::Mode::Plain);
+        let mut cvs = Vec::new();
         let mut pieces = Vec::new();
         for threads in 2..=64 {
             let limit = threads * MAX_PIECE_LEN + (1 << 20);
@@ -3893,6 +4043,13 @@ mod test {
                 );
                 let tail = pieces.last().unwrap();
                 assert_eq!(tail.offset + tail.len, len);
+                let (end, whole) = pieces.split_last().unwrap();
+                cvs.clear();
+                cvs.extend(whole.iter().map(|p| ChainingValue::at(level_of(p.len as u64), (p.offset / p.len) as u64, [1; 32])));
+                let last = LastCv::at((end.offset / CHUNK_LEN) as u64, end.len as u64, [2; 32]);
+                let (left, right) = merge_to_children(&pieces, &mut cvs, last, &tree);
+                assert_eq!((left.index(), right.first_chunk()), (0, 1 << left.level()), "{len} bytes, {threads} threads: the root's left child");
+                assert_eq!(((CHUNK_LEN as u64) << left.level()) + right.len(), len as u64, "{len} bytes, {threads} threads: the root's two children");
             }
         }
     }

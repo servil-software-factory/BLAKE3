@@ -37,22 +37,45 @@ import sys
 import tomllib
 from pathlib import Path
 
+# No compiled copy of the module beside it: a stamp needs a clean tree,
+# and must not be what dirties it.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import release_artifacts
+
 
 def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
 def edit(path, pattern, replacement):
-    """Replace the first line matching `pattern`; stop if none does."""
-    with open(path) as f:
+    """Replace the first line matching `pattern`; stop if none does. Every
+    other byte stays: the file is read and written with its line ends as
+    they are."""
+    with open(path, newline="") as f:
         text, n = re.subn(pattern, replacement, f.read(), count=1, flags=re.M)
     if n != 1:
         sys.exit(f"{path}: no line matches {pattern}")
-    with open(path, "w") as f:
+    with open(path, "w", newline="") as f:
         f.write(text)
 
 
-RELEASE = re.compile(r"(\d+\.\d+\.\d+)\+([0-9a-f]{40}|dev)")
+RELEASE = re.compile(r"([0-9]+\.[0-9]+\.[0-9]+)\+([0-9a-f]{40}|dev)")
+# The notes' title as a stamp can replace it: the version is the whole
+# token up to a space, a comma or the line's end, in ASCII digits (the
+# release check reads bytes; Python's \d and \s also take other scripts'
+# digits and spaces). The check and the stamp read the title by this one
+# pattern: where they differed, a stamp replaced more than the check saw.
+TITLED = r"# blake3-servil [0-9]+\.[0-9]+\.[0-9]+\+(?:[0-9a-f]{40}|dev)"
+TITLE = re.compile(TITLED + r"(?:[ \t,].*)?")
+
+
+def notes_title():
+    """The notes' first line: up to the first line feed, and no other
+    character ends it (Python's splitlines ends a line at a form feed and
+    at a dozen more, which the stamp reads through)."""
+    with open("CHANGELOG.md", newline="") as f:
+        return f.read().split("\n", 1)[0]
 
 
 def current():
@@ -95,9 +118,17 @@ def check_copies(full):
     # version commit to change a line only from X.Y.Z+dev, or
     # X.Y.Z+<commit>, to the release's. A title such as "0.10.0+SHA"
     # made the 0.10.0 candidate's version commit one that check refused.
-    title = Path("CHANGELOG.md").read_text().splitlines()[0]
-    if not re.fullmatch(r"# blake3-servil \d+\.\d+\.\d+\+(?:[0-9a-f]{40}|dev)\b.*", title):
+    title = notes_title()
+    # The whole token set_version replaces (up to a space or a comma): a
+    # title "0.10.0+dev-preview," passed a looser test here, and its stamp,
+    # which drops "-preview", was then refused by the release check.
+    if not TITLE.fullmatch(title):
         sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> (found {title!r})")
+    # On a version commit the title names the release, as every other copy
+    # does: the stamp writes it, and a title put back by hand to X.Y.Z+dev
+    # or to an older release's would go out over the new release's notes.
+    if not full.endswith("+dev") and not title.startswith((f"# blake3-servil {full} ", f"# blake3-servil {full},", f"# blake3-servil {full}\t")) and title != f"# blake3-servil {full}":
+        sys.exit(f"CHANGELOG.md: its title names the release {full} on its version commit (found {title!r})")
     if f'#define B3_VERSION "{full}"' not in Path("capi/b3.h").read_text().splitlines():
         sys.exit(f"capi/b3.h: B3_VERSION must be {full}")
     lock = tomllib.loads(Path("b3sum/Cargo.lock").read_text())
@@ -121,23 +152,37 @@ def check_copies(full):
 
 def set_version(full, notes=True):
     """Stamp the packages and their pins; keep a past release's notes with --dev."""
-    files = list(PACKAGES.values())
-    for path in files:
-        edit(path, r'^version = ".*"$', f'version = "{full}"')
-    for path, dependency in PINS.items():
-        edit(path, rf'^({dependency} = \{{ version = ")[^"]*', rf"\g<1>={full}")
     if notes:
-        edit("CHANGELOG.md", r"^# blake3-servil [^\s,]+", f"# blake3-servil {full}")
+        # The title as it is must be one a stamp may replace, checked
+        # before anything is written: the stamp writes the whole token
+        # anew, and the check after it would see only the new one.
+        title = notes_title()
+        if not TITLE.fullmatch(title):
+            sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> before a stamp replaces it (found {title!r})")
+    files = list(PACKAGES.values())
+    lines = [(path, r'^version = ".*"$', f'version = "{full}"') for path in files]
+    lines += [(path, rf'^({dependency} = \{{ version = ")[^"]*', rf"\g<1>={full}") for path, dependency in PINS.items()]
+    if notes:
+        lines.append(("CHANGELOG.md", r"\A" + TITLED + r"(?=[ \t,\n]|\Z)", f"# blake3-servil {full}"))
         files.append("CHANGELOG.md")
-    edit("capi/b3.h", r'^#define B3_VERSION ".*"$', f'#define B3_VERSION "{full}"')
+    lines.append(("capi/b3.h", r'^#define B3_VERSION ".*"$', f'#define B3_VERSION "{full}"'))
+    # The release lock names the published packages too, as its
+    # workspace's members: no workspace of theirs is in the repository for
+    # Cargo to update it by.
+    lines += [(RELEASE_LOCK, rf'^(name = "{re.escape(name)}"\nversion = ")[^"]*', rf"\g<1>{full}") for name in PACKAGES if name != "blake3-servil-c"]
+    # Every line to replace is found before any is written: a stamp that
+    # stopped at a file it could not read as it expects (one with carriage
+    # returns before its line feeds, say) had by then written the files
+    # before it.
+    for path, pattern, _ in lines:
+        with open(path, newline="") as f:
+            if not re.search(pattern, f.read(), flags=re.M):
+                sys.exit(f"{path}: no line matches {pattern}; nothing is written")
+    for path, pattern, replacement in lines:
+        edit(path, pattern, replacement)
     # The CLI's tracked lock contains all four published packages.
     subprocess.run(["cargo", "update", "-q", *[a for name in PACKAGES if name != "blake3-servil-c" for a in ("-p", name)]],
                    cwd="b3sum", check=True)
-    # The release lock names them too, as its workspace's members: no
-    # workspace of theirs is in the repository for Cargo to update it by.
-    for name in PACKAGES:
-        if name != "blake3-servil-c":
-            edit(RELEASE_LOCK, rf'^(name = "{re.escape(name)}"\nversion = ")[^"]*', rf"\g<1>{full}")
     files += ["b3sum/Cargo.lock", RELEASE_LOCK, "capi/b3.h"]
     check_copies(full)
     return files
@@ -177,6 +222,16 @@ files = set_version(full)
 # --no-verify: the pre-commit hook's speed check measures code, and this
 # commit changes version strings alone (AGENTS: follow a rule for its purpose).
 git("commit", "-q", "--no-verify", "-m", f"Version {full}", "--", *files)
+# The release check's own reading of a version commit, before the tag
+# names this one: its parent with the version written in, and nothing
+# else. A stamp can write more than that where a tool it runs rewrites a
+# whole file (Cargo's update of b3sum's lock drops a comment there), and
+# the release check then refused a tag that already stood.
+try:
+    release_artifacts.Release(f"v{full}", repo=os.getcwd(), commit=git("rev-parse", "HEAD"))
+except release_artifacts.NotARelease as refused:
+    git("reset", "-q", "--hard", "HEAD^")
+    sys.exit(f"the stamp is undone: no tag is made, and the tree is as it was. {refused}")
 git("tag", f"v{full}")
 print(f"v{full}")
 # The dependency line for the release notes: the release commit by its full

@@ -35,6 +35,8 @@ class Versions(unittest.TestCase):
             (src / "lib.rs").write_text("")
         (self.root / "tools").mkdir()
         shutil.copyfile(SCRIPT, self.root / "tools/gen-ver.py")
+        # The stamp reads its own commit as the release check will.
+        shutil.copyfile(SCRIPT.with_name("release_artifacts.py"), self.root / "tools/release_artifacts.py")
         (self.root / "CHANGELOG.md").write_text("# blake3-servil 0.8.0+" + "a" * 40 + ", against official BLAKE3\n")
         (self.root / "capi/b3.h").write_text(f'#define B3_VERSION "{DEV}"\n')
         self.run_command("cargo", "generate-lockfile", "--offline", "--manifest-path", "b3sum/Cargo.toml")
@@ -115,7 +117,115 @@ class Versions(unittest.TestCase):
         notes = self.root / "CHANGELOG.md"
         notes.write_text("# blake3-servil 0.8.0+SHA, against official BLAKE3\n")
         self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
-        notes.write_text("# blake3-servil 0.8.0+dev, against official BLAKE3\n")
+        # The stamp replaces the whole token up to a space or a comma, so
+        # the version must be that whole token: more after it would be lost.
+        for more in ("dev-preview", "devx", "dev.1", "a" * 41, "a" * 40 + "-dirty"):
+            with self.subTest(more=more):
+                notes.write_text(f"# blake3-servil 0.8.0+{more}, against official BLAKE3\n")
+                self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+        # Digits and spaces of other scripts are no part of a version: the
+        # release check reads the title's bytes.
+        for title in ("\uff10.\uff18.\uff10+dev, against official BLAKE3", "0.8.0+dev\u00a0against official BLAKE3"):
+            with self.subTest(title=title):
+                notes.write_text(f"# blake3-servil {title}\n")
+                self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+        # A stamp refuses such a title too, before it replaces it: after,
+        # the title would be the stamp's own, and look right.
+        notes.write_text("# blake3-servil 0.8.0+dev-preview, against official BLAKE3\n")
+        self.git("commit", "-qam", "a title no stamp may replace")
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}
+        self.assertIn("before a stamp replaces it", self.stamp("0.9.0", succeeds=False))
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}, before, "a refused stamp writes nothing")
+        for title in ("0.8.0+dev, against official BLAKE3", "0.8.0+dev against official BLAKE3", "0.8.0+dev", "0.8.0+" + "a" * 40 + ", against official BLAKE3"):
+            with self.subTest(title=title):
+                notes.write_text(f"# blake3-servil {title}\n")
+                self.stamp("--check")
+
+    def test_a_stamp_replaces_the_title_alone(self):
+        # The title's version runs to a space, a comma or the line's end: a
+        # title with nothing after its version once let the stamp run on
+        # into the lines below it, up to their first space or comma.
+        notes = self.root / "CHANGELOG.md"
+        notes.write_text("# blake3-servil 0.8.0+dev\n\nFaster,\nand the same hashes.\n")
+        self.git("commit", "-qam", "a title that ends with its version")
+        self.stamp("0.9.0")
+        title, rest = notes.read_text().split("\n", 1)
+        self.assertRegex(title, r"^# blake3-servil 0\.9\.0\+[0-9a-f]{40}$")
+        self.assertEqual(rest, "\nFaster,\nand the same hashes.\n")
+
+    def test_the_check_and_the_stamp_end_the_title_where_a_line_feed_does(self):
+        # Python's splitlines ends a line at a form feed, a next-line
+        # character and others, and the stamp's pattern read through them:
+        # the check saw "0.8.0+dev", and the stamp replaced "-preview" too.
+        notes = self.root / "CHANGELOG.md"
+        for end in ("\x0c", "\x1c", "\x85", "\u2028"):
+            with self.subTest(end=repr(end)):
+                notes.write_text(f"# blake3-servil 0.8.0+dev{end}-preview, against official BLAKE3\n")
+                self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+        self.git("commit", "-qam", "a title that ends at a line separator no file ends a line with")
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}
+        self.assertIn("before a stamp replaces it", self.stamp("0.9.0", succeeds=False))
+        self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}, before, "a refused stamp writes nothing")
+
+    def test_a_stamp_keeps_the_notes_line_ends(self):
+        # A carriage return before each line feed stays: read as text and
+        # written back, the notes lost them all, a change to every line.
+        notes = self.root / "CHANGELOG.md"
+        notes.write_bytes(b"# blake3-servil 0.8.0+dev, against official BLAKE3\r\n\r\nFaster.\r\n")
+        self.git("commit", "-qam", "notes with carriage returns")
+        self.stamp("0.9.0")
+        title, rest = notes.read_bytes().split(b"\n", 1)
+        self.assertRegex(title, rb"^# blake3-servil 0\.9\.0\+[0-9a-f]{40}, against official BLAKE3\r$")
+        self.assertEqual(rest, b"\r\nFaster.\r\n")
+        # With nothing after the version but the carriage return, the title
+        # is not one the pattern knows, and nothing is stamped.
+        notes.write_bytes(b"# blake3-servil 0.8.0+dev\r\n\r\nFaster.\r\n")
+        self.assertIn("CHANGELOG.md: its title must name a version", self.stamp("--check", succeeds=False))
+
+    def files(self):
+        return {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts and "__pycache__" not in p.parts}
+
+    def test_a_stamp_the_release_check_would_refuse_is_undone(self):
+        # Cargo writes b3sum's lock anew and drops a comment in it: a line
+        # removed, which the release check allows no version commit. The
+        # check before the stamp passes; the stamp made its commit and its
+        # tag, and the release check then refused them.
+        lock = self.root / "b3sum/Cargo.lock"
+        lock.write_text(lock.read_text() + "# a note someone left\n")
+        self.git("commit", "-qam", "a comment in b3sum's lock")
+        self.stamp("--check")
+        head, before = self.git("rev-parse", "HEAD"), self.files()
+        said = self.stamp("0.9.0", succeeds=False)
+        self.assertIn("the stamp is undone", said)
+        self.assertIn("b3sum/Cargo.lock has lines added or removed", said)
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual(self.git("tag", "-l"), "")
+        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
+        self.assertEqual(self.files(), before)
+
+    def test_a_stamp_writes_nothing_where_a_line_to_replace_is_missing(self):
+        # The header's line is not as the stamp expects (carriage returns):
+        # the manifests before it were written by then, and the stamp left
+        # them so.
+        (self.root / "capi/b3.h").write_bytes(b'#define B3_VERSION "' + DEV.encode() + b'"\r\n')
+        self.git("commit", "-qam", "a header with carriage returns")
+        before = self.files()
+        said = self.stamp("0.9.0", succeeds=False)
+        self.assertIn("capi/b3.h: no line matches", said)
+        self.assertIn("nothing is written", said)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.git("tag", "-l"), "")
+
+    def test_check_holds_a_version_commits_title_to_its_release(self):
+        self.stamp("99.2.0")
+        self.stamp("--check")
+        notes = self.root / "CHANGELOG.md"
+        stamped = notes.read_text()
+        for title in ("0.8.0+dev", "0.8.0+" + "a" * 40, "99.2.0+dev"):
+            with self.subTest(title=title):
+                notes.write_text(f"# blake3-servil {title}, against official BLAKE3\n")
+                self.assertIn("CHANGELOG.md: its title names the release 99.2.0+", self.stamp("--check", succeeds=False))
+        notes.write_text(stamped)
         self.stamp("--check")
 
     def test_check_rejects_each_stale_copy(self):

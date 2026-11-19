@@ -129,9 +129,18 @@ pub unsafe fn hash_many<const N: usize>(
             // The parent kernel reads its sixteen 64-byte blocks from one
             // contiguous run. Every caller in this crate already stores
             // parent inputs that way; anyone else gets a copy.
-            let base = inputs[0].as_ptr();
-            let contiguous = inputs[..count].iter().enumerate().all(|(i, input)| input.as_ptr() == unsafe { base.add(i * BLOCK_LEN) });
+            //
+            // The kernel reads the whole run through one pointer, and no
+            // input's own pointer may read its neighbours: it is the
+            // pointer of a borrow of 64 bytes. So the addresses are
+            // compared as numbers, each input's pointer is exposed as it
+            // is compared, and the kernel's pointer is made from the first
+            // address, with leave to read what the exposed pointers may
+            // (`core::ptr::with_exposed_provenance`).
+            let first = inputs[0].as_ptr().expose_provenance();
+            let contiguous = inputs[..count].iter().enumerate().all(|(i, input)| input.as_ptr().expose_provenance() == first.wrapping_add(i * BLOCK_LEN));
             if contiguous {
+                let base = core::ptr::with_exposed_provenance::<u8>(first);
                 unsafe { kernel(base, key.as_ptr(), counter, packed_flags, out.as_mut_ptr(), full_groups as u64) }
             } else {
                 // Gather up to GATHER groups per kernel call, so one entry
@@ -533,9 +542,10 @@ unsafe fn walk_in(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, ke
         // sixteen parents reads 32 values from `src` and writes 16 into
         // `dst`, within the room scratch_layout leaves. The values past the
         // level's own are whatever the scratch holds there (on a new block,
-        // bytes never written): the kernel makes of them parents that
-        // nothing reads, in lanes of their own, and no branch or address
-        // depends on a value.
+        // bytes never written): the kernel makes parents of them, in lanes
+        // of their own. A later level may hash those in turn, into lanes
+        // as spare; no value kept, and no branch or address, depends on
+        // one.
         let mut count = n;
         while count > keep {
             let parents = count / 2;

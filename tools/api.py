@@ -5,21 +5,93 @@ list (its JSON output), so the page names exactly what the crate offers.
 
     python3 tools/api.py DOC.json                 # the list
     python3 tools/api.py DOC.json --check PAGE    # PAGE's list is this one
+    python3 tools/api.py DOC.json --check         # the two checks below alone
+
+`--check` also holds two inventories to the crate (BLAKE3-Servil 0.9's
+wrong hash, GHSA-v237-j9h9-8pf7, was a trait implementation that no
+sentence described and no test walked together with the call it broke):
+
+- Every public type that implements a trait (derived or written; auto
+  traits and blanket implementations aside) has in its documentation a
+  section "# Trait implementations" with one line for each: the trait's
+  name in backquotes, then a sentence that says what the implementation
+  gives and what it keeps true. A trait with no line, or a line with no
+  trait, fails.
+- Every operation (public method or trait implementation) of a type in
+  LIFECYCLES is named in its lifecycle test, in the comment block
+  "// WALKED", or in "// NOT_WALKED" with a reason. The core's walk also
+  names the free functions whose signature mentions Hasher. An operation
+  in neither list, or a name that is no operation, fails.
+
+To cover another type, add its rustdoc name to LIFECYCLES for its crate
+and name its operations in that test. The checks compare names: whether
+a sentence is true and a walk tests what it names is for review.
 
 A page is its own opening, then the list from the line "## Crate root"
 to its end; `--check` compares that part and prints what differs
 (tools/check-builds.sh runs it on docs/core-api.md).
 
-DOC.json: `RUSTC_BOOTSTRAP=1 cargo rustdoc --lib --features serde --
--Z unstable-options --output-format json` writes it under target/doc/.
+DOC.json: `RUSTC_BOOTSTRAP=1 cargo rustdoc --lib --all-features --
+-Z unstable-options --output-format json` writes it under target/doc/
+(every feature: an implementation behind one is the kind that was missed).
 Hidden items (`#[doc(hidden)]`) are left out: they are not for programs.
 """
 import json
 import re
 import sys
+from pathlib import Path
 
-doc = json.load(open(sys.argv[1]))
-ix, crate = doc["index"], None
+LIFECYCLES = {
+    "blake3_servil_core": ("tests/lifecycle.rs", {"Hasher", "OutputReader"}),
+    "blake3_servil": ("threads/tests/lifecycle.rs", {"Pipeline", "Room", "Message", "Lent"}),
+}
+
+
+def compare_names(label, expected, actual):
+    missing, stale = sorted(expected - actual), sorted(actual - expected)
+    if missing or stale:
+        raise ValueError(f"{label}: missing {missing}; stale {stale}")
+
+
+def check_traits(name, traits, docs):
+    sections = re.split(r"^# Trait implementations[ \t]*$", docs or "", flags=re.M)
+    if not traits and len(sections) == 1:
+        return
+    if len(sections) != 2:
+        raise ValueError(f"{name}: expected one # Trait implementations section for {sorted(traits)}")
+    body = re.split(r"^# \S", sections[1], maxsplit=1, flags=re.M)[0]
+    # A line may run on: what follows a "- " up to a blank line is one item.
+    items = []
+    for line in map(str.strip, body.splitlines()):
+        if line.startswith(("- ", "* ")):
+            items.append(line[2:])
+        elif line and items and items[-1] is not None:
+            items[-1] += " " + line
+        else:
+            items.append(None)
+    names = set()
+    for item in filter(None, items):
+        m = re.fullmatch(r"`(\w+)` (\S.*\.)", item)
+        if not m or m[1] in names:
+            raise ValueError(f"{name}: malformed or duplicate trait line: {item}")
+        names.add(m[1])
+    compare_names(name + " trait contracts", traits, names)
+
+
+def check_walk(label, operations, text):
+    blocks = re.findall(r"^// WALKED\n((?:// [^\n]*\n)*?)// NOT_WALKED\n((?:// [^\n]*\n)*?)// END$", text, re.M)
+    if len(blocks) != 1:
+        raise ValueError(f"{label}: expected WALKED, NOT_WALKED and END")
+    walked, omitted = blocks[0]
+    names = [word for line in walked.splitlines() for word in line[3:].split()]
+    for line in omitted.splitlines():
+        m = re.fullmatch(r"// (\w+::\w+): (\S.*)", line)
+        if not m:
+            raise ValueError(f"{label}: expected an operation and reason in {line}")
+        names.append(m[1])
+    if len(names) != len(set(names)):
+        raise ValueError(f"{label}: duplicate walk declaration")
+    compare_names(label, operations, set(names))
 
 
 def ty(t):
@@ -141,7 +213,7 @@ def show_type(it, path):
     if it["id"] in seen:
         return
     seen.add(it["id"])
-    lines, traits = [], []
+    lines, traits, methods = [], [], []
     if kind == "enum":
         for vid in inner["variants"]:
             v = ix[str(vid)]
@@ -154,9 +226,14 @@ def show_type(it, path):
         i = ix[str(iid)]["inner"]["impl"]
         if i.get("is_synthetic") or i.get("blanket_impl"):
             continue
+        # rustdoc also lists, under a type, the implementations that only
+        # mention it (`From<Cv> for LastCv` under `Cv`): another type's.
+        if i.get("trait") and i["for"].get("resolved_path", {}).get("id") != it["id"]:
+            continue
         if i.get("trait"):
-            traits.append(i["trait"]["path"].split("::")[-1])
-            traits = [t for t in traits if t != "StructuralPartialEq"]
+            trait = i["trait"]["path"].split("::")[-1]
+            if trait != "StructuralPartialEq":
+                traits.append(trait)
         else:
             for mid in i["items"]:
                 m = ix[str(mid)]
@@ -165,8 +242,14 @@ def show_type(it, path):
                 mk = next(iter(m["inner"]))
                 if mk == "function":
                     lines.append(fn(m))
+                    methods.append(m["name"])
                 elif mk in ("assoc_const", "constant"):
                     lines.append("const " + m["name"])
+    if checking:
+        name = it["name"]
+        check_traits(name, set(traits), it.get("docs"))
+        if name in covered:
+            operations.update(f"{name}::{op}" for op in methods + traits)
     if lines:
         out.append("```rust\n" + "\n".join(lines) + "\n```\n")
     if traits:
@@ -191,12 +274,12 @@ def walk(mid, path, depth):
             if hidden(target):
                 continue
             tk = next(iter(target["inner"]))
-            (fns if tk == "function" else types if tk in ("struct", "enum", "trait", "type_alias") else mods if tk == "module" else consts).append((u["name"], target) if tk != "function" else target)
+            (fns if tk == "function" else types if tk in ("struct", "enum", "union", "trait", "type_alias") else mods if tk == "module" else consts).append((u["name"], target) if tk != "function" else target)
         elif kind == "module":
             mods.append((it["name"], it))
         elif kind == "function":
             fns.append(it)
-        elif kind in ("struct", "enum", "trait", "type_alias"):
+        elif kind in ("struct", "enum", "union", "trait", "type_alias"):
             types.append((it["name"], it))
         elif kind == "constant":
             consts.append((it["name"], it))
@@ -208,6 +291,8 @@ def walk(mid, path, depth):
     if fns:
         out.append("")
         for f in fns:
+            if checking and "Hasher" in covered and re.search(r"\bHasher\b", fn(f)):
+                operations.add((path + "::" + f["name"]).split("::", 1)[1])
             out.append(f"- `{fn(f)}`  \n  {first_sentence(f)}")
         out.append("")
     for name, it in types:
@@ -219,11 +304,23 @@ def walk(mid, path, depth):
         walk(it["id"], path + "::" + name, depth)
 
 
-root = ix[str(doc["root"])]
-crate = root["name"]
-walk(doc["root"], crate, 2)
-listed = "\n".join(out).strip() + "\n"
-if sys.argv[2:3] == ["--check"]:
+def main():
+    global ix, covered, checking, operations
+    doc = json.loads(Path(sys.argv[1]).read_text())
+    ix = doc["index"]
+    crate = ix[str(doc["root"])]["name"]
+    checking = sys.argv[2:3] == ["--check"]
+    if checking:
+        test, covered = LIFECYCLES[crate]
+        operations = set()
+    walk(doc["root"], crate, 2)
+    listed = "\n".join(out).strip() + "\n"
+    if not checking:
+        print(listed, end="")
+        return
+    check_walk(test, operations, (Path(__file__).resolve().parents[1] / test).read_text())
+    if len(sys.argv) == 3:
+        return
     import difflib
 
     page = open(sys.argv[3]).read()
@@ -233,5 +330,10 @@ if sys.argv[2:3] == ["--check"]:
     if shown != listed:
         sys.stdout.writelines(difflib.unified_diff(shown.splitlines(True), listed.splitlines(True), sys.argv[3], "the crate"))
         sys.exit(f"{sys.argv[3]}: its list differs from the crate's; write the list again (python3 tools/api.py DOC.json)")
-else:
-    print(listed, end="")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except ValueError as error:
+        sys.exit(str(error))

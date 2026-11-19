@@ -316,9 +316,10 @@ pub(crate) fn ran(kind: Ran) {
 /// threads wait asleep whenever no call has work for them (their memory:
 /// see [Memory](crate#memory)). Later calls return at once, and must ask
 /// for the same number: another `Some` panics. A panic on a worker thread
-/// (a bug in this crate) ends the process, its message printed, rather
-/// than leaving the call that waits for that worker's piece waiting
-/// forever.
+/// (a bug in this crate, or a waker of the program's that panics when a
+/// worker wakes it) ends the process, once the process's panic hook has
+/// printed its message, rather than leaving the call that waits for
+/// that worker's piece waiting forever.
 ///
 /// `None` counts logical CPUs, so on a CPU with SMT (Hyper-Threading) both
 /// threads of each core, and that is the faster default. On an EPYC 9255,
@@ -340,6 +341,20 @@ pub(crate) fn ran(kind: Ran) {
 /// last-level cache, each worker is kept to a cache within that node.
 /// A call wakes workers under its own cache first where it has any there.
 /// Calling threads keep their own affinity and their buffer placement.
+/// To do this, on a Linux machine with more than one memory node, the
+/// call reads the node's CPUs from `/sys/devices/system`, and the first
+/// worker binds itself to them with `sched_setaffinity` before it starts
+/// the others, which inherit them (the SME2 thread binds itself too).
+/// Where the kernel shows no list
+/// of memory nodes at all (no `/sys/devices/system/node/online`), the
+/// machine is taken to have one node, and nothing more is read or bound.
+/// Where the list is there and a part of the topology cannot be read,
+/// this call panics, and where that binding is refused, the process ends,
+/// each saying why: a sandbox that shows the nodes and hides their CPUs,
+/// or refuses the binding, needs a pool of one thread
+/// (`NonZeroUsize::new(1)`), which reads and binds nothing. A request
+/// for `n` threads starts `n - 1` workers on that node whether or not it
+/// has `n` CPUs.
 /// For each kind and size of call under 256 MiB, a caller with local
 /// workers learns whether they or all workers on the node finish sooner.
 ///
@@ -355,9 +370,17 @@ pub(crate) fn ran(kind: Ran) {
 /// to its share of the machine.
 ///
 /// The threads are this process's: in a child forked after they started,
-/// every multithreaded call and stream panics, saying so (the child has
-/// none of them). A program that forks initializes the pool in the process
-/// that hashes, after any fork; its single-threaded calls work anywhere.
+/// every multithreaded call panics, saying so (the child has none of
+/// them), and so does a new [`Pipeline`](throughput::Pipeline). A
+/// Pipeline made before the fork is not to be used in the child: its
+/// calls panic the same way once one needs a worker, and one made while
+/// the parent's workers were hashing for it may wait for ever instead.
+/// Nor is it to be dropped there with work in flight at the fork, which
+/// the child never sees finished: that drop, or the drop of a
+/// [`Lent`](throughput::Lent) guard for such work, stops the child (a
+/// child that leaves by `_exit` or `exec` drops neither). A
+/// program that forks initializes the pool in the process that hashes,
+/// after any fork; its single-threaded calls work anywhere.
 ///
 /// Each thread that makes multithreaded calls keeps a little storage for
 /// them (its cut of the input, 48 KiB for inputs up to 64 MiB, and its
@@ -461,10 +484,13 @@ pub mod throughput {
         if out.len() < 2 || batch.bytes().len() < crate::lanes::MIN_SPLIT_LEN {
             return hash_many(mode, batch, out);
         }
-        // The whole batch as a part: its length is checked against the
-        // digests there, on the caller's thread.
+        // The whole batch as a part, its length checked against the
+        // digests first, as hash_many checks it: a division here would
+        // drop a ragged end (blocks borrowed that hold no whole number of
+        // messages) where hash_many refuses it.
+        assert_eq!(Some(batch.bytes().len()), batch.slot().checked_mul(out.len()), "input holds one slot per output");
         let (kind, key, context) = crate::lanes::parts(mode);
-        crate::lanes::hash_many_in(kind, key, context, batch.part(0..batch.bytes().len() / batch.slot()), out);
+        crate::lanes::hash_many_in(kind, key, context, batch.part(0..out.len()), out);
     }
 
     /// [`hash`], using other CPU cores where that is faster: the same

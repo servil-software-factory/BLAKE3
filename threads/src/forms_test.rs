@@ -387,6 +387,20 @@ fn packed_messages_hash_multithreaded_as_each_message_alone() {
     }
 }
 
+/// Blocks borrowed that hold no whole number of messages are refused by
+/// hash_many_multithreaded above the pool's split, as hash_many refuses
+/// them: before the 0.10 fixes' own review (BLAKE3 #461) it hashed the
+/// whole messages and passed over the ragged end.
+#[test]
+#[should_panic(expected = "input holds one slot per output")]
+fn a_ragged_borrowed_batch_is_refused_above_the_split() {
+    crate::initialize_multithreaded(None);
+    // Messages of two blocks in an odd number of blocks, 640,064 bytes.
+    let blocks = vec![Block::ZERO; 2 * 5000 + 1];
+    let mut out = vec![[0u8; 32]; 5000];
+    throughput::hash_many_multithreaded(Mode::Plain, &Batch::from_blocks(&blocks, 128), &mut out);
+}
+
 /// hash_many_multithreaded of messages of 2 to 16 whole blocks, at counts
 /// that fill SME2 groups and leave remainders, against hash_many (the
 /// core's test_hash_many_whole_blocks checks that against hash()).

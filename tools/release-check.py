@@ -182,25 +182,65 @@ def mutation_result(path, commit):
     return next((r for r in (False, None, NO_VERDICT) if r in results), True)
 
 
+def unpack_builds(archives, into):
+    """Write into the folder `into` each b3sum program and crate of the
+    zips `archives` ((artifact name, bytes) pairs, each one job's dist/),
+    and name where the builders do not bear each other out. Both Linux
+    builders package the crates, and each crate is to be the same bytes
+    from both:
+    - a crate two builders made with different bytes (the later copy once
+      replaced the earlier unread, so a builder that disagreed went unseen
+      whenever the other's crate was the local one's);
+    - a crate one builder made and another builder of crates did not (the
+      union of their files would still hold every crate, each seen once);
+    - crates from one builder alone;
+    - a zip that holds a name twice (reading by name reads one of them)."""
+    made_by, crates, differ = {}, {}, []
+    for artifact, archive in archives:
+        with zipfile.ZipFile(io.BytesIO(archive)) as files:
+            names = files.namelist()
+            for name in sorted({n for n in names if names.count(n) > 1}):
+                differ.append(f"{os.path.basename(name)} ({artifact} holds it {names.count(name)} times)")
+            for name in names:
+                base = os.path.basename(name)
+                if not (base.startswith("b3sum-") or name.endswith(".crate")) or release_artifacts.is_digest(name):
+                    continue
+                if name.endswith(".crate"):
+                    crates.setdefault(artifact, set()).add(base)
+                data, path = files.read(name), os.path.join(into, base)
+                if base in made_by:
+                    if release_artifacts.read(path) != data:
+                        differ.append(f"{base} ({made_by[base]} and {artifact})")
+                    continue
+                made_by[base] = artifact
+                with open(path, "wb") as f:
+                    f.write(data)
+    every = set().union(*crates.values())
+    for artifact in sorted(crates):
+        for base in sorted(every - crates[artifact]):
+            differ.append(f"{base} ({made_by[base]} made it and {artifact} did not)")
+    if len(crates) == 1:
+        differ.append(f"the crates ({next(iter(crates))} alone made them: no second builder bears them out)")
+    return differ
+
+
 def ci_builds(run, into):
     """Write into the folder `into` the b3sum programs and the crates
     that the CI run `run` made (its `b3sum release build` jobs' artifacts,
-    each a zip of that job's dist/)."""
+    each a zip of that job's dist/); return what its jobs disagree on
+    (unpack_builds)."""
     token = open(os.path.join(MAIN, "ghtokenclassic.txt")).read().strip()
-    for artifact in github(f"/repos/servil-software-factory/BLAKE3/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]:
-        if not artifact["name"].startswith("b3sum-"):
-            continue
-        # GitHub answers with a redirect to its storage, which refuses the
-        # token: gh follows it without.
-        archive = subprocess.run(["gh", "api", f"repos/servil-software-factory/BLAKE3/actions/artifacts/{artifact['id']}/zip"],
-                                 env={**os.environ, "GH_TOKEN": token}, capture_output=True, check=True, timeout=300).stdout
-        with zipfile.ZipFile(io.BytesIO(archive)) as files:
-            for name in files.namelist():
-                if os.path.basename(name).startswith("b3sum-") or name.endswith(".crate"):
-                    if release_artifacts.is_digest(name):
-                        continue
-                    with open(os.path.join(into, os.path.basename(name)), "wb") as f:
-                        f.write(files.read(name))
+
+    def archives():
+        for artifact in github(f"/repos/servil-software-factory/BLAKE3/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]:
+            if not artifact["name"].startswith("b3sum-"):
+                continue
+            # GitHub answers with a redirect to its storage, which refuses the
+            # token: gh follows it without.
+            yield artifact["name"], subprocess.run(["gh", "api", f"repos/servil-software-factory/BLAKE3/actions/artifacts/{artifact['id']}/zip"],
+                                                   env={**os.environ, "GH_TOKEN": token}, capture_output=True, check=True, timeout=300).stdout
+
+    return unpack_builds(archives(), into)
 
 
 def version_at(commit):
@@ -221,8 +261,9 @@ def artifacts_result(commit, run=None):
         return False, f"{e} (python3 tools/gen-ver.py X.Y.Z makes a version commit)"
     dist = os.path.join(ROOT, "dist")
     with tempfile.TemporaryDirectory() as second:
-        if run is not None:
-            ci_builds(run, second)
+        differ = (ci_builds(run, second) or []) if run is not None else []
+        if differ:
+            return False, "CI's own builders do not bear each other out on " + ", ".join(differ) + ": their files are no witness of the version commit's"
         ok, lines = release_artifacts.directory(dist, release, rebuilt=None if run is None else second)
     if ok is None:
         return None, (f"not in {dist} yet: {', '.join(lines)}. On each machine `sh tools/b3sum-release.sh` writes b3sum to its dist/, "

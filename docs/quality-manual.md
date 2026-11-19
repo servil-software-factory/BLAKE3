@@ -27,7 +27,7 @@ release's measure of assurance.
 | Wrong kernel output, out-of-bounds access, secret-dependent branch/address | proofs over assembled kernels under stated contracts; planted bad kernels rejected | correctness of all Rust callers, every toolchain's output, or the processor |
 | Worker reads state after its owner frees it | Pipeline worker-visible state lives for the process | correct reuse or synchronization of that state |
 | A wait loses a wake or races on a waker | Shuttle checks the production finish/park/waker modules | every possible schedule, or weak-memory execution |
-| The Pipeline hands a result, a Room or a storage over too early, or loses a wake | Shuttle runs the whole of `pipeline.rs` against a stand-in pool; nine planted faults each make that model fail | schedules not tried, weak-memory execution, and the pool itself, which the model replaces |
+| The Pipeline hands a result, a Room or a storage over too early, or loses a wake | Shuttle runs the whole of `pipeline.rs` against a stand-in pool; ten planted faults each make that model fail | schedules not tried, weak-memory execution, and the pool itself, which the model replaces |
 | An `unsafe` block rests on a reason no one wrote down | every block of `pipeline.rs` and of `b3sum` states its reason; a check refuses one without | that each stated reason is true: they are read by people and by the audits, not proved |
 | Kernel still writes an I/O buffer after error recovery frees it | failed `io_uring_enter` aborts before recovery or unwind; a ring dropped with reads in flight aborts; a panic in `b3sum` aborts | every other lifetime or cancellation path |
 | File name replaced after the file is opened | every path hashes the file already open; direct reads reopen that descriptor through procfs | a coherent snapshot against concurrent writes to that inode: a file changed while it is hashed can give the hash of bytes it never held (`b3sum/README.md`, #443) |
@@ -358,10 +358,28 @@ AI agents, using different leading-edge models. This is a release
 practice, in addition to the executable checks above, not a claim that
 any revision with passing tests has been audited.
 
+Different models are not by themselves coverage. Before 0.10.0,
+fourteen audits of one candidate, by ten models, were held against the
+seven defects it was later known to have: one model reported the wrong
+hash among them, in both of its runs, and the two audits this practice
+then asked for, from different model families, reported none of the
+seven
+([the record](https://gist.github.com/johnservil/08e776af83103177001101793a538b61)).
+So an audit counts as one of a release's two only when its model, with
+a brief of the same form, has been run on a tree of ours that holds
+known severe defects, and the release's record says what it found
+there. The candidate `1b8e2847ec11a76cee7041a0901b4d6721c41c3a` is
+such a tree (BLAKE3 #461 lists its defects). A "no findings" report
+from an auditor with no such measure is one more review, not one of
+the two.
+
 The agents first review independently, without the other agent's
 conclusions. Give each the exact source revision, the previous stable
 release, the contracts and build instructions. Ask each to inspect the
-implementation and changes, not merely summarize these documents. The
+implementation and changes, not merely summarize these documents. A
+brief asks, and asserts nothing about the code: "is the wipe still
+right, and what is a wiped value?", not "zeroization unchanged" (that
+sentence stood in the brief of the fourteen audits above). The
 scope includes:
 
 - `unsafe` code, aliasing, initialization and arithmetic bounds;
@@ -383,6 +401,15 @@ with a reason, or an explicitly accepted residual risk. Verify claims
 against the code; model agreement is not verification. Handle disclosure
 of vulnerabilities affecting released versions before publishing
 reproduction details.
+
+An audit is not the only form of review. For a type that keeps state,
+ask also for its contract: what a value means, the invariant every
+value keeps, and each operation, trait implementations included,
+checked against that. On the wrong hash above, nine models were given
+the type and its grouped calls: three reported it when asked to audit
+them, six when asked to write the contract and check the code against
+it, and the other three of those wrote down the value that no
+constructor makes.
 
 Re-review affected findings when code changes after the audit. Review
 the diff to the final version commit as well; a review of an earlier
@@ -822,15 +849,18 @@ python3 tools/pipeline_model_controls.py
 
 The Pipeline's model (`threads/tests/shuttle_pipeline.rs`) runs the
 whole of `pipeline.rs` with a stand-in for the pool: a queue of actions
-served by the model's worker threads. Its seven scenarios cover
+served by the model's worker threads. Its nine scenarios cover
 messages through Rooms, owned and lent messages, batches, an abort, one
-Pipeline after another on one storage, and a Room that outlives its
-Pipeline. Every digest is compared with the one-thread library's, a
-caller no one wakes is a deadlock, and each run ends with every storage
-free again. The second command plants nine faults in `pipeline.rs` one
-at a time (a result published before it is written, a wake left out, a
-Room given back while a worker reads it, a storage reused while held,
-and others) and requires the model to fail for each. What the model
+Pipeline after another on one storage, a Room that outlives its
+Pipeline, a wait for a Room that another thread's drop ends, and a
+Pipeline with no place in the pool. Every digest is compared with the
+one-thread library's, a caller no one wakes is a deadlock, and each run
+ends with every storage free again. The second command plants ten
+faults in `pipeline.rs` one at a time (a result published before it is
+written, a wake left out, a Room given back while a worker reads it, a
+storage reused while held, and others) and requires the model to fail
+for each. It plants them in a copy of the tree, in the build directory:
+the tree itself never holds a fault. What the model
 cannot see: Shuttle treats every atomic ordering as SeqCst; it tries
 thousands of schedules, not all; and the pool itself is the stand-in.
 
@@ -877,7 +907,30 @@ these model tests are run with Shuttle's own scheduling.
 - **Constant-time behaviour**: see "Timing and secrets", below.
 - **Fuzzing (cargo-fuzz)**: not used. The tests enumerate every kernel
   at every input shape, count, and boundary against fixed answers, the
-  paths a fuzzer would search for.
+  paths a fuzzer of one call's input would search for. Until 0.10 they
+  did not enumerate sequences of operations on a value that keeps
+  state, and 0.9's wrong hash (GHSA-v237-j9h9-8pf7) was such a
+  sequence: a trait implementation that left a `Hasher` no constructor
+  makes, then a grouped call that relied on every `Hasher` being one a
+  constructor makes. Each had tests of its own. The lifecycle tests
+  (`tests/lifecycle.rs`, `threads/tests/lifecycle.rs`) now walk such
+  sequences: every sequence of their steps to a small depth, and long
+  seeded ones, on several values at once. A step is one public
+  operation with a few lengths and neighbours, not every argument it
+  takes. After each step every `Hasher` in play is compared with
+  official BLAKE3, the ones the step did not name included; the
+  Pipeline's walk compares every event with official BLAKE3 and with
+  the order its messages ended in. `tools/api.py --check` refuses a
+  public method or trait implementation of those types that neither
+  walk's list names, and a trait implementation of any public type
+  whose documentation has no sentence for it. Both are lists of names
+  kept complete, for the features the documentation is built with and
+  for the implementations a crate writes for the type itself (not the
+  automatic or blanket ones, nor those for references to it): they
+  make a new operation's author say where it is walked, and do not show
+  that a walk tests what it names. A second model checked that, once,
+  with faults of its own (BLAKE3 #461). A fuzzer guided by coverage
+  over such sequences has not been tried.
 
 ## Timing and secrets
 
