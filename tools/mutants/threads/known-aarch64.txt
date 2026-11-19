@@ -48,7 +48,6 @@ src/lanes.rs	replace sources::<impl Drop for Held>::drop with ()	1	OPEN: the poo
 src/lanes.rs	replace sources::Source::unregister with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::open -> bool with false	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::open -> bool with true	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace sources::run_one -> bool with false	1	OPEN: the pool's scheduling: the workers never run a source's item, and the caller hashes every piece itself: the same digests. The tests it hung here were the first pipeline's (the VM's whole run at 5c0247cd, November 12); on x86-64 it times out (timeouts-x86_64.txt)
 src/lanes.rs	replace sources::visible -> bool with false	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
 src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)

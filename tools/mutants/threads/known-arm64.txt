@@ -81,32 +81,51 @@ src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under
 src/lanes.rs	replace || with && in sources::visible	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 # Linux affinity and NUMA code excluded on macOS (M6 3418). The
 # unbound two-node Linux job judges these sites; do not list them there.
-src/lanes.rs	delete ! in places::Node::find	2	compiled out off Linux: NUMA node discovery
+src/lanes.rs	delete ! in places::Node::find	1	compiled out off Linux: NUMA node discovery
+src/lanes.rs	delete ! in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	delete ! in places::number	1	compiled out off Linux: parsing Linux CPU lists
+src/lanes.rs	replace != with == in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace != with == in places::Node::within	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace != with == in places::affinity	1	compiled out off Linux: reading the thread affinity
 src/lanes.rs	replace != with == in places::has	1	compiled out off Linux: testing a member of a CPU or node set
+src/lanes.rs	replace & with ^ in places::Node::within	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace & with ^ in places::has	1	compiled out off Linux: testing a member of a CPU or node set
 src/lanes.rs	replace & with | in places::Node::within	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace & with | in places::has	1	compiled out off Linux: testing a member of a CPU or node set
+src/lanes.rs	replace && with || in places::Node::largest	3	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace && with || in places::Node::named	1	compiled out off Linux: a CPU's NUMA node by its directory
 src/lanes.rs	replace && with || in places::number	1	compiled out off Linux: parsing Linux CPU lists
+src/lanes.rs	replace * with + in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace * with / in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace - with + in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace - with / in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace / with % in places::Node::largest	2	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace / with % in places::affinity	1	compiled out off Linux: reading the thread affinity
 src/lanes.rs	replace / with % in places::cpu_set	2	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace / with % in places::has	1	compiled out off Linux: testing a member of a CPU or node set
+src/lanes.rs	replace / with * in places::Node::largest	2	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace / with * in places::affinity	1	compiled out off Linux: reading the thread affinity
+src/lanes.rs	replace / with * in places::cpu_set	2	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace / with * in places::has	1	compiled out off Linux: testing a member of a CPU or node set
 src/lanes.rs	replace < with <= in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace < with == in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace < with > in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace == with != in initialize	1	compiled out off Linux: condition in the Linux-only node initialization
+src/lanes.rs	replace == with != in places::Node::largest	4	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace == with != in places::Node::within	1	compiled out off Linux: node mask intersection
+src/lanes.rs	replace > with < in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace > with < in places::cpu_set	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace > with < in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace > with < in places::online_nodes	1	compiled out off Linux: checking the node topology file
+src/lanes.rs	replace > with == in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace > with == in places::cpu_set	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace > with == in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace > with == in places::online_nodes	1	compiled out off Linux: checking the node topology file
+src/lanes.rs	replace > with >= in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace > with >= in places::cpu_set	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace > with >= in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace > with >= in places::online_nodes	1	compiled out off Linux: checking the node topology file
+src/lanes.rs	replace >= with < in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace places::Node::bind with ()	1	compiled out off Linux: setting the node affinity
 src/lanes.rs	replace places::Node::cpu_count -> usize with 0	1	compiled out off Linux: counting allowed CPUs in the selected node
 src/lanes.rs	replace places::Node::cpu_count -> usize with 1	1	compiled out off Linux: counting allowed CPUs in the selected node
@@ -114,6 +133,13 @@ src/lanes.rs	replace places::Node::current -> Option<Self> with None	1	compiled 
 src/lanes.rs	replace places::Node::current -> Option<Self> with Some(Default::default())	1	compiled out off Linux: NUMA node discovery
 src/lanes.rs	replace places::Node::find -> Option<Self> with None	1	compiled out off Linux: NUMA node discovery
 src/lanes.rs	replace places::Node::find -> Option<Self> with Some(Default::default())	1	compiled out off Linux: NUMA node discovery
+src/lanes.rs	replace places::Node::largest -> Option<Self> with None	1	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace places::Node::largest -> Option<Self> with Some(Default::default())	1	compiled out off Linux: choosing among NUMA nodes
+src/lanes.rs	replace places::Node::listed -> Option<Set> with None	1	compiled out off Linux: reading a NUMA node's CPU list
+src/lanes.rs	replace places::Node::listed -> Option<Set> with Some(Default::default())	1	compiled out off Linux: reading a NUMA node's CPU list
+src/lanes.rs	replace places::Node::named -> Option<usize> with None	1	compiled out off Linux: a CPU's NUMA node by its directory
+src/lanes.rs	replace places::Node::named -> Option<usize> with Some(0)	1	compiled out off Linux: a CPU's NUMA node by its directory
+src/lanes.rs	replace places::Node::named -> Option<usize> with Some(1)	1	compiled out off Linux: a CPU's NUMA node by its directory
 src/lanes.rs	replace places::Node::within -> Option<Self> with None	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace places::Node::within -> Option<Self> with Some(Default::default())	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace places::affinity -> std::io::Result<Set> with Ok(Default::default())	1	compiled out off Linux: reading the thread affinity
@@ -127,8 +153,8 @@ src/lanes.rs	replace places::number -> Option<usize> with Some(0)	1	compiled out
 src/lanes.rs	replace places::number -> Option<usize> with Some(1)	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace places::online_nodes -> Option<Set> with None	1	compiled out off Linux: checking the node topology file
 src/lanes.rs	replace places::online_nodes -> Option<Set> with Some(Default::default())	1	compiled out off Linux: checking the node topology file
+src/lanes.rs	replace |= with &= in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace |= with &= in places::cpu_set	1	compiled out off Linux: parsing Linux CPU lists
-src/lanes.rs	replace || with && in places::Node::find	1	compiled out off Linux: NUMA node discovery
 src/lanes.rs	replace || with && in places::number	2	compiled out off Linux: parsing Linux CPU lists
 src/lib.rs	replace __confine_cli_to_one_node with ()	1	compiled out off Linux: setting the CLI's node affinity
 src/lib.rs	replace __all_workers_parked -> bool with true	1	a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before

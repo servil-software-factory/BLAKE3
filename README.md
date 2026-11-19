@@ -14,8 +14,10 @@ and an [Intel i7-12700K](https://servil-software-factory.github.io/bench-hashes/
 [an overview](https://servil-software-factory.github.io/bench-hashes/) sets every machine side by side.
 
 We measure and tune on one memory node. On Linux, the library keeps its
-workers on the initializing thread's node, within its allowed CPUs, and
-`b3sum` keeps its calling thread and workers within the same node. The
+workers on one node, within the CPUs the initializing thread is allowed:
+that thread's node or, where another node holds at least twice as many
+of those CPUs, the node that holds the most. `b3sum` keeps its calling thread and workers
+within the same node. The
 application still controls its own threads and buffer placement. This is
 for speed, and no hash depends on it. On a machine with several memory
 nodes it needs the node topology under `/sys/devices/system` to be

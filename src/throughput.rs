@@ -469,7 +469,13 @@ impl From<Cv> for LastCv {
 ///
 /// What no call can check: that the bytes handed over are the message's
 /// bytes at the place named. Wrong bytes give a wrong hash, as they do in
-/// any hash call.
+/// any hash call. Nor that a value was made in this mode and under this
+/// key: a [`Cv`] carries its place and not its mode, so one kept from a
+/// `TreeHasher` of another mode or key joins at the same place without a
+/// panic, and the root is then not promised to be the message's hash under
+/// either. A
+/// program that keeps values (a cache of subtrees) keeps them by mode and
+/// key as well as by place.
 ///
 /// A message hashed in parts of 4 KiB (the part size is checked when this
 /// compiles; parts of 5 MiB would stop the build):

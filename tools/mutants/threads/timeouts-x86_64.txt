@@ -2,12 +2,10 @@
 # nextest's clock stops one (tools/mutants/check.py, TIMEOUTS). Their own outcome: neither caught nor survived.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason. Not yet run on the i7.
 src/lanes.rs	replace && with || in Pool::serve	1	a worker spins while any stream is open without looking for work: the workers never park, and the tests that wait for every worker parked (test_idle_workers_park_while_a_stream_is_open, a_caller_looping_on_collect_makes_progress_with_sleeping_workers) wait until the clock, as they are written to; the digests stay right (gate16's logs, October 24)
-src/lanes.rs	replace &= with |= in sources::find	1	as on aarch64: times out (timeouts-aarch64.txt): find's own loop never empties `active`: even the single-threaded test_find_reaches_every_registered_source never returns (gate16's logs)
 src/lanes.rs	replace + with * in sources::Source::publish_job	1	a hang the test lanes::test::test_hash_many_pool_agrees showed: the job's pieces are miscounted; the caller waits for pieces that do not exist
 src/lanes.rs	replace + with * in sources::Source::take	1	hang: `c * 1 == c` never advances `claimed`, so the worker claims the same slot in an infinite loop
 src/lanes.rs	replace + with - in sources::Source::publish_job	1	a hang the test lanes::test::test_hash_many_pool_agrees showed: the job's pieces are miscounted; the caller waits for pieces that do not exist
 src/lanes.rs	replace += with *= in cut_items	1	a hang the test each::test::test_hash_each_multithreaded showed: the cut's byte count stays 0; pieces are cut forever
-src/lanes.rs	replace - with / in sources::find	1	as on aarch64: times out (timeouts-aarch64.txt): find's own loop never empties `active`: even the single-threaded test_find_reaches_every_registered_source never returns (gate16's logs)
 src/lanes.rs	replace all_workers_parked -> bool with false	1	a test-only hook (__all_workers_parked): a no that never turns yes, so the stream tests wait for every worker parked, forever
 src/lanes.rs	replace sources::Source::finished with ()	1	a hang the test each::test::test_hash_each_multithreaded showed: finished pieces are never counted; the caller waits for them
 src/lanes.rs	replace sources::Source::publish_job -> usize with 1	1	a hang the test lanes::test::test_hash_many_pool_agrees showed: the job's pieces are miscounted; the caller waits for pieces that do not exist
@@ -33,3 +31,5 @@ src/pipeline.rs	replace Pipeline<T, B>::flush_sealed_short_rooms with ()	1	hang:
 src/pipeline.rs	replace Pipeline<T, B>::front_uses_open_group -> bool with false	1	hang: poll_ready parks without publishing open_group when the front message sits in open_group
 src/pipeline.rs	replace Pipeline<T, B>::try_take_room -> Option<Room> with None	1	hang: poll_room never acquires a free room and parks forever
 src/pipeline.rs	replace += with -= in Ring<X>::push_back	1	hang: `len -= 1` on a push wraps (this profile checks no overflow), so Ring::len no longer counts what the ring holds: 15 tests fail and forms_test::test_every_multithreaded_call_inside_guard_pages waits 15 s for a result that never comes (applied by hand, November 17). Before the capacity assert ran in every build a test failed first.
+src/lanes.rs	replace &= with |= in sources::find_from	1	as on aarch64: times out (timeouts-aarch64.txt): find_from's loop (find's, before the turn) never empties `active`: even the single-threaded test_find_reaches_every_registered_source never returns (gate16's logs)
+src/lanes.rs	replace - with / in sources::find_from	1	as on aarch64: times out (timeouts-aarch64.txt): find_from's loop (find's, before the turn) never empties `active`: even the single-threaded test_find_reaches_every_registered_source never returns (gate16's logs)
