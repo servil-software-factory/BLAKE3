@@ -18,6 +18,17 @@ use crate::throughput::{Cv, TreeHasher};
 /// side by side); box it where that matters. It touches what it uses: a
 /// short message touches its first block.
 ///
+/// # After a panic
+///
+/// Each call says what it refuses, and a callback of the caller's may
+/// panic too. A call that panics leaves each hasher it was given holding
+/// a part of its message that is not specified: of a turn's pieces some
+/// may be in and others not, and after a callback's panic bytes that
+/// earlier updates took may be gone. Its hash is then of no use: replace
+/// such a hasher with a new one (or let
+/// [`finalize_each`](crate::throughput::finalize_each) take that hash,
+/// which resets the hasher) before its next message.
+///
 /// # Examples
 ///
 /// ```
@@ -492,6 +503,9 @@ impl Hasher {
     /// The callback finishes its work before returning. It is borrowed
     /// only for this update, so it can use the caller's workers or scratch.
     /// Input that is not passed to it hashes on the calling thread.
+    ///
+    /// If the callback panics, the Hasher is as [after a panic](Hasher#after-a-panic):
+    /// replace it.
     pub fn update_with(&mut self, input: &[u8], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2]) -> &mut Self {
         self.gather(input, Some(&Pool { min_len, halves }))
     }

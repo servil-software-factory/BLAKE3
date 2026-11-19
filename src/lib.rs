@@ -148,9 +148,11 @@
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] holds and the chaining values made from them stay in the
-//!   value and in the copies the kernels leave on the stack, until
-//!   something else overwrites them. Official BLAKE3 offers `Zeroize` for
-//!   its types.
+//!   value, in the copies the kernels leave on the stack, and in the
+//!   storage a thread keeps for its collections (`hash_each`'s, above,
+//!   and a table of chaining values on CPUs with SME2), until something
+//!   else overwrites them. Official BLAKE3 offers `Zeroize` for its
+//!   types.
 //!
 //! # Panics
 //!

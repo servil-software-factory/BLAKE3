@@ -169,8 +169,9 @@ Each is accepted, with its issue.
   (GHSA-v237-j9h9-8pf7). In 0.9, `zeroize()` left a `Hasher` with zero
   key words and no mode, which the grouped calls took for a plain
   hasher, and `update_each` hashed a group of plain hashers under the
-  key words of its first: named first in a call, a wiped hasher gave
-  the plain hashers beside it wrong hashes, and nothing reported it.
+  key words of its first: where a wiped hasher was the first in a call
+  to fill 16 KiB, it gave the plain hashers beside it wrong hashes, and
+  nothing reported it.
   0.10 has no `zeroize` feature, and a plain group hashes under
   BLAKE3's constant itself, never under a member's copy of it.
 - **The Pipeline frees nothing a worker can reach** (#399). Before any
