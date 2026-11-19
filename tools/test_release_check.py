@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("release_check", Path(__file__).with_name("release-check.py"))
@@ -287,6 +288,39 @@ class Artifacts(unittest.TestCase):
         with patch.object(check, "ROOT", str(self.repo)), patch.object(check, "git", self.git), patch.object(check, "ci_builds", ci_builds), \
              patch.object(check.release_artifacts, "CRATE_DIRS", ("",)), patch.object(check.release_artifacts, "B3SUM_TARGETS", ("x86_64-unknown-linux-gnu",)):
             return check.artifacts_result(commit, None if ci_built is None else {"id": 7})
+
+    def test_ci_builders_that_disagree_fail_in_either_order(self):
+        # Both Linux jobs package the crates. The later zip's copy replaced
+        # the earlier one's unread, so the verdict went by download order.
+        crate = f"top-crate-0.3.0+{self.code}.crate"
+
+        def zipped(files):
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w") as z:
+                for name, data in files.items():
+                    z.writestr(name, data)
+            return archive.getvalue()
+
+        one = zipped({f"dist/{crate}": b"the commit's crate", "dist/b3sum-x86": b"a program", "dist/b3sum-x86.sha256": b"a digest", "dist/notes.txt": b"aside"})
+        same = zipped({f"dist/{crate}": b"the commit's crate", "dist/b3sum-arm": b"another program"})
+        other = zipped({f"dist/{crate}": b"another crate", "dist/b3sum-arm": b"another program"})
+        for archives in ([("b3sum-x86", one), ("b3sum-arm", other)], [("b3sum-arm", other), ("b3sum-x86", one)]):
+            with self.subTest(first=archives[0][0]), tempfile.TemporaryDirectory() as into:
+                differ = check.unpack_builds(archives, into)
+                self.assertEqual(len(differ), 1, differ)
+                self.assertTrue(differ[0].startswith(crate + " (") and "b3sum-x86" in differ[0] and "b3sum-arm" in differ[0], differ)
+        with tempfile.TemporaryDirectory() as into:
+            self.assertEqual(check.unpack_builds([("b3sum-x86", one), ("b3sum-arm", same)], into), [])
+            self.assertEqual(sorted(os.listdir(into)), sorted(["b3sum-arm", "b3sum-x86", crate]), "programs and crates, no digest file, nothing else")
+            self.assertEqual((Path(into) / crate).read_bytes(), b"the commit's crate")
+
+    def test_a_disagreement_among_ci_builders_fails_the_artifacts(self):
+        with patch.object(check, "ROOT", str(self.repo)), patch.object(check, "git", self.git), \
+             patch.object(check, "ci_builds", lambda run, into: ["top-crate.crate (b3sum-x86 and b3sum-arm)"]), \
+             patch.object(check.release_artifacts, "CRATE_DIRS", ("",)), patch.object(check.release_artifacts, "B3SUM_TARGETS", ("x86_64-unknown-linux-gnu",)):
+            ok, why = check.artifacts_result(self.commit, {"id": 7})
+        self.assertIs(ok, False)
+        self.assertIn("CI's own builders made different bytes for top-crate.crate (b3sum-x86 and b3sum-arm)", why)
 
     def test_a_commit_that_is_no_version_commit_fails(self):
         ok, why = self.result(self.code)

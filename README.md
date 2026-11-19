@@ -16,7 +16,13 @@ and an [Intel i7-12700K](https://servil-software-factory.github.io/bench-hashes/
 We measure and tune on one memory node. On Linux, the library keeps its
 workers on the initializing thread's node, within its allowed CPUs. The
 application still controls its own threads and buffer placement. `b3sum`
-keeps its calling thread and workers within the same node.
+keeps its calling thread and workers within the same node. On a machine
+with several memory nodes this needs the node topology under
+`/sys/devices/system` to be readable and `sched_setaffinity` to be
+allowed: where a sandbox refuses either, the library and `b3sum` stop
+and say why, rather than run across nodes. (A pool of one thread,
+`initialize_multithreaded(Some(1))`, reads and binds nothing; `b3sum`
+binds its own thread at any thread count.)
 
 ## How it is checked
 
