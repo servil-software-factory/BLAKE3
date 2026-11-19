@@ -28,7 +28,10 @@ reading stops and says so.) It lies in the build directory
 which Git ignores, with a build directory of its own beside it, so that
 no build of the tree can take a build of the copy for its own. Each run
 makes the copy anew. Between runs it holds the last fault planted;
-nothing but this script builds from it. One run at a time uses it: a
+nothing but this script builds from it. Each fault's run is kept whole
+beside the copy (logs/NN.log): the line this prints for a fault is a
+reading of it. A run counts only where Cargo compiled the Pipeline's
+package for it and the model's test ran. One run at a time uses it: a
 second run waits for the first, and a run ends what an earlier run that
 was killed outright left running (its build, its model).
 """
@@ -109,8 +112,19 @@ def home():
     return os.path.join(os.path.abspath(os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")), "pipeline-model-controls")
 
 
+# The Pipeline's package, as Cargo names what it compiles.
+PACKAGE = "blake3-servil"
+
+
 def model_passes(copy):
-    """Whether the model passes on the copy as it is now, and what it said."""
+    """Whether the model passes on the copy as it is now, and what it
+    said. The copy's source was written since its last build (the copy
+    made anew, or a fault planted), so Cargo must compile the Pipeline's
+    package for this run, and say so: a run for which it compiled
+    nothing ran an earlier build (Cargo takes a source no newer than its
+    last build for unchanged, and a clock or a file system can make a
+    new file no newer), and is no verdict on this source. A run that
+    passes ran the model's one test."""
     env = {**os.environ, "RUSTFLAGS": "--cfg shuttle", "CARGO_TARGET_DIR": os.path.join(home(), "target")}
     run = None
     try:
@@ -119,7 +133,7 @@ def model_passes(copy):
         # --nocapture: the model names each scenario as it begins, and a
         # process that the Pipeline stops takes what was captured with it.
         run = subprocess.Popen(
-            ["cargo", "test", "--locked", "-q", "--release", "--test", "shuttle_pipeline", "--", "--nocapture"],
+            ["cargo", "test", "--locked", "--release", "--test", "shuttle_pipeline", "--", "--nocapture"],
             cwd=os.path.join(copy, "threads"), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         stdout, stderr = run.communicate()
     except BaseException:
@@ -138,6 +152,11 @@ def model_passes(copy):
     began = "running 1 test" in stdout
     if run.returncode != 0 and not began:
         sys.exit(f"pipeline_model_controls: the model did not build or run:\n{stdout[-2000:]}\n{stderr[-2000:]}")
+    if not re.search(rf"^\s*Compiling {re.escape(PACKAGE)} v", stderr, re.M):
+        sys.exit(f"pipeline_model_controls: Cargo compiled nothing of {PACKAGE} for this run, whose source was just written: "
+                 f"it ran an earlier build, which says nothing of this source\n{stderr[-2000:]}")
+    if run.returncode == 0 and not re.search(r"^test result: ok\. 1 passed", stdout, re.M):
+        sys.exit(f"pipeline_model_controls: the run ended well and the model's one test did not run:\n{stdout[-2000:]}\n{stderr[-2000:]}")
     return run.returncode == 0, stdout + stderr
 
 
@@ -151,12 +170,17 @@ def how_it_failed(said):
     lines = said.splitlines()
     at = [n for n, line in enumerate(lines) if "panicked at" in line]
     stops = [line.strip() for line in lines if line.startswith("blake3-servil: ")]
+    # The C library's allocator, stopping a process whose memory it finds
+    # broken (a storage freed twice, or given out while held).
+    allocator = [line.strip() for line in lines if re.match(r"(free|malloc|realloc|munmap_chunk|double free|corrupted)\b.*(\(\)|:)", line.strip())]
     if "deadlock!" in said:
         how = "a deadlock"
     elif at and at[0] + 1 < len(lines):
         how = lines[at[0] + 1].strip()[:100]
     elif stops:
         how = "the Pipeline stopped the process: " + stops[-1][len("blake3-servil: "):][:100]
+    elif allocator:
+        how = "the allocator stopped the process: " + allocator[0][:100]
     else:
         # Cargo's line for a test process that a signal ended.
         signalled = re.search(r"\(signal: [^)]*\)", said)
@@ -286,11 +310,18 @@ def controls(copy):
     passes, said = model_passes(copy)
     if not passes:
         sys.exit(f"pipeline_model_controls: the model fails on the Pipeline as it is:\n{said[-6000:]}")
+    # Each fault's run, as it said it: this run's alone.
+    shutil.rmtree(os.path.join(home(), "logs"), ignore_errors=True)
+    os.makedirs(os.path.join(home(), "logs"))
     missed = []
     for name, find, replace in FAULTS:
         with open(source, "wb") as f:
             f.write(original.replace(find, replace).encode())
         passes, said = model_passes(copy)
+        # What the run said, whole, beside the copy: the line below is a
+        # reading of it.
+        with open(os.path.join(home(), "logs", f"{len(os.listdir(os.path.join(home(), 'logs'))):02}.log"), "w") as f:
+            f.write(f"{name}\n\n{said}")
         print(f"MISSED  {name}" if passes else f"caught  {name} ({how_it_failed(said)})", flush=True)
         if passes:
             missed.append(name)

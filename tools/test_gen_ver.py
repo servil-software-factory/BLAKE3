@@ -224,6 +224,74 @@ class Versions(unittest.TestCase):
                     self.assertEqual(self.git("rev-parse", "HEAD"), head)
                     self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
 
+    def stand_in(self, bin, program, script):
+        """A program of that name in `bin` (a folder to search first):
+        `script` is its shell, in which $real is the program it stands for."""
+        path = Path(bin) / program
+        path.write_text(f"#!/bin/sh\nreal={shutil.which(program)}\n{script}\n")
+        path.chmod(0o755)
+
+    def test_a_stamp_that_stops_touches_nothing_but_its_own_files(self):
+        # Someone saves a file of theirs while the stamp runs, and the
+        # stamp then stops. It put the whole tree back as Git had it, and
+        # undid a refused stamp with a hard reset: their work was gone.
+        theirs = self.root / "threads/src/lib.rs"
+        saves = "echo '// their work' >> ../threads/src/lib.rs"
+        lock = self.root / "b3sum/Cargo.lock"
+        lock.write_text(lock.read_text() + "# a note someone left\n")
+        self.git("commit", "-qam", "a comment in b3sum's lock")
+        cases = {
+            # Cargo fails after the manifests are written.
+            "cargo fails": ("cargo", f"{saves}\nexit 101", "", "cargo"),
+            # Cargo drops the lock's comment: the release check refuses the commit.
+            "the release check refuses": ("cargo", f'{saves}\nexec $real "$@"', "the stamp is undone", "b3sum/Cargo.lock has lines added or removed"),
+        }
+        for case, (program, script, *said) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as bin:
+                self.stand_in(bin, program, script)
+                head, before = self.git("rev-parse", "HEAD"), self.files()
+                out = self.stamp("0.9.0", succeeds=False, path=bin)
+                for words in said:
+                    self.assertIn(words, out)
+                self.assertEqual(self.git("rev-parse", "HEAD"), head)
+                self.assertEqual(self.git("tag", "-l"), "")
+                self.assertEqual(theirs.read_text(), "// their work\n", "their work is as they saved it")
+                self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "M threads/src/lib.rs")
+                theirs.write_text("")
+                self.assertEqual(self.files(), before)
+
+    def test_a_stamp_whose_commit_or_tag_git_refuses_is_undone(self):
+        # The commit can be refused (no identity, a lock on the index) and
+        # so can the tag (one of that name stands, a lock on the refs): the
+        # one left the files stamped with no commit, the other a commit no
+        # tag names.
+        for refused in ("commit", "tag"):
+            with self.subTest(refused=refused), tempfile.TemporaryDirectory() as bin:
+                # (`git tag -l` lists the tags, and is let through.)
+                self.stand_in(bin, "git", f'[ "$1" = {refused} ] && [ "$2" != -l ] && {{ echo "git: no {refused} today" >&2; exit 1; }}\nexec $real "$@"')
+                head, before = self.git("rev-parse", "HEAD"), self.files()
+                out = self.stamp("0.9.0", succeeds=False, path=bin)
+                self.assertIn(f"no {refused} today", out)
+                self.assertEqual(self.git("rev-parse", "HEAD"), head)
+                self.assertEqual(self.git("tag", "-l"), "")
+                self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
+                self.assertEqual(self.files(), before)
+
+    def test_a_refused_stamp_is_left_where_the_branch_has_moved_on(self):
+        # Another commit lands on the stamp's before its tag is refused:
+        # taking the stamp back would take that commit with it. Nothing is
+        # moved, and the stamp says what it left.
+        with tempfile.TemporaryDirectory() as bin:
+            self.stand_in(bin, "git", '[ "$1" = tag ] && [ "$2" != -l ] && { $real commit -q --allow-empty -m "their commit"; echo "git: no tag today" >&2; exit 1; }\nexec $real "$@"')
+            head = self.git("rev-parse", "HEAD")
+            out = self.stamp("0.9.0", succeeds=False, path=bin)
+            self.assertIn("is left where it is: the branch has moved on", out)
+            self.assertEqual(self.git("log", "-1", "--format=%s"), "their commit")
+            self.assertEqual(self.git("log", "-1", "--format=%s", "HEAD^"), f"Version 0.9.0+{head}")
+            self.assertEqual(self.git("rev-parse", "HEAD^^"), head)
+            self.assertEqual(self.git("tag", "-l"), "")
+            self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
+
     def test_a_stamp_writes_nothing_where_a_line_to_replace_is_missing(self):
         # The header's line is not as the stamp expects (carriage returns):
         # the manifests before it were written by then, and the stamp left

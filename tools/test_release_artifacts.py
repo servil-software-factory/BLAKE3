@@ -520,6 +520,59 @@ class Rebuilt(Gathered):
             self.assertIs(ok, False)
             self.assertTrue(all("no files of the builder" in line for line in lines), lines)
 
+    def test_builders_that_are_named_are_all_there_is_to_compare_with(self):
+        # Named builders that agree passed whatever else lay beside them:
+        # a third folder whose crate differed, a copy outside every folder,
+        # one builder named twice (or by a link) for two, and one builder
+        # holding both programs while the other built none.
+        crate = f"sub-crate-{self.version}.crate"
+        named = ["b3sum-ARM64", "b3sum-X64"]
+        def builders(second):
+            for builder in named:
+                os.mkdir(os.path.join(second, builder))
+                self.fill(os.path.join(second, builder))
+        def refused(folder, second, names, words):
+            ok, lines = ra.directory(folder, self.release, rebuilt=second, builders=names)
+            self.assertIs(ok, False, words)
+            self.assertTrue(lines and all(words in line for line in lines), (words, lines))
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
+            self.fill(folder)
+            builders(second)
+            self.assertEqual(ra.directory(folder, self.release, rebuilt=second, builders=named), (True, []))
+            # A third folder, whose crate is another.
+            third = os.path.join(second, "b3sum-RISCV")
+            os.mkdir(third)
+            self.fill(third)
+            with open(os.path.join(third, crate), "ab") as f:
+                f.write(b"and one byte more")
+            refused(folder, second, named, "holds a folder that is no builder named (b3sum-RISCV)")
+            shutil.rmtree(third)
+            # A copy outside every builder's folder.
+            shutil.copyfile(os.path.join(second, "b3sum-X64", crate), os.path.join(second, crate))
+            ok, lines = ra.directory(folder, self.release, rebuilt=second, builders=named)
+            self.assertEqual((ok, lines), (False, [f"NOT CLEAN  {crate}: a copy of it lies in {second} outside the builders' folders: with builders named, every copy is one builder's"]))
+            os.remove(os.path.join(second, crate))
+            # One builder for two: named twice, named by a link, and named by a path.
+            refused(folder, second, ["b3sum-X64", "b3sum-X64"], "are not folders' names, each once")
+            refused(folder, second, ["b3sum-X64", "."], "are not folders' names, each once")
+            refused(folder, second, ["b3sum-X64", os.path.join("b3sum-X64", "")], "are not folders' names, each once")
+            shutil.rmtree(os.path.join(second, "b3sum-ARM64"))
+            os.symlink("b3sum-X64", os.path.join(second, "b3sum-ARM64"))
+            refused(folder, second, named, "no files of the builder b3sum-ARM64")
+        # Both programs in one builder's folder, and none in the other's.
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
+            self.fill(folder)
+            builders(second)
+            arm = os.path.join(second, "b3sum-ARM64")
+            for name in os.listdir(arm):
+                if name.startswith("b3sum-"):
+                    os.remove(os.path.join(arm, name))
+            self.assertEqual(ra.directory(folder, self.release, rebuilt=second), (True, []), "unnamed, a builder of crates alone owes no program")
+            ok, lines = ra.directory(folder, self.release, rebuilt=second, builders=named)
+            self.assertIs(ok, False)
+            self.assertEqual(lines, [f"NOT CLEAN  b3sum-{self.tag}-{target}: {arm} holds no b3sum program of the release: every builder named builds one"
+                                     for target in ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu")])
+
     def test_a_program_or_a_crate_with_no_second_build_fails(self):
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
             self.fill(folder)

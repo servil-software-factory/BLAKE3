@@ -5,7 +5,11 @@
     python3 tools/gen-ver.py --check  # the version names this commit truly
 
 One commit, on top of whatever HEAD is, setting the crate's version to
-X.Y.Z+<HEAD's hash>, and the tag vX.Y.Z+<hash> on it. The hash inside the
+X.Y.Z+<HEAD's hash>, and the tag vX.Y.Z+<hash> on it. A stamp is whole or
+not at all: where it stops, its own files go back as they were and its
+commit is taken back, and no other file or commit is touched. (Run it in a
+checkout nothing else writes to for those seconds; a process killed
+outright leaves what it had written, which `git status` shows.) The hash inside the
 version string names the code commit, so whoever holds the string and
 nothing else can later check they have the right code (a string cannot
 hold the hash of the commit it sits in, so it holds its parent's; the
@@ -46,6 +50,18 @@ import release_artifacts
 
 def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def report(kind, error, trace):
+    """A command that failed, in its own words: Python would print where
+    in this file it was run, and not what it said."""
+    if isinstance(error, subprocess.CalledProcessError):
+        print(f"{' '.join(map(str, error.cmd))}: exit status {error.returncode}: {(error.stderr or '').strip()}", file=sys.stderr)
+    else:
+        sys.__excepthook__(kind, error, trace)
+
+
+sys.excepthook = report
 
 
 def edit(path, pattern, replacement):
@@ -150,16 +166,44 @@ def check_copies(full):
                      f"tested with (CONTRIBUTING.md, \"The release lock\")")
 
 
-def stamped(full, notes=True):
-    """set_version, whole or not at all: where it stops after it has
-    written (Cargo's update of b3sum's lock fails, a copy does not agree),
-    the files go back as they were. The tree was clean when it began, so
-    what Git holds is what they were."""
+def stamp_files(notes=True):
+    """The files a stamp writes, and no others: what it commits, and what
+    it puts back where it stops."""
+    return [*PACKAGES.values(), *(["CHANGELOG.md"] if notes else []), "b3sum/Cargo.lock", RELEASE_LOCK, "capi/b3.h"]
+
+
+def put_back(files):
+    """The stamp's own files as the commit under them has them. No other
+    file is touched: what someone saved elsewhere in the tree while the
+    stamp ran is theirs."""
+    git("checkout", "-q", "HEAD", "--", *files)
+
+
+def stamped(full, message, notes=True):
+    """The version written into the stamp's files and committed, whole or
+    not at all: where it stops after it has written (Cargo's update of
+    b3sum's lock fails, a copy does not agree, the commit is refused),
+    its files go back as they were, and only they. Returns the commit."""
+    files = stamp_files(notes)
     try:
-        return set_version(full, notes)
+        set_version(full, notes)
+        git("commit", "-q", "--no-verify", "-m", message, "--", *files)
     except BaseException:
-        git("checkout", "-q", "--", ".")
+        put_back(files)
         raise
+    return git("rev-parse", "HEAD")
+
+
+def taken_back(stamp, notes=True):
+    """Undo the stamp's commit: the branch back at its parent and the
+    stamp's files as they are there. Only where the commit is still the
+    branch's last: if something else has moved the branch since, nothing
+    is moved or written, and the answer is False."""
+    if git("rev-parse", "HEAD") != stamp:
+        return False
+    git("reset", "-q", "--soft", "HEAD^")
+    put_back(stamp_files(notes))
+    return True
 
 
 def set_version(full, notes=True):
@@ -171,12 +215,10 @@ def set_version(full, notes=True):
         title = notes_title()
         if not TITLE.fullmatch(title):
             sys.exit(f"CHANGELOG.md: its title must name a version as X.Y.Z+dev or X.Y.Z+<commit> before a stamp replaces it (found {title!r})")
-    files = list(PACKAGES.values())
-    lines = [(path, r'^version = ".*"$', f'version = "{full}"') for path in files]
+    lines = [(path, r'^version = ".*"$', f'version = "{full}"') for path in PACKAGES.values()]
     lines += [(path, rf'^({dependency} = \{{ version = ")[^"]*', rf"\g<1>={full}") for path, dependency in PINS.items()]
     if notes:
         lines.append(("CHANGELOG.md", r"\A" + TITLED + r"(?=[ \t,\n]|\Z)", f"# blake3-servil {full}"))
-        files.append("CHANGELOG.md")
     lines.append(("capi/b3.h", r'^#define B3_VERSION ".*"$', f'#define B3_VERSION "{full}"'))
     # The release lock names the published packages too, as its
     # workspace's members: no workspace of theirs is in the repository for
@@ -195,9 +237,7 @@ def set_version(full, notes=True):
     # The CLI's tracked lock contains all four published packages.
     subprocess.run(["cargo", "update", "-q", *[a for name in PACKAGES if name != "blake3-servil-c" for a in ("-p", name)]],
                    cwd="b3sum", check=True)
-    files += ["b3sum/Cargo.lock", RELEASE_LOCK, "capi/b3.h"]
     check_copies(full)
-    return files
 
 
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -215,8 +255,7 @@ if sys.argv[1:] == ["--dev"]:
     if named == "dev":
         sys.exit(f"the version is {release}+dev already")
     full = f"{release}+dev"
-    files = stamped(full, notes=False)
-    git("commit", "-q", "--no-verify", "-m", f"Version {full}: the code after {release}", "--", *files)
+    stamped(full, f"Version {full}: the code after {release}", notes=False)
     print(full)
     sys.exit(0)
 if len(sys.argv) != 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
@@ -230,23 +269,32 @@ if tags and number(version) <= max(tags):
     sys.exit(f"{version} is not newer than the latest tag, v{'.'.join(map(str, max(tags)))}")
 
 full = f"{version}+{git('rev-parse', 'HEAD')}"
-files = stamped(full)
-# --no-verify: the pre-commit hook's speed check measures code, and this
-# commit changes version strings alone (AGENTS: follow a rule for its purpose).
-git("commit", "-q", "--no-verify", "-m", f"Version {full}", "--", *files)
+# Asked before anything is written: a stamp with no remote to name still
+# stamps, and says so in the lines it prints.
+try:
+    origin = git("remote", "get-url", "origin")
+except subprocess.CalledProcessError:
+    origin = "<this repository's URL>"
+# The commit is made with --no-verify: the pre-commit hook's speed check
+# measures code, and this commit changes version strings alone (AGENTS:
+# follow a rule for its purpose).
+stamp = stamped(full, f"Version {full}")
 # The release check's own reading of a version commit, before the tag
 # names this one: its parent with the version written in, and nothing
 # else. A stamp can write more than that where a tool it runs rewrites a
 # whole file (Cargo's update of b3sum's lock drops a comment there), and
-# the release check then refused a tag that already stood.
+# the release check then refused a tag that already stood. The tag names
+# the commit that was read, whatever the branch's last commit is by then.
 try:
-    release_artifacts.Release(f"v{full}", repo=os.getcwd(), commit=git("rev-parse", "HEAD"))
-except release_artifacts.NotARelease as refused:
-    git("reset", "-q", "--hard", "HEAD^")
-    sys.exit(f"the stamp is undone: no tag is made, and the tree is as it was. {refused}")
-git("tag", f"v{full}")
+    release_artifacts.Release(f"v{full}", repo=os.getcwd(), commit=stamp)
+    git("tag", f"v{full}", stamp)
+except BaseException as refused:
+    reason = refused.stderr.strip() if isinstance(refused, subprocess.CalledProcessError) else refused
+    if taken_back(stamp):
+        sys.exit(f"the stamp is undone: no tag is made, and its files are as they were. {reason}")
+    sys.exit(f"no tag is made, and the stamp's commit {stamp} is left where it is: the branch has moved on since. {reason}")
 print(f"v{full}")
 # The dependency line for the release notes: the release commit by its full
 # hash, which Cargo fetches exactly, and the full version.
 for crate in ("blake3-servil-core", "blake3-servil"):
-    print(f'{crate} = {{ git = "{git("remote", "get-url", "origin")}", rev = "{git("rev-parse", "HEAD")}", version = "={full}" }}')
+    print(f'{crate} = {{ git = "{origin}", rev = "{stamp}", version = "={full}" }}')
