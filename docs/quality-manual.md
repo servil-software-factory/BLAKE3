@@ -26,7 +26,7 @@ release's measure of assurance.
 |---|---|---|
 | Wrong kernel output, out-of-bounds access, secret-dependent branch/address | proofs over assembled kernels under stated contracts; planted bad kernels rejected | correctness of all Rust callers, every toolchain's output, or the processor |
 | Worker reads state after its owner frees it | Pipeline worker-visible state lives for the process | correct reuse or synchronization of that state |
-| A wait loses a wake or races on a waker | Shuttle checks the production finish/park/waker modules | every possible schedule, or weak-memory execution |
+| A wait loses a wake or races on a waker | Shuttle checks the production finish/park/waker modules; `tools/check-waker-order.py` compiles the Apple Arm64 wait handshakes (`WakerSlot`, `Park`, `sme2_serve`) and verifies their fences against `RCpc` loads, rejecting unfenced controls | every possible schedule, or weak-memory paths outside those handshakes |
 | The Pipeline hands a result, a Room or a storage over too early, or loses a wake | Shuttle runs the whole of `pipeline.rs` against a stand-in pool; ten planted faults each make that model fail | schedules not tried, weak-memory execution, and the pool itself, which the model replaces |
 | An `unsafe` block rests on a reason no one wrote down | every block of `pipeline.rs` and of `b3sum` states its reason; a check refuses one without | that each stated reason is true: they are read by people and by the audits, not proved |
 | Kernel still writes an I/O buffer after error recovery frees it | failed `io_uring_enter` aborts before recovery or unwind; a ring dropped with reads in flight aborts; a panic in `b3sum` aborts | every other lifetime or cancellation path |
