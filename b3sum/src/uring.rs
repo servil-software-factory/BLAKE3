@@ -150,6 +150,10 @@ impl Uring {
     }
 
     pub(crate) fn new(entries: u32) -> io::Result<Self> {
+        #[cfg(test)]
+        if REFUSED.load(Ordering::Relaxed) {
+            return Err(io::Error::from_raw_os_error(libc::ENOSYS));
+        }
         let try_flags = [
             IORING_SETUP_CQSIZE | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN,
             IORING_SETUP_CQSIZE | IORING_SETUP_COOP_TASKRUN,
@@ -289,14 +293,16 @@ impl Uring {
         self.unsubmitted
     }
 
-    /// Queue an `IORING_OP_READ` SQE. Caller must ensure `buf[..len]` stays
-    /// valid and exclusively writable by the kernel until the matching CQE is
-    /// reaped.
+    /// Queue an `IORING_OP_READ` SQE for a buffer with `room` bytes left:
+    /// it asks for all of them, up to [`READ_MAX`] ([`read_len`]). Caller
+    /// must ensure `buf[..room]` stays valid and exclusively writable by
+    /// the kernel until the matching CQE is reaped.
     #[inline]
-    pub(crate) unsafe fn push_read(&mut self, fd: RawFd, buf: *mut u8, len: u32, offset: u64, rw_flags: u32, user_data: u64) -> bool {
+    pub(crate) unsafe fn push_read(&mut self, fd: RawFd, buf: *mut u8, room: usize, offset: u64, rw_flags: u32, user_data: u64) -> bool {
         if self.sq_space_left() == 0 {
             return false;
         }
+        let len = read_len(room);
         let idx = (self.local_sq_tail & self.sq_mask) as usize;
         // Sound: `idx` is below `sq_entries` (masked), so both writes are
         // inside the ring's array and its SQEs; the kernel reads an SQE only
@@ -375,8 +381,60 @@ impl Uring {
         let cqe = unsafe { *self.cqes.add(idx) };
         unsafe { (*self.cq_head).store(head.wrapping_add(1), Ordering::Release) };
         self.in_flight -= 1;
+        #[cfg(test)]
+        let cqe = spoiled(cqe);
         Some(cqe)
     }
+}
+
+/// The most one read is asked for: less than the 4 GiB that a request's
+/// 32-bit length can say.
+pub(crate) const READ_MAX: usize = 1 << 30;
+
+/// The length a read is asked for, where its buffer has `room` bytes
+/// left: all of them, up to [`READ_MAX`]. A buffer of gigabytes (a file
+/// that reported a small size and has more, or that grew) can have 4 GiB
+/// of room and more, and a request's length is 32 bits: the room cast to
+/// them asked for its low bits alone, so for exactly 4 GiB of room it
+/// asked for no byte, the read gave none, and no byte is how a file's end
+/// is known. The hash printed was then of the file's first 4 GiB. So the
+/// room comes here as it is, and no caller narrows it. A request is for
+/// at least one byte, in every build: nothing else may end a file.
+fn read_len(room: usize) -> u32 {
+    assert!(room > 0, "a read is asked for at least one byte");
+    room.min(READ_MAX) as u32
+}
+
+/// For the tests: no ring can be made, as where a sandbox refuses
+/// io_uring.
+#[cfg(test)]
+pub(crate) static REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// For the tests: what becomes of the completions [`Uring::pop_cqe`]
+/// hands out. 1: every other read that gave more than one byte gave half
+/// as many (a short read; the bytes past them are in the buffer and are
+/// not to be used). 2: every other read was interrupted. The reads'
+/// callers must come to the same bytes either way. [`SPOILED`] counts the
+/// completions so changed.
+#[cfg(test)]
+pub(crate) static SPOIL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static SPOILED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn spoiled(mut cqe: IoUringCqe) -> IoUringCqe {
+    static SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let this_one = || SEEN.fetch_add(1, Ordering::Relaxed) % 2 == 0;
+    let before = cqe.res;
+    match SPOIL.load(Ordering::Relaxed) {
+        1 if cqe.res > 1 && this_one() => cqe.res /= 2,
+        2 if cqe.res >= 0 && this_one() => cqe.res = -libc::EINTR,
+        _ => {}
+    }
+    if cqe.res != before {
+        SPOILED.fetch_add(1, Ordering::Relaxed);
+    }
+    cqe
 }
 
 /// None means interrupted; every other error is fatal. Keep this decision
@@ -429,6 +487,43 @@ impl Drop for Uring {
 mod test {
     use super::Uring;
     use std::os::fd::AsRawFd;
+
+    /// A ring's read is asked for at least one byte and at most what its
+    /// 32-bit length can say, whatever room the buffer has: at 4 GiB of
+    /// room and at its multiples the cast length was 0, which reads like
+    /// the file's end.
+    #[test]
+    fn a_rings_read_asks_for_bytes_whatever_the_room() {
+        for spare in [1, 4096, super::READ_MAX - 1, super::READ_MAX, super::READ_MAX + 1, (1 << 32) - 1, 1 << 32, (1 << 32) + 1, 1 << 33, 3 << 32, usize::MAX] {
+            let len = super::read_len(spare) as usize;
+            assert!(0 < len && len <= spare && len <= super::READ_MAX, "{spare}: {len}");
+            assert_eq!(len, spare.min(super::READ_MAX), "{spare}");
+        }
+    }
+
+    /// Through a ring: a read whose buffer has 4 GiB of room gets the
+    /// file's bytes. (The room is address space alone, and the file has
+    /// 100 bytes; where the system will not lend 4 GiB of addresses, this
+    /// says nothing.)
+    #[test]
+    fn a_read_with_four_gib_of_room_gets_the_files_bytes() {
+        let Ok(mut ring) = Uring::new(8) else { return };
+        let mut buffer: Vec<u8> = Vec::new();
+        if buffer.try_reserve_exact(1 << 32).is_err() {
+            eprintln!("no 4 GiB of address space to try this with");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, [7u8; 100]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        // Sound: the buffer has the 4 GiB of room said, and is not touched
+        // until the read's completion is taken, below.
+        assert!(unsafe { ring.push_read(file.as_raw_fd(), buffer.as_mut_ptr(), 1 << 32, 0, 0, 5) });
+        ring.submit_and_wait(1);
+        let cqe = ring.pop_cqe().unwrap();
+        assert_eq!((cqe.user_data, cqe.res), (5, 100));
+    }
 
     /// A ring dropped while a read is in flight stops the process: the
     /// read here is of a pipe no one writes, so it stays in flight.

@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SMALL: u64 = crate::MAP_LEN as u64;
@@ -42,7 +42,7 @@ const MAX_FILE_ROOMS: u64 = 48;
 const USER_LARGE_BIT: u64 = 1 << 63;
 
 pub(crate) fn applies_to_paths(args: &Args, paths: &[PathBuf]) -> bool {
-    args.is_standard_32() && paths.len() > 1 && paths.iter().all(|p| p != Path::new("-"))
+    args.is_standard_32() && paths.len() > 1 && paths.iter().all(|p| !crate::is_stdin(p))
 }
 
 pub(crate) fn hash_single_cold_large_file_1t(args: &Args, file: &File, hint_size: u64) -> Option<io::Result<blake3::Hash>> {
@@ -195,7 +195,7 @@ fn stream_fd_into_rooms(
             // else, until its completion is reaped: the room sits in `window`
             // as Reading until then, and the ring stops the process if it is
             // dropped with a read in flight.
-            let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, user_data) };
+            let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN, off, 0, user_data) };
             // In every build: a read the full ring did not take would be
             // counted in flight and waited for without end.
             assert!(ok, "the ring has room for every read in flight");
@@ -231,7 +231,7 @@ fn stream_fd_into_rooms(
                     }
                     // Sound: as the first read of this room, above; it goes
                     // back into `window`.
-                    let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN as u32, off, 0, USER_LARGE_BIT | seq) };
+                    let ok = unsafe { ring.push_read(fd, room.bytes_mut().as_mut_ptr(), ROOM_LEN, off, 0, USER_LARGE_BIT | seq) };
                     assert!(ok, "the ring has room for every read in flight");
                     window[idx] = Some(WindowSlot::Reading(room));
                     in_flight_uring += 1;
@@ -474,7 +474,7 @@ pub(crate) fn force_miss() -> bool {
 /// The tests' seam: called with each file's path just after the file is
 /// opened, where a test replaces what the path names.
 #[cfg(test)]
-pub(crate) static AFTER_OPEN: std::sync::Mutex<Option<Box<dyn Fn(&Path) + Send>>> = std::sync::Mutex::new(None);
+pub(crate) static AFTER_OPEN: std::sync::Mutex<Option<Box<dyn Fn(&std::path::Path) + Send>>> = std::sync::Mutex::new(None);
 
 /// The tests' seam: with it set, every file is taken for one the page
 /// cache does not hold.
@@ -490,37 +490,78 @@ fn force_miss() -> bool {
 }
 
 /// Read the file at `fd` from byte `at` into the `dst_cap` bytes at
-/// `dst_ptr`, from the page cache alone: how far it got, and whether that
-/// is the file's end. Only a read that gives no byte says it is: the size
-/// a file reports chooses the buffer, never where the file ends (0.9.0's
-/// rule, which a shortcut here broke: it took a read that stopped at the
-/// reported size for the end, BLAKE3 #424). False where the buffer is
-/// full or the cache lacks the next bytes: the caller reads on.
+/// `dst_ptr`: how far it got, and whether that is the file's end. The
+/// first read is of the page cache alone, and where the cache cannot
+/// give the next bytes without waiting, the answer is false and the
+/// caller reads on (through the ring, where it has one). Only a read
+/// that gives no byte says where a file ends: the size a file reports
+/// chooses the buffer, never where the file ends (0.9.0's rule, which a
+/// shortcut here broke: it took a read that stopped at the reported size
+/// for the end, BLAKE3 #424). False too where the buffer is full.
 #[inline]
-fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, mut at: usize) -> io::Result<(usize, bool)> {
+fn try_pread_cached(fd: RawFd, dst_ptr: *mut u8, dst_cap: usize, at: usize) -> io::Result<(usize, bool)> {
     if force_miss() {
         return Ok((at, false));
     }
-    loop {
-        if at == dst_cap {
-            return Ok((at, false));
-        }
+    cached_then_plain(dst_cap, at, |at, flags| {
         // Sound: `at` is below `dst_cap` here, and the callers give `dst_cap`
         // writable bytes at `dst_ptr`; the kernel writes at most the rest of
         // them.
         let iov = libc::iovec { iov_base: unsafe { dst_ptr.add(at).cast() }, iov_len: dst_cap - at };
-        let rc = unsafe { libc::preadv2(fd, &iov, 1, at as libc::off_t, libc::RWF_NOWAIT) };
-        if rc == 0 {
-            return Ok((at, true));
-        }
-        if rc < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
+        preadv2_asked(fd, &iov, at, flags)
+    })
+}
+
+/// One `preadv2` with `flags`; the tests keep what was asked.
+#[inline]
+fn preadv2_asked(fd: RawFd, iov: &libc::iovec, at: usize, flags: libc::c_int) -> isize {
+    #[cfg(test)]
+    ASKED.with(|asked| asked.borrow_mut().push(flags));
+    // Sound: the caller's one iovec over writable bytes.
+    unsafe { libc::preadv2(fd, iov, 1, at as libc::off_t, flags) }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The flags of each read [`try_pread_cached`] made on this thread.
+    static ASKED: core::cell::RefCell<Vec<libc::c_int>> = const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// [`try_pread_cached`]'s reads, each made by `read(at, flags)`: the
+/// bytes it gave, or -1 with the error in `errno`, as `preadv2` answers
+/// (the tests give a file of their own making).
+///
+/// The read that says a file has ended is one that may wait. A read of
+/// the cache alone (`RWF_NOWAIT`) that gives no byte does not say it: on
+/// Linux 5.9 and 5.10 such a read can give none where it would have had
+/// to wait, with bytes still to come (preadv2(2), BUGS), and that answer
+/// was taken for the end, so the hash printed would have been of the
+/// bytes before it. So the first read asks the cache, and once it has
+/// answered at all, with bytes or with none, the reads after it may
+/// wait: a file in the cache costs the two reads it cost before, and
+/// its end is said by the second.
+#[inline]
+fn cached_then_plain(dst_cap: usize, mut at: usize, mut read: impl FnMut(usize, libc::c_int) -> isize) -> io::Result<(usize, bool)> {
+    let mut flags = libc::RWF_NOWAIT;
+    loop {
+        if at == dst_cap {
             return Ok((at, false));
         }
+        let rc = read(at, flags);
+        if rc < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            // The cache would have had to wait, or the file system has no
+            // such reads; or a read that may wait failed, as the caller's
+            // own read of the rest will, and that one reports it.
+            return Ok((at, false));
+        }
+        if rc == 0 && flags == 0 {
+            return Ok((at, true));
+        }
         at += rc as usize;
+        flags = 0;
     }
 }
 
@@ -685,12 +726,12 @@ impl ColdRingState {
         let fd = file.as_raw_fd();
         // Sound: `partial_at` is inside the capacity (buffer_with_start).
         let ptr = unsafe { buf.as_mut_ptr().add(partial_at) };
-        let rlen = (buf.capacity() - partial_at) as u32;
+        let room = buf.capacity() - partial_at;
         self.slots[sid] = Some(SmallSlot { file_idx, file, buf, at: partial_at });
         // Sound: the read's buffer stays where it is, written by no one else,
         // until its completion is reaped: the buffer goes into `slots[sid]`
         // and is not touched until then.
-        let ok = unsafe { self.ring.push_read(fd, ptr, rlen, partial_at as u64, 0, sid as u64) };
+        let ok = unsafe { self.ring.push_read(fd, ptr, room, partial_at as u64, 0, sid as u64) };
         // In every build, as the large file's read above.
         assert!(ok, "the ring has room for every read in flight");
         self.ring_in_flight += 1;
@@ -728,12 +769,12 @@ impl ColdRingState {
                     // Sound: `st.at` is below the capacity (the read that
                     // failed had room).
                     let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
-                    let len = (st.buf.capacity() - st.at) as u32;
+                    let room = st.buf.capacity() - st.at;
                     let off = st.at as u64;
                     self.slots[slot_id] = Some(st);
                     // Sound: as queue_file's read; the slot goes back into
                     // `slots`.
-                    let ok = unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
+                    let ok = unsafe { self.ring.push_read(fd, ptr, room, off, 0, slot_id as u64) };
                     assert!(ok, "the ring has room for every read in flight");
                     self.ring_in_flight += 1;
                     continue;
@@ -806,12 +847,12 @@ impl ColdRingState {
                 // Sound: `st.at` is below the capacity (grown above if it was
                 // full).
                 let ptr = unsafe { st.buf.as_mut_ptr().add(st.at) };
-                let len = (st.buf.capacity() - st.at) as u32;
+                let room = st.buf.capacity() - st.at;
                 let off = st.at as u64;
                 self.slots[slot_id] = Some(st);
                 // Sound: as queue_file's read; the slot goes back into
                 // `slots`.
-                let ok = unsafe { self.ring.push_read(fd, ptr, len, off, 0, slot_id as u64) };
+                let ok = unsafe { self.ring.push_read(fd, ptr, room, off, 0, slot_id as u64) };
                 assert!(ok, "the ring has room for every read in flight");
                 self.ring_in_flight += 1;
             }
@@ -1502,6 +1543,117 @@ mod test {
         let mut none = vec![1u8; 7];
         assert_eq!(super::buffer_with_start(&mut none, 10_000, None), 0);
         assert!(none.capacity() > 10_000 && none.is_empty());
+    }
+
+    /// The system's own reads follow that order: the first asks the
+    /// cache alone, the one that finds the end may wait. (A reviewer's
+    /// planted fault gave every real read `RWF_NOWAIT` and passed the
+    /// test below, which plays the system itself.)
+    #[test]
+    fn the_read_that_ends_a_cached_file_may_wait() {
+        use std::os::fd::AsRawFd;
+        // Beside the test's own program: /tmp is often a file system
+        // that has no reads of the cache alone.
+        let dir = tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
+        let path = dir.path().join("cached");
+        std::fs::write(&path, [7u8; 5000]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut buffer = vec![0u8; 5001];
+        super::ASKED.with(|asked| asked.borrow_mut().clear());
+        let read = super::try_pread_cached(file.as_raw_fd(), buffer.as_mut_ptr(), buffer.len(), 0).unwrap();
+        let asked = super::ASKED.with(|asked| asked.borrow().clone());
+        if read == (0, false) {
+            // A file system without reads of the cache alone: nothing to tell.
+            assert_eq!(asked, [libc::RWF_NOWAIT]);
+            return;
+        }
+        assert_eq!(read, (5000, true));
+        assert_eq!(asked, [libc::RWF_NOWAIT, 0]);
+        assert_eq!(&buffer[..5000], &[7u8; 5000]);
+    }
+
+    /// A read of the cache alone that gives no byte does not end a
+    /// file: the kernels that give none where they would have to wait
+    /// (Linux 5.9 and 5.10) are played here by `read`, whose answers
+    /// are listed with what was asked. The end is where a read that may
+    /// wait gives no byte.
+    #[test]
+    fn a_read_of_the_cache_that_gives_no_byte_does_not_end_the_file() {
+        let content = b"0123456789";
+        let wait = |would_wait: bool| -> isize {
+            // Sound: this thread's errno.
+            unsafe { *libc::__errno_location() = if would_wait { libc::EAGAIN } else { libc::EIO } };
+            -1
+        };
+        let run = |room: usize, from: usize, cache: &dyn Fn(usize) -> isize, plain: &dyn Fn(usize) -> isize| {
+            let mut asked = Vec::new();
+            let got = super::cached_then_plain(room, from, |at, flags| {
+                asked.push((at, flags != 0));
+                if flags != 0 {
+                    assert_eq!(flags, libc::RWF_NOWAIT);
+                    cache(at)
+                } else {
+                    plain(at)
+                }
+            })
+            .unwrap();
+            (got, asked)
+        };
+        // A plain read: up to four bytes of the file at a time.
+        let plain = |at: usize| (content.len() - at).min(4) as isize;
+        // The cache gives no byte of a file that has ten.
+        assert_eq!(run(64, 0, &|_| 0, &plain), ((10, true), vec![(0, true), (0, false), (4, false), (8, false), (10, false)]));
+        // It gives six: the rest and the end come from reads that may wait.
+        assert_eq!(run(64, 0, &|at| (6 - at) as isize, &plain), ((10, true), vec![(0, true), (6, false), (10, false)]));
+        // It gives all ten: one read more, which may wait, says the end.
+        assert_eq!(run(64, 0, &|at| (10 - at) as isize, &plain), ((10, true), vec![(0, true), (10, false)]));
+        // A file of no bytes ends where a read that may wait says so.
+        assert_eq!(run(64, 0, &|_| 0, &|_| 0), ((0, true), vec![(0, true), (0, false)]));
+        // The cache would have to wait: the caller reads on, from the start.
+        assert_eq!(run(64, 0, &|_| wait(true), &plain), ((0, false), vec![(0, true)]));
+        // A full buffer is not the end.
+        assert_eq!(run(10, 0, &|at| (10 - at) as isize, &plain), ((10, false), vec![(0, true)]));
+        assert_eq!(run(8, 0, &|_| 0, &plain), ((8, false), vec![(0, true), (0, false), (4, false)]));
+        // A read that may wait fails: the caller reads on from there.
+        assert_eq!(run(64, 0, &|at| (6 - at) as isize, &|_| wait(false)), ((6, false), vec![(0, true), (6, false)]));
+        // From where an earlier read stopped.
+        assert_eq!(run(64, 6, &|_| 0, &plain), ((10, true), vec![(6, true), (6, false), (10, false)]));
+    }
+
+    /// Reads that come back short and reads that are interrupted come to
+    /// the same bytes: with every other completion of a ring cut to half
+    /// its bytes (1) or made an interruption (2), files of every size
+    /// class, all taken for misses, hash as they do untouched. (Where no
+    /// ring can be made the reads are of another kind, and this says
+    /// nothing.)
+    fn spoiled_ring_reads_come_to_the_same_hashes() {
+        let dir = tempfile::tempdir_in(".").unwrap_or_else(|_| tempfile::tempdir().unwrap());
+        let (paths, want) = files_of_every_size(dir.path(), 34);
+        super::FORCE_MISS.store(true, std::sync::atomic::Ordering::Relaxed);
+        for spoil in [1, 2] {
+            crate::uring::SPOIL.store(spoil, std::sync::atomic::Ordering::Relaxed);
+            let before = crate::uring::SPOILED.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(hashes_in_order(&paths), want, "spoil {spoil}");
+            assert_eq!(hashes_in_order(&paths[12..17]), want[12..17], "spoil {spoil}: five files of 1 MiB and more");
+            let spoiled = crate::uring::SPOILED.load(std::sync::atomic::Ordering::Relaxed) - before;
+            if crate::uring::Uring::new(8).is_ok() {
+                assert!(spoiled > 20, "spoil {spoil}: only {spoiled} completions were changed");
+            }
+        }
+        crate::uring::SPOIL.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn short_and_interrupted_ring_reads_come_to_the_same_hashes() {
+        blake3::initialize();
+        spoiled_ring_reads_come_to_the_same_hashes();
+    }
+
+    #[test]
+    fn short_and_interrupted_ring_reads_on_one_thread_come_to_the_same_hashes() {
+        blake3::initialize();
+        crate::THREADS.set(std::num::NonZeroUsize::MIN).expect("this test's process sets the thread count first");
+        spoiled_ring_reads_come_to_the_same_hashes();
     }
 
     /// The file opened is the file hashed, where there is no io_uring too:
