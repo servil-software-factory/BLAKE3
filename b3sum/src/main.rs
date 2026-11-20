@@ -99,8 +99,8 @@ struct Inner {
     raw: bool,
 
     /// Write each hash as a sigil (25 characters for 32 bytes; see
-    /// johnservil/sigil), rather than hex; with --check, read sigils as
-    /// well as hex
+    /// johnservil/sigil), rather than hex, of at most 65536 output bytes;
+    /// with --check, read sigils as well as hex
     #[arg(long, conflicts_with(RAW_ARG))]
     sigilcode: bool,
 
@@ -157,6 +157,18 @@ impl Args {
         }
         if inner.sigilcode && inner.length == 0 && !inner.check {
             bail!("--sigilcode writes at least one output byte; --length is 0");
+        }
+        // A sigil is made whole, in memory: a length of gigabytes was an
+        // allocation that stopped the process, where hex is written in
+        // pieces.
+        if inner.sigilcode && inner.length > SIGIL_MAX_LEN && !inner.check {
+            bail!("--sigilcode writes at most {SIGIL_MAX_LEN} output bytes as one sigil; --length is {}", inner.length);
+        }
+        // BLAKE3's output is 2^64 - 1 bytes long. A request past its end
+        // was a panic for text, and for --raw fewer bytes than asked for,
+        // with success.
+        if inner.seek.checked_add(inner.length).is_none() {
+            bail!("--seek {} and --length {} ask for output past its end, at 2^64 - 1 bytes", inner.seek, inner.length);
         }
         // Crash-only: leak the single key or context string once for `'static` Mode.
         let mode: blake3::Mode<'static> = if inner.keyed {
@@ -353,19 +365,91 @@ pub(crate) fn hash_slice_local(mode: blake3::Mode<'_>, bytes: &[u8]) -> blake3::
     }
 }
 
+/// Whether `path` is the operand that stands for standard input: `-`
+/// itself. (Paths compare by their parts, so `-/` and `-/.` were taken
+/// for it too, and a file of that name was never opened.)
+pub(crate) fn is_stdin(path: &Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// Whether standard input is named more than once. It is one stream: it
+/// goes to its names in the order they are given (the first reads it to
+/// its end and the others find it there), so such operands are taken one
+/// after another. File threads would each take a part of it.
+pub(crate) fn stdin_named_twice(paths: &[PathBuf]) -> bool {
+    let named = paths.iter().filter(|path| is_stdin(path)).count();
+    if named > 1 {
+        return true;
+    }
+    // Another operand may be the same stream by another name
+    // (`/dev/stdin`, `/dev/fd/0`, `/proc/self/fd/0`): such names live
+    // under /dev and /proc, and only operands there are looked at, so a
+    // run over many files asks the system nothing more.
+    #[cfg(unix)]
+    {
+        let elsewhere = |path: &&PathBuf| !is_stdin(path) && (path.starts_with("/dev") || path.starts_with("/proc"));
+        if paths.iter().any(|path| elsewhere(&path))
+            && let Some(stream) = stdin_stream()
+        {
+            return named + paths.iter().filter(elsewhere).filter(|path| names_stream(path, stream)).count() > 1;
+        }
+    }
+    false
+}
+
+/// The device and inode of standard input where it is a stream (a pipe,
+/// a terminal, a socket). Another name for it (`/dev/stdin`, `/dev/fd/0`)
+/// then opens the same stream, and two readers of it take bytes from
+/// each other. None where standard input is a regular file: opened by
+/// another name, that is read from its start, by itself.
+#[cfg(unix)]
+fn stdin_stream() -> Option<(u64, u64)> {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    let meta = File::from(io::stdin().as_fd().try_clone_to_owned().ok()?).metadata().ok()?;
+    (!meta.is_file()).then_some((meta.dev(), meta.ino()))
+}
+
+/// Whether `path` names the stream `stream` ([`stdin_stream`]).
+#[cfg(unix)]
+fn names_stream(path: &Path, stream: (u64, u64)) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).is_ok_and(|meta| (meta.dev(), meta.ino()) == stream)
+}
+
 /// Fast standard-mode (`seek == 0 && len <= 32`) single-path hasher: avoids
 /// cloning a 26 KiB `Hasher` on warm mappings and small files, uses a 64 KiB
 /// stack buffer for small files (zero `8 MiB` `BUFFERS` fault), and streams
 /// cold large Linux files via `io_uring` + `Pipeline`.
 pub(crate) fn hash_path_hash(args: &Args, path: &Path) -> anyhow::Result<blake3::Hash> {
-    if path == Path::new("-") {
+    if is_stdin(path) {
         if args.keyed() {
             bail!("Cannot open `-` in keyed mode");
         }
-        // `b3sum < file`: a file, hashed as a file named is.
+        // `b3sum < file`: a file, hashed as a file named is. Its position
+        // is shared with whoever gave it, and a map or a read by position
+        // moves none: it is left at the file's end, where reading the
+        // stream to its end leaves it, so that the next reader (a second
+        // `-`, the parent) finds no byte, and not the same file again.
         #[cfg(unix)]
         if let Some(file) = stdin_file() {
-            return hash_open_file(args, file);
+            let hash = hash_open_file(args, file)?;
+            // Only where the hashing moved none (it began at 0): a file
+            // read through its descriptor stands where its reads ended,
+            // which for a file that reports more than it holds (as under
+            // /sys) is not its reported end, and one that cannot seek to
+            // its end (as under /proc) was read that way.
+            // Nor where it held no byte: a file that reports a size and
+            // holds nothing (as some under /sys) is at its end at 0.
+            // The position is asked of descriptor 0 itself: a copy of it
+            // made for the asking needed a free descriptor, and a process
+            // allowed none more got no hash.
+            // Sound: position calls on descriptor 0, which is open (the
+            // file hashed is its copy); they touch no memory.
+            if unsafe { libc::lseek(0, 0, libc::SEEK_CUR) } == 0 && hash != args.base_hasher.finalize() {
+                unsafe { libc::lseek(0, 0, libc::SEEK_END) };
+            }
+            return Ok(hash);
         }
         let mut hasher = args.base_hasher.clone();
         update_from(&mut hasher, io::stdin())?;
@@ -375,7 +459,8 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path) -> anyhow::Result<blake3:
 }
 
 /// Standard input as a file, where it is a regular file read from its
-/// start (`b3sum < file`): the same file, its position shared. A pipe, a
+/// start (`b3sum < file`): the same file, its position shared (the
+/// caller moves it to the end once the file is hashed). A pipe, a
 /// terminal, or a file some reader has already advanced is read as a
 /// stream, from where it stands.
 #[cfg(unix)]
@@ -418,14 +503,19 @@ pub(crate) fn hash_open_file(args: &Args, mut file: File) -> anyhow::Result<blak
             #[cfg(target_os = "linux")]
             if threads().get() == 1 {
                 drop(map);
-                if size >= POOL_START_LEN as u64
-                    && let Some(res) = linux_pipe::hash_single_cold_large_file_1t(args, &file, size)
-                {
+                if size < POOL_START_LEN as u64 {
+                    let mut buf = Vec::with_capacity(len + 1);
+                    let n = read_all_uninit(&mut file, &mut buf)?;
+                    return Ok(hash_slice_32(args.mode, &buf[..n]));
+                }
+                if let Some(res) = linux_pipe::hash_single_cold_large_file_1t(args, &file, size) {
                     return Ok(res?);
                 }
-                let mut buf = Vec::with_capacity(len + 1);
-                let n = read_all_uninit(&mut file, &mut buf)?;
-                return Ok(hash_slice_32(args.mode, &buf[..n]));
+                // No ring to read it through (a sandbox that refuses
+                // io_uring, a kernel without it): the file is read in
+                // pieces, below. (It was read whole into memory, as the
+                // short files above are: a file larger than the memory
+                // the process may have then ended the process.)
             } else {
                 // A cold file of 4 MiB or more: read past the page cache,
                 // several reads at once, each thread hashing its piece
@@ -456,7 +546,7 @@ pub(crate) fn hash_open_file(args: &Args, mut file: File) -> anyhow::Result<blak
 
 fn hash_path(args: &Args, path: &Path) -> anyhow::Result<blake3::OutputReader> {
     let mut hasher = args.base_hasher.clone();
-    if path == Path::new("-") {
+    if is_stdin(path) {
         if args.keyed() {
             bail!("Cannot open `-` in keyed mode");
         }
@@ -538,6 +628,9 @@ pub(crate) fn resident(map: &memmap2::Mmap) -> bool {
 #[cfg(unix)]
 pub(crate) const MAP_LEN: usize = POOL_LEN;
 
+/// The most output bytes --sigilcode writes as one sigil.
+const SIGIL_MAX_LEN: u64 = 1 << 16;
+
 const POOL_LEN: usize = 512 << 10;
 /// Starting the thread pool in a one-shot CLI process costs ~15-25 us per worker
 /// thread (~0.3-2 ms), which exceeds the whole hash time below ~4 MiB; once
@@ -613,6 +706,12 @@ fn read_all_uninit(file: &mut File, buf: &mut Vec<u8>) -> io::Result<usize> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// For the tests: the inputs this thread read in pieces ([`update_from`]).
+    pub(crate) static STREAMED: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
 static THREADS: std::sync::OnceLock<std::num::NonZeroUsize> = std::sync::OnceLock::new();
 
 pub(crate) fn threads() -> std::num::NonZeroUsize {
@@ -654,6 +753,8 @@ fn fill(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
 }
 
 fn update_from(hasher: &mut blake3::convenience::Hasher, mut reader: impl Read + Send) -> io::Result<()> {
+    #[cfg(test)]
+    STREAMED.with(|streamed| streamed.set(streamed.get() + 1));
     BUFFERS.with_borrow_mut(|[first, second]| {
         let mut len = fill(&mut reader, first)?;
         if len < PIECE {
@@ -767,8 +868,10 @@ fn write_hex_output(mut output: blake3::OutputReader, args: &Args, out: &mut Out
     let mut block = [0u8; blake3::BLOCK_LEN];
     let mut hex_buf = [0u8; 2 * blake3::BLOCK_LEN];
     while len > 0 {
-        output.fill(&mut block);
+        // Only the bytes asked for: the output's last bytes are no whole
+        // block, and filling one past its end is a panic.
         let take_bytes = cmp::min(len, block.len() as u64) as usize;
+        output.fill(&mut block[..take_bytes]);
         encode_hex_stack(&block[..take_bytes], &mut hex_buf[..2 * take_bytes]);
         out.write_bytes(&hex_buf[..2 * take_bytes])?;
         len -= take_bytes as u64;
@@ -928,12 +1031,16 @@ fn parse_check_line(mut line: &str, sigils: bool) -> anyhow::Result<ParsedCheckL
 
     let hash_text;
     let file_str;
-    if let Some((left, right)) = split_untagged_check_line(line_after_slash) {
-        hash_text = left;
-        file_str = right;
-    } else if let Some((left, right)) = split_tagged_check_line(line_after_slash) {
+    // The tagged form first: it is told by its start and its last
+    // `) = `, and its name may hold two spaces, which is how the other
+    // form is cut (a file named `a  b` made a line of --tag that --check
+    // called an invalid hash).
+    if let Some((left, right)) = split_tagged_check_line(line_after_slash) {
         file_str = left;
         hash_text = right;
+    } else if let Some((left, right)) = split_untagged_check_line(line_after_slash) {
+        hash_text = left;
+        file_str = right;
     } else {
         bail!("Invalid check line format");
     }
@@ -972,6 +1079,14 @@ fn hash_paths_32(args: &Args, paths: &[PathBuf], on_ordered: &mut dyn FnMut(usiz
     }
     if paths.len() == 1 {
         let _ = on_ordered(0, hash_path_hash(args, &paths[0]));
+        return;
+    }
+    if stdin_named_twice(paths) {
+        for (i, path) in paths.iter().enumerate() {
+            if !on_ordered(i, hash_path_hash(args, path)) {
+                break;
+            }
+        }
         return;
     }
 
@@ -1057,7 +1172,7 @@ fn outboard_inputs(args: &Args, dir: &Path, out: &mut OutBuf) -> u64 {
         eprintln!("{}: {}: not a directory", NAME, dir.to_string_lossy());
         return paths.len().max(1) as u64;
     }
-    let workers = threads().get().min(paths.len());
+    let workers = if stdin_named_twice(paths) { 1 } else { threads().get().min(paths.len()) };
     let in_a_file = (threads().get() / paths.len().max(1)).max(1);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let done = Mutex::new(Vec::<(usize, anyhow::Result<blake3::Hash>)>::new());
@@ -1178,7 +1293,7 @@ fn outboard_of(args: &Args, path: &Path, threads: usize, rooms: &mut outboard::R
     let mode = args.mode;
     let bytes = &mut rooms.bytes;
     bytes.clear();
-    if path == Path::new("-") {
+    if is_stdin(path) {
         // The key was standard input, read to its end: no message is
         // left there, and its tree would be the empty message's.
         if matches!(mode, blake3::Mode::Keyed(_)) {
@@ -1230,7 +1345,7 @@ fn hash_inputs(args: &Args, out: &mut OutBuf) -> u64 {
         return failed;
     }
 
-    let threads = if args.file_args.len() == 1 { 1 } else { threads().get().min(args.file_args.len()) };
+    let threads = if args.file_args.len() == 1 || stdin_named_twice(&args.file_args) { 1 } else { threads().get().min(args.file_args.len()) };
     hash_inputs_with(args, threads, out, hash_some, print_output)
 }
 
@@ -1317,6 +1432,7 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
     const CHECK_CHUNK: usize = 4096;
     enum Entry {
         ParseErr(anyhow::Error),
+        Own(ParsedCheckLine),
         Stdin(ParsedCheckLine),
         File { parsed: ParsedCheckLine, batch_idx: usize },
     }
@@ -1325,14 +1441,67 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
     let stdin;
     let mut stdin_lock;
     let mut bufreader: io::BufReader<&mut dyn Read>;
-    if path == Path::new("-") {
+    // Standard input where it is a stream, and this checkfile where it
+    // is one (a pipe, by whatever name it was opened). A stream is read
+    // once: an entry that names the checkfile's own stream cannot be
+    // checked (it would be read out of the checkfile's later lines, which
+    // would then never be read as entries), and entries that name
+    // standard input's stream are taken one after another, in the order
+    // of their lines, as the operands of a run are.
+    #[cfg(unix)]
+    let stream = stdin_stream();
+    #[cfg(not(unix))]
+    let stream: Option<(u64, u64)> = None;
+    let own: Option<(u64, u64)>;
+    let checkfile_is_stdin;
+    if is_stdin(path) {
+        own = stream;
+        checkfile_is_stdin = true;
         stdin = io::stdin();
         stdin_lock = stdin.lock();
         bufreader = io::BufReader::new(&mut stdin_lock);
     } else {
         file = File::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            own = file.metadata().ok().filter(|meta| !meta.is_file()).map(|meta| (meta.dev(), meta.ino()));
+        }
+        #[cfg(not(unix))]
+        {
+            own = None;
+        }
+        checkfile_is_stdin = own.is_some() && own == stream;
         bufreader = io::BufReader::new(&mut file);
     }
+    // Another name for standard input's stream: such names live under
+    // /dev and /proc, and only entries there are looked at.
+    let names_stdin = |entry: &Path| {
+        #[cfg(unix)]
+        if (entry.starts_with("/dev") || entry.starts_with("/proc")) && stream.is_some_and(|stream| names_stream(entry, stream)) {
+            return true;
+        }
+        let _ = (entry, stream);
+        false
+    };
+    // The checkfile's own stream, by any name (few checkfiles are
+    // streams: for those every entry is looked at).
+    let is_the_checkfile = |entry: &Path| {
+        // `-` is standard input and no file's name: nothing of that
+        // name is looked up (a pipe named `-` in the directory is not
+        // what the entry means).
+        if is_stdin(entry) {
+            return checkfile_is_stdin;
+        }
+        if checkfile_is_stdin && names_stdin(entry) {
+            return true;
+        }
+        #[cfg(unix)]
+        if own.is_some_and(|own| names_stream(entry, own)) {
+            return true;
+        }
+        false
+    };
 
     let mut line = String::new();
     let mut entries = Vec::new();
@@ -1353,7 +1522,8 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
             saw_line = true;
             match parse_check_line(&line, args.sigilcode()) {
                 Err(e) => entries.push(Entry::ParseErr(e)),
-                Ok(parsed) if parsed.file_path == Path::new("-") => entries.push(Entry::Stdin(parsed)),
+                Ok(parsed) if is_the_checkfile(&parsed.file_path) => entries.push(Entry::Own(parsed)),
+                Ok(parsed) if is_stdin(&parsed.file_path) || names_stdin(&parsed.file_path) => entries.push(Entry::Stdin(parsed)),
                 Ok(parsed) => {
                     let batch_idx = batch_paths.len();
                     batch_paths.push(parsed.file_path.clone());
@@ -1378,6 +1548,16 @@ fn check_one_checkfile(path: &Path, args: &Args, files_failed: &mut u64, out: &m
                     eprintln!("{}: {}", NAME, e);
                     false
                 }
+                Entry::Own(parsed) => {
+                    // The checkfile cannot be a file it names: this
+                    // function is reading it (and holds standard input's
+                    // lock, where it is that: reading it here waited for
+                    // that lock for ever).
+                    let what = if checkfile_is_stdin { "standard input is the checkfile; it" } else { "this checkfile is a stream, and" };
+                    emit_checked_entry(parsed, Err(anyhow::anyhow!("{what} cannot also be a file to check")), args, out)?
+                }
+                // In the order of the lines, each reading the stream to
+                // its end.
                 Entry::Stdin(parsed) => {
                     let res = hash_path_hash(args, &parsed.file_path);
                     emit_checked_entry(parsed, res, args, out)?

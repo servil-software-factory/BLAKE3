@@ -48,10 +48,10 @@ CONTROLS = [
         "test_output_error_is_failure",
     ),
     (
-        "a direct read of whole pieces reads once more for the file's end (#424)",
+        "a direct read reads once more for the file's end (#424)",
         "b3sum/src/direct.rs",
-        "    if len % PIECE == 0 {",
-        "    if false {",
+        "        return (more == 0).then_some(());",
+        "        return Some(());",
         "a_file_read_directly_hashes_as_its_bytes_do",
     ),
     (

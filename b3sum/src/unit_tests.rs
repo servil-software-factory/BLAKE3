@@ -194,3 +194,26 @@ fn test_no_mmap_maps_no_file() {
     args.inner.no_mmap = true;
     assert_eq!(run(&args), [0; 4]);
 }
+
+/// One thread, and no ring to be had (a sandbox that refuses io_uring): a
+/// cold file of POOL_START_LEN or more is read in pieces. It was read
+/// whole into memory, as a shorter file still is, so a file larger than
+/// the memory the process may have ended it.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_a_cold_long_file_on_one_thread_without_a_ring_is_read_in_pieces() {
+    blake3::initialize();
+    crate::THREADS.set(std::num::NonZeroUsize::MIN).expect("this test's process sets the thread count first");
+    crate::uring::REFUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::linux_pipe::set_force_miss(true);
+    let dir = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..crate::POOL_START_LEN + 12_345).map(|i| (i.wrapping_mul(37) ^ (i >> 10)) as u8).collect();
+    for (len, in_pieces) in [(crate::POOL_START_LEN - 1, 0), (crate::POOL_START_LEN, 1), (bytes.len(), 1)] {
+        let path = dir.path().join(format!("file-{len}"));
+        std::fs::write(&path, &bytes[..len]).unwrap();
+        let args = crate::Args::for_test_plain(vec![path.clone()]);
+        let before = crate::STREAMED.with(|streamed| streamed.get());
+        assert_eq!(crate::hash_open_file(&args, std::fs::File::open(&path).unwrap()).unwrap(), blake3::convenience::hash(&bytes[..len]), "len={len}");
+        assert_eq!(crate::STREAMED.with(|streamed| streamed.get()) - before, in_pieces, "len={len}");
+    }
+}

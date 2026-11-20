@@ -91,8 +91,8 @@ Options:
       --no-names              Omit filenames in the output
       --raw                   Write raw output bytes to stdout, rather than hex
       --sigilcode             Write each hash as a sigil (25 characters for 32 bytes; see
-                              johnservil/sigil), rather than hex; with --check, read sigils as well
-                              as hex
+                              johnservil/sigil), rather than hex, of at most 65536 output bytes;
+                              with --check, read sigils as well as hex
       --tag                   Output BSD-style checksums: BLAKE3 ([FILE]) = [HASH]
   -c, --check                 Read BLAKE3 sums from the [FILE]s and check them
       --quiet                 Skip printing OK for each checked file
@@ -106,9 +106,12 @@ More information: b3sum/README.md at
 https://github.com/servil-software-factory/BLAKE3/blob/main/b3sum/README.md
 ```
 
-By default, `b3sum` uses all CPU cores: it hashes multiple files in parallel and
-splits large files across threads. Pass `--num-threads 1` to use a single
-thread. On Linux, `taskset -c LIST b3sum ...` pins `b3sum` to specific CPUs.
+By default, `b3sum` uses all the CPU cores it is allowed: it hashes multiple
+files in parallel and splits large files across threads. On a Linux machine
+with several memory nodes it keeps to one of them, the one that holds the most
+of the CPUs it is allowed (the library's README says more). Pass
+`--num-threads 1` to use a single thread. On Linux, `taskset -c LIST b3sum ...`
+pins `b3sum` to specific CPUs.
 
 See [What `--check` does](what_does_check_do.md) for checkfile rules.
 
@@ -123,14 +126,30 @@ may be of bytes that the file never held all at once.
 
 How much of the file is hashed depends on how `b3sum` takes it in:
 
-- **Read** (files under 512 KiB, standard input, every file with `--no-mmap`,
-  and on Linux most files the page cache does not hold): `b3sum` reads until
+- **Read** (files under 512 KiB, standard input that is a pipe or a terminal,
+  every file with `--no-mmap`, and on Linux most files the page cache does not
+  hold): `b3sum` reads until
   the system says
   the file has ended. The size the file reported at the start is not used.
   So a file that reports 0 bytes and has some (as under `/proc`) is hashed
   whole.
 - **Mapped** (other files of 512 KiB or more): `b3sum` hashes the bytes up to
   the size the file had when it was opened.
+
+Standard input that is a file (`b3sum < file`) is hashed as `b3sum file` is,
+read or mapped by the same rules, where it stands at the file's start; from
+any other place it is read, from there. Either way it is left at the file's
+end, as a stream read to its end is.
+
+Standard input is one stream, so name it once. Named again (`b3sum - -`), or
+by another of its names under `/dev` or `/proc` (`b3sum - /dev/stdin`,
+`b3sum /dev/stdin /dev/fd/0`), it goes to the first of the names, and the
+others find it at its end and hash no bytes. The entries of a checkfile
+that name it are taken the same way, in the order of their lines. A name
+for the pipe anywhere else (a link of your own) is taken for a file of its
+own, and two readers of one pipe each get a part of it.
+Where standard input is a file, another name for it (`/dev/stdin`) opens
+that file again from its start, and is hashed as a file of its own.
 
 What happens when a file changes during the run:
 
@@ -164,6 +183,7 @@ that part arrives.
 - Files of 16 KiB or less have no parent nodes, so no `.obao4` file is written.
 - `DIR` must already exist.
 - Works in plain mode and `--keyed` mode.
+- Standard input (`-`) is read whole into memory first.
 
 ```bash
 $ mkdir outboards && b3sum --outboard outboards big.iso
@@ -179,7 +199,8 @@ $ ls outboards
 single word (easy to double-click to select), uses visually distinct characters,
 and includes its own error check so typos or swapped adjacent characters fail
 before hashing begins. With `--check --sigilcode`, checkfiles may mix sigils and
-hex.
+hex. A sigil is made whole, in memory, so `--length` may ask for at most 65,536
+output bytes with `--sigilcode`.
 
 ```
 $ b3sum --sigilcode empty
