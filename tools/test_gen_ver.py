@@ -29,7 +29,9 @@ class Versions(unittest.TestCase):
         for path, (name, dependency) in MANIFESTS.items():
             manifest = self.root / path
             manifest.parent.mkdir(parents=True, exist_ok=True)
-            manifest.write_text(f'[package]\nname = "{name}"\nversion = "{DEV}"\nedition = "2024"\n[dependencies]\n{dependency}\n')
+            # The core crate's manifest names the repository, as the real one does.
+            repository = 'repository = "https://example.invalid/repo"\n' if path == "Cargo.toml" else ""
+            manifest.write_text(f'[package]\nname = "{name}"\nversion = "{DEV}"\nedition = "2024"\n{repository}[dependencies]\n{dependency}\n')
             src = manifest.parent / "src"
             src.mkdir()
             (src / "lib.rs").write_text("")
@@ -47,7 +49,8 @@ class Versions(unittest.TestCase):
         self.git("config", "user.email", "version-test@example.invalid")
         self.git("config", "core.hooksPath", str(self.root / "no-hooks"))
         self.git("config", "commit.gpgsign", "false")
-        self.git("remote", "add", "origin", "https://example.invalid/repo")
+        # A clone's remote can hold a credential: nothing the stamp prints may show it.
+        self.git("remote", "add", "origin", "https://someone:a-secret-token@example.invalid/a-clone")
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
 
@@ -78,6 +81,8 @@ class Versions(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "v" + full), version_commit)
         self.assertIn(f'blake3-servil-core = {{ git = "https://example.invalid/repo", rev = "{version_commit}", version = "={full}" }}', output)
         self.assertIn(f'blake3-servil = {{ git = "https://example.invalid/repo", rev = "{version_commit}", version = "={full}" }}', output)
+        self.assertNotIn("a-secret-token", output)
+        self.assertNotIn("a-clone", output)
         for path in MANIFESTS:
             self.assertIn(f'version = "{full}"', (self.root / path).read_text())
         self.assertEqual((self.root / "b3sum/Cargo.lock").read_text().count(f'version = "{full}"'), 4)
@@ -354,6 +359,23 @@ class Versions(unittest.TestCase):
         self.assertIn("tree must be clean", self.stamp("99.1.2", succeeds=False))
         self.assertEqual(self.git("diff", "HEAD"), before)
         self.assertEqual(self.git("tag", "-l"), "")
+
+    def test_a_version_is_three_numbers_in_ascii_digits(self):
+        """Python's \\d takes every script's digits, and int() reads them:
+        a version typed in another script's passed the argument's check and
+        was written into the manifests, for Cargo to refuse."""
+        head = self.git("rev-parse", "HEAD")
+        for version in ("\u0669\u0669.\u0661.\u0662", "99.1", "99.1.2.3", "v99.1.2", "99.1.x", ""):
+            self.assertIn("usage: python3 tools/gen-ver.py", self.stamp(version, succeeds=False), version)
+            self.assertEqual((self.git("rev-parse", "HEAD"), self.git("status", "--porcelain")), (head, ""), version)
+
+    def test_a_manifest_without_its_repository_still_stamps(self):
+        manifest = self.root / "Cargo.toml"
+        manifest.write_text(manifest.read_text().replace('repository = "https://example.invalid/repo"\n', ""))
+        self.git("commit", "-qam", "no repository in the manifest")
+        output = self.stamp("99.1.2")
+        self.assertIn("blake3-servil-core = { git = \"<this repository's URL>\", rev = ", output)
+        self.assertNotIn("a-secret-token", output)
 
     def test_version_must_advance(self):
         self.git("tag", "v99.1.2+" + "a" * 40)

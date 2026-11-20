@@ -258,7 +258,7 @@ if sys.argv[1:] == ["--dev"]:
     stamped(full, f"Version {full}: the code after {release}", notes=False)
     print(full)
     sys.exit(0)
-if len(sys.argv) != 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
+if len(sys.argv) != 2 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", sys.argv[1]):
     sys.exit("usage: python3 tools/gen-ver.py X.Y.Z | --dev | --check")
 version = sys.argv[1]
 if git("status", "--porcelain"):
@@ -269,12 +269,12 @@ if tags and number(version) <= max(tags):
     sys.exit(f"{version} is not newer than the latest tag, v{'.'.join(map(str, max(tags)))}")
 
 full = f"{version}+{git('rev-parse', 'HEAD')}"
-# Asked before anything is written: a stamp with no remote to name still
-# stamps, and says so in the lines it prints.
-try:
-    origin = git("remote", "get-url", "origin")
-except subprocess.CalledProcessError:
-    origin = "<this repository's URL>"
+# The repository's address for the dependency lines printed at the end:
+# the one the core crate's manifest publishes. (It was this clone's
+# remote, and a remote's URL can hold a credential, which the lines then
+# showed.) Read before anything is written: a manifest without one still
+# stamps, and the lines say so.
+origin = tomllib.loads(Path("Cargo.toml").read_text())["package"].get("repository", "<this repository's URL>")
 # The commit is made with --no-verify: the pre-commit hook's speed check
 # measures code, and this commit changes version strings alone (AGENTS:
 # follow a rule for its purpose).

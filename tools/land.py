@@ -16,7 +16,8 @@ next stayed red until someone noticed.)
 
 The gates of a commit, from what it changes against next:
   nothing but *.md files           none (the fast-forward alone)
-  anything else                    CI's jobs, all green; check-builds;
+  anything else                    the jobs of the tests' workflow on the
+                                   commit (ci.yml), all green; check-builds;
                                    mutants on x86_64, aarch64 and arm64;
                                    tests on aarch64 and arm64; cells
   proof inputs (c/, c2sp/, tools/verify/, the generators)
@@ -65,14 +66,48 @@ def required(paths):
     return gates
 
 
-def verdicts(statuses, check_runs):
+# The tests' workflow: its jobs are the gate "CI".
+TESTS = ".github/workflows/ci.yml"
+
+
+def pages(path, key=None, api=None):
+    """Every item of a GitHub list, page after page (`key`: the list's
+    name where a page is an object that holds it). One page of a hundred
+    was read, and the rest taken for absent."""
+    api = api or globals()["api"]
+    items, page = [], 1
+    while True:
+        got = api(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
+        batch = got[key] if key else got
+        items += batch
+        if len(batch) < 100:
+            return items
+        page += 1
+
+
+def tests_jobs(sha, pages=pages):
+    """The jobs of the tests' workflow on this very commit: those of its
+    newest run there, at that run's last attempt; none where it has not
+    run. Any job on the commit was taken for a test, so a commit on
+    which another workflow alone had run, and passed, read as tested. A
+    run for a pull request is left out: it tests the merge, another
+    tree."""
+    runs = [r for r in pages(f"actions/runs?head_sha={sha}", "workflow_runs") if r["path"] == TESTS and r["event"] != "pull_request" and r["head_sha"] == sha]
+    if not runs:
+        return []
+    newest = max(runs, key=lambda run: run["run_number"])
+    return pages(f"actions/runs/{newest['id']}/jobs?filter=latest", "jobs")
+
+
+def verdicts(statuses, jobs):
     """Each gate's state from a commit's statuses (newest first, as GitHub
-    lists them: the first of a context is the one that stands) and its
-    check runs: CI is green when there is a run and every run succeeded."""
+    lists them: the first of a context is the one that stands) and the
+    tests' jobs on it ([`tests_jobs`]): CI is green when there is a job
+    and every job succeeded."""
     seen = {}
     for s in statuses:
         seen.setdefault(s["context"], (s["state"], s.get("description") or ""))
-    runs = [r["conclusion"] for r in check_runs]
+    runs = [r["conclusion"] for r in jobs]
     if runs:
         green = all(c == "success" for c in runs)
         seen["CI"] = ("success" if green else "pending" if any(c is None for c in runs) else "failure", f"{runs.count('success')} of {len(runs)} jobs green")
@@ -113,9 +148,7 @@ def resolve(commit):
 
 
 def state(sha, paths):
-    statuses = api(f"commits/{sha}/statuses?per_page=100")
-    runs = api(f"commits/{sha}/check-runs?per_page=100")["check_runs"]
-    seen = verdicts(statuses, runs)
+    seen = verdicts(pages(f"commits/{sha}/statuses"), tests_jobs(sha))
     return [(g, *seen.get(g, ("missing", ""))) for g in required(paths)]
 
 

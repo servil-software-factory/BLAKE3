@@ -119,9 +119,13 @@ def log_tail(path):
     return Path(full).read_text(errors="replace")[-4000:]
 
 
-def log_ends_with(path, text):
+def log_ends_with(path, line):
+    """Whether the log's last line is `line`: None where there is no log.
+    A line above the last is an earlier run's, with whatever was written
+    after it: a rerun that failed, appended to the same log, left the
+    first run's line in the tail, and a search of the tail found it."""
     tail = log_tail(path)
-    return None if tail is None else text in tail
+    return None if tail is None else tail.rstrip().rsplit("\n", 1)[-1] == line
 
 
 def vm_result(path, commit, old):
@@ -392,7 +396,7 @@ def main():
          f" && printf '%s\\n' '{VM_OK}' >> {vm_log}")
     step("full mutation run, core and threads", mutation_result(f"tmp/night/mutants-{commit[:12]}.log", commit),
          f"python3 tools/mutants/check.py --whole > tmp/night/mutants-{commit[:12]}.log, the commit checked out (both crates; --whole, since the default covers the change since origin/next)")
-    step("check-builds", log_ends_with(f"tmp/night/check-builds-{commit[:12]}.log", "every build passes"),
+    step("check-builds", log_ends_with(f"tmp/night/check-builds-{commit[:12]}.log", "check-builds: every build passes"),
          f"sh tools/check-builds.sh > tmp/night/check-builds-{commit[:12]}.log")
     step("cargo publish --dry-run", log_ends_with(f"tmp/night/publish-dry-run-{commit[:12]}.log", "publish-dry-run: ok"),
          f"the packages' dry-run in CONTRIBUTING.md; save its output to tmp/night/publish-dry-run-{commit[:12]}.log and append 'publish-dry-run: ok' only on success")

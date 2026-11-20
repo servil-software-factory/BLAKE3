@@ -379,6 +379,10 @@ class Published(Repository):
 
         return fetch
 
+    def digest(self, program, of=None):
+        """The digest file's line for `program`, whose bytes are `of`."""
+        return f"{hashlib.sha256(self.program() if of is None else of).hexdigest()}  {program}\n".encode()
+
     def run_check(self, fetch):
         out = io.StringIO()
         with patch.object(ra, "fetch", fetch):
@@ -405,15 +409,25 @@ class Published(Repository):
 
     def test_a_dirty_program_fails_and_the_rest_still_pass(self):
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
-        bad, lines = self.run_check(self.answers({program: self.program(f".{self.commit}.dirty.{'1' * 40}")}))
+        dirty = self.program(f".{self.commit}.dirty.{'1' * 40}")
+        bad, lines = self.run_check(self.answers({program: dirty, program + ".sha256": self.digest(program, dirty)}))
         self.assertEqual(bad, 1)
-        self.assertEqual([line[:9] for line in lines], ["clean    ", "clean    ", "NOT CLEAN"])
+        self.assertEqual([line[:9] for line in lines], ["clean    ", "clean    ", "NOT CLEAN", "clean    "])
         self.assertIn(f"the GitHub release: {program}: its build version is", lines[2])
 
     def test_a_crate_or_a_program_not_published_is_missing(self):
         bad, lines = self.run_check(self.answers({}, crates=("top-crate",)))
-        self.assertEqual(bad, 2)
-        self.assertEqual(lines[1:], [f"MISSING    crates.io: sub-crate-{self.version}.crate", f"MISSING    the GitHub release: b3sum-{self.tag}-x86_64-unknown-linux-gnu"])
+        self.assertEqual(bad, 3)
+        program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
+        self.assertEqual(lines[1:], [f"MISSING    crates.io: sub-crate-{self.version}.crate", f"MISSING    the GitHub release: {program}", f"MISSING    the GitHub release: {program}.sha256"])
+
+    def test_a_program_published_without_its_digest_file_is_missing_it(self):
+        """A release's programs come with their SHA-256 files. One that
+        was not there was passed over, where a wrong one failed."""
+        program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
+        bad, lines = self.run_check(self.answers({program: self.program()}))
+        self.assertEqual((bad, lines[-1]), (1, f"MISSING    the GitHub release: {program}.sha256"))
+        self.assertTrue(all(line.startswith("clean      ") for line in lines[:-1]), lines)
 
     def test_no_github_release_is_missing(self):
         def fetch(url):
@@ -425,9 +439,9 @@ class Published(Repository):
 
     def test_an_asset_of_an_unknown_kind_fails(self):
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
-        bad, lines = self.run_check(self.answers({program: self.program(), "installer.sh": b"#!/bin/sh\n"}))
-        self.assertEqual(bad, 1)
-        self.assertIn("installer.sh: an artifact of a kind this check does not know", lines[-1])
+        bad, lines = self.run_check(self.answers({program: self.program(), program + ".sha256": self.digest(program), "installer.sh": b"#!/bin/sh\n"}))
+        self.assertEqual(bad, 1, lines)
+        self.assertTrue(any("installer.sh: an artifact of a kind this check does not know" in line for line in lines), lines)
 
 
 @patch.object(ra, "CRATE_DIRS", ("", "sub"))
@@ -660,6 +674,44 @@ class CommandLine(Repository):
     def test_a_tag_that_is_no_releases_stops_saying_so(self):
         code, _ = self.run_main("v0.3.0", "some-file")
         self.assertEqual(code, "release_artifacts: v0.3.0 is no release tag (vX.Y.Z+<the code commit's 40 hex digits>)")
+
+    def test_the_token_goes_to_githubs_api_and_nowhere_else(self):
+        """The address was searched for the API's name: a path or a longer
+        host that held it got the token too."""
+        sent = {}
+
+        class Answer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return b"bytes"
+
+        def urlopen(request, timeout):
+            sent[request.full_url] = request.get_header("Authorization")
+            return Answer()
+
+        addresses = {
+            "https://api.github.com/repos/o/r/releases/tags/v1": "Bearer a-token",
+            "https://github.com/o/r/releases/download/v1/b3sum": None,
+            "https://static.crates.io/crates/c/c-1.crate": None,
+            "https://elsewhere.example/api.github.com/x": None,
+            "https://api.github.com.elsewhere.example/x": None,
+            "https://elsewhere.example/?next=https://api.github.com/": None,
+            "http://api.github.com/repos/o/r": None,
+        }
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "a-token"}), patch.object(ra.urllib.request, "urlopen", urlopen):
+            for address in addresses:
+                self.assertEqual(ra.fetch(address), b"bytes")
+        self.assertEqual(sent, addresses)
+
+    def test_a_tag_whose_version_is_in_another_scripts_digits_is_no_release_tag(self):
+        tag = "v\u0660.\u0663.\u0660+" + "a" * 40
+        code, _ = self.run_main(tag, "some-file")
+        self.assertEqual(code, f"release_artifacts: {tag} is no release tag (vX.Y.Z+<the code commit's 40 hex digits>)")
 
 
 if __name__ == "__main__":

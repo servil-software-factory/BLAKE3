@@ -33,6 +33,69 @@ class Gates(unittest.TestCase):
         self.assertEqual(land.verdicts([], run("success", "cancelled"))["CI"][0], "failure")
 
 
+class TheTestsWorkflow(unittest.TestCase):
+    SHA = "a" * 40
+
+    def lists(self, runs, jobs):
+        """GitHub's answers: the workflow runs on a commit, and each run's jobs."""
+        asked = []
+
+        def pages(path, key):
+            asked.append(path)
+            if path.startswith("actions/runs?head_sha="):
+                self.assertEqual((path, key), (f"actions/runs?head_sha={self.SHA}", "workflow_runs"))
+                return runs
+            self.assertEqual(key, "jobs")
+            return jobs[path]
+
+        return pages, asked
+
+    def run_of(self, number, path=land.TESTS, event="workflow_dispatch", sha=None):
+        return {"id": 1000 + number, "run_number": number, "path": path, "event": event, "head_sha": sha or self.SHA}
+
+    def test_a_commit_the_tests_never_ran_on_has_no_ci(self):
+        pages, _ = self.lists([], {})
+        self.assertEqual(land.tests_jobs(self.SHA, pages), [])
+        self.assertNotIn("CI", land.verdicts([], land.tests_jobs(self.SHA, pages)))
+
+    def test_another_workflows_green_jobs_are_not_the_tests(self):
+        """Any green job on the commit read as CI: a documents workflow
+        that alone had run there made the gate pass."""
+        pages, asked = self.lists([self.run_of(7, path=".github/workflows/docs.yml")], {})
+        self.assertEqual(land.tests_jobs(self.SHA, pages), [])
+        self.assertEqual(asked, [f"actions/runs?head_sha={self.SHA}"], "no other run's jobs are read")
+
+    def test_a_pull_requests_run_and_another_commits_are_left_out(self):
+        pages, _ = self.lists([self.run_of(8, event="pull_request"), self.run_of(9, sha="b" * 40)], {})
+        self.assertEqual(land.tests_jobs(self.SHA, pages), [])
+
+    def test_the_newest_run_of_the_tests_is_the_one_read(self):
+        green = [{"conclusion": "success"}] * 14
+        failed = [{"conclusion": "success"}, {"conclusion": "failure"}]
+        jobs = {"actions/runs/1003/jobs?filter=latest": failed, "actions/runs/1012/jobs?filter=latest": green, "actions/runs/1005/jobs?filter=latest": failed}
+        pages, asked = self.lists([self.run_of(3), self.run_of(12), self.run_of(5), self.run_of(20, path=".github/workflows/docs.yml")], jobs)
+        self.assertEqual(land.verdicts([], land.tests_jobs(self.SHA, pages))["CI"], ("success", "14 of 14 jobs green"))
+        self.assertEqual(asked[1:], ["actions/runs/1012/jobs?filter=latest"])
+        # A newer run that failed stands over an older green one.
+        jobs["actions/runs/1012/jobs?filter=latest"], jobs["actions/runs/1003/jobs?filter=latest"] = failed, green
+        pages, _ = self.lists([self.run_of(3), self.run_of(12)], jobs)
+        self.assertEqual(land.verdicts([], land.tests_jobs(self.SHA, pages))["CI"][0], "failure")
+
+    def test_every_page_of_a_list_is_read(self):
+        """One page of a hundred was read: the jobs past it were not there."""
+        calls = []
+
+        def api(path):
+            calls.append(path)
+            page = int(path.rsplit("page=", 1)[1])
+            return {"jobs": [{"n": n} for n in range((page - 1) * 100, min(page * 100, 203))]}
+
+        self.assertEqual([j["n"] for j in land.pages("actions/runs/5/jobs?filter=latest", "jobs", api)], list(range(203)))
+        self.assertEqual(calls, [f"actions/runs/5/jobs?filter=latest&per_page=100&page={p}" for p in (1, 2, 3)])
+        whole = lambda path: [{"context": "cells"}] * (100 if path.endswith("page=1") else 0)
+        self.assertEqual(len(land.pages("commits/x/statuses", None, whole)), 100, "a full last page asks for one more, which is empty")
+
+
 class Subjects(unittest.TestCase):
     def test_a_working_title_does_not_land(self):
         for subject in ("x", "wip: many cold files by direct reads", "WIP stuff for later on", "PROBE ONLY: loop the b3sum test", "LAB ONLY: k1 unrolled now",

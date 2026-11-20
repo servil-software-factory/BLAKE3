@@ -73,7 +73,7 @@ class CI(unittest.TestCase):
 
 
 class ReleaseEvidence(unittest.TestCase):
-    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, ""), vm_log=None, previous=None):
+    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, ""), vm_log=None, previous=None, builds_log="check-builds: every build passes", dry_run_log="publish-dry-run: ok"):
         jobs = [job(), job()] if ci_jobs is None else ci_jobs
         def git(*args):
             if args[0] == "rev-parse":
@@ -110,7 +110,7 @@ class ReleaseEvidence(unittest.TestCase):
             candidate = (git_override or git)("rev-parse", "candidate")[:12]
             if vm_log is None:
                 vm_log = f"check: BLAKE3-Servil's working tree ({candidate}) against {old} ({old[:12]})\nregress: no cell slower\n{check.VM_OK}"
-            for name, text in [("check-release-vm", vm_log), ("check-builds", "every build passes"), ("publish-dry-run", "publish-dry-run: ok")]:
+            for name, text in [("check-release-vm", vm_log), ("check-builds", builds_log), ("publish-dry-run", dry_run_log)]:
                 (logs / f"{name}-{candidate}.log").write_text(text + "\n")
             if mutation_log is not None:
                 # A real run prints the full SHA for each crate, even when this
@@ -131,6 +131,21 @@ class ReleaseEvidence(unittest.TestCase):
 
     def test_complete_fixture_passes(self):
         self.assertEqual(self.run_gate()[0], 0)
+
+    def test_a_log_passes_by_its_last_line_alone(self):
+        """A success line with a later run's failure under it is no pass
+        (the tail was searched for the line, and held it), nor is the
+        line as part of another."""
+        for log in ("check-builds: every build passes\nerror: a later run failed", "the note says: check-builds: every build passes", "every build passes", ""):
+            code, output = self.run_gate(builds_log=log)
+            self.assertEqual(code, 1, log)
+            self.assertIn("FAIL  check-builds", output, log)
+        for log in ("publish-dry-run: ok\nerror: failed to verify package tarball", "publish-dry-run: okay", "not publish-dry-run: ok"):
+            code, output = self.run_gate(dry_run_log=log)
+            self.assertEqual(code, 1, log)
+            self.assertIn("FAIL  cargo publish --dry-run", output, log)
+        # Lines above the last, and blank lines after it, change nothing.
+        self.assertEqual(self.run_gate(builds_log="error: an earlier run failed\ncheck-builds: every build passes\n\n")[0], 0)
 
     def test_artifacts_not_gathered_yet_are_open(self):
         code, output = self.run_gate(artifacts=(None, "not in dist/ yet: b3sum-v0.3.1+c-x86_64-unknown-linux-gnu"))

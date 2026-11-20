@@ -30,8 +30,10 @@ step sh -c 'RUSTC_BOOTSTRAP=1 cargo test -q --doc --features serde && cd threads
 RUSTFLAGS="-D warnings" step cargo check -q --release --tests --examples
 # The crate with the pool (threads/). One CPU, as in a one-CPU container:
 # the pool has no worker thread, and the caller hashes everything (the
-# suites run on many CPUs and never reach that path).
-step sh -c 'cd threads && taskset -c 0 cargo nextest run --cargo-quiet --release --lib'
+# suites run on many CPUs and never reach that path). The CPU is the
+# first of those this shell may use: CPU 0 need not be one of them.
+one_cpu=$(taskset -cp $$ | sed 's/.*: *//; s/[,-].*//')
+step sh -c "cd threads && taskset -c $one_cpu cargo nextest run --cargo-quiet --release --lib"
 # The pool's handshakes (the finish line, the park, the waker slot) under
 # the model checker, every schedule Shuttle explores: seconds. Until
 # November 15, 2026 they ran only inside the mutation check, so a change
