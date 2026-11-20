@@ -172,14 +172,18 @@ next section, this gives us an important set of properties:
 2. In output, filepaths are first converted to UTF-8. Any non-Unicode segments
    are replaced with Unicode replacement characters (U+FFFD). In Rust, this is
    `OsStr::to_string_lossy`.
-3. Then, if a filepath contains any backslashes (U+005C) or newlines (U+000A),
-   these characters are escaped as `\\` and `\n` respectively.
+3. Then, if a filepath contains any backslashes (U+005C), newlines (U+000A)
+   or carriage returns (U+000D), these characters are escaped as `\\`, `\n`
+   and `\r` respectively.
 4. Finally, any output line containing an escape sequence is prefixed with a
    single backslash.
 5. When checking, each line is parsed as UTF-8, separated by a newline
-   (U+000A). Invalid UTF-8 is an error.
+   (U+000A). Invalid UTF-8 is an error. Every newline and carriage return
+   (U+000D) at a line's end is taken off it, as official `b3sum` does: so a
+   line written by hand for a file whose name ends in a carriage return
+   checks the name without it, unless the line escapes it (rule 6).
 6. Then, if a line begins with a backslash, the filepath component is
-   unescaped. Any escape sequence other than `\\` or `\n` is an error. If a
+   unescaped. Any escape sequence other than `\\`, `\n` or `\r` is an error. If a
    line does not begin with a backslash, unescaping is not performed, and any
    backslashes in the filepath component are interpreted literally. (`b3sum`
    output never contains unescaped backslashes, but they can occur in

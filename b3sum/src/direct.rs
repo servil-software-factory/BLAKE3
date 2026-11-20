@@ -98,6 +98,7 @@ pub(crate) fn read<T: Send>(
 ) -> Option<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
+    let opened = file;
     // Open a new description of this very file, with independent flags and
     // offset. Reopening its old pathname could hash a different file after
     // a rename; changing flags on a dup would change the caller's too.
@@ -134,18 +135,24 @@ pub(crate) fn read<T: Send>(
     if failed.into_inner() {
         return None;
     }
-    // A last piece that is whole was asked for no byte more than it has,
-    // so its read does not say the file ends there: one more read does
-    // (BLAKE3 #424: a file that had grown past a multiple of PIECE gave
-    // the hash of its first `len` bytes, with no sign of the rest).
-    if len % PIECE == 0 {
-        // Sound: the buffer holds PIECE writable bytes.
-        let more = unsafe { libc::pread(file.as_raw_fd(), mine.0.cast(), PIECE, len as libc::off_t) };
-        if more != 0 {
-            return None;
+    // The reads above found `len` bytes; one read more says there are no
+    // others. A last piece that is whole was asked for no byte more than
+    // it has, so its read does not say the file ends there (BLAKE3 #424:
+    // a file that had grown past a multiple of PIECE gave the hash of its
+    // first `len` bytes, with no sign of the rest). A last piece that is
+    // short was one read that stopped, and a read may stop before a
+    // file's end. The read is of one byte at `len`, of the file as the
+    // caller opened it: a direct read starts on a block, and `len` need
+    // not.
+    let mut byte = 0u8;
+    loop {
+        // Sound: one writable byte.
+        let more = unsafe { libc::pread(opened.as_raw_fd(), (&raw mut byte).cast(), 1, len as libc::off_t) };
+        if more == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
         }
+        return (more == 0).then_some(());
     }
-    Some(())
 }
 
 /// The hash of the open `file`, of `len` bytes (PIECE or more), read
