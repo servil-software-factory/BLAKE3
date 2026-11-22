@@ -21,10 +21,9 @@ pub const ROW: usize = 32;
 /// The rows a stack holds at once (the sizes from a group of 16 chunks up
 /// to 2 MiB); a row past them is condensed to its one value.
 const ROWS: usize = 8;
-/// The values of every row a stack holds at once, end to end, and their
-/// parents: what an output condenses together (`CvStack::rows_values`).
+/// The values of every row a stack holds at once, end to end: what an
+/// output condenses together (`CvStack::rows_values`).
 const RUN: usize = ROWS * ROW;
-const HALF_RUN: usize = RUN / 2;
 // The widths a row has: ROW, and three halvings down to 4.
 const _: () = assert!(ROW / 8 == 4);
 
@@ -159,7 +158,8 @@ impl CvStack {
     pub fn rows_values<P: Parent>(&self, p: &P) -> [Cv; ROWS] {
         let mut values = [[0u8; 32]; ROWS];
         // The run, and the entries whose rows are in it, in its order.
-        // Not zeroed: 8 KiB, of which a stream's six rows fill three.
+        // Neither it nor its parents' place is zeroed: 8 KiB each, of
+        // which a stream's six rows fill three, and their parents half.
         let mut run = [const { core::mem::MaybeUninit::<Cv>::uninit() }; RUN];
         let mut order = [0usize; ROWS];
         let (mut rows, mut len) = (0, 0);
@@ -181,11 +181,12 @@ impl CvStack {
         }
         // Sound: the run's first `len` values were written, a row after another.
         let mut from = unsafe { core::slice::from_raw_parts_mut(run.as_mut_ptr() as *mut Cv, len) };
-        // The parents' place, for half the run. The kernels write where
-        // values are, as into a row's place (place_on_top): it is given
-        // the run's first half to hold until the first layer writes over
-        // it, and each later layer writes over an earlier one's values.
-        let mut parents = [const { core::mem::MaybeUninit::<Cv>::uninit() }; HALF_RUN];
+        // The parents' place: half the run's length is used of it. The
+        // kernels write where values are, as into a row's place
+        // (place_on_top): it is given the run's first half to hold until
+        // the first layer writes over it, and each later layer writes
+        // over an earlier one's values.
+        let mut parents = [const { core::mem::MaybeUninit::<Cv>::uninit() }; RUN];
         let mut to = parents[..len / 2].write_copy_of_slice(&from[..len / 2]);
         // A layer for each halving of the widest row there can be: loops
         // of counts fixed at their start, like merge's.
