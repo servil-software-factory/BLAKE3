@@ -89,7 +89,9 @@
 //!
 //! Each call returns once its hash is done, on the calling thread. For
 //! long inputs and large batches on several cores, the crate
-//! `blake3-servil` adds a multithreaded form of each.
+//! `blake3-servil` adds a multithreaded form of each, and for messages
+//! that keep arriving its Pipeline
+//! ([`throughput::update_each`] says when each is the one to use).
 //!
 //! Short messages hash fastest together: 1024 messages of 64 bytes in one
 //! [`throughput::hash_many`] call take about a fifth of the time of 1024

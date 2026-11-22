@@ -89,7 +89,7 @@
 //! | Many messages of one length, in one buffer | [`throughput::hash_many_multithreaded`] |
 //! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Packed`] |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
-//! | Many messages arriving at once (a server's uploads) | [`throughput::update_each`], or across cores [`throughput::Pipeline`] |
+//! | Many messages arriving at once (a server's uploads) | [`throughput::Pipeline`]; on one thread, or holding each message's running state, [`throughput::update_each`] |
 //! | Continuous stream of messages or batches | [`throughput::Pipeline`] |
 //!
 //! Each call returns once its hash is done, and uses other CPU cores
@@ -641,6 +641,14 @@ pub mod throughput {
     /// that is faster (pieces of 512 KiB and more): the same result, never
     /// slower.
     /// Requires each `i < hashers.len()`.
+    ///
+    /// It gains in the turns whose pieces are that long: with pieces of
+    /// 512 KiB to 4 MiB it took 40% to 60% less time than [`update_each`]
+    /// on a Ryzen 9700X and 30% to 50% less on an EPYC 9255, and the same
+    /// time with shorter pieces. A [`Pipeline`] fed the same arrivals took
+    /// less time and less CPU time at every size (November 22, 2026,
+    /// BLAKE3 #470): [`update_each`] says when the Pipeline is the one to
+    /// use.
     ///
     /// # Key-dependent timing
     ///

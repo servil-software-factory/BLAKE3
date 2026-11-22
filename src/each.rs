@@ -30,6 +30,26 @@ use crate::{CHUNK_END, CHUNK_LEN, CHUNK_START, CVBytes, CVWords, ChunkState, Has
 /// to 1024 bytes waits whole in its hasher, and those that finish together
 /// hash side by side there.
 ///
+/// # Or the Pipeline
+///
+/// A program with threads to give, whose messages keep arriving, has a
+/// faster way in the crate `blake3-servil` (this library with its thread
+/// pool): its `throughput::Pipeline` took a tenth of this call's time and
+/// about a third of its CPU time for 1,024 open messages of 1 KiB arriving
+/// in 256-byte pieces (0.09 ns a byte against 0.94 on a Ryzen 9700X, 0.11
+/// against 1.18 on an EPYC 9255; November 22, 2026, BLAKE3 #470), and a
+/// third of its time for 64 open messages of 1 MiB. It holds a room of
+/// 64 KiB for each open message. This call stays the right one:
+///
+/// - on one thread;
+/// - for more open messages than the program has 64 KiB each for (a
+///   `Hasher` is 26 KiB, and touches only what it uses);
+/// - where a message's running state is wanted: a clone, a `finalize`
+///   part-way;
+/// - for a small burst after a gap, about 256 KiB a turn, where the
+///   Pipeline's workers must first wake: there it read from 6% faster to
+///   20% slower than this call on the same two machines.
+///
 /// # Key-dependent timing
 ///
 /// Hashers may use different secret keys. Grouping, kernel selection, and
