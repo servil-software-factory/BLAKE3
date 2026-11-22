@@ -64,6 +64,21 @@
 //! each warning in place of 5, with leads of 1 to 200 milliseconds, and
 //! times the calling thread alone.
 //!
+//!     host_lab early [VISITS]
+//!
+//! A hasher made early, with nothing kept running (Zooko: a caller may
+//! learn that bytes will come, a connection opening, and make its hasher
+//! then; what could making it do ahead?). After the program's gap (5
+//! milliseconds asleep, or other work) comes the hello, then a lead in
+//! which nothing runs (50 and 200 microseconds, 1 and 5 milliseconds),
+//! then the bytes: the write and the call, timed. At the hello one of:
+//! nothing, as the library ships; the kernels the call will run, run once
+//! on the calling thread over other bytes (the most that fetching code and
+//! starting the wide unit ahead could give); that and three workers
+//! woken, who find nothing and park again. One thread at 1 KiB, 16 KiB
+//! and 64 KiB, the pool at 1 MiB, the split as shipped. Writes
+//! `host_lab.early.tsv` and the same table.
+//!
 //!     host_lab price [SECONDS]
 //!
 //! What helpers kept awake cost while no call comes: for 0, 1, 3, 7 and
@@ -178,8 +193,11 @@ fn main() {
         Some("rest") => rest(count.unwrap_or(200)),
         Some("cold") => cold(count.unwrap_or(200)),
         Some("warn") => warn(count.unwrap_or(200), args.get(3).map_or("", String::as_str), args.get(4).map_or(3, |h| h.parse().expect("HELPERS is a number"))),
+        Some("early") => early(count.unwrap_or(200)),
         Some("price") => price(count.unwrap_or(10)),
-        _ => panic!("usage: host_lab latency [VISITS] | rest [VISITS] | cold [VISITS] | warn [VISITS] | price [SECONDS]"),
+        _ => panic!(
+            "usage: host_lab latency [VISITS] | rest [VISITS] | cold [VISITS] | warn [VISITS] [long|rested [HELPERS]] | early [VISITS] | price [SECONDS]"
+        ),
     }
 }
 
@@ -744,6 +762,96 @@ fn warn(visits: usize, variant: &str, helpers: usize) {
         .collect();
     let cells: Vec<Cell> = calls.iter().map(|&(multithreaded, len)| Cell { pause: Pause::Idle(rest_ns), multithreaded, len }).collect();
     report("host_lab.warn.tsv", &head, &settings, &cells, &samples);
+}
+
+/// What an `early` cell does at the hello, a lead before the bytes come:
+/// what making the hasher then could do, with nothing left running.
+#[derive(Clone, Copy, PartialEq)]
+enum Early {
+    /// Nothing: the library as it ships.
+    Nothing,
+    /// The kernels the call will run, run once on the calling thread.
+    Run,
+    /// The kernels run once, and three workers woken, who find nothing
+    /// and park again.
+    RunAndWake,
+}
+
+fn early(visits: usize) {
+    assert!(visits >= 1);
+    blake3_servil::initialize_multithreaded(None);
+    clocks::tight_timers();
+    let (_, workers) = blake3_servil::__probe_parked();
+    let helpers = workers.min(3);
+    let earlies = [("nothing early", Early::Nothing), ("kernels run", Early::Run), ("run and wake", Early::RunAndWake)];
+    let leads: [(&str, u64); 4] = [("50 us", 50_000), ("200 us", 200_000), ("1 ms", 1_000_000), ("5 ms", 5_000_000)];
+    // A way is what the hello does and how long before the bytes it comes.
+    let ways: Vec<(String, Early, u64)> =
+        leads.iter().flat_map(|&(lead_name, lead)| earlies.iter().map(move |&(name, early)| (format!("{name}, {lead_name}"), early, lead))).collect();
+    let calls = [(false, KIB), (false, 16 * KIB), (false, 64 * KIB), (true, 1 << 20)];
+    let cells: Vec<Cell> = [Pause::Idle(5_000_000), Pause::OtherWork]
+        .iter()
+        .flat_map(|&pause| calls.iter().map(move |&(multithreaded, len)| Cell { pause, multithreaded, len }))
+        .collect();
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let (source, mut message) = buffers(&mut rng);
+    // What the hello's run hashes: other bytes than the message's.
+    let (scratch, _) = buffers(&mut rng);
+    let work = vec![1u8; OTHER_WORK_BYTES];
+    let mut samples = vec![vec![Samples::default(); cells.len()]; ways.len()];
+    let mut order: Vec<(usize, usize)> = (0..ways.len()).flat_map(|w| (0..cells.len()).map(move |c| (w, c))).collect();
+    let started = clocks::now();
+    for _ in 0..visits {
+        rng.shuffle(&mut order);
+        for &(w, c) in &order {
+            let (early, lead) = (ways[w].1, ways[w].2);
+            let Cell { pause, multithreaded, len } = cells[c];
+            let call = |message: &[Block]| {
+                if multithreaded {
+                    black_box(throughput::hash_multithreaded(Mode::Plain, black_box(message), len));
+                } else {
+                    black_box(convenience::hash(black_box(&Block::bytes(message)[..len])));
+                }
+            };
+            let write = |message: &mut [Block]| Block::bytes_mut(message)[..len].copy_from_slice(black_box(&source[..len]));
+            clocks::load::tick();
+            // The same call first, untimed; then the program's gap.
+            write(&mut message);
+            call(&message);
+            match pause {
+                Pause::Nonstop => {}
+                Pause::OtherWork => clocks::Gap::Busy(&work).spend(OTHER_WORK_NS),
+                Pause::Idle(ns) => clocks::Gap::Idle.spend(ns),
+            }
+            // The hello.
+            if early != Early::Nothing {
+                black_box(convenience::hash(black_box(&scratch[..len.min(64 * KIB)])));
+            }
+            if early == Early::RunAndWake {
+                // Woken, and the knob back at once: they find nothing and park.
+                blake3_servil::__probe_warn(helpers, 512 * KIB, 128 * KIB);
+                blake3_servil::__probe_warn(0, 512 * KIB, 128 * KIB);
+            }
+            // The wait for the bytes: nothing runs.
+            clocks::Gap::Idle.spend(lead);
+            black_box(clocks::Counts::read());
+            black_box(clocks::since_ns(clocks::now()));
+            let counts_before = clocks::Counts::read();
+            let t = clocks::now();
+            write(&mut message);
+            let write_ns = clocks::since_ns(t);
+            let t = clocks::now();
+            call(&message);
+            let hash_ns = clocks::since_ns(t);
+            let counts = counts_before.zip(clocks::Counts::read()).map(|(before, after)| after.since(before));
+            keep(&mut samples[w][c], (write_ns, hash_ns, counts));
+        }
+    }
+    let run_ns = clocks::since_ns(started);
+    let what = format!("early: {visits} visits a cell; the hello's run hashes other bytes, as many as the call's up to 64 KiB; a wake wakes {helpers} workers");
+    let head = facts(&what, run_ns, workers);
+    let settings: Vec<Setting> = ways.iter().map(|(name, ..)| Setting { name: name.clone(), awake: 0, split: 512 * KIB, per: 128 * KIB }).collect();
+    report("host_lab.early.tsv", &head, &settings, &cells, &samples);
 }
 
 /// This process's energy so far by the system's own estimate, and the
