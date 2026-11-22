@@ -27,8 +27,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - name: Document both libraries in one site
         env:
           RUSTDOCFLAGS: -D warnings
@@ -38,8 +38,8 @@ jobs:
           test -f target/doc/blake3_servil_core/index.html
           test -f target/doc/blake3_servil/index.html
           echo '<meta http-equiv="refresh" content="0; url=blake3_servil/index.html">' > target/doc/index.html
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: target/doc
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
