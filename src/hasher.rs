@@ -21,6 +21,12 @@ pub const ROW: usize = 32;
 /// The rows a stack holds at once (the sizes from a group of 16 chunks up
 /// to 2 MiB); a row past them is condensed to its one value.
 const ROWS: usize = 8;
+/// The values of every row a stack holds at once, end to end, and their
+/// parents: what an output condenses together (`CvStack::rows_values`).
+const RUN: usize = ROWS * ROW;
+const HALF_RUN: usize = RUN / 2;
+// The widths a row has: ROW, and three halvings down to 4.
+const _: () = assert!(ROW / 8 == 4);
 
 /// The values of the subtrees finished so far, bottom first, each one
 /// value or a row.
@@ -152,49 +158,44 @@ impl CvStack {
     /// 0.48 (BLAKE3 #472).
     pub fn rows_values<P: Parent>(&self, p: &P) -> [Cv; ROWS] {
         let mut values = [[0u8; 32]; ROWS];
-        // The run and its parents: each layer reads the one and writes
-        // the other, turn about. Neither is zeroed whole (12 KiB).
-        let mut run = core::mem::MaybeUninit::<[Cv; ROWS * ROW]>::uninit();
-        let mut parents = core::mem::MaybeUninit::<[Cv; ROWS * ROW / 2]>::uninit();
-        let (mut from, mut to) = (run.as_mut_ptr() as *mut Cv, parents.as_mut_ptr() as *mut Cv);
-        // The entries whose rows are in the run, in its order.
+        // The run, and the entries whose rows are in it, in its order.
+        // Not zeroed: 8 KiB, of which a stream's six rows fill three.
+        let mut run = [const { core::mem::MaybeUninit::<Cv>::uninit() }; RUN];
         let mut order = [0usize; ROWS];
         let (mut rows, mut len) = (0, 0);
         // (A bit at the length or above is left from an entry merged away.)
         let live = self.wide & ((1 << self.len) - 1);
-        for halvings in 0..ROW.trailing_zeros() - 1 {
-            let width = ROW >> halvings;
+        for width in [ROW, ROW / 2, ROW / 4, ROW / 8] {
             let mut left = live;
             for _ in 0..live.count_ones() {
                 let i = left.trailing_zeros() as usize;
                 left &= left - 1;
                 let row = self.row(i);
                 if row.len() == width {
-                    // Sound: within the run, which has room for ROWS rows
-                    // of ROW values, and a slot holds one row at a time.
-                    unsafe { core::ptr::copy_nonoverlapping(row.as_ptr(), from.add(len), width) };
+                    run[len..len + width].write_copy_of_slice(row);
                     order[rows] = i;
                     rows += 1;
                     len += width;
                 }
             }
         }
-        // The first layer's parents go where values are, as a row's cut
-        // does (place_on_top); the later layers write over earlier ones.
-        // Sound: within the parents' place, half the run's room.
-        unsafe { to.write_bytes(0, len / 2) };
-        // A layer for each halving of the widest row there can be: a loop
-        // of a fixed count, like merge's.
+        // Sound: the run's first `len` values were written, a row after another.
+        let mut from = unsafe { core::slice::from_raw_parts_mut(run.as_mut_ptr() as *mut Cv, len) };
+        // The parents' place, for half the run. The kernels write where
+        // values are, as into a row's place (place_on_top): it is given
+        // the run's first half to hold until the first layer writes over
+        // it, and each later layer writes over an earlier one's values.
+        let mut parents = [const { core::mem::MaybeUninit::<Cv>::uninit() }; HALF_RUN];
+        let mut to = parents[..len / 2].write_copy_of_slice(&from[..len / 2]);
+        // A layer for each halving of the widest row there can be: loops
+        // of counts fixed at their start, like merge's.
         for layer in 1..=ROW.trailing_zeros() {
             for start in (0..len).step_by(2 * ROW) {
                 let n = (len - start).min(2 * ROW);
-                // Sound: `from` holds `len` written values (the rows'
-                // copies, or the layer before's parents), and `to` holds
-                // values in half as many places (zeroed above, or written
-                // by an earlier layer); the two are apart.
-                let (children, out) = unsafe { (core::slice::from_raw_parts(from.add(start), n), core::slice::from_raw_parts_mut(to.add(start / 2), n / 2)) };
-                let made = p.parents(children, out);
-                assert_eq!(2 * made, n, "a parent for every two children");
+                let out = &mut to[start / 2..(start + n) / 2];
+                let places = out.len();
+                let made = p.parents(&from[start..start + n], out);
+                assert_eq!((2 * made, places), (n, made), "a parent for every two children, each in its place");
             }
             len /= 2;
             // The rows that were two wide are one value each now: the
@@ -203,11 +204,10 @@ impl CvStack {
                 if self.row(order[rows - 1]).len() == 1 << layer {
                     rows -= 1;
                     len -= 1;
-                    // Sound: below the layer's count of parents, each written.
-                    values[order[rows] % ROWS] = unsafe { *to.add(len) };
+                    values[order[rows] % ROWS] = to[len];
                 }
             }
-            (from, to) = (to, from);
+            core::mem::swap(&mut from, &mut to);
         }
         assert_eq!((rows, len), (0, 0), "every row condensed to its one value");
         values
@@ -1094,6 +1094,21 @@ mod test {
                 }
             }
         }
+        // A row merged away leaves its bit and its place's values behind:
+        // they are no row of the stack's. Two rows of 16 become one, and
+        // the upper one's place stays as it was.
+        let mut stack = CvStack::new();
+        stack.push(value(0, 0));
+        for i in [1, 2] {
+            let row: std::vec::Vec<Cv> = (0..16).map(|j| value(i, j)).collect();
+            stack.push_row(&k, &row);
+        }
+        stack.merge(&k, 2);
+        assert_eq!((stack.len(), stack.is_row(1), stack.wide >> 2 & 1), (2, true, 1), "one row of the two, and the other's bit left");
+        let rows = stack.rows_values(&k);
+        assert_eq!(rows[1], k.parent(&alone(1, 16), &alone(2, 16)), "the merged row's value");
+        assert_eq!(stack.value(&rows, 1), stack.get(&k, 1));
+        assert_eq!(rows[2], [0u8; 32], "the place of the row merged away");
     }
 
     /// An output condenses the stack's rows together, a full layer of
