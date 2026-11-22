@@ -88,6 +88,16 @@ Each result folder holds runner.log (every command and its output),
 verdict.json, and the job's own files: the benchmark's report, graph,
 and samples; host_lab's report.
 
+No process of a job's command is left when the command is over. At the
+job's time limit, and when a command ends by itself, the runner ends
+every process in the command's session and every descendant of the
+command's first process, whichever process group each is in
+(cargo-nextest gives each test a group of its own). A command that ended
+and left processes running has a sentence in the verdict's "left running".
+A process that could not be ended is named there, or in "timed out".
+One kind is not found: a process that left the session and whose parent
+had ended before the runner looked.
+
 The checkouts persist between jobs (CHECKOUTS: BLAKE3-Servil, and bench-hashes
 beside it), moved to each job's commits with a forced checkout that
 rewrites only the files that differ, so Cargo rebuilds only what changed:
@@ -135,20 +145,125 @@ SESSION_FILE = Path.home() / "runner-session.txt"
 
 
 def started(pid):
-    """A process's start time as ps prints it, or None when it is gone."""
+    """A process's start time as ps prints it (its words a space apart), or
+    None when it is gone."""
     out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
-    return out.stdout.strip() or None
+    return " ".join(out.stdout.split()) or None
+
+
+def process_table():
+    """Every process there is, by PID: its parent's PID, whether it is a
+    zombie (ended, and not yet collected by its parent), and its start
+    time as `started` gives it."""
+    listing = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "lstart="], capture_output=True, text=True).stdout
+    table = {}
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) >= 4:
+            table[int(fields[0])] = (int(fields[1]), fields[2].startswith("Z"), " ".join(fields[3:]))
+    return table
+
+
+def job_processes(leader, began, table):
+    """The processes of a job's command among those of `table`, by PID,
+    each with its start time and whether it is a zombie: every process in
+    the session that the command's first process began (`leader`, started
+    at `began`), and every descendant of that process by the table's
+    parent links.
+
+    The command's process group is not enough. cargo-nextest and
+    cargo-mutants give each process they start a group of its own, to end
+    it with its children at their own time-outs: such a process leaves
+    the command's group and stays in its session (#473). One that leaves
+    the session as well is still a descendant while its parent lives. One
+    that left the session and whose parent has ended is found by nothing
+    here.
+
+    A session's number is its first process's PID, and no new process is
+    given that PID while the session has a member. So where the table
+    shows a process with that PID and another start time, nothing of the
+    session is left, and nothing is found.
+
+    Zombies are among the answer, marked, for the caller to signal and
+    not to count: on Linux a process whose first thread has ended is
+    listed as a zombie while its other threads run."""
+    first = table.get(leader)
+    if first is not None and began is not None and first[2] != began:
+        return {}
+
+    def descends(pid):
+        passed = set()
+        while pid != leader and pid in table and pid not in passed:
+            passed.add(pid)
+            pid = table[pid][0]
+        return pid == leader
+
+    def in_session(pid):
+        try:
+            return os.getsid(pid) == leader
+        except OSError:                     # gone since the table was read, or not this account's to ask about
+            return False
+
+    return {pid: (row[2], row[1]) for pid, row in table.items() if pid != os.getpid() and (descends(pid) or in_session(pid))}
+
+
+def signal_each(pids, signum):
+    for pid in pids:
+        try:
+            os.kill(pid, signum)
+        except OSError:                     # gone already, or not this account's to signal
+            pass
+
+
+def end_job(leader, began):
+    """End every process of a job's command (job_processes). Returns two
+    things: the processes it found running (PID and start time; zombies
+    are not counted), and the PIDs of those that are still running at the
+    end; the caller says them in the job's verdict.
+
+    First each process is stopped, and the table is read again until a
+    reading finds none that is not stopped yet: a stopped process starts
+    no other, so none gets away between a reading and its signal. Then
+    all are killed, and the table is read until none of them is left, a
+    few times."""
+    seen = {}                               # every process found, zombies too: its start time, and whether it was a zombie then
+    for _ in range(10):
+        new = {pid: row for pid, row in job_processes(leader, began, process_table()).items() if pid not in seen}
+        if not new:
+            break
+        signal_each(new, signal.SIGSTOP)
+        seen.update(new)
+    left = set()
+    for attempt in range(7 if seen else 0):
+        table = process_table()
+        seen.update({pid: row for pid, row in job_processes(leader, began, table).items() if pid not in seen})
+        there = {pid for pid, (at, _) in seen.items() if pid in table and table[pid][2] == at}
+        left = {pid for pid in there if not table[pid][1]}
+        if attempt == 6 or (attempt > 0 and not left):
+            break
+        signal_each(there, signal.SIGKILL)
+        time.sleep(0.05 * 2 ** attempt)
+    return {pid: at for pid, (at, zombie) in seen.items() if not zombie}, left
+
+
+def not_ended(left):
+    return f"{len(left)} of its processes could not be ended and may still be running: PID {', '.join(map(str, sorted(left)))}"
 
 
 def end_leftover_session():
-    """End the session an earlier runner left running, if it is the one it
-    recorded (the same PID and start time; this account's processes only)."""
+    """End what an earlier runner left running of its last command: the
+    session whose first process had the recorded PID and start time (this
+    account's processes only). That first process may be gone and its
+    session still there, with a test it started: the session is ended
+    then as well."""
     if not SESSION_FILE.exists():
         return
     pid, recorded = SESSION_FILE.read_text().split("\t", 1)
-    if started(int(pid)) == recorded.strip():
-        print(f"runner: ending the session an earlier runner left running (PID {pid})", file=sys.stderr, flush=True)
-        os.killpg(int(pid), signal.SIGKILL)
+    found, left = end_job(int(pid), " ".join(recorded.split()))
+    if found:
+        print(f"runner: ended what an earlier runner left running (the session of PID {pid}: {len(found)} of its processes)", file=sys.stderr, flush=True)
+    if left:
+        print(f"runner: {not_ended(left)}", file=sys.stderr, flush=True)
     SESSION_FILE.unlink()
 
 
@@ -185,6 +300,7 @@ class Job:
         self.log = log
         self.limit = limit
         self.deadline = time.monotonic() + limit
+        self.left_running = []              # what commands left running when they ended, a sentence each: for the verdict
 
     def run(self, cmd, cwd, capture=False):
         remaining = self.deadline - time.monotonic()
@@ -195,15 +311,31 @@ class Job:
         # runner alone and the current job finishes.
         proc = subprocess.Popen(cmd, cwd=cwd, env=environment(), start_new_session=True,
                                 stdout=subprocess.PIPE if capture else self.log, stderr=self.log, text=True)
-        SESSION_FILE.write_text(f"{proc.pid}\t{started(proc.pid)}\n")
+        began = started(proc.pid)
+        SESSION_FILE.write_text(f"{proc.pid}\t{began}\n")
         try:
             stdout, _ = proc.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
-            # The whole session, not the command alone: cargo's children (a
-            # benchmark it runs) would otherwise go on into the next job.
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
-            raise TimedOut(f"the job's {self.limit} s limit ended: {' '.join(cmd)}")
+            # Every process of the command, not the command alone nor its
+            # process group alone: cargo's children (a benchmark it runs, a
+            # test that cargo-nextest put in a group of its own) would
+            # otherwise go on into the next job (#473).
+            _, left = end_job(proc.pid, began)
+            if proc.stdout is not None:
+                proc.stdout.close()         # what the command printed is not read: the job has timed out
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass                        # it could not be ended: it is among `left`, and said below
+            raise TimedOut(f"the job's {self.limit} s limit ended: {' '.join(cmd)}" + (f"; {not_ended(left)}" if left else ""))
+        # The command ended by itself. What it left running in its session
+        # (a test's child that outlived the test) would run beside the
+        # job's next command, or beside the next job: it is ended, and said.
+        found, left = end_job(proc.pid, began)
+        if found:
+            said = f"{' '.join(cmd)} ended and left {len(found)} of its processes running; the runner ended them" + (f", but {not_ended(left)}" if left else "")
+            self.left_running.append(said)
+            print(f"runner: {said}", file=self.log, flush=True)
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd)
         return stdout
@@ -555,10 +687,13 @@ def process(path, out):
                 assert isinstance(job.get(name, False), bool), f"{name}: true or false"
                 if job.get(name):
                     meters[name] = subprocess.Popen(command, stdout=open(out / f"{name}.txt", "w"), stderr=log)
+            running = Job(log, limit)
             try:
                 with tempfile.TemporaryDirectory(dir=HOME / "tmp") as work:
-                    verdict["status"] = HANDLERS[job["type"]](job, Job(log, limit), Path(work), out)
+                    verdict["status"] = HANDLERS[job["type"]](job, running, Path(work), out)
             finally:
+                if running.left_running:
+                    verdict["left running"] = running.left_running
                 for name, meter in meters.items():
                     # sudo passes the signal on to powermetrics, which ends its
                     # last sample and exits, as top does. A meter that outlasts
