@@ -327,10 +327,77 @@ REACH = "--whole-suite" not in sys.argv and not CRATE  # the map is of the root 
 SHARDS = 6
 # The host's target triple, for its target runner's variable.
 HOST = next(l.split(": ", 1)[1] for l in subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True).stdout.splitlines() if l.startswith("host: "))
-# The target directory cargo is set to use (a cargo config's target-dir, or
-# the checkout's target/): the shards build inside it.
-TARGET_DIR = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=CRATE_DIR,
-                                       capture_output=True, text=True, check=True).stdout)["target_directory"]
+def main_checkout(root):
+    """The main working tree of a linked worktree, or None if `root` is the
+    main checkout itself, a bare repository, a submodule, or uses a separate
+    git directory."""
+    r = subprocess.run(
+        ["git", "-C", root, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return None
+    lines = r.stdout.splitlines()
+    if len(lines) < 2:
+        return None
+    git_dir, common_dir = lines[0], lines[1]
+    if os.path.realpath(git_dir) == os.path.realpath(common_dir):
+        return None
+    common = os.path.normpath(common_dir)
+    if os.path.basename(common) != ".git":
+        return None
+    main = os.path.dirname(common)
+    dot_git = os.path.join(main, ".git")
+    if not os.path.isdir(dot_git) or not os.path.samefile(dot_git, common):
+        return None
+    if os.path.realpath(main) == os.path.realpath(root):
+        return None
+    bare = subprocess.run(
+        ["git", "-C", main, "rev-parse", "--is-bare-repository"],
+        capture_output=True, text=True,
+    )
+    if bare.returncode != 0 or bare.stdout.strip() != "false":
+        return None
+    return main
+
+
+def default_target_dir(root, crate_dir, env=None):
+    """The target directory the shards build inside: what cargo is set to use
+    (CARGO_TARGET_DIR, CARGO_BUILD_TARGET_DIR, or a cargo config's target-dir),
+    and where none of those is set in a linked worktree, the main checkout's
+    matching target/ so a new worktree reuses the unmutated build (#453)."""
+    env = os.environ if env is None else env
+    meta = json.loads(subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        cwd=crate_dir, env=env, capture_output=True, text=True, check=True,
+    ).stdout)
+    target_dir = meta["target_directory"]
+    workspace_root = meta["workspace_root"]
+    if env.get("CARGO_TARGET_DIR") or env.get("CARGO_BUILD_TARGET_DIR"):
+        return target_dir
+    if os.path.realpath(target_dir) != os.path.realpath(os.path.join(workspace_root, "target")):
+        return target_dir
+    main = main_checkout(root)
+    if main is None:
+        return target_dir
+    rel = os.path.relpath(os.path.realpath(workspace_root), os.path.realpath(root))
+    if rel == ".." or rel.startswith(".." + os.sep):
+        return target_dir
+    parent = os.path.normpath(os.path.join(main, rel))
+    if not os.path.isdir(parent):
+        return target_dir
+    shared = os.path.join(parent, "target")
+    if os.path.lexists(shared):
+        if not (os.path.isdir(shared) and os.access(shared, os.W_OK)):
+            return target_dir
+    elif not os.access(parent, os.W_OK):
+        return target_dir
+    return shared
+
+
+# The target directory the shards build inside (a cargo config's or env's
+# target-dir, or in a linked worktree the main checkout's target/).
+TARGET_DIR = default_target_dir(ROOT, CRATE_DIR)
 # cargo-mutants needs a limit on a mutant's tests (with --in-place it would
 # otherwise take 300 s). The run's one clock is nextest's, a test's 15 s
 # (.config/nextest.toml, profile mutants), which ends a hanging test first;
