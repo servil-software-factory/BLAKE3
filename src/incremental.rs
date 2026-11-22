@@ -925,35 +925,49 @@ mod test {
         }
     }
 
-    /// The threshold is held against the group that goes to the core, not
-    /// against the update that completes it: a group gathered in the stage
-    /// from shorter updates is the callback's where it reaches the
-    /// threshold, though its last piece is one byte, and the serial
-    /// update's where it does not. (A filter on the update's own length
-    /// would pass every other test here and take the staged groups from a
-    /// caller of `update_with` whose threshold is a group.)
+    /// The threshold is held against the slice that goes to the core, not
+    /// against the update that completes it. A group gathered in the stage
+    /// from shorter updates keeps the pool where it reaches the threshold,
+    /// though its last piece is one byte: the callback is asked for it.
+    /// One byte under the threshold it is the serial update's, cut into
+    /// the rows the serial update cuts. (A filter on the update's own
+    /// length would pass every other test here and take the staged groups
+    /// from a caller of `update_with` whose threshold is a group; a gate
+    /// one byte early would keep the pool for the second case, where the
+    /// callback is silent either way, the hooks holding each subtree to
+    /// the threshold again, and only the rows tell.)
     #[test]
     #[cfg(feature = "std")]
     fn a_staged_group_is_held_to_the_threshold_by_its_own_length() {
         crate::initialize();
         let input = painted();
         let input = &input[..2 * STAGE_LEN + 5];
-        for (min_len, asked_here) in [(STAGE_LEN, true), (STAGE_LEN + 1, false)] {
-            let asked = core::cell::RefCell::new(std::vec::Vec::new());
-            let mut hasher = Hasher::new(Mode::Plain, None);
-            hasher.update(&input[..STAGE_LEN - 1]);
-            hasher.update_with(&input[STAGE_LEN - 1..STAGE_LEN], min_len, &|tree, level, index, bytes| {
-                asked.borrow_mut().push((level, index, bytes.len()));
-                tree.subtree_halves(level, index, bytes)
-            });
-            if asked_here {
-                assert_eq!(asked.borrow().as_slice(), &[(4, 0, STAGE_LEN)], "a group of the threshold's length, completed by one byte");
-            } else {
-                assert!(asked.borrow().is_empty(), "a group one byte under the threshold: {:?}", asked.borrow());
-            }
-            hasher.update(&input[STAGE_LEN..]);
-            assert_eq!(*hasher.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, input), "a threshold of {min_len}");
-        }
+        let asked = core::cell::RefCell::new(std::vec::Vec::new());
+        let mut hasher = Hasher::new(Mode::Plain, None);
+        hasher.update(&input[..STAGE_LEN - 1]);
+        hasher.update_with(&input[STAGE_LEN - 1..STAGE_LEN], STAGE_LEN, &|tree, level, index, bytes| {
+            asked.borrow_mut().push((level, index, bytes.len()));
+            tree.subtree_halves(level, index, bytes)
+        });
+        assert_eq!(asked.borrow().as_slice(), &[(4, 0, STAGE_LEN)], "a group of the threshold's length, completed by one byte");
+        hasher.update(&input[STAGE_LEN..]);
+        assert_eq!(*hasher.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, input));
+        // One byte under the threshold, and the message's second group:
+        // its first cuts no row on either path.
+        let rows = || crate::COUNTED.with(|c| c[crate::Counted::Row as usize].replace(0));
+        let (mut serial, mut pooled) = (Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None));
+        serial.update(&input[..2 * STAGE_LEN - 1]);
+        pooled.update(&input[..2 * STAGE_LEN - 1]);
+        let last = &input[2 * STAGE_LEN - 1..2 * STAGE_LEN];
+        rows();
+        serial.update(last);
+        let want = rows();
+        pooled.update_with(last, STAGE_LEN + 1, &|_, _, _, _| panic!("a group one byte under the threshold holds no subtree for the callback"));
+        assert_eq!(rows(), want, "a group one byte under the threshold: the serial update's rows");
+        let rows_here = (4..=hasher::ROW).contains(&Platform::detect().simd_degree());
+        assert_eq!(want > 0, rows_here, "the comparison is of something wherever the kernels cut rows");
+        assert_eq!(pooled.finalize(), serial.finalize());
+        assert_eq!(*pooled.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input[..2 * STAGE_LEN]));
     }
 
     #[test]
