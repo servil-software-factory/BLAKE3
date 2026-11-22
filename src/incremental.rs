@@ -315,7 +315,7 @@ impl Hasher {
                 let groups = input.len() / STAGE_LEN * STAGE_LEN;
                 // The loop's variant on this path: a group or more leaves the input.
                 assert!(groups > 0, "no whole group went to the core");
-                self.core.update_pooled(&input[..groups], pooled);
+                self.update_groups(&input[..groups], pooled);
                 input = &input[groups..];
                 continue;
             }
@@ -336,9 +336,22 @@ impl Hasher {
             // Sound: the first `staged` bytes were written; the core reads
             // them before the stage is written again.
             let bytes = unsafe { core::slice::from_raw_parts(self.stage.as_ptr() as *const u8, staged) };
-            self.core.update_pooled(bytes, pooled);
+            self.update_groups(bytes, pooled);
         }
         &[]
+    }
+
+    /// Whole groups to the core, pooled only where they reach the pool's
+    /// threshold: shorter, they hold no subtree for the pool, and hash
+    /// exactly as the serial update hashes them. Kept pooled, they would
+    /// lose what the hooks do only without a pool: the rows a whole group
+    /// is cut into, and the SME2 turn over the whole input. (64 open
+    /// messages fed 16 KiB at a time took 9% to 15% longer through
+    /// update_each_multithreaded than through update_each, on a Ryzen
+    /// 9700X and an EPYC 9255: BLAKE3 #470.)
+    #[inline(always)]
+    fn update_groups(&mut self, groups: &[u8], pooled: Option<&Pool<'_>>) {
+        self.core.update_pooled(groups, pooled.filter(|pool| groups.len() >= pool.min_len));
     }
 
     /// A whole group in the stage, from offset zero: its first chunk's
@@ -718,14 +731,6 @@ impl HasherCore {
     /// callback's threshold may go to the pool.
     pub(crate) fn update_pooled(&mut self, input: &[u8], pooled: Option<&Pool<'_>>) -> &mut Self {
         self.assert_room(self.count(), input.len());
-        // An input shorter than the pool's threshold holds no subtree for
-        // the pool, so it hashes exactly as the serial update does. Kept
-        // pooled, it would lose what the hooks do only without a pool: the
-        // rows a whole group is cut into, and the SME2 turn over the whole
-        // input. (64 open messages fed 16 KiB at a time took 9% to 15%
-        // longer through update_each_multithreaded than through
-        // update_each, on a Ryzen 9700X and an EPYC 9255: BLAKE3 #470.)
-        let pooled = pooled.filter(|pool| input.len() >= pool.min_len);
         // The partial chunk first (hasher::fill), then whole subtrees and the
         // last chunk (hasher::feed), as src/hasher.rs describes.
         let fill_kernels = kernels_on(&self.key, &self.chunk_state, self.chunk_state.platform, pooled);
