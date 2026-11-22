@@ -57,7 +57,9 @@
 //! 64 KiB, over the pool (split from 32 KiB) at 256 KiB and 1 MiB. Beside
 //! them the call with no warning, as the library ships, and with the
 //! three kept awake through the rest. Writes `host_lab.warn.tsv` and the
-//! same table (its "setting" column names the way).
+//! same table (its "setting" column names the way). `host_lab warn VISITS
+//! long [HELPERS]` takes leads of 5 milliseconds to half a second in
+//! their place, and wakes HELPERS workers where the plain form wakes three.
 //!
 //!     host_lab price [SECONDS]
 //!
@@ -171,7 +173,9 @@ fn main() {
         Some("latency") => latency(count.unwrap_or(200)),
         Some("rest") => rest(count.unwrap_or(200)),
         Some("cold") => cold(count.unwrap_or(200)),
-        Some("warn") => warn(count.unwrap_or(200)),
+        Some("warn") => {
+            warn(count.unwrap_or(200), args.get(3).map(String::as_str) == Some("long"), args.get(4).map_or(3, |h| h.parse().expect("HELPERS is a number")))
+        }
         Some("price") => price(count.unwrap_or(10)),
         _ => panic!("usage: host_lab latency [VISITS] | rest [VISITS] | cold [VISITS] | warn [VISITS] | price [SECONDS]"),
     }
@@ -625,23 +629,36 @@ enum Readied {
     Kept,
 }
 
-fn warn(visits: usize) {
+fn warn(visits: usize, long: bool, helpers: usize) {
     assert!(visits >= 1);
     blake3_servil::initialize_multithreaded(None);
     clocks::tight_timers();
     let (_, workers) = blake3_servil::__probe_parked();
-    assert!(workers >= 3, "the probe wakes three workers");
+    assert!((1..=workers).contains(&helpers), "the probe wakes HELPERS of the pool's workers");
     const REST_NS: u64 = 5_000_000;
-    const HELPERS: usize = 3;
-    let ways = [
-        ("no warning", Readied::Ships),
-        ("warned 0 us", Readied::Warned(0)),
-        ("warned 50 us", Readied::Warned(50_000)),
-        ("warned 200 us", Readied::Warned(200_000)),
-        ("warned 1 ms", Readied::Warned(1_000_000)),
-        ("warned 5 ms", Readied::Warned(5_000_000)),
-        ("kept awake", Readied::Kept),
-    ];
+    // The leads: up to 5 ms, or with "long" (the Macs, whose clock rises
+    // slowly) from 5 ms to half a second.
+    let ways = if long {
+        [
+            ("no warning", Readied::Ships),
+            ("warned 5 ms", Readied::Warned(5_000_000)),
+            ("warned 20 ms", Readied::Warned(20_000_000)),
+            ("warned 50 ms", Readied::Warned(50_000_000)),
+            ("warned 100 ms", Readied::Warned(100_000_000)),
+            ("warned 200 ms", Readied::Warned(200_000_000)),
+            ("warned 500 ms", Readied::Warned(500_000_000)),
+        ]
+    } else {
+        [
+            ("no warning", Readied::Ships),
+            ("warned 0 us", Readied::Warned(0)),
+            ("warned 50 us", Readied::Warned(50_000)),
+            ("warned 200 us", Readied::Warned(200_000)),
+            ("warned 1 ms", Readied::Warned(1_000_000)),
+            ("warned 5 ms", Readied::Warned(5_000_000)),
+            ("kept awake", Readied::Kept),
+        ]
+    };
     let calls = [(false, KIB), (false, 64 * KIB), (true, 256 * KIB), (true, 1 << 20)];
     // The table's shape, reused: a row for each way (its "gap"), a column
     // of samples for each call (its "setting").
@@ -667,7 +684,7 @@ fn warn(visits: usize) {
             let write = |message: &mut [Block]| Block::bytes_mut(message)[..len].copy_from_slice(black_box(&source[..len]));
             clocks::load::tick();
             // The first call, untimed, as the timed one will run: with the helpers awake for every way but "no warning".
-            let ready = Setting { name: String::new(), awake: HELPERS, split: 32 * KIB, per: 32 * KIB };
+            let ready = Setting { name: String::new(), awake: helpers, split: 32 * KIB, per: 32 * KIB };
             let ships = Setting { name: String::new(), awake: 0, split: 512 * KIB, per: 128 * KIB };
             settle(if way == Readied::Ships { &ships } else { &ready }, workers, &mut unsettled);
             write(&mut message);
@@ -679,7 +696,7 @@ fn warn(visits: usize) {
             }
             clocks::Gap::Idle.spend(REST_NS);
             if let Readied::Warned(lead) = way {
-                blake3_servil::__probe_warn(HELPERS, 32 * KIB, 32 * KIB);
+                blake3_servil::__probe_warn(helpers, 32 * KIB, 32 * KIB);
                 if lead > 0 {
                     clocks::Gap::Idle.spend(lead);
                 }
@@ -699,12 +716,12 @@ fn warn(visits: usize) {
     }
     let run_ns = clocks::since_ns(started);
     blake3_servil::__probe_latency(0, 512 * KIB, 128 * KIB);
-    let mut head = facts(&format!("warn: {visits} visits a cell, {HELPERS} workers woken or kept, after {} ms of rest", REST_NS / 1_000_000), run_ns, workers);
+    let mut head = facts(&format!("warn: {visits} visits a cell, {helpers} workers woken or kept, after {} ms of rest", REST_NS / 1_000_000), run_ns, workers);
     head += &format!("# settles that did not complete in 200 ms: {unsettled}\n");
     // Reported through the shared table: a "setting" for each way, a cell for each call.
     let settings: Vec<Setting> = ways
         .iter()
-        .map(|(name, way)| Setting { name: (*name).to_owned(), awake: if *way == Readied::Ships { 0 } else { HELPERS }, split: 32 * KIB, per: 32 * KIB })
+        .map(|(name, way)| Setting { name: (*name).to_owned(), awake: if *way == Readied::Ships { 0 } else { helpers }, split: 32 * KIB, per: 32 * KIB })
         .collect();
     let cells: Vec<Cell> = calls.iter().map(|&(multithreaded, len)| Cell { pause: Pause::Idle(REST_NS), multithreaded, len }).collect();
     report("host_lab.warn.tsv", &head, &settings, &cells, &samples);
