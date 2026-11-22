@@ -135,7 +135,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         for (which, out) in which.chunks(16).zip(out.chunks_mut(16)) {
             if which.len() == 16 {
                 let hashed = {
-                    let inputs: Option<arrayvec::ArrayVec<_, 16>> = which.iter().map(|&i| crate::ffi_output::input(&hashers[i])).collect();
+                    let inputs: Option<crate::stack_vec::StackVec<_, 16>> = which.iter().map(|&i| crate::ffi_output::input(&hashers[i])).collect();
                     match inputs {
                         Some(inputs) => {
                             // Sound: the detected platform supplies AVX-512F+VL;
@@ -173,8 +173,8 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
             // stack: a finish allocates nothing.
             let mut small = (0..which.len()).filter(|&k| whole_in_stage(&hashers[which[k]])).peekable();
             while small.peek().is_some() {
-                let part: arrayvec::ArrayVec<usize, BY_BLOCKS_AT_ONCE> = small.by_ref().take(BY_BLOCKS_AT_ONCE).collect();
-                let bytes: arrayvec::ArrayVec<&[u8], BY_BLOCKS_AT_ONCE> = part.iter().map(|&k| hashers[which[k]].staged_bytes()).collect();
+                let part: crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE> = small.by_ref().take(BY_BLOCKS_AT_ONCE).collect();
+                let bytes: crate::stack_vec::StackVec<&[u8], BY_BLOCKS_AT_ONCE> = part.iter().map(|&k| hashers[which[k]].staged_bytes()).collect();
                 let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
                 hash_by_blocks(&bytes, crate::IV, 0, &mut digests[..part.len()], platform);
                 for (&k, digest) in part.iter().zip(&digests) {
@@ -226,7 +226,7 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option
     /// time: that second panic ends the process.)
     struct Held<'h> {
         hashers: &'h mut [Hasher],
-        held: arrayvec::ArrayVec<usize, TABLE>,
+        held: crate::stack_vec::StackVec<usize, TABLE>,
     }
     impl Drop for Held<'_> {
         fn drop(&mut self) {
@@ -235,8 +235,8 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option
             }
         }
     }
-    let mut turn = Held { hashers, held: arrayvec::ArrayVec::new() };
-    let mut waiting = arrayvec::ArrayVec::<(usize, &[u8]), TABLE>::new();
+    let mut turn = Held { hashers, held: crate::stack_vec::StackVec::new() };
+    let mut waiting = crate::stack_vec::StackVec::<(usize, &[u8]), TABLE>::new();
     for &(i, bytes) in pieces {
         if waiting.is_full() || turn.held.is_full() {
             drain(turn.hashers, &mut turn.held, &mut waiting, pooled);
@@ -257,8 +257,8 @@ fn gather<'a>(
     i: usize,
     bytes: &'a [u8],
     pooled: Option<&crate::incremental::Pool<'_>>,
-    held: &mut arrayvec::ArrayVec<usize, TABLE>,
-    waiting: &mut arrayvec::ArrayVec<(usize, &'a [u8]), TABLE>,
+    held: &mut crate::stack_vec::StackVec<usize, TABLE>,
+    waiting: &mut crate::stack_vec::StackVec<(usize, &'a [u8]), TABLE>,
 ) {
     debug_assert!(hashers[i].held_group().is_none(), "a held hasher's bytes wait");
     let rest = hashers[i].gather_part(bytes, pooled, true);
@@ -279,8 +279,8 @@ fn gather<'a>(
 /// as many pieces waiting as it took, so neither list overflows.
 fn drain<'a>(
     hashers: &mut [Hasher],
-    held: &mut arrayvec::ArrayVec<usize, TABLE>,
-    waiting: &mut arrayvec::ArrayVec<(usize, &'a [u8]), TABLE>,
+    held: &mut crate::stack_vec::StackVec<usize, TABLE>,
+    waiting: &mut crate::stack_vec::StackVec<(usize, &'a [u8]), TABLE>,
     pooled: Option<&crate::incremental::Pool<'_>>,
 ) {
     loop {
@@ -309,7 +309,7 @@ fn drain<'a>(
 const INDEPENDENT_MIN: usize = 3;
 
 /// Hash every queued stage, then return the bounded table to its caller.
-fn flush_held(hashers: &mut [Hasher], held: &mut arrayvec::ArrayVec<usize, TABLE>) {
+fn flush_held(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usize, TABLE>) {
     hash_held(hashers, held);
     held.clear();
 }
@@ -352,7 +352,7 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
         return;
     }
     // Plain's key is the IV, the same for every plain hasher.
-    let mut plain = arrayvec::ArrayVec::<usize, TABLE>::new();
+    let mut plain = crate::stack_vec::StackVec::<usize, TABLE>::new();
     plain.extend(held.iter().copied().filter(|&i| hashers[i].core.chunk_state.flags == 0));
     if !plain.is_empty() {
         hash_cohort::<TABLE>(hashers, &plain);
@@ -371,8 +371,8 @@ const STAGE_PARENTS: usize = ALONE_CHUNKS / 2;
 /// levels live on the stack; ping-pong leaves the final two children in
 /// the other buffer. Block supplies the existing 64-byte alignment.
 pub(crate) struct HeldWorkspace<const N: usize> {
-    level: arrayvec::ArrayVec<[Block; STAGE_PARENTS], N>,
-    next: arrayvec::ArrayVec<[Block; STAGE_PARENTS / 2], N>,
+    level: crate::stack_vec::StackVec<[Block; STAGE_PARENTS], N>,
+    next: crate::stack_vec::StackVec<[Block; STAGE_PARENTS / 2], N>,
 }
 
 impl<const N: usize> HeldWorkspace<N> {
@@ -382,7 +382,7 @@ impl<const N: usize> HeldWorkspace<N> {
         const {
             assert!(ALONE_CHUNKS == 16 && crate::STAGE_LEN == ALONE_CHUNKS * CHUNK_LEN);
         }
-        Self { level: arrayvec::ArrayVec::new(), next: arrayvec::ArrayVec::new() }
+        Self { level: crate::stack_vec::StackVec::new(), next: crate::stack_vec::StackVec::new() }
     }
 
     /// Call once, with 1 <= count <= N: initialize through a borrow of the
@@ -426,7 +426,7 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     #[cfg(not(blake3_sme2))]
     let on_sme2 = false;
     {
-        let mut refs = arrayvec::ArrayVec::<[&[u8; CHUNK_LEN]; ALONE_CHUNKS], N>::new();
+        let mut refs = crate::stack_vec::StackVec::<[&[u8; CHUNK_LEN]; ALONE_CHUNKS], N>::new();
         refs.extend(alike.iter().map(|&i| {
             let hasher = &hashers[i];
             // The shared key serves plain hashers only. Check the public
@@ -436,7 +436,7 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
             core::array::from_fn(|j| stage[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap())
         }));
         let refs = refs.as_slice().as_flattened();
-        let mut counters = arrayvec::ArrayVec::<u64, N>::new();
+        let mut counters = crate::stack_vec::StackVec::<u64, N>::new();
         counters.extend(alike.iter().map(|&i| hashers[i].held_group().unwrap().0));
         if on_sme2 {
             #[cfg(blake3_sme2)]
@@ -479,7 +479,7 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
             // Eight parent blocks per full stage. Derive descriptor rows
             // from that layout, including its readable final padding.
             let (full, tail) = bytes.as_chunks::<BLOCK_LEN>().0.as_chunks::<STAGE_PARENTS>();
-            let mut rows = arrayvec::ArrayVec::<_, N>::new();
+            let mut rows = crate::stack_vec::StackVec::<_, N>::new();
             rows.extend(full.iter().map(|row| row.each_ref()));
             if let Some(first) = tail.first() {
                 rows.push(core::array::from_fn(|i| tail.get(i).unwrap_or(first)));
@@ -579,7 +579,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
             if matches!(turn.platform(), Platform::SME2) {
                 macro_rules! run {
                     ($n:expr) => {{
-                        let mut lanes: arrayvec::ArrayVec<&[u8; $n], BY_BLOCKS_AT_ONCE> =
+                        let mut lanes: crate::stack_vec::StackVec<&[u8; $n], BY_BLOCKS_AT_ONCE> =
                             items.iter().map(|item| (*item).try_into().expect("equal whole-block lengths")).collect();
                         while lanes.len() % GROUP != 0 {
                             lanes.push(*lanes.last().unwrap());
@@ -616,7 +616,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
         }
     }
     let whole = |item: &[u8]| item.len().saturating_sub(1) / crate::BLOCK_LEN;
-    let mut order: arrayvec::ArrayVec<usize, BY_BLOCKS_AT_ONCE> = (0..items.len()).collect();
+    let mut order: crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE> = (0..items.len()).collect();
     order.sort_unstable_by_key(|&i| whole(items[i]));
     // With SHA-3 the last block stays in the lanes too; other AArch64
     // CPUs keep the prefix kernels followed by scalar last blocks.
@@ -632,7 +632,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
         #[cfg(blake3_neon)]
         if last_lanes {
             for group in same_blocks.chunks(GROUP) {
-                let inputs: arrayvec::ArrayVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
                 let mut last_blocks = [[0u8; crate::BLOCK_LEN]; GROUP];
                 let mut lengths = [0u32; GROUP];
                 for ((&i, block), len) in group.iter().zip(&mut last_blocks).zip(&mut lengths) {
@@ -640,7 +640,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
                     block[..tail.len()].copy_from_slice(tail);
                     *len = tail.len() as u32;
                 }
-                let lasts: arrayvec::ArrayVec<*const u8, GROUP> = last_blocks[..group.len()].iter().map(|b| b.as_ptr()).collect();
+                let lasts: crate::stack_vec::StackVec<*const u8, GROUP> = last_blocks[..group.len()].iter().map(|b| b.as_ptr()).collect();
                 let mut digests = [0u8; GROUP * OUT_LEN];
                 crate::counted(crate::Counted::ByBlocksCall);
                 // Sound: SHA-3 is present; these items share k whole blocks
@@ -666,7 +666,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
         }
         if k > 0 {
             for group in same_blocks.chunks(GROUP) {
-                let inputs: arrayvec::ArrayVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
                 let mut lanes = [0u8; GROUP * OUT_LEN];
                 crate::counted(crate::Counted::ByBlocksCall);
                 // Sound: each item holds more than k whole blocks; the
@@ -750,8 +750,8 @@ pub(crate) fn hash_each_on<I: Item>(key: &CVWords, flags: u8, items: &[I], out: 
         // a collection of small items allocates nothing.
         let mut small = (0..items.len()).filter(|&i| items[i].bytes().len() <= CHUNK_LEN).peekable();
         while small.peek().is_some() {
-            let part: arrayvec::ArrayVec<usize, BY_BLOCKS_AT_ONCE> = small.by_ref().take(BY_BLOCKS_AT_ONCE).collect();
-            let bytes: arrayvec::ArrayVec<&[u8], BY_BLOCKS_AT_ONCE> = part.iter().map(|&i| items[i].bytes()).collect();
+            let part: crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE> = small.by_ref().take(BY_BLOCKS_AT_ONCE).collect();
+            let bytes: crate::stack_vec::StackVec<&[u8], BY_BLOCKS_AT_ONCE> = part.iter().map(|&i| items[i].bytes()).collect();
             let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
             hash_by_blocks(&bytes, &key, flags, &mut digests[..part.len()], platform);
             for (&i, digest) in part.iter().zip(&digests) {
@@ -788,9 +788,10 @@ pub(crate) fn hash_each_on<I: Item>(key: &CVWords, flags: u8, items: &[I], out: 
             crate::counted(crate::Counted::EachRound);
             // A round's lanes go to the kernels LANES_AT_ONCE at a time,
             // their chunks and places on the stack.
-            let mut refs = arrayvec::ArrayVec::<&[u8; CHUNK_LEN], LANES_AT_ONCE>::new();
-            let mut owners = arrayvec::ArrayVec::<usize, LANES_AT_ONCE>::new();
-            let mut flush = |refs: &mut arrayvec::ArrayVec<&[u8; CHUNK_LEN], LANES_AT_ONCE>, owners: &mut arrayvec::ArrayVec<usize, LANES_AT_ONCE>| {
+            let mut refs = crate::stack_vec::StackVec::<&[u8; CHUNK_LEN], LANES_AT_ONCE>::new();
+            let mut owners = crate::stack_vec::StackVec::<usize, LANES_AT_ONCE>::new();
+            let mut flush = |refs: &mut crate::stack_vec::StackVec<&[u8; CHUNK_LEN], LANES_AT_ONCE>,
+                             owners: &mut crate::stack_vec::StackVec<usize, LANES_AT_ONCE>| {
                 let mut lane_out = [0u8; LANES_AT_ONCE * OUT_LEN];
                 let lanes = &mut lane_out[..refs.len() * OUT_LEN];
                 platform.hash_many(refs, &key, k as u64, IncrementCounter::No, flags, CHUNK_START, CHUNK_END, lanes);

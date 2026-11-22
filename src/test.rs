@@ -1,7 +1,6 @@
 use crate::{BLOCK_LEN, CHUNK_LEN, CVBytes};
 
 include!("../tools/require_nextest.rs");
-use arrayvec::ArrayVec;
 
 pub(crate) use crate::test_support::*;
 
@@ -1530,6 +1529,117 @@ fn test_hash_comparisons_and_formats() {
     }
 }
 
+/// Every byte of a Hash counts in each of its comparisons: two that differ
+/// in one byte, at any of the 32 offsets, are unequal, against a Hash, a
+/// 32-byte array and a slice; so is a slice a byte shorter or longer. (A
+/// comparison that stopped one byte early passed every other test here:
+/// BLAKE3 PR #484.)
+#[test]
+fn test_every_byte_of_a_hash_counts_in_its_comparisons() {
+    let bytes: [u8; 32] = core::array::from_fn(|i| i as u8 * 7 + 1);
+    let hash = crate::Hash::from_bytes(bytes);
+    assert!(hash == crate::Hash::from_bytes(bytes) && hash == bytes && hash == bytes[..]);
+    for at in 0..32 {
+        for flip in [0x01u8, 0x80, 0xff] {
+            let mut other = bytes;
+            other[at] ^= flip;
+            assert!(hash != crate::Hash::from_bytes(other), "byte {at} ^ {flip:#04x}, against a Hash");
+            assert!(hash != other, "byte {at} ^ {flip:#04x}, against an array");
+            assert!(hash != other[..], "byte {at} ^ {flip:#04x}, against a slice");
+        }
+    }
+    let mut longer = [0u8; 33];
+    longer[..32].copy_from_slice(&bytes);
+    assert!(hash != bytes[..31] && hash != longer[..] && hash != [0u8; 0][..]);
+}
+
+/// A StackVec holds what was put in, in order, by each of its ways in, up
+/// to its capacity, and one element more panics by each of them.
+#[test]
+fn test_stack_vec_holds_its_elements_and_refuses_one_too_many() {
+    use crate::stack_vec::StackVec;
+    let mut v = StackVec::<u32, 5>::new();
+    assert!(v.is_empty());
+    v.push(7);
+    v.extend([8, 9]);
+    assert_eq!(*v, [7, 8, 9]);
+    v.extend_from_slice(&[10, 11]);
+    assert_eq!(v.as_slice(), &[7, 8, 9, 10, 11]);
+    v.as_mut_slice()[0] = 1;
+    v[4] = 5;
+    let mut by_reference = [0; 5];
+    for (slot, &element) in by_reference.iter_mut().zip(&v) {
+        *slot = element;
+    }
+    assert_eq!(by_reference, [1, 8, 9, 10, 5]);
+    let collected: StackVec<u8, 3> = (1..=3).collect();
+    assert_eq!(*collected, [1, 2, 3]);
+    let nothing: StackVec<u8, 0> = Default::default();
+    assert!(nothing.is_empty() && StackVec::<u8, 3>::default().is_empty());
+    #[cfg(feature = "std")]
+    {
+        let mut two = StackVec::<u8, 3>::new();
+        two.extend([1, 2]);
+        assert!(collected.is_full() && !two.is_full() && StackVec::<u8, 0>::new().is_full());
+        two.clear();
+        assert!(two.is_empty() && !two.is_full());
+        two.push(4);
+        assert_eq!(*two, [4]);
+        // One element too many, by each way in; the last, a slice of two
+        // into room for one.
+        for way in 0..4 {
+            let overflow = std::panic::catch_unwind(|| {
+                let mut full: StackVec<u8, 3> = (1..=3).collect();
+                match way {
+                    0 => full.push(4),
+                    1 => full.extend([4]),
+                    2 => full.extend_from_slice(&[4]),
+                    _ => {
+                        let mut room_for_one = StackVec::<u8, 3>::new();
+                        room_for_one.extend([1, 2]);
+                        room_for_one.extend_from_slice(&[3, 4]);
+                    }
+                }
+            });
+            assert!(overflow.is_err(), "way {way}");
+        }
+        let too_many = std::panic::catch_unwind(|| (1..=4).collect::<StackVec<u8, 3>>().len());
+        assert!(too_many.is_err());
+    }
+}
+
+/// A HexHash keeps the contracts of the str it lends (Borrow<str> asks for
+/// the str's own hash, equality and order): a map keyed by HexHash finds
+/// a key by its &str, and Display honors width and precision as a str's
+/// does. (BLAKE3 PR #484: a hash derived over the byte array missed the
+/// lookup, and a Display that wrote the 64 characters ignored `{:.8}`.)
+#[test]
+#[cfg(feature = "std")]
+fn test_hex_hash_keeps_the_contracts_of_its_str() {
+    use std::hash::BuildHasher;
+    let a = crate::Hash::from_bytes([0xab; 32]).to_hex();
+    let b = crate::Hash::from_bytes(core::array::from_fn(|i| i as u8)).to_hex();
+    let state = std::collections::hash_map::RandomState::new();
+    assert_eq!(state.hash_one(a), state.hash_one(a.as_str()));
+    assert_eq!(state.hash_one(b), state.hash_one(b.as_str()));
+    let mut map = std::collections::HashMap::new();
+    map.insert(a, 1);
+    map.insert(b, 2);
+    assert_eq!((map.get(a.as_str()), map.get(b.as_str()), map.get("another key")), (Some(&1), Some(&2), None));
+    let mut tree = std::collections::BTreeMap::new();
+    tree.insert(a, 1);
+    tree.insert(b, 2);
+    assert_eq!((tree.get(a.as_str()), tree.get(b.as_str()), tree.get("another key")), (Some(&1), Some(&2), None));
+    assert_eq!((a.cmp(&b), b.cmp(&a), a.cmp(&a)), (a.as_str().cmp(b.as_str()), b.as_str().cmp(a.as_str()), core::cmp::Ordering::Equal));
+    assert!(a == *a.as_str() && a == a.as_str() && a != *b.as_str() && a != b.as_str() && a == a && a != b);
+
+    assert_eq!(std::format!("{a}"), a.as_str());
+    assert_eq!(std::format!("{a:.8}"), "abababab");
+    assert_eq!(std::format!("{a:>70}"), std::format!("      {}", a.as_str()));
+    assert_eq!(std::format!("{a:-<12.4}"), "abab--------");
+    assert_eq!(std::format!("{a:?}"), std::format!("{:?}", a.as_str()));
+}
+
 /// A Hasher's Debug form names its flags and platform, and leaves out
 /// its bytes and chaining values (they may be secret).
 #[test]
@@ -1884,7 +1994,9 @@ fn test_grouped_hash() {
             }
             let input = &input_buf[..case];
             let expected_hash = crate::convenience::hash(input);
-            let mut chaining_values = ArrayVec::<CVBytes, MAX_CHUNKS>::new();
+            // The first n hold the current level's chaining values.
+            let mut chaining_values: [CVBytes; MAX_CHUNKS] = [[0; 32]; MAX_CHUNKS];
+            let mut n = 0;
             let mut subtree_offset = 0;
             while subtree_offset < input.len() {
                 let take = core::cmp::min(subtree_len, input.len() - subtree_offset);
@@ -1892,21 +2004,21 @@ fn test_grouped_hash() {
                     .set_input_offset(subtree_offset as u64)
                     .update(&input[subtree_offset..][..take])
                     .finalize_non_root();
-                chaining_values.push(subtree_cv);
+                chaining_values[n] = subtree_cv;
+                n += 1;
                 subtree_offset += take;
             }
-            assert!(chaining_values.len() >= 2);
-            while chaining_values.len() > 2 {
-                let n = chaining_values.len();
+            assert!(n >= 2);
+            while n > 2 {
                 for i in 0..(n / 2) {
                     chaining_values[i] = parent(&chaining_values[2 * i], &chaining_values[2 * i + 1]).chaining_value();
                 }
                 if n % 2 == 1 {
                     chaining_values[n / 2] = chaining_values[n - 1];
                 }
-                chaining_values.truncate(n / 2 + n % 2);
+                n = n / 2 + n % 2;
             }
-            assert_eq!(chaining_values.len(), 2);
+            assert_eq!(n, 2);
             assert_eq!(expected_hash, parent(&chaining_values[0], &chaining_values[1]).root_hash(), "{case} bytes in subtrees of {subtree_chunks} chunks");
         }
     }

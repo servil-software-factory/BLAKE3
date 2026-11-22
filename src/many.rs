@@ -335,7 +335,7 @@ fn hash_two_chunks(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: 
             pair[..OUT_LEN].copy_from_slice(&cvs[i]);
             pair[OUT_LEN..].copy_from_slice(&cvs[count + i]);
         }
-        let parents: arrayvec::ArrayVec<&[u8; BLOCK_LEN], GROUP> = pairs[..count].iter().collect();
+        let parents: crate::stack_vec::StackVec<&[u8; BLOCK_LEN], GROUP> = pairs[..count].iter().collect();
         // Sound: as above.
         unsafe {
             crate::neon_hybrid::hash_many_last_len(&parents, key, 0, IncrementCounter::No, flags | PARENT, 0, ROOT, BLOCK_LEN, digests.as_flattened_mut())
@@ -393,7 +393,8 @@ pub(crate) fn across_from(len: usize, platform: Platform) -> Option<usize> {
 fn hash_across(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     let slot = slot_len(len);
     for (group, digests) in outputs.chunks_mut(ACROSS_GROUP).enumerate() {
-        let messages: arrayvec::ArrayVec<&[u8], ACROSS_GROUP> = (0..digests.len()).map(|m| &input[(group * ACROSS_GROUP + m) * slot..][..len]).collect();
+        let messages: crate::stack_vec::StackVec<&[u8], ACROSS_GROUP> =
+            (0..digests.len()).map(|m| &input[(group * ACROSS_GROUP + m) * slot..][..len]).collect();
         hash_group_across(&messages, len, key, flags, digests, platform);
     }
 }
@@ -419,7 +420,8 @@ pub(crate) fn hash_group_across(messages: &[&[u8]], len: usize, key: &CVWords, f
         // cvs[chunk][message]
         let mut cvs = [[[0u8; OUT_LEN]; GROUP]; ACROSS_CHUNKS];
         for k in 0..full {
-            let refs: arrayvec::ArrayVec<&[u8; CHUNK_LEN], GROUP> = (0..count).map(|m| message(m)[k * CHUNK_LEN..][..CHUNK_LEN].try_into().unwrap()).collect();
+            let refs: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], GROUP> =
+                (0..count).map(|m| message(m)[k * CHUNK_LEN..][..CHUNK_LEN].try_into().unwrap()).collect();
             platform.hash_many(&refs, key, k as u64, IncrementCounter::No, flags, CHUNK_START, CHUNK_END, cvs[k][..count].as_flattened_mut());
         }
         if full < chunks {
@@ -428,7 +430,7 @@ pub(crate) fn hash_group_across(messages: &[&[u8]], len: usize, key: &CVWords, f
             let mut so_far = [[0u8; OUT_LEN]; GROUP];
             if before_last > 0 {
                 // Sound: each pointer reaches before_last whole blocks of its message.
-                let ptrs: arrayvec::ArrayVec<*const u8, GROUP> = (0..count).map(|m| message(m)[full * CHUNK_LEN..].as_ptr()).collect();
+                let ptrs: crate::stack_vec::StackVec<*const u8, GROUP> = (0..count).map(|m| message(m)[full * CHUNK_LEN..].as_ptr()).collect();
                 unsafe { hash_many_blocks(platform, &ptrs, before_last, key, full as u64, false, flags, CHUNK_START, 0, so_far[..count].as_flattened_mut()) };
             }
             for m in 0..count {
@@ -473,7 +475,7 @@ fn subtree_across(
         blocks[m][..OUT_LEN].copy_from_slice(&cvs[first][m]);
         blocks[m][OUT_LEN..].copy_from_slice(&cvs[first + split][m]);
     }
-    let lanes: arrayvec::ArrayVec<&[u8; BLOCK_LEN], 16> = blocks[..count].iter().collect();
+    let lanes: crate::stack_vec::StackVec<&[u8; BLOCK_LEN], 16> = blocks[..count].iter().collect();
     let parent_flags = flags | crate::PARENT | if top { ROOT } else { 0 };
     platform.hash_many(&lanes, key, 0, IncrementCounter::No, parent_flags, 0, 0, cvs[first][..count].as_flattened_mut());
 }
@@ -557,10 +559,18 @@ pub(crate) fn try_whole_group<'a>(
         platform: Platform,
         mut output: impl FnMut(usize, [u8; OUT_LEN]),
     ) -> bool {
-        let table: Option<arrayvec::ArrayVec<&[u8; N], TABLE>> = (0..count).map(|i| input(i).try_into().ok()).collect();
-        let Some(table) = table else { return false };
+        // The messages up to the first that is not N bytes: all of them, or
+        // this group goes the one-message way. The table is filled where it
+        // stands. Collected, it was copied whole to its place, a kibibyte
+        // whatever the group's size, and a group of two 64-byte messages
+        // took half as long again (BLAKE3 PR #484).
+        let mut table = crate::stack_vec::StackVec::<&[u8; N], TABLE>::new();
+        table.extend((0..count).map_while(|i| input(i).try_into().ok()));
+        if table.len() != count {
+            return false;
+        }
         // Only a group that takes the lanes needs temporary outputs.
-        let mut digests = arrayvec::ArrayVec::<[u8; OUT_LEN], TABLE>::new();
+        let mut digests = crate::stack_vec::StackVec::<[u8; OUT_LEN], TABLE>::new();
         digests.extend(core::iter::repeat_n([0; OUT_LEN], count));
         whole_messages(&table, key, flags, &mut digests, platform);
         for (i, &digest) in digests.iter().enumerate() {

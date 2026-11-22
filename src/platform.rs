@@ -3,17 +3,14 @@ use crate::{BLOCK_LEN, CHUNK_LEN, CVWords, IncrementCounter};
 // The most chunks one call hashes: AVX-512's 32 (16 off Linux), SME2's,
 // NEON's 16. Every platform hashes at least four, so the walk's arrays
 // (src/tree.rs) hold two values or more.
-cfg_if::cfg_if! {
-    if #[cfg(target_arch = "x86_64")] {
-        pub const MAX_SIMD_DEGREE: usize = if cfg!(target_os = "linux") { 32 } else { 16 };
-    } else if #[cfg(blake3_sme2)] {
-        // See sme2::DEGREE.
-        pub const MAX_SIMD_DEGREE: usize = crate::sme2::DEGREE;
-    } else {
-        // See neon_hybrid::GROUP.
-        pub const MAX_SIMD_DEGREE: usize = 16;
-    }
-}
+#[cfg(target_arch = "x86_64")]
+pub const MAX_SIMD_DEGREE: usize = if cfg!(target_os = "linux") { 32 } else { 16 };
+#[cfg(all(not(target_arch = "x86_64"), blake3_sme2))]
+// See sme2::DEGREE.
+pub const MAX_SIMD_DEGREE: usize = crate::sme2::DEGREE;
+#[cfg(all(not(target_arch = "x86_64"), not(blake3_sme2)))]
+// See neon_hybrid::GROUP.
+pub const MAX_SIMD_DEGREE: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

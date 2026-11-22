@@ -39,11 +39,23 @@ const fn as_bytes(&self) -> &[u8; 32]
 const fn from_bytes(bytes: [u8; 32]) -> Self
 const fn as_slice(&self) -> &[u8]
 fn from_slice(bytes: &[u8]) -> Result<Self, TryFromSliceError>
-fn to_hex(&self) -> ArrayString<{ _ }>
+fn to_hex(&self) -> HexHash
 fn from_hex(hex: impl AsRef<[u8]>) -> Result<Self, HexError>
 ```
 
 Implements: `Clone`, `Copy`, `Debug`, `Deserialize`, `Display`, `Eq`, `From`, `FromStr`, `Hash`, `PartialEq`, `Serialize`.
+
+
+### `struct HexHash`
+
+The 64 lowercase hexadecimal characters of a `Hash`, held inline with no heap allocation.
+
+```rust
+fn as_str(&self) -> &str
+fn as_bytes(&self) -> &[u8; 64]
+```
+
+Implements: `AsRef`, `Borrow`, `Clone`, `Copy`, `Debug`, `Deref`, `Display`, `Eq`, `Hash`, `Ord`, `PartialEq`, `PartialOrd`.
 
 
 ### `struct HexError`
