@@ -1504,6 +1504,9 @@ mod test {
         let mut input = vec![0u8; 8 * crate::STAGE_LEN];
         crate::test::paint_test_input(&mut input);
         let counts = || [crate::Counted::Row, crate::Counted::Flat, crate::Counted::HeldPass].map(|what| crate::COUNTED.with(|c| c[what as usize].replace(0)));
+        // The threshold of the library with threads: 512 KiB, above every
+        // piece here.
+        const THRESHOLD: usize = 32 * crate::STAGE_LEN;
         let key = [0x53u8; 32];
         for mode in [Mode::Plain, Mode::Keyed(&key)] {
             let mut serial: Vec<Hasher> = (0..N).map(|_| Hasher::new(mode, None)).collect();
@@ -1515,7 +1518,7 @@ mod test {
                 counts();
                 update_each(&mut serial, &pieces);
                 let want = counts();
-                update_each_with(&mut pooled, &pieces, n + 1, &|_, _, _, _| panic!("a piece below the threshold holds no subtree for the callback"));
+                update_each_with(&mut pooled, &pieces, THRESHOLD, &|_, _, _, _| panic!("a piece below the threshold holds no subtree for the callback"));
                 assert_eq!(counts(), want, "{fed} bytes in, pieces of {n}: update_each's rows, flat walks and held passes");
                 for (a, b) in serial.iter().zip(&pooled) {
                     assert_eq!(a.finalize(), b.finalize(), "{fed} bytes");

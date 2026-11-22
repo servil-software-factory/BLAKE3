@@ -842,6 +842,9 @@ mod test {
         let mut input = std::vec![0u8; 16 * STAGE_LEN];
         crate::test::paint_test_input(&mut input);
         let counts = || [crate::Counted::Row, crate::Counted::Flat].map(|what| crate::COUNTED.with(|c| c[what as usize].replace(0)));
+        // The threshold of the library with threads: 512 KiB, above every
+        // piece here and every group they fill in the stage.
+        const THRESHOLD: usize = 32 * STAGE_LEN;
         let key = [0x52u8; 32];
         let platform = Platform::detect();
         let rows_here = (4..=hasher::ROW).contains(&platform.simd_degree());
@@ -861,7 +864,7 @@ mod test {
                 counts();
                 serial.update(piece);
                 let want = counts();
-                pooled.update_with(piece, n + 1, &|_, _, _, _| panic!("an input below the threshold holds no subtree for the callback"));
+                pooled.update_with(piece, THRESHOLD, &|_, _, _, _| panic!("an input below the threshold holds no subtree for the callback"));
                 assert_eq!(counts(), want, "{fed} bytes in, a piece of {n}: the serial update's rows and flat walks");
                 assert_eq!(pooled.finalize(), serial.finalize(), "{fed} bytes");
                 seen = [seen[0] + want[0], seen[1] + want[1]];
