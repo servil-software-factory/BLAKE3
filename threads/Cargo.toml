@@ -22,7 +22,6 @@ serde = ["blake3-servil-core/serde"]
 # The one-thread library: the kernels and their proofs, the Hasher, the
 # direct and grouped calls. This crate re-exports it whole.
 blake3-servil-core = { version = "=0.10.0+dev", path = ".." }
-arrayvec = { version = "0.7.4", default-features = false }
 
 [build-dependencies]
 cc = "1.1.12"
