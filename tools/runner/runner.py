@@ -88,6 +88,29 @@ Each result folder holds runner.log (every command and its output),
 verdict.json, and the job's own files: the benchmark's report, graph,
 and samples; host_lab's report.
 
+No process of a job's command is left when the command is over. At the
+job's time limit, and when a command ends by itself, the runner ends
+every process in the command's session and every descendant of any
+member of that session (whichever process group each is in;
+cargo-nextest gives each test a group of its own). A command that ended
+and left processes running has a sentence in the verdict's "left running".
+A process that could not be ended, or a failed process listing, stops the
+job (status "error" or "timed out") rather than starting the next command
+beside an unknown survivor.
+
+Known limits of this PID-based cleanup (a cgroup per job on Linux belongs
+to ops #25):
+- A process that left the session and whose parent had already ended
+  before the runner looked is not found.
+- `lstart` has 1-second resolution and `os.kill` takes a PID, so rapid
+  same-second PID reuse is a theoretical window.
+- On startup (`end_leftover_session`), a leftover record whose leader is
+  already gone is not trusted to signal an arbitrary session (to avoid
+  signalling an unrelated session after PID reuse); only a live leader
+  matching the recorded start time is ended on restart.
+- A Linux zombie thread-group leader whose non-main thread is still alive
+  appears as a zombie in `ps` and is signalled, though not counted as live.
+
 The checkouts persist between jobs (CHECKOUTS: BLAKE3-Servil, and bench-hashes
 beside it), moved to each job's commits with a forced checkout that
 rewrites only the files that differ, so Cargo rebuilds only what changed:
@@ -104,6 +127,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -135,21 +159,266 @@ SESSION_FILE = Path.home() / "runner-session.txt"
 
 
 def started(pid):
-    """A process's start time as ps prints it, or None when it is gone."""
-    out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
-    return out.stdout.strip() or None
+    """A process's start time as ps prints it (its words a space apart), or
+    None when it is gone or ps fails."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=10, start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return " ".join(out.stdout.split()) or None
+
+
+def process_table():
+    """Every process there is, by PID: (ppid, state_char, start_time).
+    Raises RuntimeError if `ps` cannot start, times out, exits non-zero,
+    or returns an empty table."""
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "lstart="],
+            capture_output=True, text=True, timeout=15, start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"process listing failed: {e}") from e
+    if out.returncode != 0:
+        raise RuntimeError(f"ps exited {out.returncode}: {out.stderr.strip()}")
+    table = {}
+    for line in out.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 4:
+            try:
+                pid, ppid = int(fields[0]), int(fields[1])
+            except ValueError:
+                continue
+            stat = fields[2][0] if fields[2] else "?"
+            table[pid] = (ppid, stat, " ".join(fields[3:]))
+    if not table:
+        raise RuntimeError("ps returned an empty process table")
+    return table
+
+
+def _is_zombie(row):
+    return row[1] == "Z"
+
+
+def _is_stopped(row):
+    return row[1] == "T"
+
+
+def job_processes(leader, began, table, leader_reaped=False):
+    """The processes of a job's command among those of `table`, by PID:
+    {pid: (start_time, is_zombie)}. Includes every process in `leader`'s
+    session and every descendant of `leader` or of any session member.
+
+    Validates `leader > 0`. When `leader_reaped` is True, `leader` itself
+    has already been waited on, so any row at `leader` in `table` belongs
+    to a reused PID (never ours) and is ignored; only session members and
+    their descendants are returned. When `leader_reaped` is False and a
+    row at `leader` has a start time other than `began`, nothing is ours.
+    """
+    if not isinstance(leader, int) or leader <= 0:
+        return {}
+    me = os.getpid()
+    first = table.get(leader)
+    if not leader_reaped and first is not None and began is not None and first[2] != began:
+        return {}
+
+    def in_session(pid):
+        try:
+            return os.getsid(pid) == leader
+        except OSError:
+            return False
+
+    # Seed set: the live leader (if not reaped) plus every process in `leader`'s session.
+    roots = set()
+    if not leader_reaped and leader in table and leader != me:
+        roots.add(leader)
+    for pid in table:
+        if pid == me:
+            continue
+        if leader_reaped and pid == leader:
+            continue
+        if in_session(pid):
+            roots.add(pid)
+
+    # Walk parent links from every process to see if it reaches any root (or `leader`
+    # when not reaped, e.g. a leader that just exited between calls).
+    found = set(roots)
+    children = {}
+    for pid, row in table.items():
+        if pid == me or (leader_reaped and pid == leader):
+            continue
+        children.setdefault(row[0], []).append(pid)
+
+    queue = list(roots)
+    if not leader_reaped and leader not in found:
+        queue.append(leader)
+    while queue:
+        cur = queue.pop()
+        for child in children.get(cur, ()):
+            if child not in found:
+                found.add(child)
+                queue.append(child)
+
+    found.discard(me)
+    if leader_reaped:
+        found.discard(leader)
+    return {pid: (table[pid][2], _is_zombie(table[pid])) for pid in found if pid in table}
+
+
+def signal_verified(targets, signum, table):
+    """Signal each (pid, start_time) in `targets` only if `table` still shows
+    that PID with the same start time, avoiding signalling a reused PID."""
+    for pid, at in targets.items():
+        if pid <= 0 or pid == os.getpid():
+            continue
+        row = table.get(pid)
+        if row is None or (at is not None and row[2] != at):
+            continue
+        try:
+            os.kill(pid, signum)
+        except OSError:
+            pass
+
+
+def _fallback_killpg(leader):
+    if isinstance(leader, int) and leader > 0:
+        try:
+            os.killpg(leader, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def end_job(leader, began, leader_reaped=False):
+    """End every process of a job's command (job_processes). Returns
+    `(found, left, error)`:
+    - `found`: {pid: start_time} of non-zombie processes seen;
+    - `left`: set of non-zombie PIDs still alive at the end;
+    - `error`: None if process listings succeeded, else an error message.
+
+    Stop pass: sends SIGSTOP to every non-stopped, non-zombie job process
+    and re-reads until every live job process is stopped (`T`) and no new
+    ones appear (up to 15 rounds).
+    Kill pass: verifies each process's start time against the current table
+    before SIGKILL, and re-reads until none remain.
+    If `ps` fails at any point (e.g. EAGAIN at the process limit), falls
+    back to `os.killpg(leader, SIGKILL)` and kills every PID already seen
+    so nothing is left stopped or running, and reports the failure in `error`.
+    """
+    if not isinstance(leader, int) or leader <= 0:
+        return {}, set(), f"invalid session leader PID {leader!r}"
+    seen = {}       # pid -> (start_time, was_zombie_first_seen)
+    error = None
+
+    def kill_known_and_group():
+        if not leader_reaped:
+            _fallback_killpg(leader)
+        for pid in list(seen):
+            if pid > 0 and pid != os.getpid():
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+    # Stop pass: stop every running job process until all are stopped (T) and none are new.
+    try:
+        for attempt in range(15):
+            table = process_table()
+            current = job_processes(leader, began, table, leader_reaped=leader_reaped)
+            for pid, info in current.items():
+                if pid not in seen:
+                    seen[pid] = info
+            to_stop = {
+                pid: at
+                for pid, (at, z) in current.items()
+                if not z and not _is_stopped(table[pid])
+            }
+            if not to_stop:
+                break
+            signal_verified(to_stop, signal.SIGSTOP, table)
+            time.sleep(0.01 if attempt < 5 else 0.03)
+    except RuntimeError as e:
+        error = str(e)
+        kill_known_and_group()
+        return {pid: at for pid, (at, z) in seen.items() if not z}, set(), error
+
+    # Kill pass: keep discovering and killing until no live job processes remain.
+    left = set()
+    try:
+        for attempt in range(7 if seen else 0):
+            table = process_table()
+            current = job_processes(leader, began, table, leader_reaped=leader_reaped)
+            for pid, info in current.items():
+                if pid not in seen or seen[pid][0] != info[0]:
+                    # Newly discovered (or replaced within the job): stop before killing if live.
+                    if not info[1] and not _is_stopped(table[pid]):
+                        signal_verified({pid: info[0]}, signal.SIGSTOP, table)
+                    seen[pid] = info
+            there = {
+                pid: at
+                for pid, (at, _) in seen.items()
+                if pid in table and table[pid][2] == at
+            }
+            left = {pid for pid in there if not _is_zombie(table[pid])}
+            if attempt == 6 or (attempt > 0 and not left):
+                break
+            signal_verified(there, signal.SIGKILL, table)
+            time.sleep(0.05 * 2 ** attempt)
+    except RuntimeError as e:
+        error = str(e)
+        kill_known_and_group()
+
+    return {pid: at for pid, (at, z) in seen.items() if not z}, left, error
+
+
+def not_ended(left):
+    return f"{len(left)} of its processes could not be ended and may still be running: PID {', '.join(map(str, sorted(left)))}"
+
+
+def _clear_session_file():
+    try:
+        SESSION_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def end_leftover_session():
-    """End the session an earlier runner left running, if it is the one it
-    recorded (the same PID and start time; this account's processes only)."""
+    """End what an earlier runner left running of its last command, if the
+    recorded leader is still alive with the exact recorded start time.
+    Refuses to act on a missing or mismatched leader, or an invalid PID,
+    so a stale record can never signal an unrelated session."""
     if not SESSION_FILE.exists():
         return
-    pid, recorded = SESSION_FILE.read_text().split("\t", 1)
-    if started(int(pid)) == recorded.strip():
-        print(f"runner: ending the session an earlier runner left running (PID {pid})", file=sys.stderr, flush=True)
-        os.killpg(int(pid), signal.SIGKILL)
-    SESSION_FILE.unlink()
+    try:
+        raw = SESSION_FILE.read_text().strip()
+        pid_s, recorded = raw.split("\t", 1)
+        pid = int(pid_s)
+        recorded = " ".join(recorded.split())
+    except ValueError:
+        print("runner: ignoring damaged session record", file=sys.stderr, flush=True)
+        _clear_session_file()
+        return
+    if pid <= 0 or not recorded or recorded == "None":
+        print(f"runner: ignoring invalid session record (PID {pid!r}, start {recorded!r})", file=sys.stderr, flush=True)
+        _clear_session_file()
+        return
+    if started(pid) != recorded:
+        # Leader is gone or PID was reused; do not guess at an unrelated session.
+        _clear_session_file()
+        return
+    found, left, err = end_job(pid, recorded, leader_reaped=False)
+    if found:
+        print(f"runner: ended what an earlier runner left running (the session of PID {pid}: {len(found)} of its processes)", file=sys.stderr, flush=True)
+    if err:
+        print(f"runner: leftover session cleanup error: {err}", file=sys.stderr, flush=True)
+    if left:
+        print(f"runner: {not_ended(left)}", file=sys.stderr, flush=True)
+    if not left and not err:
+        _clear_session_file()
 
 
 def on_signal(signum, _frame):
@@ -185,6 +454,7 @@ class Job:
         self.log = log
         self.limit = limit
         self.deadline = time.monotonic() + limit
+        self.left_running = []              # what commands left running when they ended, a sentence each: for the verdict
 
     def run(self, cmd, cwd, capture=False):
         remaining = self.deadline - time.monotonic()
@@ -195,18 +465,81 @@ class Job:
         # runner alone and the current job finishes.
         proc = subprocess.Popen(cmd, cwd=cwd, env=environment(), start_new_session=True,
                                 stdout=subprocess.PIPE if capture else self.log, stderr=self.log, text=True)
-        SESSION_FILE.write_text(f"{proc.pid}\t{started(proc.pid)}\n")
+        began = started(proc.pid)
+        SESSION_FILE.write_text(f"{proc.pid}\t{began or ''}\n")
+        # When capturing stdout, drain it in a daemon thread while waiting on the
+        # leader itself: a worker that outlives the leader and keeps stdout open
+        # is cleaned up at the leader's exit instead of hanging until timeout (#475).
+        chunks = []
+        reader = None
+        if capture and proc.stdout is not None:
+            def _drain():
+                try:
+                    while True:
+                        part = proc.stdout.read(65536)
+                        if not part:
+                            break
+                        chunks.append(part)
+                except OSError:
+                    pass
+            reader = threading.Thread(target=_drain, daemon=True)
+            reader.start()
         try:
-            stdout, _ = proc.communicate(timeout=remaining)
+            proc.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            # The whole session, not the command alone: cargo's children (a
-            # benchmark it runs) would otherwise go on into the next job.
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()
-            raise TimedOut(f"the job's {self.limit} s limit ended: {' '.join(cmd)}")
+            # Every process of the command, not the command alone nor its
+            # process group alone: cargo's children (a benchmark it runs, a
+            # test that cargo-nextest put in a group of its own) would
+            # otherwise go on into the next job (#473).
+            _, left, err = end_job(proc.pid, began, leader_reaped=False)
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass                        # it could not be ended: it is among `left`, and said below
+            if not left and not err:
+                _clear_session_file()
+            detail = ""
+            if err:
+                detail += f"; cleanup error: {err}"
+            if left:
+                detail += f"; {not_ended(left)}"
+            raise TimedOut(f"the job's {self.limit} s limit ended: {' '.join(cmd)}{detail}")
+        # The leader has exited and been reaped (`leader_reaped=True`). End any
+        # descendant/session process it left running (which also closes any held
+        # stdout pipe so `reader` finishes promptly).
+        found, left, err = end_job(proc.pid, began, leader_reaped=True)
+        if reader is not None:
+            reader.join(timeout=5.0)
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        if not left and not err:
+            _clear_session_file()
+        if found:
+            if left:
+                ended = len(found) - len(left)
+                said = f"{' '.join(cmd)} ended and left {len(found)} of its processes running; ended {ended}, {not_ended(left)}"
+            else:
+                said = f"{' '.join(cmd)} ended and left {len(found)} of its processes running; the runner ended them"
+            self.left_running.append(said)
+            print(f"runner: {said}", file=self.log, flush=True)
+        if err or left:
+            parts = []
+            if err:
+                parts.append(f"cleanup could not verify process table: {err}")
+            if left:
+                parts.append(not_ended(left))
+            raise RuntimeError(f"after {' '.join(cmd)}: {'; '.join(parts)}")
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd)
-        return stdout
+        return "".join(chunks) if capture else None
 
     def sync(self, url, dest, commit):
         """`dest`, a clone of `url` kept between jobs, at `commit`: a commit
@@ -555,10 +888,13 @@ def process(path, out):
                 assert isinstance(job.get(name, False), bool), f"{name}: true or false"
                 if job.get(name):
                     meters[name] = subprocess.Popen(command, stdout=open(out / f"{name}.txt", "w"), stderr=log)
+            running = Job(log, limit)
             try:
                 with tempfile.TemporaryDirectory(dir=HOME / "tmp") as work:
-                    verdict["status"] = HANDLERS[job["type"]](job, Job(log, limit), Path(work), out)
+                    verdict["status"] = HANDLERS[job["type"]](job, running, Path(work), out)
             finally:
+                if running.left_running:
+                    verdict["left running"] = running.left_running
                 for name, meter in meters.items():
                     # sudo passes the signal on to powermetrics, which ends its
                     # last sample and exits, as top does. A meter that outlasts
