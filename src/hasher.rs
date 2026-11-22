@@ -1038,6 +1038,107 @@ mod test {
         assert_eq!((parents.len(), children.len()), (0, 64), "no rows: no layer of parents, and every group's two children");
     }
 
+    /// The rows' values computed together are each row's own: the value
+    /// computed apart, a parent at a time, and the one `get` gives, which
+    /// condenses a row alone. Rows of every width in every order, the
+    /// narrower below the wider and above it, with single values under
+    /// and between them; ROWS rows of ROW values, the longest run there
+    /// is; ROWS rows of four, the shortest; one row alone at each width;
+    /// and no row. A place without a row holds zeros.
+    #[test]
+    fn the_rows_values_computed_together_are_each_rows_own() {
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let value = |i: usize, j: usize| -> Cv { core::array::from_fn(|b| (31 * i + 7 * j + 3 * b + i * j) as u8) };
+        let alone = |i: usize, width: usize| {
+            let mut layer: std::vec::Vec<Cv> = (0..width).map(|j| value(i, j)).collect();
+            while layer.len() > 1 {
+                layer = layer.chunks(2).map(|two| k.parent(&two[0], &two[1])).collect();
+            }
+            layer[0]
+        };
+        // An entry's width: 0 for a single value.
+        let stacks: [&[usize]; 12] = [
+            &[0, 0, 4, 32, 8, 16, 4, 16, 8, 32],
+            &[0, 32, 0, 4, 0, 0, 8, 16],
+            &[0, 0, 32, 32, 32, 32, 32, 32, 32, 32],
+            &[0, 4, 4, 4, 4, 4, 4, 4, 4],
+            &[0, 16, 8, 4],
+            &[0, 4, 8, 16, 32],
+            &[0, 0, 32],
+            &[0, 0, 16],
+            &[0, 0, 8],
+            &[0, 0, 4],
+            &[0, 0, 0],
+            &[],
+        ];
+        for widths in stacks {
+            let mut stack = CvStack::new();
+            for (i, &width) in widths.iter().enumerate() {
+                if width == 0 {
+                    stack.push(value(i, 0));
+                } else {
+                    let row: std::vec::Vec<Cv> = (0..width).map(|j| value(i, j)).collect();
+                    stack.push_row(&k, &row);
+                }
+            }
+            let rows = stack.rows_values(&k);
+            for (i, &width) in widths.iter().enumerate() {
+                assert_eq!(stack.is_row(i), width != 0, "entry {i} of {widths:?}");
+                assert_eq!(stack.value(&rows, i), alone(i, width.max(1)), "entry {i} of {widths:?}");
+                assert_eq!(stack.value(&rows, i), stack.get(&k, i), "entry {i} of {widths:?}, as it is condensed alone");
+            }
+            for place in 0..ROWS {
+                if !(0..widths.len()).any(|i| stack.is_row(i) && i % ROWS == place) {
+                    assert_eq!(rows[place], [0u8; 32], "place {place} of {widths:?}");
+                }
+            }
+        }
+    }
+
+    /// An output condenses the stack's rows together, a full layer of
+    /// parents at a time. After 64 groups fed a group at a time the stack
+    /// holds six rows; the output asks for their parents in calls of
+    /// every row's children side by side (2 ROW at most a call), a layer
+    /// after another down to the six rows' twelve halves. Each row
+    /// condensed alone asked for 8, 4 and 2 at a time, six times over: a
+    /// digest between 16 KiB updates cost 1.09 us so and 0.64 us together
+    /// on a Ryzen 9700X (BLAKE3 #472). The same for the output of a
+    /// message that goes on past the stack's subtrees (`above`).
+    #[test]
+    fn an_output_condenses_the_rows_a_full_layer_at_a_time() {
+        const GROUP: usize = 16 * CHUNK_LEN;
+        let input: std::vec::Vec<u8> = (0..64 * GROUP + 100).map(|i| (i % 251) as u8).collect();
+        let width = Platform::detect().simd_degree().min(16);
+        if width < 4 {
+            return;
+        }
+        let hooks = Rows { platform: Platform::detect(), width: |_| width, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let mut chunk = k.new_chunk(0);
+        let mut stack = CvStack::new();
+        for group in input[..64 * GROUP].chunks(GROUP) {
+            let rest = fill(&k, &mut chunk, &mut stack, 0, group);
+            feed(&k, &mut chunk, &mut stack, 0, rest);
+        }
+        assert_eq!((stack.len(), stack.rows_in_use()), (7, 6), "64 groups: six rows above the first group's value");
+        let mut layers = std::vec::Vec::new();
+        let mut run = 6 * width;
+        while run >= 12 {
+            layers.extend((0..run).step_by(2 * ROW).map(|start| (run - start).min(2 * ROW)));
+            run /= 2;
+        }
+        let asked = hooks.parents.borrow().len();
+        assert_eq!(final_node(&k, &chunk, &stack).root_bytes(), *crate::convenience::hash(&input[..64 * GROUP]).as_bytes());
+        assert_eq!(hooks.parents.borrow()[asked..], layers, "the output's parents, a layer a call or two");
+        // And with a hundred bytes more, in a chunk of their own after the stack's 1024.
+        let asked = hooks.parents.borrow().len();
+        let mut tail = k.new_chunk(64 * 16);
+        tail.update(&input[64 * GROUP..]);
+        assert_eq!(above(&k, &stack, 1, k.chunk_node(&tail)).root_bytes(), *crate::convenience::hash(&input).as_bytes());
+        assert_eq!(hooks.parents.borrow()[asked..], layers, "the same layers under the bytes that follow");
+    }
+
     /// A row gives up its place to the row ROWS entries above it, whatever
     /// lies between and wherever the two stand: two single values, then
     /// nine rows (entries 2 to 10), and the first row, entry 2, is
