@@ -23,6 +23,28 @@
 //! percentiles and the longest call, in microseconds; the calling thread's
 //! clock rate over the write and the call, and its share of time on
 //! efficiency cores, where the platform counts them.
+//!
+//!     host_lab rest [VISITS]
+//!
+//! The calling thread's own speed after a rest (the Macs' question: one
+//! helper kept awake took a call after 5 ms asleep to a quarter of its
+//! time; does a QoS class on the calling thread do as much with nothing
+//! spinning?). `convenience::hash` after 200 microseconds, 1, 5 and 20
+//! milliseconds asleep, under each way of staying fast: as launched; the
+//! calling thread in QoS class default, user-initiated, user-interactive;
+//! one pool worker kept awake; a spinning thread of the program's own in
+//! the background QoS class (macOS runs that on efficiency cores). Writes
+//! `host_lab.rest.tsv` and the same table.
+//!
+//!     host_lab price [SECONDS]
+//!
+//! What helpers kept awake cost while no call comes: for 0, 1, 3, 7 and
+//! all workers awake (there and back, a rest between), the process's CPU
+//! time and its energy over SECONDS of waiting: on macOS the system's own
+//! estimate for the process (`ri_energy_nj`, a model: within about a
+//! fifth of the chip's meter in earlier probes), on Linux the package's
+//! counter where the process may read it. Each line is led by its start
+//! in Unix seconds.
 
 use blake3_servil::throughput::{self, Block};
 use blake3_servil::{Mode, convenience};
@@ -43,7 +65,10 @@ impl Pause {
             Pause::Nonstop => "nonstop",
             Pause::OtherWork => "other work",
             Pause::Idle(20_000) => "idle 20 us",
+            Pause::Idle(200_000) => "idle 200 us",
+            Pause::Idle(1_000_000) => "idle 1 ms",
             Pause::Idle(5_000_000) => "idle 5 ms",
+            Pause::Idle(20_000_000) => "idle 20 ms",
             Pause::Idle(_) => "idle",
         }
     }
@@ -118,127 +143,71 @@ fn percentile(sorted: &[u32], percent: usize) -> u32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    assert!(args.get(1).map(String::as_str) == Some("latency"), "usage: host_lab latency [VISITS]");
-    let visits: usize = args.get(2).map_or(200, |v| v.parse().expect("VISITS is a number"));
-    assert!(visits >= 1);
-
-    blake3_servil::initialize_multithreaded(None);
-    // The pauses land when asked, as the bench's do.
-    clocks::tight_timers();
-    let (_, workers) = blake3_servil::__probe_parked();
-    assert!(workers >= 1, "the probe needs a pool: more than one CPU");
-
-    const KIB: usize = 1024;
-    let ships = Setting { name: "ships".to_owned(), awake: 0, split: 512 * KIB, per: 128 * KIB };
-    let mut settings = vec![ships.clone(), Setting { name: "asleep, split 32 KiB".to_owned(), awake: 0, split: 32 * KIB, per: 32 * KIB }];
-    let mut awakes: Vec<usize> = [1, 3, 7, workers].into_iter().filter(|&k| k <= workers).collect();
-    awakes.dedup();
-    for awake in awakes {
-        let name = if awake == workers { format!("all {awake} awake, split 32 KiB") } else { format!("{awake} awake, split 32 KiB") };
-        settings.push(Setting { name, awake, split: 32 * KIB, per: 32 * KIB });
+    let count: Option<usize> = args.get(2).map(|v| v.parse().expect("the second argument is a number"));
+    match args.get(1).map(String::as_str) {
+        Some("latency") => latency(count.unwrap_or(200)),
+        Some("rest") => rest(count.unwrap_or(200)),
+        Some("price") => price(count.unwrap_or(10)),
+        _ => panic!("usage: host_lab latency [VISITS] | rest [VISITS] | price [SECONDS]"),
     }
+}
 
-    let pauses = [Pause::Nonstop, Pause::OtherWork, Pause::Idle(20_000), Pause::Idle(5_000_000)];
-    let mut cells = Vec::new();
-    for pause in pauses {
-        for len in [KIB, 16 * KIB, 64 * KIB, 256 * KIB, 1 << 20, 4 << 20] {
-            cells.push(Cell { pause, multithreaded: false, len });
+/// One visit of `cell`: the same call first, untimed (twice back to back
+/// for a nonstop cell); the gap; then, as the bench's helper does, the
+/// timing path warmed and the write and the call each timed alone, the
+/// thread's counts read outside both. Returns the write's and the call's
+/// nanoseconds and the counts over both.
+fn visit(cell: Cell, source: &[u8], message: &mut [Block], work: &[u8]) -> (u64, u64, Option<clocks::Counts>) {
+    let len = cell.len;
+    let call = |message: &[Block]| {
+        if cell.multithreaded {
+            black_box(throughput::hash_multithreaded(Mode::Plain, black_box(message), len));
+        } else {
+            black_box(convenience::hash(black_box(&Block::bytes(message)[..len])));
         }
-        for len in [64 * KIB, 256 * KIB, 1 << 20, 4 << 20] {
-            cells.push(Cell { pause, multithreaded: true, len });
-        }
+    };
+    let write = |message: &mut [Block]| Block::bytes_mut(message)[..len].copy_from_slice(black_box(&source[..len]));
+    let before = if cell.pause == Pause::Nonstop { 2 } else { 1 };
+    for _ in 0..before {
+        write(message);
+        call(message);
     }
-
-    // The message's source, the place it is written to before each call
-    // (whole blocks, as the throughput calls take them), and the other
-    // work's memory, larger than the caches.
-    let max = 4 << 20;
-    let mut source = vec![0u8; max];
-    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    for chunk in source.chunks_mut(8) {
-        chunk.copy_from_slice(&rng.next().to_le_bytes()[..chunk.len()]);
+    match cell.pause {
+        Pause::Nonstop => {}
+        Pause::OtherWork => clocks::Gap::Busy(work).spend(OTHER_WORK_NS),
+        Pause::Idle(ns) => clocks::Gap::Idle.spend(ns),
     }
-    let mut message = vec![Block::ZERO; max / 64];
-    let work = vec![1u8; OTHER_WORK_BYTES];
+    black_box(clocks::Counts::read());
+    black_box(clocks::since_ns(clocks::now()));
+    let counts_before = clocks::Counts::read();
+    let t = clocks::now();
+    write(message);
+    let write_ns = clocks::since_ns(t);
+    let t = clocks::now();
+    call(message);
+    let hash_ns = clocks::since_ns(t);
+    let counts = counts_before.zip(clocks::Counts::read()).map(|(before, after)| after.since(before));
+    (write_ns, hash_ns, counts)
+}
 
-    // Every setting hashes right, on both calls, before anything is timed.
-    let mut unsettled = 0;
-    for setting in &settings {
-        settle(setting, workers, &mut unsettled);
-        for len in [16 * KIB, 64 * KIB, 256 * KIB, (1 << 20) + 1, 4 << 20] {
-            Block::bytes_mut(&mut message)[..len].copy_from_slice(&source[..len]);
-            let want = convenience::hash(&source[..len]);
-            assert_eq!(throughput::hash_multithreaded(Mode::Plain, &message, len), want, "{} at {len}", setting.name);
-        }
-    }
+fn keep(kept: &mut Samples, (write_ns, hash_ns, counts): (u64, u64, Option<clocks::Counts>)) {
+    kept.hash_ns.push(hash_ns.min(u32::MAX as u64) as u32);
+    kept.write_ns.push(write_ns.min(u32::MAX as u64) as u32);
+    kept.counts = match (kept.counts, counts) {
+        (Some(sum), Some(one)) => Some(sum.plus(one)),
+        (None, one) if kept.hash_ns.len() == 1 => one,
+        _ => None,
+    };
+}
 
-    let mut samples = vec![vec![Samples::default(); cells.len()]; settings.len()];
-    let mut setting_order: Vec<usize> = (0..settings.len()).collect();
-    let mut cell_order: Vec<usize> = (0..cells.len()).collect();
-    let started = clocks::now();
-    for _ in 0..visits {
-        rng.shuffle(&mut setting_order);
-        for &s in &setting_order {
-            settle(&settings[s], workers, &mut unsettled);
-            rng.shuffle(&mut cell_order);
-            for &c in &cell_order {
-                let cell = cells[c];
-                let len = cell.len;
-                let call = |message: &[Block]| {
-                    if cell.multithreaded {
-                        black_box(throughput::hash_multithreaded(Mode::Plain, black_box(message), len));
-                    } else {
-                        black_box(convenience::hash(black_box(&Block::bytes(message)[..len])));
-                    }
-                };
-                let write = |message: &mut [Block]| Block::bytes_mut(message)[..len].copy_from_slice(black_box(&source[..len]));
-                clocks::load::tick();
-                // The first call, untimed: the timed one then follows the same call.
-                let before = if cell.pause == Pause::Nonstop { 2 } else { 1 };
-                for _ in 0..before {
-                    write(&mut message);
-                    call(&message);
-                }
-                match cell.pause {
-                    Pause::Nonstop => {}
-                    Pause::OtherWork => clocks::Gap::Busy(&work).spend(OTHER_WORK_NS),
-                    Pause::Idle(ns) => clocks::Gap::Idle.spend(ns),
-                }
-                // As the bench's helper does: the timing path warmed, then
-                // the write and the call each timed alone, the counts read
-                // outside both.
-                black_box(clocks::Counts::read());
-                black_box(clocks::since_ns(clocks::now()));
-                let counts_before = clocks::Counts::read();
-                let t = clocks::now();
-                write(&mut message);
-                let write_ns = clocks::since_ns(t);
-                let t = clocks::now();
-                call(&message);
-                let hash_ns = clocks::since_ns(t);
-                let counts = counts_before.zip(clocks::Counts::read()).map(|(before, after)| after.since(before));
-                let kept = &mut samples[s][c];
-                kept.hash_ns.push(hash_ns.min(u32::MAX as u64) as u32);
-                kept.write_ns.push(write_ns.min(u32::MAX as u64) as u32);
-                kept.counts = match (kept.counts, counts) {
-                    (Some(sum), Some(one)) => Some(sum.plus(one)),
-                    (None, one) if kept.hash_ns.len() == 1 => one,
-                    _ => None,
-                };
-            }
-        }
-    }
-    let run_ns = clocks::since_ns(started);
-    settle(&ships, workers, &mut unsettled);
-
-    let mut file = std::fs::File::create("host_lab.latency.tsv").expect("write host_lab.latency.tsv");
+/// The run's facts, for the head of its file and its table.
+fn facts(what: &str, run_ns: u64, workers: usize) -> String {
     let mut head = String::new();
-    head += &format!("# host_lab latency: {visits} visits a cell, {:.1} s\n", run_ns as f64 / 1e9);
+    head += &format!("# host_lab {what}, {:.1} s\n", run_ns as f64 / 1e9);
     head += &format!("# blake3-servil {}\n", blake3_servil::BUILD_VERSION);
     head += &format!("# target: {} {}\n", std::env::consts::ARCH, std::env::consts::OS);
     head += &format!("# cpus: {}; pool workers: {workers}\n", std::thread::available_parallelism().map_or(0, |n| n.get()));
     head += &format!("# wall clock: {}\n", clocks::WALL_CLOCK);
-    head += &format!("# settles that did not complete in 200 ms: {unsettled}\n");
     let windows = clocks::load::windows();
     head += &format!(
         "# other programs' load: {} windows, {} busy; {}\n",
@@ -246,6 +215,12 @@ fn main() {
         windows.iter().filter(|w| w.busy()).count(),
         clocks::load::describe(&windows).replace('\n', " | ")
     );
+    head
+}
+
+/// Every sample to `file_name`, and the table to standard output.
+fn report(file_name: &str, head: &str, settings: &[Setting], cells: &[Cell], samples: &[Vec<Samples>]) {
+    let mut file = std::fs::File::create(file_name).expect("write the samples file");
     file.write_all(head.as_bytes()).unwrap();
     print!("{head}");
     writeln!(file, "setting\tawake\tsplit\tper\tgap\tcall\tsize\thash ns\twrite ns\tp cycles\tp ns\te cycles\te ns").unwrap();
@@ -304,4 +279,282 @@ fn main() {
             );
         }
     }
+}
+
+const KIB: usize = 1024;
+
+/// The message's source (the same bytes on every run) and the place it
+/// is written to before each call: whole blocks, as the throughput calls
+/// take them.
+fn buffers(rng: &mut Rng) -> (Vec<u8>, Vec<Block>) {
+    let max = 4 << 20;
+    let mut source = vec![0u8; max];
+    for chunk in source.chunks_mut(8) {
+        chunk.copy_from_slice(&rng.next().to_le_bytes()[..chunk.len()]);
+    }
+    (source, vec![Block::ZERO; max / 64])
+}
+
+fn latency(visits: usize) {
+    assert!(visits >= 1);
+
+    blake3_servil::initialize_multithreaded(None);
+    // The pauses land when asked, as the bench's do.
+    clocks::tight_timers();
+    let (_, workers) = blake3_servil::__probe_parked();
+    assert!(workers >= 1, "the probe needs a pool: more than one CPU");
+
+    let ships = Setting { name: "ships".to_owned(), awake: 0, split: 512 * KIB, per: 128 * KIB };
+    let mut settings = vec![ships.clone(), Setting { name: "asleep, split 32 KiB".to_owned(), awake: 0, split: 32 * KIB, per: 32 * KIB }];
+    let mut awakes: Vec<usize> = [1, 3, 7, workers].into_iter().filter(|&k| k <= workers).collect();
+    awakes.dedup();
+    for awake in awakes {
+        let name = if awake == workers { format!("all {awake} awake, split 32 KiB") } else { format!("{awake} awake, split 32 KiB") };
+        settings.push(Setting { name, awake, split: 32 * KIB, per: 32 * KIB });
+    }
+
+    let pauses = [Pause::Nonstop, Pause::OtherWork, Pause::Idle(20_000), Pause::Idle(5_000_000)];
+    let mut cells = Vec::new();
+    for pause in pauses {
+        for len in [KIB, 16 * KIB, 64 * KIB, 256 * KIB, 1 << 20, 4 << 20] {
+            cells.push(Cell { pause, multithreaded: false, len });
+        }
+        for len in [64 * KIB, 256 * KIB, 1 << 20, 4 << 20] {
+            cells.push(Cell { pause, multithreaded: true, len });
+        }
+    }
+
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let (source, mut message) = buffers(&mut rng);
+    // The other work's memory, larger than the caches.
+    let work = vec![1u8; OTHER_WORK_BYTES];
+
+    // Every setting hashes right, on both calls, before anything is timed.
+    let mut unsettled = 0;
+    for setting in &settings {
+        settle(setting, workers, &mut unsettled);
+        for len in [16 * KIB, 64 * KIB, 256 * KIB, (1 << 20) + 1, 4 << 20] {
+            Block::bytes_mut(&mut message)[..len].copy_from_slice(&source[..len]);
+            let want = convenience::hash(&source[..len]);
+            assert_eq!(throughput::hash_multithreaded(Mode::Plain, &message, len), want, "{} at {len}", setting.name);
+        }
+    }
+
+    let mut samples = vec![vec![Samples::default(); cells.len()]; settings.len()];
+    let mut setting_order: Vec<usize> = (0..settings.len()).collect();
+    let mut cell_order: Vec<usize> = (0..cells.len()).collect();
+    let started = clocks::now();
+    for _ in 0..visits {
+        rng.shuffle(&mut setting_order);
+        for &s in &setting_order {
+            settle(&settings[s], workers, &mut unsettled);
+            rng.shuffle(&mut cell_order);
+            for &c in &cell_order {
+                clocks::load::tick();
+                keep(&mut samples[s][c], visit(cells[c], &source, &mut message, &work));
+            }
+        }
+    }
+    let run_ns = clocks::since_ns(started);
+    settle(&ships, workers, &mut unsettled);
+    let mut head = facts(&format!("latency: {visits} visits a cell"), run_ns, workers);
+    head += &format!("# settles that did not complete in 200 ms: {unsettled}\n");
+    report("host_lab.latency.tsv", &head, &settings, &cells, &samples);
+}
+
+/// macOS's QoS classes (<sys/qos.h>) beside the two `clocks` names.
+const QOS_DEFAULT: u32 = 0x15;
+const QOS_USER_INITIATED: u32 = 0x19;
+
+/// The calling thread's QoS class as the system reports it (macOS), or
+/// None elsewhere.
+fn qos_now() -> Option<u32> {
+    #[cfg(target_vendor = "apple")]
+    {
+        unsafe extern "C" {
+            fn pthread_self() -> usize;
+            fn pthread_get_qos_class_np(thread: usize, class: *mut u32, relative_priority: *mut i32) -> i32;
+        }
+        let (mut class, mut priority) = (0u32, 0i32);
+        // Sound: both places are writable, and the thread is this one.
+        let rc = unsafe { pthread_get_qos_class_np(pthread_self(), &mut class, &mut priority) };
+        return (rc == 0).then_some(class);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// How the program tries to keep the calling thread fast through a rest.
+#[derive(Clone, Copy, PartialEq)]
+enum Fast {
+    /// Nothing: the thread as the program was launched.
+    AsLaunched,
+    /// The calling thread in this QoS class.
+    Qos(u32),
+    /// One pool worker kept awake (the latency mode's "1 awake").
+    Worker,
+    /// A spinning thread of the program's own in the background QoS class.
+    BackgroundSpinner,
+}
+
+fn rest(visits: usize) {
+    assert!(visits >= 1);
+    blake3_servil::initialize_multithreaded(None);
+    clocks::tight_timers();
+    let (_, workers) = blake3_servil::__probe_parked();
+    let launched = qos_now();
+    let ways = [
+        ("as launched", Fast::AsLaunched),
+        ("QoS default", Fast::Qos(QOS_DEFAULT)),
+        ("QoS user-initiated", Fast::Qos(QOS_USER_INITIATED)),
+        ("QoS user-interactive", Fast::Qos(clocks::USER_INTERACTIVE)),
+        ("one worker awake", Fast::Worker),
+        ("a background spinner", Fast::BackgroundSpinner),
+    ];
+    // The table's rows carry each way's name where the latency mode's carry a setting's.
+    let settings: Vec<Setting> = ways
+        .iter()
+        .map(|(name, way)| Setting { name: (*name).to_owned(), awake: usize::from(*way == Fast::Worker), split: 512 * KIB, per: 128 * KIB })
+        .collect();
+    let mut cells = Vec::new();
+    for pause in [Pause::Idle(200_000), Pause::Idle(1_000_000), Pause::Idle(5_000_000), Pause::Idle(20_000_000)] {
+        for len in [KIB, 16 * KIB, 64 * KIB, 256 * KIB] {
+            cells.push(Cell { pause, multithreaded: false, len });
+        }
+    }
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let (source, mut message) = buffers(&mut rng);
+
+    // The program's own spinner: it spins while `spin` is set and sleeps
+    // on its token otherwise.
+    static SPIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let spinner = std::thread::spawn(|| {
+        clocks::set_qos(clocks::BACKGROUND);
+        loop {
+            while SPIN.load(std::sync::atomic::Ordering::Relaxed) {
+                std::hint::spin_loop();
+            }
+            std::thread::park();
+        }
+    });
+
+    let mut samples = vec![vec![Samples::default(); cells.len()]; settings.len()];
+    let mut way_order: Vec<usize> = (0..ways.len()).collect();
+    let mut cell_order: Vec<usize> = (0..cells.len()).collect();
+    let mut unsettled = 0;
+    let started = clocks::now();
+    for _ in 0..visits {
+        rng.shuffle(&mut way_order);
+        for &w in &way_order {
+            let way = ways[w].1;
+            settle(&settings[w], workers, &mut unsettled);
+            SPIN.store(way == Fast::BackgroundSpinner, std::sync::atomic::Ordering::Relaxed);
+            spinner.thread().unpark();
+            rng.shuffle(&mut cell_order);
+            let block = |samples: &mut Vec<Samples>, message: &mut Vec<Block>| {
+                for &c in &cell_order {
+                    clocks::load::tick();
+                    keep(&mut samples[c], visit(cells[c], &source, message, &[]));
+                }
+            };
+            match way {
+                // A thread of its own for each block, in the class from its start: the main thread keeps the class it was launched in.
+                Fast::Qos(class) => std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        clocks::set_qos(class);
+                        block(&mut samples[w], &mut message);
+                    });
+                }),
+                _ => block(&mut samples[w], &mut message),
+            }
+            SPIN.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let run_ns = clocks::since_ns(started);
+    blake3_servil::__probe_latency(0, 512 * KIB, 128 * KIB);
+    let mut head = facts(&format!("rest: {visits} visits a cell"), run_ns, workers);
+    head += &format!("# the main thread's QoS class as launched: {}\n", launched.map_or("not reported here".to_owned(), |class| format!("{class:#x}")));
+    head += &format!("# settles that did not complete in 200 ms: {unsettled}\n");
+    report("host_lab.rest.tsv", &head, &settings, &cells, &samples);
+}
+
+/// This process's energy so far by the system's own estimate, and the
+/// performance cores' share of it, in nanojoules (macOS: rusage_info_v6's
+/// ri_energy_nj and ri_penergy_nj); elsewhere the package's counter where
+/// the process may read it, with no share.
+fn energy_nj() -> Option<(u64, Option<u64>)> {
+    #[cfg(target_vendor = "apple")]
+    {
+        unsafe extern "C" {
+            fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
+            fn getpid() -> i32;
+        }
+        let mut words = [0u64; 64];
+        // Sound: `words` is writable and longer than rusage_info_v6 (flavor 6).
+        let rc = unsafe { proc_pid_rusage(getpid(), 6, words.as_mut_ptr()) };
+        return (rc == 0).then(|| (words[42], Some(words[43])));
+    }
+    #[allow(unreachable_code)]
+    clocks::energy::package_nj().map(|nj| (nj, None))
+}
+
+fn price(seconds: usize) {
+    assert!(seconds >= 1);
+    blake3_servil::initialize_multithreaded(None);
+    let (_, workers) = blake3_servil::__probe_parked();
+    let mut awakes: Vec<usize> = [0, 1, 3, 7, workers].into_iter().filter(|&k| k <= workers).collect();
+    awakes.dedup();
+    let there_and_back: Vec<usize> = awakes.iter().chain(awakes.iter().rev()).copied().collect();
+    let hold = std::time::Duration::from_secs(seconds as u64);
+    let rest = std::time::Duration::from_secs(5);
+    let mut unsettled = 0;
+    println!("# host_lab price: {seconds} s a hold, 5 s of rest before each, the calling thread asleep throughout");
+    println!("# blake3-servil {}", blake3_servil::BUILD_VERSION);
+    println!(
+        "# target: {} {}; cpus: {}; pool workers: {workers}",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        std::thread::available_parallelism().map_or(0, |n| n.get())
+    );
+    println!(
+        "# energy: {}",
+        if cfg!(target_vendor = "apple") {
+            "the system's estimate for this process (ri_energy_nj), a model"
+        } else {
+            "the package's counter (energy-pkg), every program's"
+        }
+    );
+    println!("{:<12} {:>6} {:>8} {:>10} {:>8} {:>10}", "start", "awake", "wall s", "CPUs busy", "watts", "P share %");
+    for awake in there_and_back {
+        blake3_servil::__probe_latency(0, 512 * KIB, 128 * KIB);
+        std::thread::sleep(rest);
+        settle(&Setting { name: String::new(), awake, split: 512 * KIB, per: 128 * KIB }, workers, &mut unsettled);
+        clocks::load::tick();
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let (energy, cpu, started) = (energy_nj(), clocks::process_cpu_ns(), clocks::now());
+        std::thread::sleep(hold);
+        let (wall_ns, cpu_ns, energy_after) = (clocks::since_ns(started), clocks::process_cpu_ns() - cpu, energy_nj());
+        let watts = energy.zip(energy_after).map(|((before, _), (after, _))| (after - before) as f64 / wall_ns as f64);
+        let p_share = energy
+            .zip(energy_after)
+            .and_then(|((before, p_before), (after, p_after))| Some((p_after? - p_before?) as f64 * 100.0 / (after - before).max(1) as f64));
+        println!(
+            "{:<12} {:>6} {:>8.2} {:>10.2} {:>8} {:>10}",
+            at,
+            awake,
+            wall_ns as f64 / 1e9,
+            cpu_ns as f64 / wall_ns as f64,
+            watts.map_or("-".to_owned(), |w| format!("{w:.2}")),
+            p_share.map_or("-".to_owned(), |p| format!("{p:.0}"))
+        );
+    }
+    blake3_servil::__probe_latency(0, 512 * KIB, 128 * KIB);
+    let windows = clocks::load::windows();
+    println!("# settles that did not complete in 200 ms: {unsettled}");
+    println!(
+        "# other programs' load: {} windows, {} busy; {}",
+        windows.len(),
+        windows.iter().filter(|w| w.busy()).count(),
+        clocks::load::describe(&windows).replace('\n', " | ")
+    );
 }
