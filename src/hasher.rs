@@ -949,6 +949,31 @@ mod test {
         assert_eq!((parents.len(), children.len()), (0, 64), "no rows: no layer of parents, and every group's two children");
     }
 
+    /// Rows merge by the chunks since the hasher's first, not by the
+    /// counter. A subtree that begins at chunk 64, hashed on its own a
+    /// group at a time, owes its second group one merge (16 chunks in),
+    /// where the counter, 80, has two bits set. Rows of four, whatever
+    /// the machine's kernels cut: an SME2 Mac's cut none, so no test
+    /// there told `counter - initial` from `counter + initial`. Against
+    /// official BLAKE3's value for the subtree.
+    #[test]
+    fn rows_of_a_subtree_that_begins_past_chunk_zero_merge_by_its_own_chunks() {
+        use blake3::hazmat::HasherExt;
+        const GROUP: usize = 16 * CHUNK_LEN;
+        const FIRST: u64 = 64;
+        let input: std::vec::Vec<u8> = (0..4 * GROUP).map(|i| (i % 251) as u8).collect();
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let mut chunk = k.new_chunk(FIRST);
+        let mut stack = CvStack::new();
+        for group in input.chunks_exact(GROUP) {
+            feed(&k, &mut chunk, &mut stack, FIRST, group);
+        }
+        assert_eq!(hooks.children.borrow().as_slice(), [GROUP], "the first group alone asks for its children: the three after are rows");
+        let want = blake3::Hasher::new().set_input_offset(FIRST * CHUNK_LEN as u64).update(&input).finalize_non_root();
+        assert_eq!(final_node(&k, &chunk, &stack).chaining_value(), want);
+    }
+
     /// A row gives up its place to the row ROWS entries above it, whatever
     /// lies between and wherever the two stand: two single values, then
     /// nine rows (entries 2 to 10), and the first row, entry 2, is
