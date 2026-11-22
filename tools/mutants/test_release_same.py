@@ -119,7 +119,8 @@ class Confirm(unittest.TestCase):
             subprocess.run(["patch", "-s", "-p0", path], input=self.places[0][2], text=True, cwd=self.tree, check=True)
             written = release_same.build(self.tree, self.target, release_same_build_args(), self.env)
         finally:
-            open(path, "w").write(LIB)
+            with open(path, "w") as f:
+                f.write(LIB)
         self.assertNotEqual(written, base)
 
     def test_a_change_to_code_is_not(self):

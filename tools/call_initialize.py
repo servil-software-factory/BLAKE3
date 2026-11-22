@@ -43,7 +43,8 @@ def doc_examples(path):
         out += block + [lines[j]]
         i = j + 1
     if changed:
-        open(path, "w").write("\n".join(out))
+        with open(path, "w") as f:
+            f.write("\n".join(out))
 
 def first_statements(path, crate):
     text = open(path).read()
@@ -59,7 +60,8 @@ def first_statements(path, crate):
     out.append(text[last:])
     new = "".join(out)
     if new != text:
-        open(path, "w").write(new)
+        with open(path, "w") as f:
+            f.write(new)
 
 for path in sorted(glob.glob(os.path.join(ROOT, "src", "**", "*.rs"), recursive=True)):
     doc_examples(path)

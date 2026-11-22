@@ -107,6 +107,9 @@ Every job type runs on the Mac. A thorough `--all` benchmark run under the
 runner matches the same run from the user's Terminal (704 cells, median
 ratio 1.001).
 
+The runner's own tests (`python3 -m unittest discover -s tools/runner`)
+run in CI on Linux and macOS, under the system's CPython and under PyPy.
+
 ## The chip's power (`"powermetrics": true`)
 
 Energy is a lab instrument (Zooko): measured in experiments here, and kept

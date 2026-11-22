@@ -341,13 +341,28 @@ jobs:
         path: dist/
 
   runner_tests:
-    name: runner tests (${{ matrix.os }})
+    name: runner tests (${{ matrix.os }}, ${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # The system's CPython, and PyPy: it has no reference counts, so a file
+        # left unclosed stays unwritten, and it lacks some of CPython's os calls.
+        python: [python3, pypy3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - run: python3 -W default -m unittest discover -s tools/runner -p 'test_*.py' -v
+    - name: PyPy 8.0.1 (Python 3.12), by the SHA-256 pypy.org publishes
+      if: matrix.python == 'pypy3'
+      run: |
+        case "$(uname -sm)" in
+          "Linux x86_64") name=pypy3.12-v8.0.1-linux64 sha=aeed27797777296d9c94e53bdfa608804696dbd4ff9f2213003cce064ee46ef8 ;;
+          "Darwin arm64") name=pypy3.12-v8.0.1-macos_arm64 sha=c10baeae4a61063a1183c4ee4e8324765ba736a3980323654efb31e79f1514db ;;
+          *) echo "no PyPy named for $(uname -sm)"; exit 1 ;;
+        esac
+        curl -sSfL -o "$RUNNER_TEMP/pypy.tar.gz" "https://downloads.python.org/pypy/$name.tar.gz"
+        echo "$sha  $RUNNER_TEMP/pypy.tar.gz" | shasum -a 256 -c
+        tar -xzf "$RUNNER_TEMP/pypy.tar.gz" -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/$name/bin" >> "$GITHUB_PATH"
+    - run: ${{ matrix.python }} --version && ${{ matrix.python }} -W default -m unittest discover -s tools/runner -p 'test_*.py' -v

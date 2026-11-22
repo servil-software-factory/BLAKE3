@@ -18,16 +18,19 @@ from unittest.mock import patch
 import runner
 
 SLEEP = "import time; time.sleep(30)"
+# A worker says its PID in a file, and closes it: PyPy writes an unclosed file's bytes when it collects
+# the file, which for a worker asleep is never.
+SAY_PID = "f = open(sys.argv[1], 'w'); f.write(str(os.getpid())); f.close()"
 # A worker that leaves the command's process group, as a test started by cargo-nextest does, and then says
 # its PID: so the PID is known only once the worker is in a group of its own.
-OWN_GROUP = "import os, sys, time; os.setpgid(0, 0); open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)"
+OWN_GROUP = f"import os, sys, time; os.setpgid(0, 0); {SAY_PID}; time.sleep(30)"
 # A worker that leaves the command's session as well.
-OWN_SESSION = "import os, sys, time; os.setsid(); open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)"
+OWN_SESSION = f"import os, sys, time; os.setsid(); {SAY_PID}; time.sleep(30)"
 # A process with a zombie under it (a child that has ended and that it does not collect), and the same as
 # a worker in a group of its own.
 ZOMBIE_UNDER = ("import os, sys, time\n"
                 "if os.fork() == 0: os._exit(0)\n"
-                "time.sleep(0.3); open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)\n")
+                f"time.sleep(0.3); {SAY_PID}; time.sleep(30)\n")
 WITH_ZOMBIE = "import os\nos.setpgid(0, 0)\n" + ZOMBIE_UNDER
 # The command: it starts the worker and waits.
 PARENT = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); time.sleep(30)"
@@ -156,7 +159,11 @@ class Limit(unittest.TestCase):
         signal. (Killed without that, the command leaves the ones it started in between: their parent is
         gone and they are in sessions of their own.)"""
         proc, began = self.command(SPAWNER, self.sleep)
-        time.sleep(1.0)
+        # Until it has started enough sleepers to test with, or most of its 4 s have passed: a busy CI
+        # machine started 9 in a fixed second.
+        end = time.monotonic() + 3.5
+        while len(sleepers(self.sleep)) <= 10 and time.monotonic() < end:
+            time.sleep(0.05)
         os.killpg(proc.pid, signal.SIGKILL)                                 # the control: the old way
         proc.wait()
         left = sleepers(self.sleep)

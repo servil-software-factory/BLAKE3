@@ -51,7 +51,8 @@ class CodeHash(unittest.TestCase):
         name, _, offset, size = next(s for s in sections(path) if pick(s))
         data = bytearray(open(path, "rb").read())
         data[offset + size // 2] ^= 0xFF
-        open(path, "wb").write(data)
+        with open(path, "wb") as f:
+            f.write(data)
         return name, code_hash.code_hash(path, B3SUM)
 
     def test_a_copy_hashes_alike(self):
