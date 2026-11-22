@@ -337,8 +337,10 @@ it takes and ticks each step:
    merge, so its head-SHA label alone is not evidence for the release commit.
 3. `bench-hashes check --against <previous release tag> --cells all`,
    on the timing Mac (a Mac Mini M6, `mac-m6-timing` in the runners'
-   exchange; `tools/release-check.py` reads that Mac's latest such
-   check) and on the native x86 machines of the
+   exchange; `tools/release-check.py` reads that Mac's checks of the two
+   commits: the one it started last decides, every one of them must be a
+   whole record however old, and the job names both commits in full)
+   and on the native x86 machines of the
    fleet; VM timing runs nightly on a best-effort basis and is not
    awaited for a release. Use one bench commit on both sides for the
    calls they share. Compare new calls with a suitable development
