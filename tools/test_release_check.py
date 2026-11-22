@@ -18,12 +18,23 @@ check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
 HEAD, OLD = "a" * 40, "b" * 40
+# A verdict's field left out, where None would write JSON's null.
+ABSENT = object()
 RUN = {"id": 7, "run_number": 7, "name": "tests", "path": ".github/workflows/ci.yml", "event": "workflow_dispatch", "status": "completed", "conclusion": "success"}
 MUTATION_OK = f"mutants: BLAKE3-Servil at {HEAD}\nmutants: the whole run\nmutants: 12 survive, each known and explained\nmutants: 3 time out, each known (timeouts-x86_64.txt)\n"
 
 
 def job(conclusion="success", status="completed"):
     return {"name": "test job", "status": status, "conclusion": conclusion}
+
+
+def resolve_fixture(spelling, commits=(HEAD, OLD)):
+    """`git rev-parse --verify --quiet SPELLING` over `commits`: the one
+    that begins so, or git's failure where none or several do."""
+    found = [c for c in commits if c.startswith(spelling.removesuffix("^{commit}"))]
+    if len(found) != 1:
+        raise subprocess.CalledProcessError(1, ["git", "rev-parse", spelling])
+    return found[0]
 
 
 class CI(unittest.TestCase):
@@ -73,9 +84,11 @@ class CI(unittest.TestCase):
 
 
 class ReleaseEvidence(unittest.TestCase):
-    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, ""), previous=None, builds_log="check-builds: every build passes", dry_run_log="publish-dry-run: ok", mac_results=None):
+    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, ""), previous=None, builds_log="check-builds: every build passes", dry_run_log="publish-dry-run: ok", mac_results=None, inspections=ABSENT):
         jobs = [job(), job()] if ci_jobs is None else ci_jobs
         def git(*args):
+            if args[:3] == ("rev-parse", "--verify", "--quiet"):
+                return resolve_fixture(args[3])
             if args[0] == "rev-parse":
                 return HEAD if args[1] == "candidate" else OLD
             if args[0] == "tag":
@@ -101,13 +114,17 @@ class ReleaseEvidence(unittest.TestCase):
             task = {"type": kind, "old_commit": old, "new_commit": new}
             if cells is not None:
                 task["cells"] = cells
-            (root / "mac-runner/jobs/job.json").write_text(json.dumps(task))
             readings = {k: v for k, v in zip(("power at start", "power at end"), power) if v is not None}
-            # A results folder is NAME.TIME-MACHINE; `mac_results` gives
-            # others than the one check on the timing Mac.
+            if inspections is not ABSENT:
+                readings["inspections"] = inspections
+            # A results folder is NAME.TIME-MACHINE, and its job is
+            # jobs/NAME.json; `mac_results` gives others than the one
+            # check on the timing Mac, each the same task under its name.
             for folder, status in mac_results or [("job.20261120T135633Z-mac-m6-timing", verdict)]:
+                name = folder.split(".")[0]
+                (root / "mac-runner/jobs" / (name + ".json")).write_text(json.dumps(task))
                 (root / "mac-runner/results" / folder).mkdir(parents=True)
-                (root / "mac-runner/results" / folder / "verdict.json").write_text(json.dumps({"job": "job.json", "status": status, **readings}))
+                (root / "mac-runner/results" / folder / "verdict.json").write_text(json.dumps({"job": name + ".json", "status": status, **readings}))
             logs = root / "tmp/night"
             logs.mkdir(parents=True)
             candidate = (git_override or git)("rev-parse", "candidate")[:12]
@@ -280,11 +297,270 @@ class ReleaseEvidence(unittest.TestCase):
                 self.assertIsNone(check.mutation_result("mutants.log", HEAD), text)
 
     def test_mac_undecided_outcomes_remain_distinct(self):
-        for verdict, label in [("timed out", "TIMED OUT"), ("no verdict", "NO VERDICT")]:
+        for verdict, label in [("timed out", "TIMED OUT"), ("no verdict", "NO VERDICT"), ("cancelled", "NO VERDICT")]:
             with self.subTest(verdict=verdict):
                 code, output = self.run_gate(verdict=verdict)
                 self.assertEqual(code, 2)
                 self.assertIn(label + "  Mac check", output)
+                self.assertIn(f"(the last one: {verdict})", output)
+
+    def test_an_inspected_mac_check_is_no_verdict(self):
+        # The runner's inspection samples the job's processes, which
+        # suspends them while they are timed (BLAKE3 #464): the check's
+        # "no regression" is then no evidence, and neither is its
+        # "regression". An empty list is a check nobody inspected.
+        once = [{"at": "2026-11-22T09:00:00Z", "duration_seconds": 1.25}]
+        for verdict in ["no regression", "regression"]:
+            for inspections, times in [(once, "1 time:"), (once * 3, "3 times:"), ([None], "1 time:")]:
+                with self.subTest(verdict=verdict, inspections=inspections):
+                    code, output = self.run_gate(verdict=verdict, inspections=inspections)
+                    self.assertEqual(code, 2, output)
+                    self.assertIn("NO VERDICT  Mac check", output)
+                    self.assertIn("inspected while it ran, " + times, output)
+        code, output = self.run_gate(inspections=[])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.run_gate(verdict="regression", inspections=[])[0], 1)
+
+    def test_inspections_that_are_no_list_pass_nothing(self):
+        # Absent is a check nobody inspected. Any value that is no list,
+        # the empty ones too (null, false, 0, "", {}), is a record this
+        # reader does not understand: a passing check with
+        # "inspections": null once passed the step.
+        for inspections in [None, False, 0, 0.0, "", {}, "yes", 3, {"at": "09:00"}, True]:
+            for verdict in ["no regression", "regression"]:
+                with self.subTest(inspections=inspections, verdict=verdict):
+                    code, output = self.run_gate(verdict=verdict, inspections=inspections)
+                    self.assertEqual(code, 2, output)
+                    self.assertIn("NO VERDICT  Mac check", output)
+                    self.assertIn(f'"inspections" is {type(inspections).__name__}, not a list', output)
+
+    def test_a_timed_out_mac_check_is_timed_out_whatever_else(self):
+        # The runner's limit ended the job: that is the step's outcome,
+        # inspected or off AC power or both, and the line says each.
+        once = [{"at": "2026-11-22T09:00:00Z", "duration_seconds": 1.25}]
+        code, output = self.run_gate(verdict="timed out", inspections=once, power=("AC Power, 100%", "Battery Power, 98%"))
+        self.assertEqual(code, 2, output)
+        self.assertIn("TIMED OUT  Mac check", output)
+        for text in ["(the last one: timed out)", "inspected while it ran, 1 time:", "run it again plugged in"]:
+            self.assertIn(text, output)
+        # The runner's other statuses decide nothing once inspected, an
+        # error among them; uninspected, an error fails.
+        for verdict in ["error", "a side stopped", "no verdict", "cancelled"]:
+            code, output = self.run_gate(verdict=verdict, inspections=once)
+            self.assertEqual(code, 2, output)
+            self.assertIn("NO VERDICT  Mac check", output)
+            self.assertIn(f"(the last one: {verdict})", output)
+        code, output = self.run_gate(verdict="error")
+        self.assertEqual(code, 1, output)
+        self.assertIn("FAIL  Mac check", output)
+        self.assertIn("(the last one: error)", output)
+
+
+class MacCheck(unittest.TestCase):
+    """`mac_check` on an exchange of several records, each with its own
+    job: which record decides, and what an unusable one does. (A review
+    of this reader found each of these; the step had passed on an older
+    record where the latest was spelled otherwise, misattributed, tied,
+    or damaged.)"""
+
+    T1, T2, T3 = "20261120T135633Z", "20261121T020027Z", "20261122T020016Z"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "jobs").mkdir()
+        (self.root / "results").mkdir()
+        self.commits = [HEAD, OLD]
+
+    def record(self, name, time, status="no regression", machine="mac-m6-timing", new=HEAD, old=OLD, job_file=ABSENT, verdict_file=ABSENT, claim_file=ABSENT, **fields):
+        """One job and its results folder. `job_file`, `verdict_file` and
+        `claim_file` are a file's whole text (None: no such file);
+        `fields` go into the verdict, and one that is ABSENT is left out."""
+        task = json.dumps({"type": "check", "cells": "all", "old_commit": old, "new_commit": new}) if job_file is ABSENT else job_file
+        if task is not None:
+            (self.root / "jobs" / (name + ".json")).write_text(task)
+        folder = self.root / "results" / f"{name}.{time}-{machine}"
+        folder.mkdir()
+        if verdict_file is ABSENT:
+            v = {"job": name + ".json", "status": status, "power at start": "AC Power, lowpowermode 0", "power at end": "AC Power, lowpowermode 0", **fields}
+            verdict_file = json.dumps({k: value for k, value in v.items() if value is not ABSENT})
+        if verdict_file is not None:
+            (folder / "verdict.json").write_text(verdict_file)
+        if claim_file is not ABSENT:
+            (folder / "claimed.json").write_text(claim_file)
+        return folder.name
+
+    def check(self, old=OLD):
+        def git(*args):
+            assert args[:3] == ("rev-parse", "--verify", "--quiet"), args
+            return resolve_fixture(args[3], self.commits)
+        with patch.object(check, "git", git):
+            return check.mac_check(str(self.root), HEAD, old)
+
+    def test_no_record_is_open_and_one_pass_passes(self):
+        self.assertEqual(self.check(), (None, ""))
+        self.record("3547-check", self.T1)
+        self.assertEqual(self.check(), (True, ""))
+
+    def test_a_commit_named_by_its_beginning_is_that_commit(self):
+        # The runner takes 7 to 40 hex digits. A later check that spelled
+        # the candidate with twelve was passed over for an older pass.
+        self.record("first", self.T1)
+        for field in ["new", "old"]:
+            for digits in [7, 12, 39]:
+                with self.subTest(field=field, digits=digits):
+                    name = f"later-{field}-{digits}"
+                    spelled = {field: (HEAD if field == "new" else OLD)[:digits]}
+                    self.record(name, self.T2, "cancelled", **spelled)
+                    outcome, note = self.check()
+                    self.assertEqual(outcome, check.NO_VERDICT, note)
+                    self.assertIn("(the last one: cancelled)", note)
+                    self.record(name + "-again", self.T3, "regression", **spelled)
+                    self.assertIs(self.check()[0], False)
+                    for made in list((self.root / "results").glob("later-*")):
+                        for file in made.iterdir():
+                            file.unlink()
+                        made.rmdir()
+        # Not this commit: six digits or capitals (the runner refuses
+        # both), another commit's beginning, a value that is no text.
+        for i, spelling in enumerate([HEAD[:6], HEAD[:12].upper(), "c" * 12, "a" * 11 + "c", None, 7, ""]):
+            self.record(f"other-{i}", self.T3, "regression", new=spelling)
+        self.assertEqual(self.check(), (True, ""))
+
+    def test_a_beginning_that_other_objects_share_decides_nothing(self):
+        self.record("first", self.T1)
+        self.commits.append("a" * 12 + "c" * 28)
+        self.record("later", self.T2, "no regression", new="a" * 12)
+        outcome, note = self.check()
+        self.assertEqual(outcome, check.NO_VERDICT, note)
+        self.assertIn("later." + self.T2, note)
+        self.assertIn("a beginning that other objects here share", note)
+
+    def test_a_folders_job_is_the_one_its_name_gives(self):
+        # The later folder is another commit's check, and its verdict
+        # names the first job by mistake: the candidate's own check, the
+        # inspected one, still decides. (The step took the job from the
+        # verdict, and passed.)
+        self.record("first", self.T1, inspections=[{"at": "09:00"}])
+        self.record("later", self.T2, new="c" * 40, job="first.json")
+        outcome, note = self.check()
+        self.assertEqual(outcome, check.NO_VERDICT, note)
+        self.assertIn("inspected while it ran, 1 time", note)
+        # And a later check of these commits whose verdict names another
+        # job is not a verdict on it.
+        named = self.record("named-otherwise", self.T3, job="first.json")
+        outcome, note = self.check()
+        self.assertEqual(outcome, check.NO_VERDICT, note)
+        self.assertIn(f"the last one, {named}, decides nothing: its verdict names the job 'first.json', not named-otherwise.json", note)
+
+    def test_a_later_folder_whose_job_cannot_be_read_holds_the_step(self):
+        self.record("early-and-jobless", self.T1, job_file=None)
+        self.record("the-check", self.T2)
+        self.assertEqual(self.check(), (True, ""), "an earlier folder without a job decides nothing")
+        for i, (text, why) in enumerate([(None, "cannot be read"), ("{", "is not JSON"), ("[]", "is not a JSON object"), ("not text", "is not JSON")]):
+            with self.subTest(job_file=text):
+                later = self.record(f"jobless-{i}", self.T3, job_file=text)
+                if text == "not text":
+                    (self.root / "jobs" / f"jobless-{i}.json").write_bytes(b"\xff\xfe")
+                outcome, note = self.check()
+                self.assertEqual(outcome, check.NO_VERDICT, note)
+                self.assertIn(later, note)
+                self.assertIn(why, note)
+                (self.root / "results" / later / "verdict.json").unlink()
+                (self.root / "results" / later).rmdir()
+        # In the same hand-over as the check: also held.
+        self.record("jobless-with-it", self.T2, job_file=None)
+        self.assertEqual(self.check()[0], check.NO_VERDICT)
+
+    def test_the_latest_decides_and_a_tie_decides_nothing(self):
+        # Jobs handed over together share the folder's time; the Mac
+        # runs them in turn, and the verdict's "started" orders them.
+        for first, second in [("regression", "no regression"), ("no regression", "regression")]:
+            with self.subTest(first=first), tempfile.TemporaryDirectory() as tmp:
+                self.root = Path(tmp)
+                (self.root / "jobs").mkdir()
+                (self.root / "results").mkdir()
+                self.record("zz-ran-first", self.T2, first, started="2026-11-21T02:00:30Z")
+                self.record("aa-ran-second", self.T2, second, started="2026-11-21T02:31:00Z")
+                self.assertIs(self.check()[0], second == "no regression")
+                # Without the times: no order, whatever the two say.
+                self.record("mm-third", self.T3, first)
+                self.record("nn-fourth", self.T3, second)
+                outcome, note = self.check()
+                self.assertEqual(outcome, check.NO_VERDICT, note)
+                self.assertIn("cannot be put in order", note)
+                self.assertIn("mm-third", note)
+                self.assertIn("nn-fourth", note)
+
+    def test_a_check_without_a_verdict_yet_is_waited_for(self):
+        self.record("the-check", self.T2, started="2026-11-21T02:00:30Z")
+        self.record("abandoned-before", self.T1, verdict_file=None, claim_file='{"job": "abandoned-before.json", "machine": "mac-m6-timing"}')
+        self.assertEqual(self.check(), (True, ""))
+        running = self.record("running", self.T3, verdict_file=None, claim_file='{"job": "running.json", "machine": "mac-m6-timing"}')
+        outcome, note = self.check()
+        self.assertEqual(outcome, check.NO_VERDICT, note)
+        self.assertIn(f"the last one, {running}, decides nothing: it has no verdict yet", note)
+        # Handed over with a check that has finished: it runs after it.
+        (self.root / "results" / running).rename(self.root / "results" / f"running.{self.T2}-mac-m6-timing")
+        outcome, note = self.check()
+        self.assertEqual(outcome, check.NO_VERDICT, note)
+        self.assertIn("it has no verdict yet", note)
+
+    def test_a_damaged_latest_record_decides_nothing_and_an_older_pass_does_not_stand_in(self):
+        self.record("first", self.T1)
+        cases = [
+            (dict(verdict_file="{\"job\": \"x.json\", \"status\": \"no regr"), "its verdict.json is not JSON"),
+            (dict(verdict_file="[]"), "its verdict.json is not a JSON object"),
+            (dict(status=None), "its status is None, not a text"),
+            (dict(status=ABSENT), "its status is None, not a text"),
+            (dict(status=""), "its status is '', not a text"),
+            (dict(status=["no regression"]), "not a text"),
+            (dict(claim_file="{"), "its claimed.json is not JSON"),
+            (dict(claim_file='{"job": "first.json", "machine": "mac-m6-timing"}'), "its claimed.json names 'first.json'"),
+            (dict(claim_file='{"job": "damaged-8.json", "machine": "mac-m4-timing"}'), "on 'mac-m4-timing'"),
+        ]
+        for i, (fields, why) in enumerate(cases):
+            with self.subTest(fields=fields):
+                later = self.record(f"damaged-{i}", self.T2, **fields)
+                outcome, note = self.check()
+                self.assertEqual(outcome, check.NO_VERDICT, note)
+                self.assertIn(f"the last one, {later}, decides nothing", note)
+                self.assertIn(why, note)
+                for file in (self.root / "results" / later).iterdir():
+                    file.unlink()
+                (self.root / "results" / later).rmdir()
+        # Power readings of the wrong type or the wrong word are off AC.
+        for i, reading in enumerate([None, 5, ["AC Power"], "AC Powerless", "", "ac power", ABSENT]):
+            with self.subTest(reading=reading):
+                later = self.record(f"power-{i}", self.T2, **{"power at end": reading})
+                outcome, note = self.check()
+                self.assertEqual(outcome, check.NO_VERDICT, note)
+                self.assertIn("ran off AC power: " + (reading if isinstance(reading, str) and reading else "unrecorded"), note)
+                for file in (self.root / "results" / later).iterdir():
+                    file.unlink()
+                (self.root / "results" / later).rmdir()
+        self.assertEqual(self.check(), (True, ""))
+
+    def test_damage_elsewhere_is_never_read(self):
+        # Older than the check, on another Mac, or another job's: such a
+        # record is not opened, so its damage cannot stop the checklist
+        # (a truncated verdict of an unrelated job once raised from it).
+        self.record("older-damaged", self.T1, verdict_file="{")
+        self.record("m4-damaged", self.T3, verdict_file="{", machine="mac-m4-timing")
+        self.record("benchmark-damaged", self.T3, verdict_file="{", job_file='{"type": "benchmark"}')
+        self.record("partial-damaged", self.T3, verdict_file="{", job_file=json.dumps({"type": "check", "cells": "small", "old_commit": OLD, "new_commit": HEAD}))
+        self.record("another-commit-damaged", self.T3, verdict_file="{", new="c" * 40)
+        self.record("the-check", self.T2)
+        self.assertEqual(self.check(), (True, ""))
+        (self.root / "results" / "not-a-results-folder").mkdir()
+        (self.root / "results" / "a-file").write_text("x")
+        self.assertEqual(self.check(), (True, ""))
+
+    def test_without_a_previous_release_any_old_side_counts(self):
+        self.record("first-release", self.T1, old="c" * 40)
+        self.assertEqual(self.check(old=None), (True, ""))
+        self.assertEqual(self.check(), (None, ""))
 
 
 class Artifacts(unittest.TestCase):
