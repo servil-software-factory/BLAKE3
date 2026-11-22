@@ -1488,6 +1488,48 @@ mod test {
         assert_eq!(pair[1].clone().finalize(), crate::test::official::hash(Mode::Plain, &input));
     }
 
+    /// A turn whose pieces are all shorter than the pool's threshold does
+    /// `update_each`'s work: the callback is not asked, and the counts
+    /// are the same (the rows whole groups are cut into, the flat walks
+    /// on SME2, the passes over held groups), turn after turn; the
+    /// digests are the same either way. Eight messages fed a group at a
+    /// time, the pattern of BLAKE3 #470 (where `update_each_multithreaded`
+    /// took 9% to 15% longer than `update_each`: its groups cut no rows),
+    /// then pieces that leave the boundary and come back to it.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_turn_below_the_pools_threshold_is_update_eachs() {
+        crate::initialize();
+        const N: usize = 8;
+        let mut input = vec![0u8; 8 * crate::STAGE_LEN];
+        crate::test::paint_test_input(&mut input);
+        let counts = || [crate::Counted::Row, crate::Counted::Flat, crate::Counted::HeldPass].map(|what| crate::COUNTED.with(|c| c[what as usize].replace(0)));
+        let key = [0x53u8; 32];
+        for mode in [Mode::Plain, Mode::Keyed(&key)] {
+            let mut serial: Vec<Hasher> = (0..N).map(|_| Hasher::new(mode, None)).collect();
+            let mut pooled = serial.clone();
+            let (mut fed, mut seen) = (0, [0u64; 3]);
+            for n in [crate::STAGE_LEN, crate::STAGE_LEN, crate::STAGE_LEN + 4096, 4096, crate::STAGE_LEN - 8192, 4 * crate::STAGE_LEN] {
+                let pieces: Vec<(usize, &[u8])> = (0..N).map(|i| (i, &input[fed..fed + n])).collect();
+                fed += n;
+                counts();
+                update_each(&mut serial, &pieces);
+                let want = counts();
+                update_each_with(&mut pooled, &pieces, n + 1, &|_, _, _, _| panic!("a piece below the threshold holds no subtree for the callback"));
+                assert_eq!(counts(), want, "{fed} bytes in, pieces of {n}: update_each's rows, flat walks and held passes");
+                for (a, b) in serial.iter().zip(&pooled) {
+                    assert_eq!(a.finalize(), b.finalize(), "{fed} bytes");
+                }
+                seen = core::array::from_fn(|k| seen[k] + want[k]);
+            }
+            assert_eq!(fed, input.len());
+            assert!(seen.iter().any(|&n| n > 0), "the turns cut rows, walked flat or passed held groups: the comparison is of something");
+            for h in &pooled {
+                assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(mode, &input));
+            }
+        }
+    }
+
     /// Public mode and independent-parent availability choose the held
     /// passes; equal and distinct secret keys always take the same work.
     #[cfg(feature = "std")]

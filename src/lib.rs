@@ -336,12 +336,15 @@ pub(crate) enum Counted {
     /// One `finalize` that hashed the staged bytes apart and read the
     /// stack, the core not copied.
     TailApart = 8,
+    /// One whole subtree a Hasher's update hashed on SME2's flat walk, to
+    /// its one chaining value (the Hasher's hook `subtree_cv`).
+    Flat = 9,
 }
 
 #[cfg(all(test, feature = "std"))]
 std::thread_local! {
     /// This thread's counts since the test last cleared them, by Counted.
-    pub(crate) static COUNTED: [core::cell::Cell<u64>; 9] = const { [const { core::cell::Cell::new(0) }; 9] };
+    pub(crate) static COUNTED: [core::cell::Cell<u64>; 10] = const { [const { core::cell::Cell::new(0) }; 10] };
 }
 
 /// Count one of `what`: in the tests' record, and nothing in any other
