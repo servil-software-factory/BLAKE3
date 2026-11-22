@@ -2023,7 +2023,10 @@ mod prefetch_counts {
     /// the cold one, throughput::hash the warm one.
     #[test]
     fn test_convenience_prefetches_and_performance_does_not() {
-        if !matches!(Platform::detect(), Platform::NEON | Platform::SME2) || !crate::neon_hybrid::sha3_detected() {
+        let on_neon = matches!(Platform::detect(), Platform::NEON);
+        #[cfg(blake3_sme2)]
+        let on_neon = on_neon || matches!(Platform::detect(), Platform::SME2);
+        if !on_neon || !crate::neon_hybrid::sha3_detected() {
             return;
         }
         let blocks = std::vec![crate::throughput::Block::ZERO; 64];

@@ -898,10 +898,14 @@ mod test {
                 if len > 300 * GROUP && pieces[0] == 21845 {
                     continue;
                 }
+                // Rows as wide as this target's kernels take (ROW on x86-64
+                // Linux, 16 where MAX_SIMD_DEGREE is 16: two rows of 32
+                // merging send 64 children to compress_parents_parallel).
+                let widest = ROW.min(crate::platform::MAX_SIMD_DEGREE);
                 assert_eq!(
-                    fed(message, pieces, |sub| ROW.min(sub / CHUNK_LEN)).0,
+                    fed(message, pieces, |sub| widest.min(sub / CHUNK_LEN)).0,
                     want,
-                    "rows as wide as may be (16 for a group, 32 from two): {len} bytes in pieces of {pieces:?}"
+                    "rows as wide as may be (16 for a group, up to {widest}): {len} bytes in pieces of {pieces:?}"
                 );
                 assert_eq!(fed(message, pieces, |_| 4).0, want, "rows of 4: {len} bytes in pieces of {pieces:?}");
                 assert_eq!(
