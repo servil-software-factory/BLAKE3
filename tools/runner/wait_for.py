@@ -39,6 +39,7 @@ IDLE_SECONDS = 180
 GRACE = 600
 # runner.py's default and largest time limits.
 DEFAULT_LIMIT, MAX_LIMIT = 1800, 7200
+LIMITS = {"mutants-whole": MAX_LIMIT}
 PASSED = ("ok", "passed", "no regression")
 NO_VERDICT = ("timed out", "no verdict")
 
@@ -47,7 +48,7 @@ def main():
     assert len(sys.argv) in (2, 3), __doc__
     stem = sys.argv[1].removesuffix(".json")
     job = json.loads((EXCHANGE / "jobs" / f"{stem}.json").read_text())
-    limit = job.get("time_limit_seconds", DEFAULT_LIMIT)
+    limit = job.get("time_limit_seconds", LIMITS.get(job.get("type"), DEFAULT_LIMIT))
     idle_since = time.monotonic()
     results = EXCHANGE / "results"
     while True:

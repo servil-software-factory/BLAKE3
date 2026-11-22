@@ -36,7 +36,7 @@ every 500 ms beside it, in its results' powermetrics.txt. And "top": true:
 the twelve busiest processes every second beside it, each sample with its
 time, in its results' top.txt, to name the other programs a timing job's
 busy windows count.)
-    {"type": "b3sum", "fork_commit": "...", "bench_commit": "...", "quick": true}
+    {"type": "b3sum", "fork_commit": "...", "bench_commit": "...", "against": "...", "quick": true}
 
 (A b3sum job builds the contenders, bench-hashes' tools/b3sum-contenders.py
 at the BLAKE3-Servil commit: official BLAKE3's b3sum, BLAKE3-Servil's as b3sum and
@@ -621,10 +621,20 @@ def benchmark(job, run, work, out):
 
 def b3sum(job, run, work, out):
     fork_commit = hex_commit(job, "fork_commit")
+    old_commit = hex_commit(job, "against") if "against" in job else None
     fork, bench = run.checkouts(fork_commit, hex_commit(job, "bench_commit"))
+    commits = [old_commit, fork_commit] if old_commit is not None else [fork_commit]
     # One contender a line, each one argument (a command may hold flags).
-    contenders = [line for line in run.run([sys.executable, "tools/b3sum-contenders.py", str(fork), str(HOME / "b3sum-contenders"), fork_commit],
+    contenders = [line for line in run.run([sys.executable, "tools/b3sum-contenders.py", str(fork), str(HOME / "b3sum-contenders"), *commits],
                                            cwd=bench, capture=True).splitlines() if "=" in line]
+    if old_commit is not None:
+        # Head-to-head comparison: old_commit is the base (first), followed by fork_commit and official.
+        old_tag, new_tag = f"b3sum-{old_commit[:7]}=", f"b3sum-{fork_commit[:7]}="
+        contenders = (
+            [c for c in contenders if c.startswith(old_tag)]
+            + [c for c in contenders if c.startswith(new_tag)]
+            + [c for c in contenders if c.startswith("official=")]
+        )
     exe = run.run(["cargo", "run", "--release", "--quiet", "--", "build-against", str(fork)],
                   cwd=bench, capture=True).strip().splitlines()[-1]
     quick = ["--quick"] if job.get("quick") else []
@@ -882,14 +892,17 @@ def process(path, out):
             assert job["type"] not in TIMED or on_mains(verdict["power at start"]), \
                 f"a {job['type']} job times, so it runs on mains power alone; the Mac is on {verdict['power at start']}: plug it in and queue the job again"
             limit = job.get("time_limit_seconds", LIMITS.get(job["type"], DEFAULT_LIMIT))
-            assert isinstance(limit, int) and 0 < limit <= MAX_LIMIT, f"time_limit_seconds must be 1-{MAX_LIMIT}"
+            assert isinstance(limit, int) and not isinstance(limit, bool) and 0 < limit <= MAX_LIMIT, f"time_limit_seconds must be 1-{MAX_LIMIT}"
             meters = {}
-            for name, command in [("powermetrics", POWERMETRICS), ("top", TOP)]:
-                assert isinstance(job.get(name, False), bool), f"{name}: true or false"
-                if job.get(name):
-                    meters[name] = subprocess.Popen(command, stdout=open(out / f"{name}.txt", "w"), stderr=log)
+            meter_files = []
             running = Job(log, limit)
             try:
+                for name, command in [("powermetrics", POWERMETRICS), ("top", TOP)]:
+                    assert isinstance(job.get(name, False), bool), f"{name}: true or false"
+                    if job.get(name):
+                        mf = open(out / f"{name}.txt", "w")
+                        meter_files.append(mf)
+                        meters[name] = subprocess.Popen(command, stdout=mf, stderr=log)
                 with tempfile.TemporaryDirectory(dir=HOME / "tmp") as work:
                     verdict["status"] = HANDLERS[job["type"]](job, running, Path(work), out)
             finally:
@@ -908,6 +921,8 @@ def process(path, out):
                         meter.kill()
                         meter.wait()
                         verdict[name] = "did not exit within 10 s of SIGINT; killed (its last samples may be missing)"
+                for mf in meter_files:
+                    mf.close()
         except TimedOut as e:
             verdict["status"] = "timed out"
             verdict["timed out"] = str(e)
@@ -918,7 +933,7 @@ def process(path, out):
             print(f"runner: {verdict['error']}", file=log, flush=True)
     verdict["finished"] = utc("%Y-%m-%dT%H:%M:%SZ")
     verdict["power at end"] = power()
-    if verdict.get("type") in TIMED and verdict.get("status") not in (None, "error") and not verdict["power at end"].startswith("AC Power"):
+    if verdict.get("type") in TIMED and verdict.get("status") not in (None, "error", "timed out") and not verdict["power at end"].startswith("AC Power"):
         verdict["status"] = f"power left mains during the job ({verdict['status']}): its results are no evidence of speed"
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
     print(f"runner: {path.name}: {verdict['status']} -> {out}", file=sys.stderr, flush=True)

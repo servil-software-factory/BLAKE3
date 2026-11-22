@@ -116,5 +116,79 @@ class WholeMutationRun(unittest.TestCase):
         self.assertIs(runner.HANDLERS["mutants-whole"], runner.mutants_whole)
 
 
+
+class B3sumAgainstAndHygiene(unittest.TestCase):
+    def test_b3sum_with_against_runs_old_as_base_with_new_and_official(self):
+        old_c = "2c60420c2bccbf6073e35e668691d98520f9b096"
+        new_c = "abcdef0123456789abcdef0123456789abcdef01"
+        bench_c = "3" * 40
+        commands = []
+
+        class StubRun:
+            def checkouts(self, *_):
+                return Path("/code/fork"), Path("/code/bench")
+
+            def run(self, command, capture=False, **_):
+                commands.append(command)
+                if "b3sum-contenders.py" in command[1]:
+                    return "\n".join([
+                        "official=/bins/official",
+                        "official-1-thread=/bins/official --num-threads 1",
+                        f"b3sum-{old_c[:7]}=/bins/old",
+                        f"b3sum-{new_c[:7]}=/bins/new",
+                        "sha256sum=/usr/bin/sha256sum",
+                    ]) + "\n"
+                if "build-against" in command:
+                    return "/bins/bench-hashes\n"
+                return ""
+
+        status = runner.b3sum(
+            {"fork_commit": new_c, "against": old_c, "bench_commit": bench_c},
+            StubRun(),
+            None,
+            Path("/results"),
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(commands[0][-2:], [old_c, new_c])
+        b3sum_cmd = commands[-1]
+        self.assertEqual(
+            b3sum_cmd[-3:],
+            [f"b3sum-{old_c[:7]}=/bins/old", f"b3sum-{new_c[:7]}=/bins/new", "official=/bins/official"],
+        )
+
+    def test_wait_for_limits_match_runner_limits(self):
+        import wait_for
+        self.assertEqual(wait_for.DEFAULT_LIMIT, runner.DEFAULT_LIMIT)
+        self.assertEqual(wait_for.MAX_LIMIT, runner.MAX_LIMIT)
+        self.assertEqual(wait_for.LIMITS, runner.LIMITS)
+
+    def test_second_meter_start_failure_stops_first_meter(self):
+        import os, sys, time
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            out = root / "out"
+            out.mkdir()
+            (root / "tmp").mkdir()
+            pid_file = root / "meter.pid"
+            job_file = root / "0001-demo.json"
+            job_file.write_text(json.dumps({"type": "test", "fork_commit": "0" * 40, "powermetrics": True, "top": True}))
+            fake_pm = [
+                sys.executable, "-c",
+                f"import os, pathlib, time; pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(30)",
+            ]
+            bad_top = ["/nonexistent-top-binary-for-test"]
+            with patch.object(runner, "HOME", root), \
+                 patch.object(runner, "POWERMETRICS", fake_pm), \
+                 patch.object(runner, "TOP", bad_top), \
+                 patch.object(runner, "power", lambda: "AC Power, lowpowermode 0"):
+                status = runner.process(job_file, out)
+            self.assertEqual(status, "error")
+            if pid_file.exists():
+                mpid = int(pid_file.read_text().strip())
+                time.sleep(0.1)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(mpid, 0)
+
 if __name__ == "__main__":
     unittest.main()
