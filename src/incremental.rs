@@ -99,6 +99,24 @@ impl Clone for Hasher {
 /// the widest kernels' lanes.
 pub(crate) const STAGE_LEN: usize = 16 * CHUNK_LEN;
 
+/// The first `len` bytes of a Hasher's stage, as the bytes they are. The
+/// view borrows the stage, so the compiler holds each use of it against
+/// the Hasher's other borrows. (A view made in place by `from_raw_parts`
+/// has a lifetime of its own choosing: one such let a method that
+/// borrowed the whole Hasher exclusively read the stage through it, which
+/// Rust's rules for references forbid, and no check said so.)
+///
+/// # Safety
+///
+/// The stage's first `len` bytes were written, and `len` is at most
+/// `STAGE_LEN`.
+#[inline(always)]
+unsafe fn written(stage: &[core::mem::MaybeUninit<u8>; STAGE_LEN], len: usize) -> &[u8] {
+    debug_assert!(len <= STAGE_LEN, "the stage holds no more than itself");
+    // Sound: the caller's two facts, and `MaybeUninit<u8>` is laid out as `u8`.
+    unsafe { core::slice::from_raw_parts(stage.as_ptr() as *const u8, len) }
+}
+
 /// The tree's state behind a [`Hasher`]: its chunk, and the chaining values
 /// of its finished subtrees.
 pub(crate) struct HasherCore {
@@ -256,7 +274,7 @@ impl Hasher {
     /// The bytes gathered in the stage.
     pub(crate) fn staged_bytes(&self) -> &[u8] {
         // Sound: the first `staged` bytes of the stage were written (gather).
-        unsafe { core::slice::from_raw_parts(self.stage.as_ptr() as *const u8, self.staged) }
+        unsafe { written(&self.stage, self.staged) }
     }
 
     /// Copy `bytes` into the stage after what it holds. Under a block
@@ -315,7 +333,7 @@ impl Hasher {
                 let groups = input.len() / STAGE_LEN * STAGE_LEN;
                 // The loop's variant on this path: a group or more leaves the input.
                 assert!(groups > 0, "no whole group went to the core");
-                self.update_groups(&input[..groups], pooled);
+                self.core.update_groups(&input[..groups], pooled);
                 input = &input[groups..];
                 continue;
             }
@@ -333,25 +351,13 @@ impl Hasher {
                 return input;
             }
             let staged = core::mem::replace(&mut self.staged, 0);
-            // Sound: the first `staged` bytes were written; the core reads
-            // them before the stage is written again.
-            let bytes = unsafe { core::slice::from_raw_parts(self.stage.as_ptr() as *const u8, staged) };
-            self.update_groups(bytes, pooled);
+            // Sound: the first `staged` bytes were written (stage). The
+            // view borrows the stage, and the call the core, a field
+            // apart, which reads them before the stage is written again.
+            let bytes = unsafe { written(&self.stage, staged) };
+            self.core.update_groups(bytes, pooled);
         }
         &[]
-    }
-
-    /// Whole groups to the core, pooled only where they reach the pool's
-    /// threshold: shorter, they hold no subtree for the pool, and hash
-    /// exactly as the serial update hashes them. Kept pooled, they would
-    /// lose what the hooks do only without a pool: the rows a whole group
-    /// is cut into, and the SME2 turn over the whole input. (64 open
-    /// messages fed 16 KiB at a time took 9% to 15% longer through
-    /// update_each_multithreaded than through update_each, on a Ryzen
-    /// 9700X and an EPYC 9255: BLAKE3 #470.)
-    #[inline(always)]
-    fn update_groups(&mut self, groups: &[u8], pooled: Option<&Pool<'_>>) {
-        self.core.update_pooled(groups, pooled.filter(|pool| groups.len() >= pool.min_len));
     }
 
     /// A whole group in the stage, from offset zero: its first chunk's
@@ -446,7 +452,7 @@ impl Hasher {
         // Sound: the first `staged` bytes of the stage were written (gather).
         // The stage and the core are distinct fields: the core takes the
         // staged bytes in place, with no copy of itself.
-        let staged = unsafe { core::slice::from_raw_parts(self.stage.as_ptr().cast::<u8>(), self.staged) };
+        let staged = unsafe { written(&self.stage, self.staged) };
         self.core.update(staged);
         self.core.final_output()
     }
@@ -727,6 +733,27 @@ impl HasherCore {
         self.chunk_state.chunk_counter += CHUNKS;
     }
 
+    /// What `gather_part` sends to the core (an input's whole groups, or
+    /// the stage's bytes up to a group boundary), pooled only where the
+    /// slice reaches the pool's threshold: shorter, it holds no subtree
+    /// for the pool, and hashes exactly as the serial update hashes it.
+    /// Kept pooled, it would lose what the hooks do only without a pool:
+    /// the rows a whole group is cut into, and the SME2 turn over the
+    /// whole slice. (64 open messages fed 16 KiB at a time took 9% to 15%
+    /// longer through update_each_multithreaded than through update_each,
+    /// on a Ryzen 9700X and an EPYC 9255: BLAKE3 #470.) The threshold is
+    /// held against the slice, not against the update that completed it:
+    /// a group gathered from shorter updates is the pool's where it
+    /// reaches the threshold.
+    ///
+    /// The core's and not the Hasher's: the Hasher calls it with a view of
+    /// its own stage, and a method on the Hasher would borrow the stage
+    /// exclusively while the view reads it.
+    #[inline(always)]
+    pub(crate) fn update_groups(&mut self, groups: &[u8], pooled: Option<&Pool<'_>>) {
+        self.update_pooled(groups, pooled.filter(|pool| groups.len() >= pool.min_len));
+    }
+
     /// `update`'s loop; with `pooled`, whole subtrees at or above the
     /// callback's threshold may go to the pool.
     pub(crate) fn update_pooled(&mut self, input: &[u8], pooled: Option<&Pool<'_>>) -> &mut Self {
@@ -831,15 +858,20 @@ mod test {
         update_with_one_wrong_half(1);
     }
 
-    /// An update shorter than the pool's threshold is the serial update:
-    /// the callback is not asked, and the input's whole subtrees take the
-    /// serial update's paths. Counted, since the digests are the same
-    /// either way: the rows a whole group is cut into, and on SME2 the
-    /// flat walks. (Kept pooled, such an update cut no row and walked
-    /// none flat: `update_multithreaded` fed 64 KiB at a time was slower
-    /// than `update`, BLAKE3 #470.) At the threshold the callback is
-    /// asked (`pool_halves_use_the_subtrees_nonzero_place`), and above
-    /// it too.
+    /// Groups shorter than the pool's threshold go to the core as the
+    /// serial update sends them: the callback is not asked, and their
+    /// whole subtrees take the serial update's paths. Counted, since the
+    /// digests are the same either way: the rows a whole group is cut
+    /// into, and on SME2 the flat walks to one value. (Kept pooled, such
+    /// an update cut no row, and no subtree of it walked flat to its one
+    /// value: 64 open messages fed 16 KiB at a time took 9% to 15% longer
+    /// through `update_each_multithreaded` than through `update_each`,
+    /// BLAKE3 #470.) The threshold here
+    /// is above every piece and every group the pieces fill in the stage;
+    /// what is held to it is the group, not the piece that completes it
+    /// (`a_staged_group_is_held_to_the_threshold_by_its_own_length`). At
+    /// the threshold the callback is asked
+    /// (`pool_halves_use_the_subtrees_nonzero_place`), and above it too.
     #[test]
     #[cfg(feature = "std")]
     fn an_update_below_the_pools_threshold_is_the_serial_update() {
@@ -891,6 +923,51 @@ mod test {
             assert_eq!(calls.get(), 1, "one subtree of 64 KiB, above a threshold of 16 KiB");
             assert_eq!(*pooled.finalize().as_bytes(), crate::test::official::hash(mode, &input));
         }
+    }
+
+    /// The threshold is held against the slice that goes to the core, not
+    /// against the update that completes it. A group gathered in the stage
+    /// from shorter updates keeps the pool where it reaches the threshold,
+    /// though its last piece is one byte: the callback is asked for it.
+    /// One byte under the threshold it is the serial update's, cut into
+    /// the rows the serial update cuts. (A filter on the update's own
+    /// length would pass every other test here and take the staged groups
+    /// from a caller of `update_with` whose threshold is a group; a gate
+    /// one byte early would keep the pool for the second case, where the
+    /// callback is silent either way, the hooks holding each subtree to
+    /// the threshold again, and only the rows tell.)
+    #[test]
+    #[cfg(feature = "std")]
+    fn a_staged_group_is_held_to_the_threshold_by_its_own_length() {
+        crate::initialize();
+        let input = painted();
+        let input = &input[..2 * STAGE_LEN + 5];
+        let asked = core::cell::RefCell::new(std::vec::Vec::new());
+        let mut hasher = Hasher::new(Mode::Plain, None);
+        hasher.update(&input[..STAGE_LEN - 1]);
+        hasher.update_with(&input[STAGE_LEN - 1..STAGE_LEN], STAGE_LEN, &|tree, level, index, bytes| {
+            asked.borrow_mut().push((level, index, bytes.len()));
+            tree.subtree_halves(level, index, bytes)
+        });
+        assert_eq!(asked.borrow().as_slice(), &[(4, 0, STAGE_LEN)], "a group of the threshold's length, completed by one byte");
+        hasher.update(&input[STAGE_LEN..]);
+        assert_eq!(*hasher.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, input));
+        // One byte under the threshold, and the message's second group:
+        // its first cuts no row on either path.
+        let rows = || crate::COUNTED.with(|c| c[crate::Counted::Row as usize].replace(0));
+        let (mut serial, mut pooled) = (Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None));
+        serial.update(&input[..2 * STAGE_LEN - 1]);
+        pooled.update(&input[..2 * STAGE_LEN - 1]);
+        let last = &input[2 * STAGE_LEN - 1..2 * STAGE_LEN];
+        rows();
+        serial.update(last);
+        let want = rows();
+        pooled.update_with(last, STAGE_LEN + 1, &|_, _, _, _| panic!("a group one byte under the threshold holds no subtree for the callback"));
+        assert_eq!(rows(), want, "a group one byte under the threshold: the serial update's rows");
+        let rows_here = (4..=hasher::ROW).contains(&Platform::detect().simd_degree());
+        assert_eq!(want > 0, rows_here, "the comparison is of something wherever the kernels cut rows");
+        assert_eq!(pooled.finalize(), serial.finalize());
+        assert_eq!(*pooled.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input[..2 * STAGE_LEN]));
     }
 
     #[test]

@@ -1488,14 +1488,45 @@ mod test {
         assert_eq!(pair[1].clone().finalize(), crate::test::official::hash(Mode::Plain, &input));
     }
 
-    /// A turn whose pieces are all shorter than the pool's threshold does
-    /// `update_each`'s work: the callback is not asked, and the counts
-    /// are the same (the rows whole groups are cut into, the flat walks
-    /// on SME2, the passes over held groups), turn after turn; the
-    /// digests are the same either way. Eight messages fed a group at a
-    /// time, the pattern of BLAKE3 #470 (where `update_each_multithreaded`
-    /// took 9% to 15% longer than `update_each`: its groups cut no rows),
-    /// then pieces that leave the boundary and come back to it.
+    /// The threshold is held against what goes to the core, not against a
+    /// turn's pieces. On x86-64 a fresh hasher's first byte goes to the
+    /// core at once and the next 16,383 gather up to the group's boundary;
+    /// the turn of one byte that completes them sends the core a slice
+    /// whose last half group is a subtree of the threshold's length, the
+    /// callback's. (As before the pool was kept from shorter slices: a
+    /// filter on the pieces' lengths would take this subtree from it.)
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[test]
+    fn a_turn_of_one_byte_can_complete_a_subtree_for_the_callback() {
+        crate::initialize();
+        let mut input = vec![0u8; crate::STAGE_LEN];
+        crate::test::paint_test_input(&mut input);
+        let mut hashers = vec![Hasher::new(Mode::Plain, None)];
+        let asked = core::cell::RefCell::new(Vec::new());
+        let mut at = 0;
+        for n in [1, 8191, 8191, 1] {
+            update_each_with(&mut hashers, &[(0, &input[at..at + n])], crate::STAGE_LEN / 2, &|tree, level, index, bytes| {
+                asked.borrow_mut().push((level, index, bytes.len()));
+                tree.subtree_halves(level, index, bytes)
+            });
+            at += n;
+        }
+        assert_eq!(asked.borrow().as_slice(), &[(3, 1, crate::STAGE_LEN / 2)], "the second half group, once");
+        assert_eq!(*hashers[0].finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input));
+    }
+
+    /// A turn that sends the core nothing as long as the pool's threshold
+    /// does `update_each`'s work: the callback is not asked, and the
+    /// counts are the same (the rows whole groups are cut into, the flat
+    /// walks to one value on SME2, the passes over held groups), turn
+    /// after turn; the digests are the same either way. The threshold
+    /// here is above every piece and every group the pieces fill; what
+    /// is held to it is what goes to the core, not the piece
+    /// (`a_turn_of_one_byte_can_complete_a_subtree_for_the_callback`).
+    /// Eight messages fed a group at a time, the pattern of BLAKE3 #470
+    /// (where `update_each_multithreaded` took 9% to 15% longer than
+    /// `update_each`: its groups cut no rows), then pieces that leave the
+    /// boundary and come back to it.
     #[cfg(feature = "std")]
     #[test]
     fn a_turn_below_the_pools_threshold_is_update_eachs() {
