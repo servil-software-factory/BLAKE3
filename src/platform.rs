@@ -419,6 +419,7 @@ impl Platform {
         }
     }
 
+    #[allow(unused_mut)]
     pub(crate) fn xof_many(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, mut counter: u64, flags: u8, out: &mut [u8]) {
         debug_assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
         if out.is_empty() {
