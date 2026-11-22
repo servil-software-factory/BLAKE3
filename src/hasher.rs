@@ -24,6 +24,8 @@ const ROWS: usize = 8;
 /// The values of every row a stack holds at once, end to end: what an
 /// output condenses together (`CvStack::condense`).
 const RUN: usize = ROWS * ROW;
+const HALF_RUN: usize = RUN / 2;
+const _: () = assert!(2 * HALF_RUN == RUN);
 // The widths a row has: ROW, and three halvings down to 4.
 const _: () = assert!(ROW / 8 == 4);
 
@@ -199,7 +201,7 @@ impl CvStack {
         // (place_on_top): it is given the run's first half to hold until
         // the first layer writes over it, and each later layer writes
         // over an earlier one's values.
-        let mut parents = [const { core::mem::MaybeUninit::<Cv>::uninit() }; RUN];
+        let mut parents = [const { core::mem::MaybeUninit::<Cv>::uninit() }; HALF_RUN];
         let mut to = parents[..len / 2].write_copy_of_slice(&from[..len / 2]);
         // A layer for each halving of the widest row there can be: loops
         // of counts fixed at their start, like merge's.
