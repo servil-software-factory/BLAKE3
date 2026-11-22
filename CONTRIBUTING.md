@@ -280,8 +280,28 @@ found complete. A candidate lands once:
   basis (never awaited for a landing or a release, and a slowdown seen
   only on a VM is looked into when nothing better waits); the VM's
   correctness checks, tests and mutants on AArch64 Linux, stay a gate.
-  Whoever made the candidate lands it once every check has passed,
-the same day: no review gate stands between a passing candidate and
+- for a change to shipped code (the library crates, `b3sum`, the C
+  header and API, and their build scripts and manifests), one review by
+  an AI model of another family than its author's has read it, with
+  `tools/review/BRIEF.md` as its brief (an author on a Claude model
+  takes a GPT or a Gemini reviewer, and so on; where the author's model
+  is not known, any model the author did not use). The reviewer works
+  alone, builds and runs what it needs, and plants faults to see whether
+  the change's tests catch them. Its report is public (a gist, or the
+  pull request). **One round**, and a finding holds the landing **only**
+  if it shows a wrong result, a crash or panic, a hang, or a slowdown.
+  Everything else (comments, style, minor edge cases, extra tests) lands
+  and becomes an issue. `python3 tools/land.py record review COMMIT
+  success "REVIEWER: what it found; what was done; where the report
+  is"` posts it. Tools, the job runner, mutation lists, workflows,
+  integration-only tests, and docs do not need a landing review.
+  (Zooko's Rule 2 trial, November 22, 2026: one ten-minute review of
+  shipped code found the running-digest slowdown of BLAKE3 #472, while
+  multi-round reviews of tools and mutation lists slowed down landings.
+  Re-evaluated after a few landings for quality against calendar time.)
+
+Whoever made the candidate lands it once every check has passed, the
+same day: no person's review stands between a passing candidate and
 `next`.
 
 Every open issue and pull request has one assignee, the person whose

@@ -20,6 +20,10 @@ The gates of a commit, from what it changes against next:
                                    commit (ci.yml), all green; check-builds;
                                    mutants on x86_64, aarch64 and arm64;
                                    tests on aarch64 and arm64; cells
+  shipped code (src/, c/, build.rs, threads/src/, threads/build.rs,
+                b3sum/src/, capi/src/, capi/b3.h, version/src/,
+                the crates' Cargo.toml)
+                                   review as well
   proof inputs (c/, c2sp/, tools/verify/, the generators)
                                    long proofs as well
 
@@ -30,6 +34,16 @@ posted with `record`, whose description says where the log is. A gate
 that does not apply is recorded as success with a description that
 begins "waived: " and gives the reason; the waiver is then on the commit
 for every reader, which a skipped step never was.
+
+`review` is one review of a change to shipped code by an AI model of
+another family than its author's (CONTRIBUTING, "Branches and changes";
+tools/review/BRIEF.md is the brief). It holds a landing only for a
+wrong result, a crash or panic, a hang, or a slowdown; everything else
+lands and becomes an issue. Its description names the reviewer and says
+what it found and what was done about it; its report is public.
+(November 22, 2026: Zooko's trial of Rule 2, after a single review of
+shipped code caught the running-digest slowdown of #472 while
+multi-round reviews of tools and lists slowed down landings.)
 """
 
 import json
@@ -41,6 +55,13 @@ REPO = "servil-software-factory/BLAKE3"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL = ("check-builds", "mutants x86_64")
 ELSEWHERE = ("mutants aarch64", "mutants arm64", "tests aarch64", "tests arm64", "cells")
+SHIPPED_CODE = (
+    "src/", "c/", "build.rs", "Cargo.toml",
+    "threads/src/", "threads/build.rs", "threads/Cargo.toml",
+    "b3sum/src/", "b3sum/Cargo.toml",
+    "capi/src/", "capi/b3.h", "capi/Cargo.toml",
+    "version/src/", "version/Cargo.toml",
+)
 PROOF_INPUTS = ("c/", "c2sp/", "tools/verify/", "tools/gen_neon_hybrid.py", "tools/gen_sme2_hybrid.py", "tools/gen_x86.py", "tools/gen_x86_chunk_root.py",
                 "tools/gen_avx512_32.py", "tools/gen_output8.py", "tools/gen_output16.py")
 
@@ -56,11 +77,17 @@ def api(path, *fields, method="GET"):
     return json.loads(out.stdout) if out.stdout.strip() else None
 
 
+def is_shipped(path):
+    return any(path.startswith(p) if p.endswith("/") else path == p for p in SHIPPED_CODE)
+
+
 def required(paths):
     """The gates a change to `paths` needs (see the module's text)."""
     if all(p.endswith(".md") for p in paths):
         return ()
     gates = ("CI",) + LOCAL + ELSEWHERE
+    if any(is_shipped(p) for p in paths):
+        gates += ("review",)
     if any(p.startswith(PROOF_INPUTS) for p in paths):
         gates += ("long proofs",)
     return gates

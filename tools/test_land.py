@@ -14,11 +14,16 @@ class Gates(unittest.TestCase):
         self.assertEqual(land.required(["AGENTS.md", "docs/core-api.md"]), ())
 
     def test_code_needs_every_gate_and_proof_inputs_the_proofs(self):
-        code = land.required(["src/lib.rs", "README.md"])
-        self.assertEqual(code, ("CI", "check-builds", "mutants x86_64", "mutants aarch64", "mutants arm64", "tests aarch64", "tests arm64", "cells"))
-        for path in ("c/blake3_neon_hybrid_aarch64.S", "tools/verify/canon.py", "tools/gen_neon_hybrid.py", "c2sp/BLAKE3/Blake3.lean"):
-            self.assertEqual(land.required([path]), code + ("long proofs",), path)
-        self.assertEqual(land.required(["tools/land.py"]), code, "a tool is code")
+        base = ("CI", "check-builds", "mutants x86_64", "mutants aarch64", "mutants arm64", "tests aarch64", "tests arm64", "cells")
+        shipped = base + ("review",)
+        self.assertEqual(land.required(["src/lib.rs", "README.md"]), shipped)
+        for path in ("threads/src/pipeline.rs", "b3sum/src/main.rs", "capi/b3.h", "capi/src/lib.rs", "build.rs", "Cargo.toml", "version/src/lib.rs"):
+            self.assertEqual(land.required([path]), shipped, path)
+        for path in ("tools/land.py", "tools/runner/runner.py", "tools/mutants/known-arm64.txt", ".github/workflows/ci.yml", "tests/lifecycle.rs", "b3sum/tests/cli_tests.rs"):
+            self.assertEqual(land.required([path]), base, f"not shipped code: {path}")
+        self.assertEqual(land.required(["c/blake3_neon_hybrid_aarch64.S"]), shipped + ("long proofs",))
+        for path in ("tools/verify/canon.py", "tools/gen_neon_hybrid.py", "c2sp/BLAKE3/Blake3.lean"):
+            self.assertEqual(land.required([path]), base + ("long proofs",), path)
 
     def test_the_newest_status_of_a_gate_stands(self):
         statuses = [{"context": "cells", "state": "success", "description": "new"}, {"context": "cells", "state": "failure", "description": "old"}]
@@ -135,8 +140,9 @@ class Landable(unittest.TestCase):
             text = land.landable(base, list(land.required(paths)))
             self.assertLessEqual(len(text), 140, paths)
             self.assertTrue(text.startswith("every gate green on top of 0123456789ab: "))
-        self.assertIn("check-builds", land.landable(base, list(land.required(["src/lib.rs"]))))
-        self.assertTrue(land.landable(base, list(land.required(["c/x.S"]))).endswith(": 9 gates"))
+        self.assertIn("check-builds", land.landable(base, ["CI", "check-builds", "cells"]), "the gates by name while they fit")
+        self.assertTrue(land.landable(base, list(land.required(["src/lib.rs"]))).endswith(": 9 gates"))
+        self.assertTrue(land.landable(base, list(land.required(["c/x.S"]))).endswith(": 10 gates"))
         self.assertTrue(land.landable(base, []).endswith("*.md only"))
 
 
