@@ -139,37 +139,6 @@ pub fn context_key(context: &str) -> ContextKey {
     crate::hash_serial(context.as_bytes(), IV, DERIVE_KEY_CONTEXT).0
 }
 
-/// The value passed to the kernels; the checked calls carry its place
-/// separately. Equality is constant-time, as [`struct@Hash`]'s is.
-#[derive(Clone, Copy, Debug)]
-#[repr(transparent)]
-struct BareCv([u8; OUT_LEN]);
-
-#[cfg(all(test, feature = "std"))]
-impl BareCv {
-    /// The chaining value's bytes.
-    #[inline]
-    pub const fn as_bytes(&self) -> &[u8; OUT_LEN] {
-        &self.0
-    }
-
-    /// A chaining value from its bytes: one a program stored or received.
-    #[inline]
-    pub const fn from_bytes(bytes: [u8; OUT_LEN]) -> Self {
-        Self(bytes)
-    }
-}
-
-/// This implementation is constant-time.
-impl PartialEq for BareCv {
-    #[inline]
-    fn eq(&self, other: &BareCv) -> bool {
-        constant_time_eq::constant_time_eq_32(&self.0, &other.0)
-    }
-}
-
-impl Eq for BareCv {}
-
 const CHUNK: u64 = CHUNK_LEN as u64;
 
 /// The highest level of a whole subtree: 2^53 chunks, 2^63 bytes, the left
@@ -268,7 +237,8 @@ const fn last_max(first_chunk: u64) -> u64 {
 ///   constant time.
 #[derive(Clone, Copy)]
 pub struct Cv {
-    value: BareCv,
+    /// The chaining value as the kernels take it: 32 bytes.
+    value: crate::CVBytes,
     place: u64,
 }
 
@@ -278,7 +248,7 @@ impl Cv {
     /// ([`as_bytes`](Cv::as_bytes) gives its 32 zero bytes). Zeroed memory
     /// is the same value.
     pub const fn unset() -> Self {
-        Cv { value: BareCv([0; OUT_LEN]), place: UNSET }
+        Cv { value: [0; OUT_LEN], place: UNSET }
     }
 
     /// A chaining value a program stored or received, for the whole
@@ -288,13 +258,13 @@ impl Cv {
     /// Requires a level of at most 53 and a subtree that ends
     /// within a message's 2^64 - 1 bytes.
     pub const fn at(level: u32, index: u64, bytes: [u8; OUT_LEN]) -> Self {
-        Cv { value: BareCv(bytes), place: place(level, index) }
+        Cv { value: bytes, place: place(level, index) }
     }
 
     /// The chaining value's bytes.
     #[inline]
     pub const fn as_bytes(&self) -> &[u8; OUT_LEN] {
-        &self.value.0
+        &self.value
     }
 
     /// The subtree holds 2^level chunks.
@@ -318,7 +288,7 @@ impl Cv {
     pub(crate) fn halves_bytes([left, right]: [Self; 2], level: u32, index: u64) -> [crate::CVBytes; 2] {
         let [a, b] = half_places(level, index);
         assert!(left.place == a && right.place == b, "not the halves of level {level} index {index}: {left:?} and {right:?}");
-        [left.value.0, right.value.0]
+        [left.value, right.value]
     }
 
     /// The place, of a value that has one.
@@ -338,7 +308,7 @@ impl core::fmt::Debug for Cv {
 impl PartialEq for Cv {
     #[inline]
     fn eq(&self, other: &Cv) -> bool {
-        (self.place == other.place) & (self.value == other.value)
+        (self.place == other.place) & constant_time_eq::constant_time_eq_32(&self.value, &other.value)
     }
 }
 
@@ -378,7 +348,7 @@ impl Eq for Cv {}
 ///   in constant time.
 #[derive(Clone, Copy)]
 pub struct LastCv {
-    value: BareCv,
+    value: crate::CVBytes,
     first_chunk: u64,
     len: u64,
 }
@@ -392,13 +362,13 @@ impl LastCv {
     /// length.
     pub const fn at(first_chunk: u64, len: u64, bytes: [u8; OUT_LEN]) -> Self {
         assert!(len >= 1 && len <= last_max(first_chunk), "the last subtree holds from one byte to the whole subtree aligned at its first chunk");
-        LastCv { value: BareCv(bytes), first_chunk, len }
+        LastCv { value: bytes, first_chunk, len }
     }
 
     /// The chaining value's bytes.
     #[inline]
     pub const fn as_bytes(&self) -> &[u8; OUT_LEN] {
-        &self.value.0
+        &self.value
     }
 
     /// The message's chunk the subtree begins at.
@@ -424,7 +394,7 @@ impl core::fmt::Debug for LastCv {
 impl PartialEq for LastCv {
     #[inline]
     fn eq(&self, other: &LastCv) -> bool {
-        (self.first_chunk == other.first_chunk) & (self.len == other.len) & (self.value == other.value)
+        (self.first_chunk == other.first_chunk) & (self.len == other.len) & constant_time_eq::constant_time_eq_32(&self.value, &other.value)
     }
 }
 
@@ -563,19 +533,18 @@ impl TreeHasher {
 
     /// A subtree's chaining value, on `platform`'s kernels.
     #[inline]
-    fn cv_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> BareCv {
+    fn cv_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> crate::CVBytes {
         if input.len() <= CHUNK_LEN {
-            return BareCv(crate::ChunkState::new(&self.key, first_chunk, self.flags, platform).update(input).output().chaining_value());
+            return crate::ChunkState::new(&self.key, first_chunk, self.flags, platform).update(input).output().chaining_value();
         }
         let [left, right] = self.halves_on(platform, first_chunk, input);
-        BareCv(crate::hasher::parent_output(&left.0, &right.0, &self.key, self.flags, platform).chaining_value())
+        crate::hasher::parent_output(&left, &right, &self.key, self.flags, platform).chaining_value()
     }
 
     /// The values of a subtree's children, not yet labelled.
     #[inline]
-    fn halves_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> [BareCv; 2] {
-        let [left, right] = crate::tree::root_children(&crate::tree::PlatformKernels { key: &self.key, flags: self.flags, platform }, input, 0, first_chunk);
-        [BareCv(left), BareCv(right)]
+    fn halves_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> [crate::CVBytes; 2] {
+        crate::tree::root_children(&crate::tree::PlatformKernels { key: &self.key, flags: self.flags, platform }, input, 0, first_chunk)
     }
 
     /// This `TreeHasher`, its calls kept to the calling core's own kernels: for
@@ -683,15 +652,15 @@ impl TreeHasher {
     }
 
     /// The chaining value of the parent of two subtrees.
-    fn bare_parent_cv(&self, left: &BareCv, right: &BareCv) -> BareCv {
-        BareCv(crate::hasher::parent_output(&left.0, &right.0, &self.key, self.flags, self.parents_platform()).chaining_value())
+    fn bare_parent_cv(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> crate::CVBytes {
+        crate::hasher::parent_output(left, right, &self.key, self.flags, self.parents_platform()).chaining_value()
     }
 
     /// A layer of parents: `out[i]` is the parent of `children[2 * i]` and
     /// `children[2 * i + 1]`, side by side in the CPU's lanes.
     ///
     /// Requires an even number of children and half as many outputs.
-    fn bare_parent_cvs(&self, children: &[BareCv], out: &mut [BareCv]) {
+    fn bare_parent_cvs(&self, children: &[crate::CVBytes], out: &mut [crate::CVBytes]) {
         assert_eq!(children.len() % 2, 0, "parents take their children in pairs");
         assert_eq!(out.len(), children.len() / 2, "one parent per pair of children");
         let platform = self.parents_platform();
@@ -702,9 +671,6 @@ impl TreeHasher {
                 out[0] = self.bare_parent_cv(&children[0], &children[1]);
                 continue;
             }
-            // Sound: BareCv is a transparent [u8; 32].
-            let children: &[[u8; OUT_LEN]] = unsafe { core::slice::from_raw_parts(children.as_ptr().cast(), children.len()) };
-            let out: &mut [[u8; OUT_LEN]] = unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr().cast(), out.len()) };
             let parents = crate::compress_parents_parallel(children.as_flattened(), &self.key, self.flags, platform, out.as_flattened_mut());
             debug_assert_eq!(parents, out.len());
         }
@@ -712,14 +678,14 @@ impl TreeHasher {
 
     /// The hash of the message whose root has these two children: the
     /// tree's top, where the chaining values end.
-    fn bare_root_hash(&self, left: &BareCv, right: &BareCv) -> Hash {
-        crate::hasher::parent_output(&left.0, &right.0, &self.key, self.flags, self.parents_platform()).root_hash()
+    fn bare_root_hash(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> Hash {
+        crate::hasher::parent_output(left, right, &self.key, self.flags, self.parents_platform()).root_hash()
     }
 
     /// The extended output of the message whose root has these two
     /// children: its first 32 bytes are [`bare_root_hash`](TreeHasher::bare_root_hash)'s.
-    fn bare_root_output(&self, left: &BareCv, right: &BareCv) -> crate::OutputReader {
-        crate::OutputReader::new(crate::hasher::parent_output(&left.0, &right.0, &self.key, self.flags, self.parents_platform()))
+    fn bare_root_output(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> crate::OutputReader {
+        crate::OutputReader::new(crate::hasher::parent_output(left, right, &self.key, self.flags, self.parents_platform()))
     }
     /// The chaining value of a whole subtree: the `index`-th of 2^`level`
     /// chunks.
@@ -818,8 +784,8 @@ impl TreeHasher {
         // 32 children are the widest kernel's two rounds, and the two
         // arrays are 1.5 KiB of the stack.
         const PAIRS: usize = 16;
-        let mut values = [BareCv([0; OUT_LEN]); 2 * PAIRS];
-        let mut parents = [BareCv([0; OUT_LEN]); PAIRS];
+        let mut values = [[0u8; OUT_LEN]; 2 * PAIRS];
+        let mut parents = [[0u8; OUT_LEN]; PAIRS];
         for (children, out) in children.chunks(2 * PAIRS).zip(out.chunks_mut(PAIRS)) {
             for (value, child) in values.iter_mut().zip(children) {
                 *value = child.value;
@@ -958,15 +924,11 @@ mod tree_test {
                         if len > CHUNK_LEN {
                             let turn = tree.turn(len);
                             let [left, right] = tree.halves_on(turn.platform(), first_chunk, bytes);
-                            assert_eq!(*tree.bare_parent_cv(&left, &right).as_bytes(), want, "the halves' parent, first_chunk={first_chunk} len={len}");
+                            assert_eq!(tree.bare_parent_cv(&left, &right), want, "the halves' parent, first_chunk={first_chunk} len={len}");
                             let split = left_len(len as u64) as usize;
+                            assert_eq!(left, official::subtree_cv(mode, first_chunk, &bytes[..split]), "the left half, first_chunk={first_chunk} len={len}");
                             assert_eq!(
-                                *left.as_bytes(),
-                                official::subtree_cv(mode, first_chunk, &bytes[..split]),
-                                "the left half, first_chunk={first_chunk} len={len}"
-                            );
-                            assert_eq!(
-                                *right.as_bytes(),
+                                right,
                                 official::subtree_cv(mode, first_chunk + (split / CHUNK_LEN) as u64, &bytes[split..]),
                                 "the right half, first_chunk={first_chunk} len={len}"
                             );
@@ -1009,21 +971,21 @@ mod tree_test {
     fn parents_and_the_root_match_official_blake3() {
         crate::initialize();
         let bytes = painted(32 * 300);
-        let cvs: Vec<BareCv> = bytes.as_chunks::<32>().0.iter().map(|b| BareCv::from_bytes(*b)).collect();
+        let cvs: Vec<crate::CVBytes> = bytes.as_chunks::<32>().0.to_vec();
         for mode in modes() {
             let tree = TreeHasher::new(mode);
             for pair in cvs[..40].chunks(2) {
                 let (left, right) = (&pair[0], &pair[1]);
-                assert_eq!(*tree.bare_parent_cv(left, right).as_bytes(), official::parent(mode, left.as_bytes(), right.as_bytes(), false));
-                assert_eq!(*tree.bare_root_hash(left, right).as_bytes(), official::parent(mode, left.as_bytes(), right.as_bytes(), true));
+                assert_eq!(tree.bare_parent_cv(left, right), official::parent(mode, left, right, false));
+                assert_eq!(*tree.bare_root_hash(left, right).as_bytes(), official::parent(mode, left, right, true));
                 let mut out = [0u8; 150];
                 tree.bare_root_output(left, right).fill(&mut out);
                 assert_eq!(out[..32], *tree.bare_root_hash(left, right).as_bytes());
-                assert_ne!(tree.bare_parent_cv(left, right).as_bytes(), tree.bare_root_hash(left, right).as_bytes(), "the root is not a chaining value");
+                assert_ne!(&tree.bare_parent_cv(left, right), tree.bare_root_hash(left, right).as_bytes(), "the root is not a chaining value");
             }
             for pairs in (0..=40).chain([63, 64, 65, 127, 128, 129, 150]) {
                 let children = &cvs[..2 * pairs];
-                let mut out = std::vec![BareCv::from_bytes([0; 32]); pairs];
+                let mut out = std::vec![[0u8; 32]; pairs];
                 tree.bare_parent_cvs(children, &mut out);
                 for (i, got) in out.iter().enumerate() {
                     assert_eq!(*got, tree.bare_parent_cv(&children[2 * i], &children[2 * i + 1]), "pair {i} of {pairs}");
@@ -1039,7 +1001,7 @@ mod tree_test {
     #[test]
     fn a_tree_built_from_its_pieces_gives_the_messages_hash() {
         crate::initialize();
-        fn cv(tree: &TreeHasher, input: &[u8], first_chunk: u64) -> BareCv {
+        fn cv(tree: &TreeHasher, input: &[u8], first_chunk: u64) -> crate::CVBytes {
             if input.len() <= 16 * CHUNK_LEN {
                 return tree.last_cv(first_chunk, input).value;
             }
@@ -1076,14 +1038,6 @@ mod tree_test {
                 }
             }
         }
-    }
-
-    /// Chaining values compare by their bytes.
-    #[test]
-    fn chaining_values_compare_by_their_bytes() {
-        let (one, other) = (BareCv::from_bytes([1; 32]), BareCv::from_bytes([2; 32]));
-        assert!(one == BareCv::from_bytes([1; 32]));
-        assert!(one != other);
     }
 
     #[test]
@@ -1124,16 +1078,16 @@ mod tree_test {
     #[should_panic(expected = "parents take their children in pairs")]
     fn a_layer_of_parents_takes_pairs() {
         crate::initialize();
-        let cvs = [BareCv::from_bytes([1; 32]); 3];
-        TreeHasher::new(Mode::Plain).bare_parent_cvs(&cvs, &mut [BareCv::from_bytes([0; 32])]);
+        let cvs = [[1u8; 32]; 3];
+        TreeHasher::new(Mode::Plain).bare_parent_cvs(&cvs, &mut [[0u8; 32]]);
     }
 
     #[test]
     #[should_panic(expected = "one parent per pair of children")]
     fn a_layer_of_parents_takes_one_output_a_pair() {
         crate::initialize();
-        let cvs = [BareCv::from_bytes([1; 32]); 4];
-        TreeHasher::new(Mode::Plain).bare_parent_cvs(&cvs, &mut [BareCv::from_bytes([0; 32])]);
+        let cvs = [[1u8; 32]; 4];
+        TreeHasher::new(Mode::Plain).bare_parent_cvs(&cvs, &mut [[0u8; 32]]);
     }
 
     /// The hash of a whole message, a batch and a collection in a prepared
