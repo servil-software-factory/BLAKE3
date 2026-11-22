@@ -48,6 +48,13 @@ libc = { version = "0.2", default-features = false }
 libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]
+# PROBE (probe/latency-ready, never to land): examples/host_lab.rs times the
+# pool, so it needs the crate in threads/ (a cycle through a
+# dev-dependency, which Cargo allows) and the servil projects' clocks
+# (clocks/ here is a copy of bench-hashes 7f2a0b21's, which has no
+# dependencies; a git dependency would clone a gigabyte of records).
+blake3-servil = { path = "threads" }
+clocks = { path = "clocks" }
 # Official BLAKE3, the tests' independent implementation: it generates their
 # fixed expected values (BLAKE3_GOLDEN=1, src/test.rs's `golden`), and the
 # co-linking test checks its native symbols never replace ours.

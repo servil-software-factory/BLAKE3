@@ -478,6 +478,21 @@ pub fn __confine_cli_to_one_node() {
     lanes::places::confine_cli_thread();
 }
 
+/// PROBE (probe/latency-ready, never to land): keep `awake` workers
+/// polling in place of parking, send `hash_multithreaded` to the pool from
+/// `split` bytes, and on the wide AVX-512 kernel count a participant per
+/// `per` bytes. (0, 512 KiB, 128 KiB) is the library as it ships.
+#[doc(hidden)]
+pub fn __probe_latency(awake: usize, split: usize, per: usize) {
+    lanes::probe_latency(awake, split, per)
+}
+
+/// PROBE: how many workers are parked now, and how many the pool has.
+#[doc(hidden)]
+pub fn __probe_parked() -> (usize, usize) {
+    lanes::probe_parked()
+}
+
 /// Whether every worker of the multithreaded calls' pool is parked (false
 /// before [`initialize_multithreaded`]). Undocumented and unstable, for
 /// tests only: a test that needs the pool idle waits for this, not for a
@@ -596,7 +611,7 @@ pub mod throughput {
         crate::lanes::require();
         // The short path first and inline, so a small input costs what
         // hash costs; everything the pool needs is behind the call after.
-        if len < crate::lanes::MIN_SPLIT_LEN {
+        if len < crate::lanes::PROBE_SPLIT.load(std::sync::atomic::Ordering::Relaxed) {
             return hash(mode, input, len);
         }
         let (kind, key, context) = crate::lanes::parts(mode);

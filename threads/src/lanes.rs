@@ -132,6 +132,31 @@ const MIN_PIECE_LEN: usize = 8 * CHUNK_LEN;
 /// The longest piece.
 const MAX_PIECE_LEN: usize = 128 * CHUNK_LEN;
 
+/// PROBE (probe/latency-ready, never to land): what a caller-paid "ready"
+/// scope would change, set at run time by [`probe_latency`]. `PROBE_AWAKE`
+/// workers (the lowest-numbered) poll for work in place of parking; a job
+/// is then cut for those and its caller alone, and wakes nobody.
+/// `PROBE_SPLIT` is the length from which `hash_multithreaded` goes to the
+/// pool; `PROBE_PER` the bytes a participant in [`tree_threads`].
+pub(crate) static PROBE_AWAKE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROBE_SPLIT: AtomicUsize = AtomicUsize::new(MIN_SPLIT_LEN);
+pub(crate) static PROBE_PER: AtomicUsize = AtomicUsize::new(MAX_PIECE_LEN);
+
+/// Set the probe's knobs, and wake every parked worker so that those the
+/// first knob keeps up start polling.
+pub(crate) fn probe_latency(awake: usize, split: usize, per: usize) {
+    assert!(split > MIN_PIECE_LEN && per >= MIN_PIECE_LEN, "a split job has two pieces or more");
+    PROBE_SPLIT.store(split, Ordering::SeqCst);
+    PROBE_PER.store(per, Ordering::SeqCst);
+    PROBE_AWAKE.store(awake, Ordering::SeqCst);
+    pool().park.wake_all();
+}
+
+/// How many workers are parked now, and how many the pool has (the probe's check).
+pub(crate) fn probe_parked() -> (usize, usize) {
+    (pool().park.parked_count(), pool().workers())
+}
+
 /// Between polls a thread spins in user space, and every YIELD_EVERY it
 /// hands the CPU to any runnable thread (a caller the OS has queued
 /// behind a poller then waits this long at most, never a quantum).
@@ -280,7 +305,7 @@ pub(crate) fn hash_many_in(
 /// over the machine's threads (a shorter input is the caller's, on its
 /// own thread: the public calls' short path).
 pub(crate) fn hash_over_pool(tree: &TreeHasher, input: &[u8]) -> Hash {
-    debug_assert!(input.len() >= MIN_SPLIT_LEN);
+    debug_assert!(input.len() >= PROBE_SPLIT.load(Ordering::Relaxed));
     let Some((pool, _caller)) = spare_pool() else {
         return tree.hash(input);
     };
@@ -296,7 +321,11 @@ pub(crate) fn hash_over_pool(tree: &TreeHasher, input: &[u8]) -> Hash {
 /// available; the same budget cuts the pieces and asks for the wakes.
 /// Other kernels and work kinds keep their policy (experiment, #125).
 fn tree_threads(len: usize, available: usize, degree: usize) -> usize {
-    if cfg!(all(target_arch = "x86_64", target_os = "linux")) && degree >= 16 { len.div_ceil(MAX_PIECE_LEN).max(2).min(available) } else { available }
+    if cfg!(all(target_arch = "x86_64", target_os = "linux")) && degree >= 16 {
+        len.div_ceil(PROBE_PER.load(Ordering::Relaxed)).max(2).min(available)
+    } else {
+        available
+    }
 }
 
 fn spare_pool() -> Option<(&'static Pool, Caller<'static>)> {
@@ -372,6 +401,11 @@ fn tree_cvs<T>(pool: &Pool, input: &[u8], tree: &TreeHasher, counter: u64, merge
     let turn = Sme2Turn::take(Platform::detect(), true);
     let plan = pool.plan(places::Kind::Tree, input.len());
     let threads = tree_threads(input.len(), plan.threads, turn.platform().simd_degree());
+    // PROBE: with workers kept awake, the job is theirs and the caller's.
+    let threads = match PROBE_AWAKE.load(Ordering::Relaxed) {
+        0 => threads,
+        awake => threads.min(awake + 1),
+    };
     let prefix = prefix_for(&turn, input.len(), threads);
     with_scratch(
         |pieces| cut_with_prefix(pieces, input.len(), threads, prefix),
@@ -2714,7 +2748,7 @@ impl Pool {
         let ptr = &job as *const Job as *mut Job<'static>;
         let published = AbortOnUnwind;
         let target = source.publish_job(ptr, pieces, own, near);
-        if slot.is_some() {
+        if slot.is_some() && PROBE_AWAKE.load(Ordering::Relaxed) == 0 {
             // A worker for each piece past the caller's first (none for a
             // job of one past its own: a wake for none is nothing); for a
             // tree, within the wide kernel's thread budget.
@@ -2786,6 +2820,16 @@ impl Pool {
             // if the first worker has settled the places by now.
             if !placed {
                 placed = places::take(me);
+            }
+            // PROBE: a worker the knob keeps up polls for work in place of
+            // parking (a pause between looks, the CPU handed on every
+            // YIELD_EVERY, as a waiting caller does).
+            if me < PROBE_AWAKE.load(Ordering::Relaxed) {
+                let mut yielded = now();
+                while !sources::visible(false) && me < PROBE_AWAKE.load(Ordering::Relaxed) {
+                    poll_pause(&mut yielded);
+                }
+                continue;
             }
             // Park unless work shows (crate::park's handshake); woken, pay
             // the wakes owed before working.

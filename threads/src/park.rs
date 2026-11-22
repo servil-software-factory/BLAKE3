@@ -110,7 +110,6 @@ impl Park {
     /// Wake every worker that is parked now, each once: how many. (A
     /// loop of `wake_one` would wake the first ones again as they park
     /// again, and never reach the last.)
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn wake_all(&self) -> usize {
         let mut woken = 0;
         for (word, handles) in self.parked.iter().zip(self.handles.chunks(64)) {
