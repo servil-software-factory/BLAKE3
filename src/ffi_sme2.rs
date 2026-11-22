@@ -234,7 +234,7 @@ pub unsafe fn hash_block_run(run: &[u8], key: &CVWords, flags: u8, out: &mut [u8
         return;
     }
     if left > 0 {
-        let table: arrayvec::ArrayVec<&[u8; BLOCK_LEN], GROUP> = blocks[done..].iter().collect();
+        let table: crate::stack_vec::StackVec<&[u8; BLOCK_LEN], GROUP> = blocks[done..].iter().collect();
         // Sound: NEON is available wherever SME2 is, as this function
         // requires; the outputs reach `left` values past `done`.
         unsafe { crate::neon_hybrid::hash_many(&table, key, 0, IncrementCounter::No, flags, 0, 0, &mut out[done * OUT_LEN..]) };

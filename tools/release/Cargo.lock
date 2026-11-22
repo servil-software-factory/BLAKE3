@@ -90,7 +90,6 @@ dependencies = [
 name = "blake3-servil"
 version = "0.10.0+dev"
 dependencies = [
- "arrayvec",
  "blake3",
  "blake3-servil-core",
  "cc",
@@ -106,11 +105,9 @@ dependencies = [
 name = "blake3-servil-core"
 version = "0.10.0+dev"
 dependencies = [
- "arrayvec",
  "blake3",
  "blake3-servil-version",
  "cc",
- "cfg-if",
  "ciborium",
  "constant_time_eq",
  "hex",

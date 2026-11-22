@@ -253,6 +253,7 @@ mod io;
 mod many;
 mod pair;
 mod self_test;
+mod stack_vec;
 mod tree;
 
 /// A kind of kernel or path a call ran, for the tests that check which
@@ -376,10 +377,10 @@ pub(crate) fn ran_kernel(entry: *const ()) {
     let _ = entry;
 }
 
-use arrayvec::{ArrayString, ArrayVec};
 use core::cmp;
 use core::fmt;
 use platform::{MAX_SIMD_DEGREE, Platform};
+use stack_vec::StackVec;
 
 /// This build's version: the crate's version, and for any build but a
 /// release's own commit, the commit built and, from a dirty tree, the Git
@@ -481,6 +482,109 @@ pub(crate) const DERIVE_KEY_MATERIAL: u8 = 1 << 6;
 #[repr(transparent)]
 pub struct Hash([u8; OUT_LEN]);
 
+/// The 64 lowercase hexadecimal characters of a [`Hash`](struct@Hash), held
+/// inline with no heap allocation.
+///
+/// Dereferences to `&str` and implements `Display`, `AsRef<str>`, `AsRef<[u8]>`,
+/// and `PartialEq<&str>` / `PartialEq<str>`. Equality on `HexHash` is not
+/// constant-time; compare [`Hash`](struct@Hash) values directly for secret tags or keys.
+///
+/// # Trait implementations
+///
+/// - `AsRef` borrows the 64 hexadecimal characters as `&str` or `&[u8]`.
+/// - `Borrow` lends the 64 hexadecimal characters as `&str`, with the `str`'s own hash, equality and order, so a map keyed by `HexHash` finds a key by its `&str`.
+/// - `Clone` copies the 64 ASCII bytes.
+/// - `Copy` leaves the same 64 ASCII bytes available at both places.
+/// - `Debug` formats the 64 hexadecimal characters as a quoted Rust string.
+/// - `Deref` borrows the 64 hexadecimal characters as `&str`.
+/// - `Display` formats the 64 lowercase hexadecimal characters as their `str` does, width and precision included.
+/// - `Eq` reflects `PartialEq` over the 64 ASCII bytes (not constant-time).
+/// - `Hash` feeds the hasher what the `str` of the 64 characters feeds it.
+/// - `Ord` compares the 64 ASCII bytes lexicographically (not constant-time).
+/// - `PartialEq` compares the 64 ASCII bytes against another `HexHash`, `str`, or `&str` (not constant-time).
+/// - `PartialOrd` compares the 64 ASCII bytes lexicographically (not constant-time).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HexHash([u8; 2 * OUT_LEN]);
+
+impl HexHash {
+    /// View the 64 hexadecimal characters as a `&str`.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        // Sound: `Hash::to_hex` writes only ASCII '0'..='9' and 'a'..='f'.
+        unsafe { core::str::from_utf8_unchecked(&self.0) }
+    }
+
+    /// View the 64 ASCII hexadecimal bytes.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8; 2 * OUT_LEN] {
+        &self.0
+    }
+}
+
+impl core::ops::Deref for HexHash {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for HexHash {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<[u8]> for HexHash {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl core::borrow::Borrow<str> for HexHash {
+    #[inline]
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+// As the str hashes, which `Borrow<str>` requires: a derived hash of the
+// byte array feeds the hasher other bytes, and a lookup by `&str` misses.
+impl core::hash::Hash for HexHash {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state)
+    }
+}
+
+impl fmt::Display for HexHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_str(), f)
+    }
+}
+
+impl fmt::Debug for HexHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl PartialEq<str> for HexHash {
+    #[inline]
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for HexHash {
+    #[inline]
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 impl Hash {
     /// The raw bytes of the `Hash`. Note that byte arrays don't provide
     /// constant-time equality checking, so if you need to compare hashes,
@@ -517,22 +621,20 @@ impl Hash {
     /// call's time and memory accesses are the same for every hash (a
     /// hash may be a secret: a keyed hash's tag, a derived key).
     ///
-    /// The returned [`ArrayString`] is a fixed size and doesn't allocate memory
-    /// on the heap. Note that [`ArrayString`] doesn't provide constant-time
-    /// equality checking, so if you need to compare hashes, prefer the `Hash`
-    /// type.
-    ///
-    /// [`ArrayString`]: https://docs.rs/arrayvec/0.5.1/arrayvec/struct.ArrayString.html
-    pub fn to_hex(&self) -> ArrayString<{ 2 * OUT_LEN }> {
+    /// The returned [`HexHash`] holds the 64 ASCII hexadecimal bytes inline
+    /// with no heap allocation and dereferences to `&str`. Note that
+    /// [`HexHash`] doesn't provide constant-time equality checking, so if you
+    /// need to compare hashes, prefer the [`Hash`](struct@Hash) type.
+    pub fn to_hex(&self) -> HexHash {
         // 0..=9 are '0' + n; 10..=15 are 'a' + n - 10, which is '0' + n + 39:
         // (n + 6) >> 4 is 1 exactly for those.
-        let character = |n: u8| (b'0' + n + ((n + 6) >> 4) * 39) as char;
-        let mut s = ArrayString::new();
-        for &b in self.0.iter() {
-            s.push(character(b >> 4));
-            s.push(character(b & 0xf));
+        let nibble = |n: u8| b'0' + n + ((n + 6) >> 4) * 39;
+        let mut bytes = [0u8; 2 * OUT_LEN];
+        for (i, &b) in self.0.iter().enumerate() {
+            bytes[2 * i] = nibble(b >> 4);
+            bytes[2 * i + 1] = nibble(b & 0xf);
         }
-        s
+        HexHash(bytes)
     }
 
     /// Decode a `Hash` from hexadecimal. Both uppercase and lowercase ASCII
@@ -631,7 +733,7 @@ impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Formatting field as `&str` to reduce code size since the `Debug`
         // dynamic dispatch table for `&str` is likely needed elsewhere already,
-        // but that for `ArrayString<[u8; 64]>` is not.
+        // but that for `HexHash` is not.
         let hex = self.to_hex();
         let hex: &str = hex.as_str();
 
@@ -643,7 +745,7 @@ impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Formatting field as `&str` to reduce code size since the `Debug`
         // dynamic dispatch table for `&str` is likely needed elsewhere already,
-        // but that for `ArrayString<[u8; 64]>` is not.
+        // but that for `HexHash` is not.
         let hex = self.to_hex();
         let hex: &str = hex.as_str();
 
@@ -890,8 +992,8 @@ fn hash_many_rounded<const N: usize>(
     if let Some(lanes) = rounded_lanes(platform, inputs.len()) {
         ran(Ran::RoundedUp);
         let last = *inputs.last().expect("a count that rounds up is 3 or more");
-        let mut padded = ArrayVec::<&[u8; N], 32>::new();
-        padded.try_extend_from_slice(inputs).unwrap();
+        let mut padded = StackVec::<&[u8; N], 32>::new();
+        padded.extend_from_slice(inputs);
         while padded.len() < lanes {
             padded.push(last);
         }
@@ -916,7 +1018,7 @@ fn compress_chunks_parallel(input: &[u8], key: &CVWords, chunk_counter: u64, fla
     debug_assert!(input.len() <= MAX_SIMD_DEGREE * CHUNK_LEN);
 
     let mut chunks_exact = input.chunks_exact(CHUNK_LEN);
-    let mut chunks_array = ArrayVec::<&[u8; CHUNK_LEN], MAX_SIMD_DEGREE>::new();
+    let mut chunks_array = StackVec::<&[u8; CHUNK_LEN], MAX_SIMD_DEGREE>::new();
     for chunk in &mut chunks_exact {
         chunks_array.push(chunk.try_into().unwrap());
     }
@@ -988,7 +1090,7 @@ pub(crate) fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWo
     debug_assert!(num_children <= 2 * MAX_SIMD_DEGREE, "too many");
 
     let mut parents_exact = child_chaining_values.chunks_exact(BLOCK_LEN);
-    let mut parents_array = ArrayVec::<&[u8; BLOCK_LEN], MAX_SIMD_DEGREE>::new();
+    let mut parents_array = StackVec::<&[u8; BLOCK_LEN], MAX_SIMD_DEGREE>::new();
     for parent in &mut parents_exact {
         parents_array.push(parent.try_into().unwrap());
     }

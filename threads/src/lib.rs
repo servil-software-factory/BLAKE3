@@ -235,7 +235,9 @@
 
 #![allow(clippy::too_many_arguments)]
 
-pub use blake3_servil_core::{BLOCK_LEN, BUILD_VERSION, CHUNK_LEN, ContextKey, Hash, HexError, KEY_LEN, Mode, OUT_LEN, OutputReader, convenience, initialize};
+pub use blake3_servil_core::{
+    BLOCK_LEN, BUILD_VERSION, CHUNK_LEN, ContextKey, Hash, HexError, HexHash, KEY_LEN, Mode, OUT_LEN, OutputReader, convenience, initialize,
+};
 
 pub(crate) use blake3_servil_core::convenience::Hasher;
 pub(crate) use blake3_servil_core::thread_support::{MAX_SIMD_DEGREE, Platform, Sme2Turn, assert_slots, prepare_collection_thread, slot_len};

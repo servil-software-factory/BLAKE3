@@ -5,6 +5,7 @@
 use crate::hasher;
 use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, ROOT, platform::Platform};
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct Input<'a> {
     block: &'a [u8; BLOCK_LEN],

@@ -360,7 +360,7 @@ fn many(platform: Platform, messages: &[u8], offset: usize, len: usize, out: &mu
 /// keyed by `key` (see Case::ChunkValues), into `out`.
 fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]) -> usize {
     let key = crate::platform::words_from_le_bytes_32(key);
-    let mut chunks = arrayvec::ArrayVec::<&[u8; crate::CHUNK_LEN], 18>::new();
+    let mut chunks = crate::stack_vec::StackVec::<&[u8; crate::CHUNK_LEN], 18>::new();
     chunks.extend(input.chunks_exact(crate::CHUNK_LEN).map(|c| c.try_into().expect("whole chunks")));
     let out = &mut out[..chunks.len() * crate::OUT_LEN];
     #[cfg(blake3_sme2)]
