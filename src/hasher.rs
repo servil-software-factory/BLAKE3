@@ -139,6 +139,91 @@ impl CvStack {
         p.parent(&a[0], &a[1])
     }
 
+    /// Every row's one value, entry i's at `i % ROWS` (a place without a
+    /// row holds zeros): what [`CvStack::get`] gives for each row,
+    /// computed for all of them together. The rows' values are laid end
+    /// to end, the widest row first, and condensed a layer of parents at
+    /// a time over the whole run: every two neighbours' parent is a parent
+    /// in its row, the run halves, and the rows that were two wide, the
+    /// run's last, are done. So the parents go to the kernels in full
+    /// batches whatever each row's width, where a row condensed alone
+    /// sends them 8, 4, 2 and 1 at a time: a digest taken between 16 KiB
+    /// updates cost 1.09 us that way on a Ryzen 9700X, where 0.9.1's cost
+    /// 0.48 (BLAKE3 #472).
+    pub fn rows_values<P: Parent>(&self, p: &P) -> [Cv; ROWS] {
+        let mut values = [[0u8; 32]; ROWS];
+        // The run and its parents: each layer reads the one and writes
+        // the other, turn about. Neither is zeroed whole (12 KiB).
+        let mut run = core::mem::MaybeUninit::<[Cv; ROWS * ROW]>::uninit();
+        let mut parents = core::mem::MaybeUninit::<[Cv; ROWS * ROW / 2]>::uninit();
+        let (mut from, mut to) = (run.as_mut_ptr() as *mut Cv, parents.as_mut_ptr() as *mut Cv);
+        // The entries whose rows are in the run, in its order.
+        let mut order = [0usize; ROWS];
+        let (mut rows, mut len) = (0, 0);
+        // (A bit at the length or above is left from an entry merged away.)
+        let live = self.wide & ((1 << self.len) - 1);
+        for halvings in 0..ROW.trailing_zeros() - 1 {
+            let width = ROW >> halvings;
+            let mut left = live;
+            for _ in 0..live.count_ones() {
+                let i = left.trailing_zeros() as usize;
+                left &= left - 1;
+                let row = self.row(i);
+                if row.len() == width {
+                    // Sound: within the run, which has room for ROWS rows
+                    // of ROW values, and a slot holds one row at a time.
+                    unsafe { core::ptr::copy_nonoverlapping(row.as_ptr(), from.add(len), width) };
+                    order[rows] = i;
+                    rows += 1;
+                    len += width;
+                }
+            }
+        }
+        // The first layer's parents go where values are, as a row's cut
+        // does (place_on_top); the later layers write over earlier ones.
+        // Sound: within the parents' place, half the run's room.
+        unsafe { to.write_bytes(0, len / 2) };
+        // A layer for each halving of the widest row there can be: a loop
+        // of a fixed count, like merge's.
+        for layer in 1..=ROW.trailing_zeros() {
+            for start in (0..len).step_by(2 * ROW) {
+                let n = (len - start).min(2 * ROW);
+                // Sound: `from` holds `len` written values (the rows'
+                // copies, or the layer before's parents), and `to` holds
+                // values in half as many places (zeroed above, or written
+                // by an earlier layer); the two are apart.
+                let (children, out) = unsafe { (core::slice::from_raw_parts(from.add(start), n), core::slice::from_raw_parts_mut(to.add(start / 2), n / 2)) };
+                let made = p.parents(children, out);
+                assert_eq!(2 * made, n, "a parent for every two children");
+            }
+            len /= 2;
+            // The rows that were two wide are one value each now: the
+            // narrowest, so the run's last.
+            for _ in 0..rows {
+                if self.row(order[rows - 1]).len() == 1 << layer {
+                    rows -= 1;
+                    len -= 1;
+                    // Sound: below the layer's count of parents, each written.
+                    values[order[rows] % ROWS] = unsafe { *to.add(len) };
+                }
+            }
+            (from, to) = (to, from);
+        }
+        assert_eq!((rows, len), (0, 0), "every row condensed to its one value");
+        values
+    }
+
+    /// Entry `i`'s one value, below the length: a single entry's own, a
+    /// row's from `rows` ([`CvStack::rows_values`]).
+    pub fn value(&self, rows: &[Cv; ROWS], i: usize) -> Cv {
+        assert!(i < self.len, "a value below the stack's length");
+        if self.is_row(i) {
+            return rows[i % ROWS];
+        }
+        // Sound: a single entry below the length was written (push, merge, narrow).
+        unsafe { *(self.cvs.as_ptr() as *const Cv).add(i) }
+    }
+
     /// `cv` on top; the stack holds fewer than DEPTH values.
     pub fn push(&mut self, cv: Cv) {
         self.set(self.len, cv);
@@ -410,6 +495,9 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
     if stack.len() == 0 {
         return k.chunk_node(chunk);
     }
+    // The rows' values, condensed together: an output computed between
+    // updates finds a row for every size of subtree the stack holds.
+    let rows = stack.rows_values(k);
     let mut n = stack.len();
     // (With an empty chunk the stack holds two entries or more: a
     // message's first subtree goes onto it as its two halves, never as
@@ -418,11 +506,11 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
         k.chunk_node(chunk)
     } else {
         n -= 2;
-        k.parent_node(&stack.get(k, n), &stack.get(k, n + 1))
+        k.parent_node(&stack.value(&rows, n), &stack.value(&rows, n + 1))
     };
     while n > 0 {
         n -= 1;
-        out = k.parent_node(&stack.get(k, n), &k.node_cv(&out));
+        out = k.parent_node(&stack.value(&rows, n), &k.node_cv(&out));
     }
     out
 }
@@ -436,13 +524,14 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
 /// into the rest. The stack is only read.
 pub fn above<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, stack: &CvStack, target: usize, out: N) -> N {
     assert!(target >= 1 && stack.len() >= target, "a subtree or more before the rest, each with its entry");
-    let mut top = stack.get(k, stack.len() - 1);
+    let rows = stack.rows_values(k);
+    let mut top = stack.value(&rows, stack.len() - 1);
     for i in (target - 1..stack.len() - 1).rev() {
-        top = k.parent(&stack.get(k, i), &top);
+        top = k.parent(&stack.value(&rows, i), &top);
     }
     let mut out = k.parent_node(&top, &k.node_cv(&out));
     for i in (0..target - 1).rev() {
-        out = k.parent_node(&stack.get(k, i), &k.node_cv(&out));
+        out = k.parent_node(&stack.value(&rows, i), &k.node_cv(&out));
     }
     out
 }
