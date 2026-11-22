@@ -1,6 +1,7 @@
 //! The Hasher's stack of chaining values, its loop over the input, a
 //! chunk's state, and a node's output, in safe Rust over their kernels.
 
+use crate::platform::MAX_SIMD_DEGREE;
 use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, PARENT, ROOT};
 use crate::{CVBytes as Cv, MAX_DEPTH};
 const DEPTH: usize = MAX_DEPTH + 1;
@@ -10,7 +11,7 @@ pub trait Parent {
     fn parent(&self, left: &Cv, right: &Cv) -> Cv;
     /// A layer of parents, side by side in the kernels' lanes: `out[i]`
     /// the parent of `children[2 * i]` and `children[2 * i + 1]`, for an
-    /// even count of children from 2 to 2 * ROW. Returns their count.
+    /// even count of children from 2 to CALL. Returns their count.
     fn parents(&self, children: &[Cv], out: &mut [Cv]) -> usize;
 }
 
@@ -21,6 +22,16 @@ pub const ROW: usize = 32;
 /// The rows a stack holds at once (the sizes from a group of 16 chunks up
 /// to 2 MiB); a row past them is condensed to its one value.
 const ROWS: usize = 8;
+/// The values of every row a stack holds at once, end to end: what an
+/// output condenses together (`CvStack::condense`).
+const RUN: usize = ROWS * ROW;
+/// The most children the kernels take in one call of `Parent::parents`:
+/// two for each of the blocks they hash at once. 2 ROW on x86-64 Linux.
+/// Half that on AArch64 without the SME2 unit and on x86-64 elsewhere,
+/// where no row is wider than 16; with the SME2 unit, the whole run.
+const CALL: usize = 2 * MAX_SIMD_DEGREE;
+// The widths a row has: ROW, and three halvings down to 4.
+const _: () = assert!(ROW / 8 == 4);
 
 /// The values of the subtrees finished so far, bottom first, each one
 /// value or a row.
@@ -137,6 +148,100 @@ impl CvStack {
         }
         assert_eq!(n, 2, "a row's two halves");
         p.parent(&a[0], &a[1])
+    }
+
+    /// Every row's one value, entry i's at `i % ROWS` (a place without a
+    /// row holds zeros): what [`CvStack::get`] gives for each row,
+    /// computed for all of them together ([`CvStack::condense`]). A stack
+    /// without rows (a message hashed by one update, or by kernels that
+    /// cut none) pays this test and no more: the rows' work and its
+    /// 16 KiB of frame are the other function's.
+    pub fn rows_values<P: Parent>(&self, p: &P) -> [Cv; ROWS] {
+        let mut values = [[0u8; 32]; ROWS];
+        // (A bit at the length or above is left from an entry merged away.)
+        let live = self.wide & ((1 << self.len) - 1);
+        if live != 0 {
+            self.condense(p, live, &mut values);
+        }
+        values
+    }
+
+    /// The rows at `live`'s bits, each condensed to its one value, into
+    /// `values` at the row's place. The rows' values are laid end to end,
+    /// the widest row first, and condensed a layer of parents at a time
+    /// over the whole run: every two neighbours' parent is a parent in
+    /// its row, the run halves, and the rows that were two wide, the
+    /// run's last, are done. So the parents go to the kernels in full
+    /// batches whatever each row's width, where a row condensed alone
+    /// sends them 8, 4, 2 and 1 at a time: a digest taken between 16 KiB
+    /// updates cost 1.09 us that way on a Ryzen 9700X, where 0.9.1's cost
+    /// 0.48 (BLAKE3 #472).
+    #[inline(never)]
+    fn condense<P: Parent>(&self, p: &P, live: u64, values: &mut [Cv; ROWS]) {
+        // The run, and the entries whose rows are in it, in its order.
+        // Neither it nor its parents' place is zeroed: 8 KiB each, of
+        // which a stream's six rows fill three, and their parents half.
+        let mut run = [const { core::mem::MaybeUninit::<Cv>::uninit() }; RUN];
+        let mut order = [0usize; ROWS];
+        let (mut rows, mut len) = (0, 0);
+        for width in [ROW, ROW / 2, ROW / 4, ROW / 8] {
+            let mut left = live;
+            for _ in 0..live.count_ones() {
+                let i = left.trailing_zeros() as usize;
+                left &= left - 1;
+                let row = self.row(i);
+                if row.len() == width {
+                    run[len..len + width].write_copy_of_slice(row);
+                    order[rows] = i;
+                    rows += 1;
+                    len += width;
+                }
+            }
+        }
+        // Sound: the run's first `len` values were written, a row after another.
+        let mut from = unsafe { core::slice::from_raw_parts_mut(run.as_mut_ptr() as *mut Cv, len) };
+        // The parents' place: half the run's length is used of it. The
+        // kernels write where values are, as into a row's place
+        // (place_on_top): it is given the run's first half to hold until
+        // the first layer writes over it, and each later layer writes
+        // over an earlier one's values.
+        let mut parents = [const { core::mem::MaybeUninit::<Cv>::uninit() }; RUN];
+        let mut to = parents[..len / 2].write_copy_of_slice(&from[..len / 2]);
+        // A layer for each halving of the widest row there can be, in
+        // calls of as many children as the kernels take: loops of counts
+        // fixed at their start, like merge's.
+        for layer in 1..=ROW.trailing_zeros() {
+            for start in (0..len).step_by(CALL) {
+                let n = (len - start).min(CALL);
+                let out = &mut to[start / 2..(start + n) / 2];
+                let places = out.len();
+                let made = p.parents(&from[start..start + n], out);
+                assert_eq!((2 * made, places), (n, made), "a parent for every two children, each in its place");
+            }
+            len /= 2;
+            // The rows that were two wide are one value each now: the
+            // narrowest, so the run's last.
+            for _ in 0..rows {
+                if self.row(order[rows - 1]).len() == 1 << layer {
+                    rows -= 1;
+                    len -= 1;
+                    values[order[rows] % ROWS] = to[len];
+                }
+            }
+            core::mem::swap(&mut from, &mut to);
+        }
+        assert_eq!((rows, len), (0, 0), "every row condensed to its one value");
+    }
+
+    /// Entry `i`'s one value, below the length: a single entry's own, a
+    /// row's from `rows` ([`CvStack::rows_values`]).
+    pub fn value(&self, rows: &[Cv; ROWS], i: usize) -> Cv {
+        assert!(i < self.len, "a value below the stack's length");
+        if self.is_row(i) {
+            return rows[i % ROWS];
+        }
+        // Sound: a single entry below the length was written (push, merge, narrow).
+        unsafe { *(self.cvs.as_ptr() as *const Cv).add(i) }
     }
 
     /// `cv` on top; the stack holds fewer than DEPTH values.
@@ -410,6 +515,9 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
     if stack.len() == 0 {
         return k.chunk_node(chunk);
     }
+    // The rows' values, condensed together: an output computed between
+    // updates finds a row for every size of subtree the stack holds.
+    let rows = stack.rows_values(k);
     let mut n = stack.len();
     // (With an empty chunk the stack holds two entries or more: a
     // message's first subtree goes onto it as its two halves, never as
@@ -418,11 +526,11 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
         k.chunk_node(chunk)
     } else {
         n -= 2;
-        k.parent_node(&stack.get(k, n), &stack.get(k, n + 1))
+        k.parent_node(&stack.value(&rows, n), &stack.value(&rows, n + 1))
     };
     while n > 0 {
         n -= 1;
-        out = k.parent_node(&stack.get(k, n), &k.node_cv(&out));
+        out = k.parent_node(&stack.value(&rows, n), &k.node_cv(&out));
     }
     out
 }
@@ -436,13 +544,14 @@ pub fn final_node<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, chunk: &C, stack:
 /// into the rest. The stack is only read.
 pub fn above<C: Chunk, N, K: Nodes<C, N> + Parent>(k: &K, stack: &CvStack, target: usize, out: N) -> N {
     assert!(target >= 1 && stack.len() >= target, "a subtree or more before the rest, each with its entry");
-    let mut top = stack.get(k, stack.len() - 1);
+    let rows = stack.rows_values(k);
+    let mut top = stack.value(&rows, stack.len() - 1);
     for i in (target - 1..stack.len() - 1).rev() {
-        top = k.parent(&stack.get(k, i), &top);
+        top = k.parent(&stack.value(&rows, i), &top);
     }
     let mut out = k.parent_node(&top, &k.node_cv(&out));
     for i in (0..target - 1).rev() {
-        out = k.parent_node(&stack.get(k, i), &k.node_cv(&out));
+        out = k.parent_node(&stack.value(&rows, i), &k.node_cv(&out));
     }
     out
 }
@@ -976,6 +1085,126 @@ mod test {
         assert_eq!(hooks.children.borrow().as_slice(), [GROUP], "the first group alone asks for its children: the three after are rows");
         let want = blake3::Hasher::new().set_input_offset(FIRST * CHUNK_LEN as u64).update(&input).finalize_non_root();
         assert_eq!(final_node(&k, &chunk, &stack).chaining_value(), want);
+    }
+
+    /// The rows' values computed together are each row's own: the value
+    /// computed apart, a parent at a time, and the one `get` gives, which
+    /// condenses a row alone. Rows of every width in every order, the
+    /// narrower below the wider and above it, with single values under
+    /// and between them; ROWS rows of ROW values, the longest run there
+    /// is; ROWS rows of four, the shortest; one row alone at each width;
+    /// and no row. A place without a row holds zeros.
+    #[test]
+    fn the_rows_values_computed_together_are_each_rows_own() {
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let value = |i: usize, j: usize| -> Cv { core::array::from_fn(|b| (31 * i + 7 * j + 3 * b + i * j) as u8) };
+        let alone = |i: usize, width: usize| {
+            let mut layer: std::vec::Vec<Cv> = (0..width).map(|j| value(i, j)).collect();
+            while layer.len() > 1 {
+                layer = layer.chunks(2).map(|two| k.parent(&two[0], &two[1])).collect();
+            }
+            layer[0]
+        };
+        // An entry's width: 0 for a single value.
+        let stacks: [&[usize]; 12] = [
+            &[0, 0, 4, 32, 8, 16, 4, 16, 8, 32],
+            &[0, 32, 0, 4, 0, 0, 8, 16],
+            &[0, 0, 32, 32, 32, 32, 32, 32, 32, 32],
+            &[0, 4, 4, 4, 4, 4, 4, 4, 4],
+            &[0, 16, 8, 4],
+            &[0, 4, 8, 16, 32],
+            &[0, 0, 32],
+            &[0, 0, 16],
+            &[0, 0, 8],
+            &[0, 0, 4],
+            &[0, 0, 0],
+            &[],
+        ];
+        for widths in stacks {
+            let mut stack = CvStack::new();
+            for (i, &width) in widths.iter().enumerate() {
+                if width == 0 {
+                    stack.push(value(i, 0));
+                } else {
+                    let row: std::vec::Vec<Cv> = (0..width).map(|j| value(i, j)).collect();
+                    stack.push_row(&k, &row);
+                }
+            }
+            let rows = stack.rows_values(&k);
+            for (i, &width) in widths.iter().enumerate() {
+                assert_eq!(stack.is_row(i), width != 0, "entry {i} of {widths:?}");
+                assert_eq!(stack.value(&rows, i), alone(i, width.max(1)), "entry {i} of {widths:?}");
+                assert_eq!(stack.value(&rows, i), stack.get(&k, i), "entry {i} of {widths:?}, as it is condensed alone");
+            }
+            for place in 0..ROWS {
+                if !(0..widths.len()).any(|i| stack.is_row(i) && i % ROWS == place) {
+                    assert_eq!(rows[place], [0u8; 32], "place {place} of {widths:?}");
+                }
+            }
+        }
+        // A row merged away leaves its bit and its place's values behind:
+        // they are no row of the stack's. Two rows of 16 become one, and
+        // the upper one's place stays as it was.
+        let mut stack = CvStack::new();
+        stack.push(value(0, 0));
+        for i in [1, 2] {
+            let row: std::vec::Vec<Cv> = (0..16).map(|j| value(i, j)).collect();
+            stack.push_row(&k, &row);
+        }
+        stack.merge(&k, 2);
+        assert_eq!((stack.len(), stack.is_row(1), stack.wide >> 2 & 1), (2, true, 1), "one row of the two, and the other's bit left");
+        let rows = stack.rows_values(&k);
+        assert_eq!(rows[1], k.parent(&alone(1, 16), &alone(2, 16)), "the merged row's value");
+        assert_eq!(stack.value(&rows, 1), stack.get(&k, 1));
+        assert_eq!(rows[2], [0u8; 32], "the place of the row merged away");
+    }
+
+    /// An output condenses the stack's rows together, a full layer of
+    /// parents at a time. After 64 groups fed a group at a time the stack
+    /// holds six rows; the output asks for their parents in calls of
+    /// every row's children side by side, as many a call as the kernels
+    /// take (CALL), a layer after another down to the six rows' twelve
+    /// halves. Each row condensed alone asked for 8, 4 and 2 at a time,
+    /// six times over: a digest between 16 KiB updates cost 1.09 us so
+    /// and 0.67 us together on a Ryzen 9700X (BLAKE3 #472). The same for
+    /// the output of a message that goes on past the stack's subtrees
+    /// (`above`). Rows of 16, as that machine cuts them, and rows of 32
+    /// where the target's kernels take 32-wide rows (so the run is longer
+    /// than one call on every target: 96 > 32 on 16-wide targets, 192 > 64
+    /// on 32-wide ones). Against official BLAKE3's hashes.
+    #[test]
+    fn an_output_condenses_the_rows_a_full_layer_at_a_time() {
+        const CALL: usize = 2 * crate::platform::MAX_SIMD_DEGREE;
+        let widest = ROW.min(crate::platform::MAX_SIMD_DEGREE);
+        for width in [16, widest] {
+            let group = width * CHUNK_LEN;
+            let input: std::vec::Vec<u8> = (0..64 * group + 100).map(|i| (i % 251) as u8).collect();
+            let hooks = Rows { platform: Platform::detect(), width: |_| width, parents: Default::default(), children: Default::default() };
+            let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+            let mut chunk = k.new_chunk(0);
+            let mut stack = CvStack::new();
+            for piece in input[..64 * group].chunks(group) {
+                let rest = fill(&k, &mut chunk, &mut stack, 0, piece);
+                feed(&k, &mut chunk, &mut stack, 0, rest);
+            }
+            assert_eq!((stack.len(), stack.rows_in_use()), (7, 6), "64 groups: six rows above the first group's value");
+            let mut layers = std::vec::Vec::new();
+            let mut run = 6 * width;
+            while run >= 12 {
+                layers.extend((0..run).step_by(CALL).map(|start| (run - start).min(CALL)));
+                run /= 2;
+            }
+            let asked = hooks.parents.borrow().len();
+            assert_eq!(final_node(&k, &chunk, &stack).root_bytes(), *blake3::hash(&input[..64 * group]).as_bytes());
+            assert_eq!(hooks.parents.borrow()[asked..], layers, "rows of {width}: the output's parents, each layer in as few calls as take it");
+            // And with a hundred bytes more, in a chunk of their own after the stack's 64 groups.
+            let asked = hooks.parents.borrow().len();
+            let mut tail = k.new_chunk((64 * width) as u64);
+            tail.update(&input[64 * group..]);
+            assert_eq!(above(&k, &stack, 1, k.chunk_node(&tail)).root_bytes(), *blake3::hash(&input).as_bytes());
+            assert_eq!(hooks.parents.borrow()[asked..], layers, "rows of {width}: the same layers under the bytes that follow");
+        }
     }
 
     /// A row gives up its place to the row ROWS entries above it, whatever
