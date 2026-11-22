@@ -267,6 +267,21 @@ impl Platform {
         unreachable!("build.rs builds for x86-64 and AArch64 alone")
     }
 
+    /// PROBE (probe/latency-ready, never to land): the kernels of this name
+    /// where this CPU has them ("sse41", "avx2", "avx512"), for
+    /// examples/host_lab.rs's cold mode, which hashes one message on each.
+    #[doc(hidden)]
+    #[cfg(all(target_arch = "x86_64", blake3_sse41_ffi, blake3_avx2_ffi, blake3_avx512_ffi))]
+    pub fn probe_named(name: &str) -> Option<Platform> {
+        let detected = Self::detect();
+        match name {
+            "sse41" => Some(Platform::SSE41),
+            "avx2" if detected != Platform::SSE41 => Some(Platform::AVX2),
+            "avx512" if detected == Platform::AVX512 => Some(Platform::AVX512),
+            _ => None,
+        }
+    }
+
     /// The selection's name, for reports.
     pub fn name(&self) -> &'static str {
         match self {

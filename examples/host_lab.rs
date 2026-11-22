@@ -32,9 +32,20 @@
 //! spinning?). `convenience::hash` after 200 microseconds, 1, 5 and 20
 //! milliseconds asleep, under each way of staying fast: as launched; the
 //! calling thread in QoS class default, user-initiated, user-interactive;
-//! one pool worker kept awake; a spinning thread of the program's own in
-//! the background QoS class (macOS runs that on efficiency cores). Writes
-//! `host_lab.rest.tsv` and the same table.
+//! the real-time policy audio threads use; one pool worker kept awake; a
+//! spinning thread of the program's own in the background QoS class
+//! (macOS runs that on efficiency cores). Writes `host_lab.rest.tsv` and
+//! the same table.
+//!
+//!     host_lab cold [VISITS]
+//!
+//! What a now-and-then call would gain from narrower kernels (x86-64: the
+//! Xeon's call after other work takes four times its back-to-back time at
+//! 16 KiB and 64 KiB, which reads as the 512-bit unit starting). One
+//! message on the calling thread, back to back, after other work and
+//! after 5 milliseconds asleep, through `convenience::hash` as shipped and
+//! through the one-thread tree on each kernel family the CPU has: the
+//! widest, AVX2, SSE4.1. Writes `host_lab.cold.tsv` and the same table.
 //!
 //!     host_lab price [SECONDS]
 //!
@@ -147,8 +158,9 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("latency") => latency(count.unwrap_or(200)),
         Some("rest") => rest(count.unwrap_or(200)),
+        Some("cold") => cold(count.unwrap_or(200)),
         Some("price") => price(count.unwrap_or(10)),
-        _ => panic!("usage: host_lab latency [VISITS] | rest [VISITS] | price [SECONDS]"),
+        _ => panic!("usage: host_lab latency [VISITS] | rest [VISITS] | cold [VISITS] | price [SECONDS]"),
     }
 }
 
@@ -159,20 +171,24 @@ fn main() {
 /// nanoseconds and the counts over both.
 fn visit(cell: Cell, source: &[u8], message: &mut [Block], work: &[u8]) -> (u64, u64, Option<clocks::Counts>) {
     let len = cell.len;
-    let call = |message: &[Block]| {
+    visit_with(cell.pause, len, source, message, work, |message: &[Block]| {
         if cell.multithreaded {
             black_box(throughput::hash_multithreaded(Mode::Plain, black_box(message), len));
         } else {
             black_box(convenience::hash(black_box(&Block::bytes(message)[..len])));
         }
-    };
+    })
+}
+
+/// [`visit`] with the call given: `call` hashes the message's first `len` bytes.
+fn visit_with(pause: Pause, len: usize, source: &[u8], message: &mut [Block], work: &[u8], call: impl Fn(&[Block])) -> (u64, u64, Option<clocks::Counts>) {
     let write = |message: &mut [Block]| Block::bytes_mut(message)[..len].copy_from_slice(black_box(&source[..len]));
-    let before = if cell.pause == Pause::Nonstop { 2 } else { 1 };
+    let before = if pause == Pause::Nonstop { 2 } else { 1 };
     for _ in 0..before {
         write(message);
         call(message);
     }
-    match cell.pause {
+    match pause {
         Pause::Nonstop => {}
         Pause::OtherWork => clocks::Gap::Busy(work).spend(OTHER_WORK_NS),
         Pause::Idle(ns) => clocks::Gap::Idle.spend(ns),
@@ -384,6 +400,42 @@ fn qos_now() -> Option<u32> {
     None
 }
 
+/// Put the calling thread under macOS's real-time policy
+/// (THREAD_TIME_CONSTRAINT_POLICY, what audio threads use): no period, 200
+/// microseconds of computation within 400. Whether the system took it
+/// (false elsewhere).
+fn real_time() -> bool {
+    #[cfg(target_vendor = "apple")]
+    {
+        #[repr(C)]
+        struct Policy {
+            period: u32,
+            computation: u32,
+            constraint: u32,
+            preemptible: u32,
+        }
+        unsafe extern "C" {
+            fn mach_thread_self() -> u32;
+            fn thread_policy_set(thread: u32, flavor: u32, policy: *const Policy, count: u32) -> i32;
+            fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+        }
+        let mut timebase = [0u32; 2];
+        // Sound: the two words are writable (numerator, denominator).
+        if unsafe { mach_timebase_info(&mut timebase) } != 0 || timebase[0] == 0 {
+            return false;
+        }
+        let ticks = |ns: u64| (ns * timebase[1] as u64 / timebase[0] as u64) as u32;
+        let policy = Policy { period: 0, computation: ticks(200_000), constraint: ticks(400_000), preemptible: 1 };
+        // Sound: the policy is four words, as the count says; the thread is this one.
+        return unsafe { thread_policy_set(mach_thread_self(), 2, &policy, 4) } == 0;
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+/// The blocks whose thread was refused the real-time policy.
+static REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// How the program tries to keep the calling thread fast through a rest.
 #[derive(Clone, Copy, PartialEq)]
 enum Fast {
@@ -391,6 +443,8 @@ enum Fast {
     AsLaunched,
     /// The calling thread in this QoS class.
     Qos(u32),
+    /// The calling thread under the real-time policy (macOS).
+    RealTime,
     /// One pool worker kept awake (the latency mode's "1 awake").
     Worker,
     /// A spinning thread of the program's own in the background QoS class.
@@ -408,6 +462,7 @@ fn rest(visits: usize) {
         ("QoS default", Fast::Qos(QOS_DEFAULT)),
         ("QoS user-initiated", Fast::Qos(QOS_USER_INITIATED)),
         ("QoS user-interactive", Fast::Qos(clocks::USER_INTERACTIVE)),
+        ("real-time policy", Fast::RealTime),
         ("one worker awake", Fast::Worker),
         ("a background spinner", Fast::BackgroundSpinner),
     ];
@@ -465,6 +520,14 @@ fn rest(visits: usize) {
                         block(&mut samples[w], &mut message);
                     });
                 }),
+                Fast::RealTime => std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        if !real_time() {
+                            REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        block(&mut samples[w], &mut message);
+                    });
+                }),
                 _ => block(&mut samples[w], &mut message),
             }
             SPIN.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -474,8 +537,68 @@ fn rest(visits: usize) {
     blake3_servil::__probe_latency(0, 512 * KIB, 128 * KIB);
     let mut head = facts(&format!("rest: {visits} visits a cell"), run_ns, workers);
     head += &format!("# the main thread's QoS class as launched: {}\n", launched.map_or("not reported here".to_owned(), |class| format!("{class:#x}")));
+    head += &format!("# blocks whose thread the system refused the real-time policy: {} of {visits}\n", REFUSED.load(std::sync::atomic::Ordering::Relaxed));
     head += &format!("# settles that did not complete in 200 ms: {unsettled}\n");
     report("host_lab.rest.tsv", &head, &settings, &cells, &samples);
+}
+
+fn cold(visits: usize) {
+    assert!(visits >= 1);
+    blake3_servil::initialize_multithreaded(None);
+    clocks::tight_timers();
+    let (_, workers) = blake3_servil::__probe_parked();
+    use blake3_servil_core::thread_support::Platform;
+    let tree = blake3_servil_core::throughput::TreeHasher::new(Mode::Plain);
+    // The kernel families this CPU has, the widest first; None is convenience::hash as shipped.
+    let mut kernels: Vec<(String, Option<Platform>)> = vec![("convenience::hash".to_owned(), None)];
+    let widest = Platform::detect();
+    kernels.push((format!("widest ({})", widest.name()), Some(widest)));
+    #[cfg(target_arch = "x86_64")]
+    for name in ["avx2", "sse41"] {
+        if let Some(platform) = Platform::probe_named(name).filter(|&p| p != widest) {
+            kernels.push((platform.name().to_owned(), Some(platform)));
+        }
+    }
+    let settings: Vec<Setting> = kernels.iter().map(|(name, _)| Setting { name: name.clone(), awake: 0, split: 512 * KIB, per: 128 * KIB }).collect();
+    let mut cells = Vec::new();
+    for pause in [Pause::Nonstop, Pause::OtherWork, Pause::Idle(5_000_000)] {
+        for len in [KIB, 4 * KIB, 16 * KIB, 64 * KIB, 256 * KIB, 1 << 20] {
+            cells.push(Cell { pause, multithreaded: false, len });
+        }
+    }
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let (source, mut message) = buffers(&mut rng);
+    let work = vec![1u8; OTHER_WORK_BYTES];
+    // Every kernel hashes right before anything is timed.
+    for (name, platform) in &kernels {
+        for len in [KIB, 4 * KIB, 16 * KIB + 1, 64 * KIB, (1 << 20) + 1] {
+            if let Some(platform) = platform {
+                assert_eq!(tree.hash_on(*platform, &source[..len]), convenience::hash(&source[..len]), "{name} at {len}");
+            }
+        }
+    }
+    let mut samples = vec![vec![Samples::default(); cells.len()]; settings.len()];
+    // Kernels and cells shuffled together: every visit is one (kernel, cell).
+    let mut order: Vec<(usize, usize)> = (0..kernels.len()).flat_map(|k| (0..cells.len()).map(move |c| (k, c))).collect();
+    let started = clocks::now();
+    for _ in 0..visits {
+        rng.shuffle(&mut order);
+        for &(k, c) in &order {
+            let cell = cells[c];
+            let len = cell.len;
+            clocks::load::tick();
+            let sample = match kernels[k].1 {
+                None => visit(cell, &source, &mut message, &work),
+                Some(platform) => visit_with(cell.pause, len, &source, &mut message, &work, |message: &[Block]| {
+                    black_box(tree.hash_on(platform, black_box(&Block::bytes(message)[..len])));
+                }),
+            };
+            keep(&mut samples[k][c], sample);
+        }
+    }
+    let run_ns = clocks::since_ns(started);
+    let head = facts(&format!("cold: {visits} visits a cell"), run_ns, workers);
+    report("host_lab.cold.tsv", &head, &settings, &cells, &samples);
 }
 
 /// This process's energy so far by the system's own estimate, and the
