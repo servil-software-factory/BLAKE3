@@ -1344,6 +1344,10 @@ mod test {
             let mut h = Hasher::new(Mode::Plain, None);
             h.core.update(&input[..in_core]);
             h.stage(&input[in_core..in_core + 900]);
+            // The count with part of a chunk in the core: on AArch64 no
+            // update leaves one there (every first chunk is staged), so
+            // only this state tells a count that subtracts it.
+            assert_eq!(h.count(), (in_core + 900) as u64, "{in_core} bytes in the core: the count");
             crate::COUNTED.with(|c| c[crate::Counted::TailApart as usize].set(0));
             assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input[..in_core + 900]), "{in_core} bytes in the core");
             assert_eq!(crate::COUNTED.with(|c| c[crate::Counted::TailApart as usize].get()), 0, "{in_core} bytes in the core: the copy");
