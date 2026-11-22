@@ -16,14 +16,20 @@ and the rest timed out or have no verdict.
   Pull-request runs check a synthetic merge by default, not the head SHA
   GitHub associates with the run, so they are not release evidence.
 - Long proofs: the commit's GitHub status "long proofs" (long-proofs.sh).
-- Mac check: results/*/verdict.json, in a clone of the Mac runners'
-  exchange (servil-software-factory/mac-runner; $MAC_RUNNER, or
-  mac-runner beside the main checkout; pull it first), whose job names
-  this commit as new_commit and the previous release as old_commit (a
-  "check" job with "cells": "all"), run on AC power from start to end (its verdict's "power
-  at start" and "power at end"); on battery it is NO VERDICT. The
-  timing Mac's results alone (a results folder is NAME.TIME-MACHINE, and
-  the exchange serves other Macs too), and of those the latest by TIME.
+- Mac check: the timing Mac's check of every cell of this commit against
+  the previous release, in a clone of the Mac runners' exchange
+  (servil-software-factory/mac-runner; $MAC_RUNNER, or mac-runner beside
+  the main checkout; pull it first). `mac_check` has the rules. In
+  short: a results folder is NAME.TIME-MACHINE, its job is
+  jobs/NAME.json, and the records that count are the timing Mac's whose
+  job is a "check" with "cells": "all" naming this commit as new_commit
+  and the previous release as old_commit. The step passes when every
+  such record is whole (a claim and a finished verdict that agree with
+  the folder), none is still queued, and the one the Mac started last
+  names both commits in full and says "no regression" of a run on AC
+  power that nobody inspected. A record that is not whole, a job that
+  cannot be told from such a check, two that started together: NO
+  VERDICT, with the folder named. An earlier pass never stands in.
 - The logs, each named for the commit it ran on (C: the commit's first 12
   hex digits), so an earlier commit's log cannot stand in for it:
   - Full mutation run: tmp/night/mutants-C.log, with one complete section
@@ -54,10 +60,11 @@ before the release's changes, and its pages are read fresh.
 """
 
 import argparse
-import glob
+import datetime
 import io
 import json
 import socket
+import stat
 import urllib.error
 from pathlib import Path
 import os
@@ -85,7 +92,7 @@ EXCHANGE = os.environ.get("MAC_RUNNER") or os.path.join(os.path.dirname(MAIN), "
 # last by its folder's name, and said FAIL where the M6's had passed.
 TIMING_MAC = "mac-m6-timing"
 # A results folder: the job's name, when a Mac claimed it, and which Mac.
-RESULTS_FOLDER = re.compile(r".+\.([0-9]{8}T[0-9]{6}Z)-([A-Za-z0-9_.-]+)")
+RESULTS_FOLDER = re.compile(r"(?s)(.+)\.([0-9]{8}T[0-9]{6}Z)-([A-Za-z0-9_.-]+)")
 
 
 # A step's two outcomes besides PASS, FAIL and OPEN.
@@ -323,6 +330,212 @@ def named_previous(commit, tag):
     return tag
 
 
+def shown(value):
+    """`value` for a step's one line: a text as JSON writes it (no line
+    break survives), anything else as Python does, the first 80 characters."""
+    text = json.dumps(value) if isinstance(value, str) else repr(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def read_object(path):
+    """The JSON object in the regular file at `path`, or a text that says
+    why there is none to take (for a sentence that begins with the
+    file). A link is not the file, a field written twice is not a
+    record, and a megabyte is more than any record holds."""
+
+    def once(pairs):
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("a field twice")
+        return dict(pairs)
+
+    try:
+        found = os.lstat(path)
+        if not stat.S_ISREG(found.st_mode):
+            return "is not a regular file"
+        if found.st_size > 1 << 20:
+            return "is too large for a record"
+        value = json.loads(Path(path).read_bytes().decode(), object_pairs_hook=once)
+    except OSError as e:
+        return f"cannot be read ({e.strerror or e})"
+    except (ValueError, RecursionError):  # not text, not JSON, a field twice, or nested past reading
+        return "is not a JSON object with each field once"
+    return value if isinstance(value, dict) else "is not a JSON object with each field once"
+
+
+def utc(text, form):
+    """The moment `text` names in `form`, or None where it names none."""
+    try:
+        return datetime.datetime.strptime(text, form) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def named(spelling, full):
+    """Does a job's `spelling` name the commit `full`: "in full", "by its
+    beginning" (the runner takes 7 to 40 lowercase hex digits), "another"
+    (a well-formed name of another commit), or None for what is no name.
+    Where `full` is None any commit will do, and the answer is how
+    `spelling` names its own."""
+    if not isinstance(spelling, str) or not re.fullmatch("[0-9a-f]{7,40}", spelling):
+        return None
+    if full is None:
+        return "in full" if len(spelling) == 40 else "by its beginning"
+    return "in full" if spelling == full else "by its beginning" if full.startswith(spelling) else "another"
+
+
+def check_of(job, commit, old):
+    """What a job file's content says of this step: None, it is not a
+    check of every cell of these commits (another kind of job, a check of
+    some cells, another commit's); "in full" or "by its beginning", it is
+    one, and how it names them; or a text that begins "?", it cannot be
+    told, with why. A job that cannot be told is never taken for another
+    commit's: `{}` says no more than `{` does."""
+    if isinstance(job, str):
+        return "? its job file " + job
+    kind = job.get("type")
+    if not isinstance(kind, str):
+        return f"? its job's type is {shown(kind)}"
+    if kind != "check" or job.get("cells") != "all":
+        return None
+    sides = [named(job.get("new_commit"), commit), named(job.get("old_commit"), old)]
+    if None in sides:
+        return f"? its job is a check of every cell whose commits are {shown(job.get('old_commit'))} and {shown(job.get('new_commit'))}"
+    if "another" in sides:
+        return None
+    return "by its beginning" if "by its beginning" in sides else "in full"
+
+
+def mac_check(exchange, commit, old):
+    """The Mac step, from a clone of the exchange: (outcome, note), the
+    outcome as `step` takes it and the note for its line.
+
+    The step says PASS for one thing only: every record in the exchange
+    that is, or may be, the timing Mac's check of every cell of `commit`
+    against `old` is whole, and the one the Mac started last says "no
+    regression" of a run on AC power that nobody inspected. It asks what
+    a good record looks like, and refuses the rest; it does not try to
+    list the ways a record can be bad.
+
+    The records. A results folder is NAME.TIME-MACHINE, a real folder
+    (not a link), and jobs/NAME.json is its job, whatever NAME holds. The
+    job says whether the folder counts: a "check" with "cells": "all"
+    whose new_commit and old_commit name `commit` and `old` (any commit
+    for old where there is no previous release), in full or by a
+    beginning. Another kind of job, a check of some cells and another
+    commit's check do not count, and their results are never opened. A
+    job that cannot be told (unreadable, without a type, a check of every
+    cell without two commits' names) holds the step, wherever it is: on
+    the timing Mac's folders, and among the jobs that no Mac has taken
+    yet, where a check of these commits that is still queued holds it too.
+
+    Whole. The record that counts has a claim (claimed.json: this job,
+    this Mac) and a verdict (verdict.json: this job, the type "check", a
+    status, when it started, not before the folder's TIME, and when it
+    finished, not before it started), each a regular file with one JSON
+    object, and a job that names no "points" beside "cells". A folder
+    without a verdict is a check queued or running. One record that is
+    not whole holds the step, however old: nobody can say when it ran.
+
+    Last. By the verdicts' "started": several jobs handed over together
+    share the folder's TIME, and a busy Mac runs them in the order of
+    their names, not of their coming. Two that started in the same
+    second cannot be put in order.
+
+    What the last one must be to pass: its commits named in full (an
+    abbreviation is resolved on the Mac, in a checkout this one cannot
+    see; such a check can fail the step and cannot pass it); both power
+    readings from the source "AC Power" (a check on battery measures the
+    efficiency cores' clock, not the machine's: job 351; jobs 1696 and
+    1697 passed so, #202; the readings are the two ends', which is all
+    the runner records); no inspection (the runner sampled the stacks of
+    the job's processes, tools/runner, which suspends them while they
+    are timed), where "inspections" is absent or a list, and any other
+    value passes nothing. Then "no regression" passes and any other
+    status fails, apart from the runner's three that decide nothing: the
+    status "timed out" (its limit ended the job: TIMED OUT, whatever else
+    is true of the record), "no verdict" (the machine was busy) and
+    "cancelled" (someone ended the job)."""
+
+    def hold(why):
+        return NO_VERDICT, f" ({why})"
+
+    try:
+        folders = sorted(os.scandir(os.path.join(exchange, "results")), key=lambda entry: entry.name)
+        queued = sorted(os.scandir(os.path.join(exchange, "jobs")), key=lambda entry: entry.name)
+    except OSError as e:
+        return hold(f"the exchange cannot be listed: {e.strerror or e}")
+    records, handed_over = [], set()
+    for entry in folders:
+        ran = RESULTS_FOLDER.fullmatch(entry.name)
+        if not ran:
+            continue
+        handed_over.add(ran.group(1))
+        if ran.group(3) != TIMING_MAC:
+            continue
+        name, label = ran.group(1), shown(entry.name)
+        job = read_object(os.path.join(exchange, "jobs", name + ".json"))
+        how = check_of(job, commit, old)
+        if how is None:
+            continue
+        if how.startswith("?"):
+            return hold(f"{label} cannot be told from a check of these commits: {how[2:]}")
+        folder = os.path.join(exchange, "results", entry.name)
+        claim, verdict = read_object(os.path.join(folder, "claimed.json")), read_object(os.path.join(folder, "verdict.json"))
+        started, finished = (utc(verdict.get(key), "%Y-%m-%dT%H:%M:%SZ") if isinstance(verdict, dict) else None for key in ("started", "finished"))
+        why = (
+            "it is not a folder" if entry.is_symlink() or not entry.is_dir(follow_symlinks=False)
+            else "its folder's time is no date" if utc(ran.group(2), "%Y%m%dT%H%M%SZ") is None
+            else "its job names points beside every cell" if "points" in job
+            else f"its claimed.json {claim}" if isinstance(claim, str)
+            else f"its claimed.json names {shown(claim.get('job'))} on {shown(claim.get('machine'))}" if claim.get("job") != name + ".json" or claim.get("machine") != TIMING_MAC
+            else "it has no verdict yet (queued or running: wait for it; if it was abandoned, take its folder out of the exchange)" if not os.path.lexists(os.path.join(folder, "verdict.json"))
+            else f"its verdict.json {verdict}" if isinstance(verdict, str)
+            else f"its verdict names the job {shown(verdict.get('job'))}" if verdict.get("job") != name + ".json"
+            else f"its verdict is of the type {shown(verdict.get('type'))}, not of a check" if verdict.get("type") != "check"
+            else f"its status is {shown(verdict.get('status'))}, not a text" if not isinstance(verdict.get("status"), str) or not verdict["status"]
+            else f"its verdict started at {shown(verdict.get('started'))} and finished at {shown(verdict.get('finished'))}" if started is None or finished is None or finished < started
+            else "its verdict started before its folder's time, when the job was handed over" if started < utc(ran.group(2), "%Y%m%dT%H%M%SZ") - datetime.timedelta(minutes=1)
+            else None
+        )
+        if why:
+            return hold(f"{label} is no whole record, and nothing says when it ran: {why}")
+        records.append((started, label, how, verdict))
+    for entry in queued:
+        if not entry.name.endswith(".json") or entry.name[:-5] in handed_over:
+            continue
+        job = read_object(entry.path)
+        how = check_of(job, commit, old)
+        if how is not None and (isinstance(job, str) or job.get("machine", TIMING_MAC) == TIMING_MAC):
+            return hold(f"jobs/{shown(entry.name)[1:-1]} is queued and no Mac has taken it: " + (how[2:] if how.startswith("?") else "a check of these commits; wait for it, or take it out"))
+    if not records:
+        return None, ""
+    records.sort(key=lambda record: record[0])
+    started, label, how, verdict = records[-1]
+    if len(records) > 1 and records[-2][0] == started:
+        return hold(f"the last two started in the same second and cannot be put in order: {records[-2][1]} and {label}; run the check again")
+    status = verdict["status"]
+    note = f" (the last one: {shown(status)[1:-1]})" if status != "no regression" else ""
+    undecided = status in ("no verdict", "cancelled")
+    for reading in (verdict.get("power at start"), verdict.get("power at end")):
+        if not isinstance(reading, str) or reading.split(",")[0].strip() != "AC Power":
+            note += f" (the last one ran off AC power: {shown(reading)[1:-1] if isinstance(reading, str) and reading else 'unrecorded'}; run it again plugged in)"
+            undecided = True
+            break
+    inspections = verdict.get("inspections", [])
+    if not isinstance(inspections, list):
+        note += f" (the last one's \"inspections\" is {type(inspections).__name__}, not a list: a record this check does not understand; run it again)"
+        undecided = True
+    elif inspections:
+        note += f" (the last one was inspected while it ran, {len(inspections)} time{'s' if len(inspections) != 1 else ''}: sampling suspends what it times; run it again)"
+        undecided = True
+    if status == "timed out":
+        return TIMED_OUT, note
+    if status == "no regression" and how != "in full" and not undecided:
+        note += f" (the last one, {label}, names a commit by its beginning, which the Mac resolved in a checkout of its own: it cannot pass a release; queue the check with both commits in full)"
+        undecided = True
+    return (NO_VERDICT if undecided else status == "no regression"), note
+
+
 def main():
     parser = argparse.ArgumentParser(description="Check the evidence for a BLAKE3-Servil release.")
     parser.add_argument("commit", nargs="?", default="main")
@@ -363,36 +576,9 @@ def main():
     except GitHubTimedOut as e:
         step("long proofs", TIMED_OUT, str(e))
 
-    mac, mac_power, mac_time = None, None, ""
-    for verdict in glob.glob(os.path.join(EXCHANGE, "results/*/verdict.json")):
-        # The timing Mac's, and the latest of them by the time in the
-        # folder's name (the names' own order is not the jobs': a name may
-        # begin with a number or with a date).
-        ran = RESULTS_FOLDER.fullmatch(os.path.basename(os.path.dirname(verdict)))
-        if not ran or ran.group(2) != TIMING_MAC or ran.group(1) < mac_time:
-            continue
-        v = json.loads(Path(verdict).read_text())
-        job = os.path.join(EXCHANGE, "jobs", v["job"])
-        if not os.path.exists(job):
-            continue
-        j = json.loads(Path(job).read_text())
-        if (j.get("type") == "check" and j.get("cells") == "all"
-                and j.get("new_commit") == commit
-                and (old is None or j.get("old_commit") == old)):
-            mac, mac_time = v["status"], ran.group(1)
-            # A check on battery measures the efficiency cores' clock, not
-            # the machine's (job 351; jobs 1696 and 1697 passed so, #202):
-            # it is no evidence. Both readings must say AC power.
-            readings = [v.get("power at start", ""), v.get("power at end", "")]
-            mac_power = next((r or "unrecorded" for r in readings if not r.startswith("AC Power")), None)
-    # The runner's verdict, each status as itself: "timed out" (its limit
-    # ended the job) and "no verdict" (the machine was busy) are neither a
-    # pass nor a regression.
-    step("Mac check against the previous release",
-         None if mac is None else TIMED_OUT if mac == "timed out" else NO_VERDICT if mac == "no verdict" or mac_power else mac == "no regression",
-         f"in {EXCHANGE} (pulled), a check job (cells all) on {TIMING_MAC} with old_commit {previous or '<the main line before this release>'} and new_commit {commit[:10]}, and old_bench_commit when the old side predates the bench's calls"
-         + (f" (the last one: {mac})" if mac in ("timed out", "no verdict") else "")
-         + (f" (the last one ran off AC power: {mac_power}; run it again plugged in)" if mac_power else ""))
+    mac, mac_note = mac_check(EXCHANGE, commit, old)
+    step("Mac check against the previous release", mac,
+         f"in {EXCHANGE} (pulled), a check job (cells all) on {TIMING_MAC} with old_commit {previous or '<the main line before this release>'} and new_commit {commit[:10]}, and old_bench_commit when the old side predates the bench's calls" + mac_note)
 
     step("full mutation run, core and threads", mutation_result(f"tmp/night/mutants-{commit[:12]}.log", commit),
          f"python3 tools/mutants/check.py --whole > tmp/night/mutants-{commit[:12]}.log, the commit checked out (both crates; --whole, since the default covers the change since origin/next)")
