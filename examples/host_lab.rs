@@ -47,6 +47,18 @@
 //! through the one-thread tree on each kernel family the CPU has: the
 //! widest, AVX2, SSE4.1. Writes `host_lab.cold.tsv` and the same table.
 //!
+//!     host_lab warn [VISITS]
+//!
+//! Helpers woken by a warning in place of helpers kept awake: how far
+//! ahead of the call must the warning come? Everything rests 5
+//! milliseconds; then three workers are woken (`__probe_warn`), the
+//! caller waits out the lead (0, 50 and 200 microseconds, 1 and 5
+//! milliseconds), and the call is timed: on one thread at 1 KiB and
+//! 64 KiB, over the pool (split from 32 KiB) at 256 KiB and 1 MiB. Beside
+//! them the call with no warning, as the library ships, and with the
+//! three kept awake through the rest. Writes `host_lab.warn.tsv` and the
+//! same table (its "setting" column names the way).
+//!
 //!     host_lab price [SECONDS]
 //!
 //! What helpers kept awake cost while no call comes: for 0, 1, 3, 7 and
@@ -159,8 +171,9 @@ fn main() {
         Some("latency") => latency(count.unwrap_or(200)),
         Some("rest") => rest(count.unwrap_or(200)),
         Some("cold") => cold(count.unwrap_or(200)),
+        Some("warn") => warn(count.unwrap_or(200)),
         Some("price") => price(count.unwrap_or(10)),
-        _ => panic!("usage: host_lab latency [VISITS] | rest [VISITS] | cold [VISITS] | price [SECONDS]"),
+        _ => panic!("usage: host_lab latency [VISITS] | rest [VISITS] | cold [VISITS] | warn [VISITS] | price [SECONDS]"),
     }
 }
 
@@ -599,6 +612,102 @@ fn cold(visits: usize) {
     let run_ns = clocks::since_ns(started);
     let head = facts(&format!("cold: {visits} visits a cell"), run_ns, workers);
     report("host_lab.cold.tsv", &head, &settings, &cells, &samples);
+}
+
+/// How a `warn` cell readies the pool for its call.
+#[derive(Clone, Copy, PartialEq)]
+enum Readied {
+    /// Nothing: the library as it ships.
+    Ships,
+    /// Three workers woken this many nanoseconds before the write.
+    Warned(u64),
+    /// Three workers kept awake through the rest.
+    Kept,
+}
+
+fn warn(visits: usize) {
+    assert!(visits >= 1);
+    blake3_servil::initialize_multithreaded(None);
+    clocks::tight_timers();
+    let (_, workers) = blake3_servil::__probe_parked();
+    assert!(workers >= 3, "the probe wakes three workers");
+    const REST_NS: u64 = 5_000_000;
+    const HELPERS: usize = 3;
+    let ways = [
+        ("no warning", Readied::Ships),
+        ("warned 0 us", Readied::Warned(0)),
+        ("warned 50 us", Readied::Warned(50_000)),
+        ("warned 200 us", Readied::Warned(200_000)),
+        ("warned 1 ms", Readied::Warned(1_000_000)),
+        ("warned 5 ms", Readied::Warned(5_000_000)),
+        ("kept awake", Readied::Kept),
+    ];
+    let calls = [(false, KIB), (false, 64 * KIB), (true, 256 * KIB), (true, 1 << 20)];
+    // The table's shape, reused: a row for each way (its "gap"), a column
+    // of samples for each call (its "setting").
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let (source, mut message) = buffers(&mut rng);
+    let mut samples = vec![vec![Samples::default(); calls.len()]; ways.len()];
+    let mut order: Vec<(usize, usize)> = (0..ways.len()).flat_map(|w| (0..calls.len()).map(move |c| (w, c))).collect();
+    let mut unsettled = 0;
+    let asleep = |split: usize| blake3_servil::__probe_latency(0, split, split.min(128 * KIB));
+    let started = clocks::now();
+    for _ in 0..visits {
+        rng.shuffle(&mut order);
+        for &(w, c) in &order {
+            let (multithreaded, len) = calls[c];
+            let way = ways[w].1;
+            let call = |message: &[Block]| {
+                if multithreaded {
+                    black_box(throughput::hash_multithreaded(Mode::Plain, black_box(message), len));
+                } else {
+                    black_box(convenience::hash(black_box(&Block::bytes(message)[..len])));
+                }
+            };
+            let write = |message: &mut [Block]| Block::bytes_mut(message)[..len].copy_from_slice(black_box(&source[..len]));
+            clocks::load::tick();
+            // The first call, untimed, as the timed one will run: with the helpers awake for every way but "no warning".
+            let ready = Setting { name: String::new(), awake: HELPERS, split: 32 * KIB, per: 32 * KIB };
+            let ships = Setting { name: String::new(), awake: 0, split: 512 * KIB, per: 128 * KIB };
+            settle(if way == Readied::Ships { &ships } else { &ready }, workers, &mut unsettled);
+            write(&mut message);
+            call(&message);
+            // The rest: every worker parked unless this way keeps them awake.
+            match way {
+                Readied::Ships | Readied::Kept => {}
+                Readied::Warned(_) => asleep(32 * KIB),
+            }
+            clocks::Gap::Idle.spend(REST_NS);
+            if let Readied::Warned(lead) = way {
+                blake3_servil::__probe_warn(HELPERS, 32 * KIB, 32 * KIB);
+                if lead > 0 {
+                    clocks::Gap::Idle.spend(lead);
+                }
+            }
+            black_box(clocks::Counts::read());
+            black_box(clocks::since_ns(clocks::now()));
+            let counts_before = clocks::Counts::read();
+            let t = clocks::now();
+            write(&mut message);
+            let write_ns = clocks::since_ns(t);
+            let t = clocks::now();
+            call(&message);
+            let hash_ns = clocks::since_ns(t);
+            let counts = counts_before.zip(clocks::Counts::read()).map(|(before, after)| after.since(before));
+            keep(&mut samples[w][c], (write_ns, hash_ns, counts));
+        }
+    }
+    let run_ns = clocks::since_ns(started);
+    blake3_servil::__probe_latency(0, 512 * KIB, 128 * KIB);
+    let mut head = facts(&format!("warn: {visits} visits a cell, {HELPERS} workers woken or kept, after {} ms of rest", REST_NS / 1_000_000), run_ns, workers);
+    head += &format!("# settles that did not complete in 200 ms: {unsettled}\n");
+    // Reported through the shared table: a "setting" for each way, a cell for each call.
+    let settings: Vec<Setting> = ways
+        .iter()
+        .map(|(name, way)| Setting { name: (*name).to_owned(), awake: if *way == Readied::Ships { 0 } else { HELPERS }, split: 32 * KIB, per: 32 * KIB })
+        .collect();
+    let cells: Vec<Cell> = calls.iter().map(|&(multithreaded, len)| Cell { pause: Pause::Idle(REST_NS), multithreaded, len }).collect();
+    report("host_lab.warn.tsv", &head, &settings, &cells, &samples);
 }
 
 /// This process's energy so far by the system's own estimate, and the

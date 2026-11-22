@@ -487,6 +487,13 @@ pub fn __probe_latency(awake: usize, split: usize, per: usize) {
     lanes::probe_latency(awake, split, per)
 }
 
+/// PROBE: [`__probe_latency`] that wakes `awake` workers and no more: a
+/// warning that a call is coming.
+#[doc(hidden)]
+pub fn __probe_warn(awake: usize, split: usize, per: usize) {
+    lanes::probe_warn(awake, split, per)
+}
+
 /// PROBE: how many workers are parked now, and how many the pool has.
 #[doc(hidden)]
 pub fn __probe_parked() -> (usize, usize) {

@@ -152,6 +152,18 @@ pub(crate) fn probe_latency(awake: usize, split: usize, per: usize) {
     pool().park.wake_all();
 }
 
+/// The probe's warning: set the knobs as [`probe_latency`] does, and wake
+/// `awake` workers and no more (the lowest-numbered parked ones, which
+/// are the ones the knob keeps up when every worker was parked).
+pub(crate) fn probe_warn(awake: usize, split: usize, per: usize) {
+    assert!(split > MIN_PIECE_LEN && per >= MIN_PIECE_LEN, "a split job has two pieces or more");
+    PROBE_SPLIT.store(split, Ordering::SeqCst);
+    PROBE_PER.store(per, Ordering::SeqCst);
+    PROBE_AWAKE.store(awake, Ordering::SeqCst);
+    let park = &pool().park;
+    let _ = (0..awake).take_while(|_| park.wake_one()).count();
+}
+
 /// How many workers are parked now, and how many the pool has (the probe's check).
 pub(crate) fn probe_parked() -> (usize, usize) {
     (pool().park.parked_count(), pool().workers())
