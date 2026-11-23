@@ -20,7 +20,7 @@ path = "src/main.rs"
 anyhow = "1.0.25"
 blake3 = { version = "=0.10.0+dev", path = "../threads", package = "blake3-servil" }
 # --sigilcode: each hash as a sigil (johnservil/sigil), its full version pinned.
-sigilcode = "=0.1.0+81af550bfd3eb2aff85c3ddf0a21446e78a1809d"
+sigilcode = "=0.2.0+3d45e305e2204f7d52a9728edc3d9f3e9ee809c1"
 
 # A file already in the page cache is mapped and hashed in place.
 [target.'cfg(unix)'.dependencies]

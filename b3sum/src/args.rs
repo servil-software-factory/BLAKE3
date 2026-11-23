@@ -24,9 +24,9 @@ Options:
                               while b3sum hashes it then cannot stop the run
       --no-names              Omit filenames in the output
       --raw                   Write raw output bytes to stdout, rather than hex
-      --sigilcode             Write each hash as a sigil (25 characters for 32 bytes; see
-                              johnservil/sigil), rather than hex, of at most 65536 output bytes;
-                              with --check, read sigils as well as hex
+      --sigilcode             [experimental] Write each hash as a Sigil 0.2 sigil (8 hex digits
+                              and 22 letters for 32 bytes; see johnservil/sigil), rather than hex,
+                              for 8 to 65536 output bytes; with --check, read sigils as well as hex
       --tag                   Output BSD-style checksums: BLAKE3 ([FILE]) = [HASH]
   -c, --check                 Read BLAKE3 sums from the [FILE]s and check them
       --quiet                 Skip printing OK for each checked file
