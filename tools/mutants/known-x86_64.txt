@@ -22,15 +22,12 @@ src/each.rs	delete match arm 960 in by_blocks_at_once	1	same code: every test bi
 src/each.rs	replace % with + in by_blocks_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace % with / in by_blocks_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace && with || in by_blocks_at_once	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/each.rs	replace && with || in finalize_each	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace * with + in by_blocks_at_once	5	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace * with / in by_blocks_at_once	5	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace + with * in by_blocks_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace + with - in by_blocks_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/each.rs	replace <= with > in finalize_each	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace == with != in by_blocks_at_once	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/each.rs	replace == with != in finalize_each	3	[cpu has avx512f avx512vl] same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/each.rs	replace == with != in finalize_each	4	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane finish's own condition and its test record, behind `matches!(Platform::detect(), Platform::AVX512)`: a CPU without AVX-512 never takes it, and AVX-512 machines catch it (one place; the other three are NEON's, the same code on x86-64)
+src/each.rs	replace == with != in finalize_each	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane finish's own condition, behind `matches!(Platform::detect(), Platform::AVX512)`: a CPU without AVX-512 never takes it, and AVX-512 machines catch it
 src/each.rs	replace >= with < in by_blocks_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace >= with < in finalize_each	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane finish's own condition and its test record, behind `matches!(Platform::detect(), Platform::AVX512)`: a CPU without AVX-512 never takes it, and AVX-512 machines catch it
 src/each.rs	replace hash_held with ()	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -56,9 +53,9 @@ src/ffi_output.rs	replace == with != in held_groups	1	[cpu lacks avx512f avx512v
 src/ffi_output.rs	replace == with != in input	2	[cpu lacks avx512f avx512vl] code for another machine: `input` describes a message for the sixteen-lane finish of finalize_each, which only an AVX-512 CPU takes; this CPU never calls it. AVX-512 machines catch it (incremental_roots_batch_all_modes_and_selected_indices, a_turn_then_an_update_finishes_outside_the_group)
 src/ffi_output.rs	replace >= with < in held_groups	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
 src/ffi_output.rs	replace input -> Option<Input<'_>> with None	1	[cpu lacks avx512f avx512vl] code for another machine: `input` describes a message for the sixteen-lane finish of finalize_each, which only an AVX-512 CPU takes; this CPU never calls it. AVX-512 machines catch it (incremental_roots_batch_all_modes_and_selected_indices)
-src/ffi_output.rs	replace | with & in input	6	[cpu lacks avx512f avx512vl] code for another machine: `input` describes a message for the sixteen-lane finish of finalize_each, which only an AVX-512 CPU takes; this CPU never calls it. AVX-512 machines catch it (incremental_roots_batch_all_modes_and_selected_indices, a_turn_then_an_update_finishes_outside_the_group)
+src/ffi_output.rs	replace | with & in input	4	[cpu lacks avx512f avx512vl] code for another machine: `input` describes a message for the sixteen-lane finish of finalize_each, which only an AVX-512 CPU takes; this CPU never calls it. AVX-512 machines catch it (incremental_roots_batch_all_modes_and_selected_indices, a_turn_then_an_update_finishes_outside_the_group)
 src/ffi_output.rs	replace | with ^ in held_groups	1	equivalent: mode flags (0, 16, 32, 64) and PARENT (4) occupy disjoint bits
-src/ffi_output.rs	replace | with ^ in input	6	equivalent: mode flags (0, 16, 32, 64), CHUNK_START (1), CHUNK_END (2) and ROOT (8) occupy disjoint bits
+src/ffi_output.rs	replace | with ^ in input	4	equivalent: mode flags (0, 16, 32, 64), CHUNK_START (1), CHUNK_END (2) and ROOT (8) occupy disjoint bits
 src/ffi_output.rs	replace | with ^ in packed	3	equivalent: | and ^ agree on flag bits that never overlap: the mode's flags hold none of CHUNK_START, CHUNK_END and ROOT
 src/ffi_output.rs	replace | with ^ in self_test_shape	2	equivalent: fixture structural flags (3, 2, 4), mode flags (0, 16, 32, 64) and optional ROOT (8) occupy disjoint bits
 src/ffi_partial.rs	replace % with + in rotation	1	equivalent: k % 4 becomes k + 4, which adds 16 to each shuffle index; pshufb reads an index's low four bits (and bit 7, clear: the largest is 47), so the shuffle is the same
@@ -70,7 +67,7 @@ src/hasher.rs	replace - with / in feed	1	equivalent: ahead is read by the SME2 k
 src/hasher.rs	replace < with <= in ChunkState<P>::fill_buf	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/hasher.rs	replace < with <= in fill	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/hasher.rs	replace | with ^ in ChunkState<P>::absorb	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
-src/hasher.rs	replace | with ^ in ChunkState<P>::output	2	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
+src/hasher.rs	replace | with ^ in ChunkState<P>::output_parts	2	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
 src/hasher.rs	replace | with ^ in Output<P>::root_bytes	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
 src/hasher.rs	replace | with ^ in parent_output	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
 src/incremental.rs	replace && with || in <impl hasher::Hooks for HasherHooks<'_>>::subtree_cv	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
