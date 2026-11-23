@@ -81,8 +81,8 @@ impl Args {
         if inner.raw && file_args.len() > 1 {
             bail!("Only one filename can be provided when using --raw");
         }
-        if inner.sigilcode && inner.length == 0 && !inner.check {
-            bail!("--sigilcode writes at least one output byte; --length is 0");
+        if inner.sigilcode && inner.length < SIGIL_MIN_LEN && !inner.check {
+            bail!("--sigilcode writes at least {SIGIL_MIN_LEN} output bytes; --length is {}", inner.length);
         }
         // A sigil is made whole, in memory: a length of gigabytes was an
         // allocation that stopped the process, where hex is written in
@@ -554,7 +554,8 @@ pub(crate) fn resident(map: &memmap2::Mmap) -> bool {
 #[cfg(unix)]
 pub(crate) const MAP_LEN: usize = POOL_LEN;
 
-/// The most output bytes --sigilcode writes as one sigil.
+/// The fewest and most output bytes --sigilcode writes as one sigil.
+const SIGIL_MIN_LEN: u64 = 8;
 const SIGIL_MAX_LEN: u64 = 1 << 16;
 
 const POOL_LEN: usize = 512 << 10;

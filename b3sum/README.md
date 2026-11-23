@@ -90,9 +90,9 @@ Options:
                               while b3sum hashes it then cannot stop the run
       --no-names              Omit filenames in the output
       --raw                   Write raw output bytes to stdout, rather than hex
-      --sigilcode             Write each hash as a sigil (25 characters for 32 bytes; see
-                              johnservil/sigil), rather than hex, of at most 65536 output bytes;
-                              with --check, read sigils as well as hex
+      --sigilcode             [experimental] Write each hash as a Sigil 0.2 sigil (8 hex digits
+                              and 22 letters for 32 bytes; see johnservil/sigil), rather than hex,
+                              for 8 to 65536 output bytes; with --check, read sigils as well as hex
       --tag                   Output BSD-style checksums: BLAKE3 ([FILE]) = [HASH]
   -c, --check                 Read BLAKE3 sums from the [FILE]s and check them
       --quiet                 Skip printing OK for each checked file
@@ -194,19 +194,21 @@ $ ls outboards
 
 ## Hashes as sigils (experimental)
 
-> **Experimental:** `--sigilcode` uses [Sigil](https://github.com/johnservil/sigil) 0.1, which is experimental and not yet stable. Sigil 0.1 has a known Unicode 15.1 line-break flaw in 52 Cham letters, and Sigil 0.2 will change the format incompatibly. Do not store long-lived checkfiles in Sigil 0.1 format; wait for Sigil 0.2.
+> **Experimental:** `--sigilcode` uses [Sigil](https://github.com/johnservil/sigil) 0.2 (hex-prefixed), which is on trial and not yet stabilized. Sigil 0.2 replaces Sigil 0.1 (which had a Unicode 15.1 line-break flaw in Cham letters) and is incompatible with 0.1 checkfiles.
 
-`--sigilcode` prints each 32-byte hash as a 25-character
-[sigil](https://github.com/johnservil/sigil) instead of hex. A sigil is a
+`--sigilcode` prints each 32-byte hash as a 30-character visible
+[sigil](https://github.com/johnservil/sigil) (a leading left-to-right mark,
+the first 8 hex digits, and 22 letters) instead of 64 hex digits. A sigil is a
 single word (easy to double-click to select), uses visually distinct characters,
 and includes its own error check so typos or swapped adjacent characters fail
 before hashing begins. With `--check --sigilcode`, checkfiles may mix sigils and
-hex. A sigil is made whole, in memory, so `--length` may ask for at most 65,536
-output bytes with `--sigilcode`.
+hex (and sigils copied without their leading mark or with uppercase hex still
+verify). A sigil is made whole, in memory, so `--length` must ask for 8 to
+65,536 output bytes with `--sigilcode`.
 
 ```
 $ b3sum --sigilcode empty
-ᢳᕌᔃጾዿᑂഔጕꔍⶰᣟꕄꕛቴⴲజᐽᙿᕯⶂጁᑃሃᛜጩ  empty
+‎af1349b9ꛡኾपⷃꢢꔹടꗐᘦꚧꢯꗔᚵᖣꗘᒬᔑৎሱसቝᗰ  empty
 $ b3sum --sigilcode empty > sums.b3 && b3sum --sigilcode --check sums.b3
 empty: OK
 ```
