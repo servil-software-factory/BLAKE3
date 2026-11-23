@@ -98,6 +98,20 @@ A process that could not be ended, or a failed process listing, stops the
 job (status "error" or "timed out") rather than starting the next command
 beside an unknown survivor.
 
+A job that reaches its time limit leaves stacks.txt beside its log: its
+processes, and where each stood when the limit came. The runner reads
+them while it holds them stopped, between stopping every one and
+killing every one, so nothing of the job runs or starts meanwhile. The
+file lists the processes (each one's state before the stop, its share
+of a CPU, its command). Then, on macOS, /usr/bin/sample of each process
+(every thread's call graph), sixteen processes at a time, the deepest
+descendants first; on Linux each thread's name and the CPU time it has
+used, which is what an account without root can read of a stopped
+process there. The capture takes STACKS_BUDGET seconds at most,
+whatever any step of it does. It never changes the verdict: what it
+could not read it says in the file, and the verdict's "stacks" says
+what the file holds.
+
 Known limits of this PID-based cleanup (a cgroup per job on Linux belongs
 to ops #25):
 - A process that left the session and whose parent had already ended
@@ -147,6 +161,13 @@ EXAMPLES = {"host_lab", "energy_probe", "job_trace", "sme_units"}
 FEATURES = {"job-trace"}
 DEFAULT_LIMIT = 1800
 MAX_LIMIT = 7200
+# What a job at its limit leaves in stacks.txt (the docstring's paragraph):
+# the seconds the capture may take all told, the program that samples a
+# process's threads (macOS has one; None reads /proc), and how many of
+# them run at once.
+STACKS_BUDGET = 10.0
+SAMPLER = "/usr/bin/sample" if sys.platform == "darwin" else None
+SAMPLED_AT_ONCE = 16
 
 stopping = False
 
@@ -293,7 +314,7 @@ def _fallback_killpg(leader):
             pass
 
 
-def end_job(leader, began, leader_reaped=False):
+def end_job(leader, began, leader_reaped=False, while_stopped=None):
     """End every process of a job's command (job_processes). Returns
     `(found, left, error)`:
     - `found`: {pid: start_time} of non-zombie processes seen;
@@ -303,6 +324,11 @@ def end_job(leader, began, leader_reaped=False):
     Stop pass: sends SIGSTOP to every non-stopped, non-zombie job process
     and re-reads until every live job process is stopped (`T`) and no new
     ones appear (up to 15 rounds).
+    Between the passes, `while_stopped(processes, states)` is called if
+    given: `processes` is {pid: start_time} of the stopped ones, `states`
+    {pid: the state letter ps gave when the pid was first seen, before this
+    function signalled it}. The kill pass follows whatever it does; what it
+    raises is raised again once the kill pass is over.
     Kill pass: verifies each process's start time against the current table
     before SIGKILL, and re-reads until none remain.
     If `ps` fails at any point (e.g. EAGAIN at the process limit), falls
@@ -312,6 +338,7 @@ def end_job(leader, began, leader_reaped=False):
     if not isinstance(leader, int) or leader <= 0:
         return {}, set(), f"invalid session leader PID {leader!r}"
     seen = {}       # pid -> (start_time, was_zombie_first_seen)
+    states = {}     # pid -> ps's state letter when first seen
     error = None
 
     def kill_known_and_group():
@@ -332,6 +359,7 @@ def end_job(leader, began, leader_reaped=False):
             for pid, info in current.items():
                 if pid not in seen:
                     seen[pid] = info
+                    states[pid] = table[pid][1]
             to_stop = {
                 pid: at
                 for pid, (at, z) in current.items()
@@ -345,6 +373,13 @@ def end_job(leader, began, leader_reaped=False):
         error = str(e)
         kill_known_and_group()
         return {pid: at for pid, (at, z) in seen.items() if not z}, set(), error
+
+    raised = None
+    if while_stopped is not None:
+        try:
+            while_stopped({pid: at for pid, (at, zombie) in current.items() if not zombie}, states)
+        except BaseException as e:
+            raised = e
 
     # Kill pass: keep discovering and killing until no live job processes remain.
     left = set()
@@ -372,7 +407,113 @@ def end_job(leader, began, leader_reaped=False):
         error = str(e)
         kill_known_and_group()
 
+    if raised is not None:
+        raise raised
     return {pid: at for pid, (at, z) in seen.items() if not z}, left, error
+
+
+def threads(pid):
+    """Each thread of a Linux process, a line: its name and the CPU time
+    it has used, from /proc. (Of a stopped process an account without root
+    reads no more: the kernel symbol a thread waited in is gone with the
+    stop.)"""
+    def read(path):
+        try:
+            return path.read_bytes().decode("utf-8", "replace").strip()
+        except OSError:
+            return ""
+    try:
+        tasks = sorted(Path(f"/proc/{pid}/task").iterdir(), key=lambda task: int(task.name))
+    except (OSError, ValueError):
+        return "its threads could not be read\n"
+    lines = []
+    for task in tasks:
+        # The times follow the name's closing parenthesis, the 12th and 13th fields after it; the name may hold any byte.
+        fields = read(task / "stat").rpartition(")")[2].split()
+        used = f"{(int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK'):.2f} s of CPU" if len(fields) > 12 else "its times could not be read"
+        lines.append(f"thread {task.name} ({read(task / 'comm') or '?'}): {used}")
+    return "\n".join(lines) + "\n"
+
+
+def stacks(processes, states, budget):
+    """Where a job's stopped processes stand: the text for stacks.txt, and
+    a sentence for the verdict. `processes` and `states` are end_job's.
+    Takes `budget` seconds at most whatever any step does, and what it
+    could not read it says in the text.
+
+    First the processes as ps lists them, with each one's state before
+    the stop. Then, with a SAMPLER, a second's sample of every process,
+    SAMPLED_AT_ONCE at a time, the deepest descendants first: a test that
+    hangs is a leaf, and its ancestors wait for it. Without one,
+    `threads` reads each."""
+    deadline = time.monotonic() + budget
+    left = lambda: max(0.0, deadline - time.monotonic())
+    live = sorted(processes)
+    if not live:
+        return "no process of the command was running\n", "no stacks: no process of the command was running"
+    parent, rows = {}, []
+    try:
+        listed = subprocess.run(["ps", "-o", "pid=", "-o", "ppid=", "-o", "%cpu=", "-o", "etime=", "-o", "args=", "-p", ",".join(map(str, live))],
+                                capture_output=True, timeout=left(), start_new_session=True).stdout.decode("utf-8", "replace")
+        for line in listed.splitlines():
+            fields = line.split(None, 4)
+            # ps prints a command's arguments as they are: a line break within them makes lines that are no rows.
+            if len(fields) >= 4 and fields[0].isdigit() and fields[1].isdigit():
+                pid = int(fields[0])
+                parent[pid] = int(fields[1])
+                rows.append(f"{pid:>7} {fields[1]:>7} {states.get(pid, '?'):<4} {fields[2]:>5} {fields[3]:>11} {fields[4] if len(fields) > 4 else ''}")
+            else:
+                rows.append(line)
+    except (OSError, subprocess.SubprocessError) as e:
+        rows.append(f"ps could not list them: {e}")
+
+    def depth(pid):
+        steps = 0
+        while parent.get(pid) in processes and steps < len(processes):
+            pid, steps = parent[pid], steps + 1
+        return steps
+    live.sort(key=lambda pid: (-depth(pid), pid))
+    parts = [f"{len(live)} processes: PID, parent, state before the stop, % of a CPU, time running, command\n" + "\n".join(rows) + "\n"]
+    read = 0
+    if SAMPLER:
+        with tempfile.TemporaryDirectory() as folder:
+            waiting = list(live)
+            while waiting and left() > 0:
+                batch, waiting = waiting[:SAMPLED_AT_ONCE], waiting[SAMPLED_AT_ONCE:]
+                samplers = []
+                for pid in batch:
+                    try:
+                        samplers.append((pid, subprocess.Popen([SAMPLER, str(pid), "1", "-file", f"{folder}/{pid}.txt"], stdout=subprocess.DEVNULL,
+                                                               stderr=subprocess.DEVNULL, start_new_session=True)))
+                    except OSError as e:
+                        parts.append(f"\n--- process {pid} ---\nthe sampler did not start: {e}\n")
+                for pid, sampler in samplers:
+                    try:
+                        sampler.wait(timeout=left())
+                        ended = f"ended with {sampler.returncode}"
+                    except subprocess.TimeoutExpired:
+                        sampler.kill()
+                        ended = "ran out of time"
+                        try:
+                            sampler.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    try:
+                        sample = Path(folder, f"{pid}.txt").read_bytes().decode("utf-8", "replace")
+                    except OSError:
+                        sample = ""
+                    read += bool(sample.strip())
+                    parts.append(f"\n--- process {pid} ---\n{sample if sample.strip() else f'no sample: the sampler {ended}'}\n")
+            parts.extend(f"\n--- process {pid} ---\nno sample: the capture's {budget:g} s were over\n" for pid in waiting)
+    else:
+        for pid in live:
+            if left() <= 0:
+                parts.append(f"\n--- process {pid} ---\nnot read: the capture's {budget:g} s were over\n")
+                continue
+            parts.append(f"\n--- process {pid} ---\n{threads(pid)}")
+            read += 1
+    said = f"stacks.txt: {read} of the command's {len(live)} processes at the time limit"
+    return "".join(parts), said if read == len(live) else f"{said}; why the others are missing is in the file"
 
 
 def not_ended(left):
@@ -455,6 +596,20 @@ class Job:
         self.limit = limit
         self.deadline = time.monotonic() + limit
         self.left_running = []              # what commands left running when they ended, a sentence each: for the verdict
+        self.stacks = None                  # what stacks.txt holds, once the limit has ended a command: for the verdict
+
+    def keep_stacks(self, processes, states, why):
+        """Write stacks.txt beside the log: where the command's stopped
+        processes stood when `why` came (end_job's `while_stopped`). A
+        capture that fails says so in `stacks` and changes nothing else:
+        the job's verdict stays its own."""
+        try:
+            text, self.stacks = stacks(processes, states, STACKS_BUDGET)
+            with open(Path(self.log.name).with_name("stacks.txt"), "w", encoding="utf-8", errors="backslashreplace") as file:
+                file.write(f"{utc('%Y-%m-%dT%H:%M:%SZ')} {why}\n{text}")
+        except Exception as e:
+            self.stacks = f"no stacks: {type(e).__name__}: {e}".encode("ascii", "backslashreplace").decode()
+        print(f"runner: {self.stacks}", file=self.log, flush=True)
 
     def run(self, cmd, cwd, capture=False):
         remaining = self.deadline - time.monotonic()
@@ -487,11 +642,17 @@ class Job:
         try:
             proc.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
+            said = f"the job's {self.limit} s limit ended: {' '.join(cmd)}"
             # Every process of the command, not the command alone nor its
             # process group alone: cargo's children (a benchmark it runs, a
             # test that cargo-nextest put in a group of its own) would
-            # otherwise go on into the next job (#473).
-            _, left, err = end_job(proc.pid, began, leader_reaped=False)
+            # otherwise go on into the next job (#473). While they are
+            # stopped, where each one stood is kept for whoever reads
+            # "timed out".
+            _, left, err = end_job(proc.pid, began, leader_reaped=False,
+                                   while_stopped=lambda processes, states: self.keep_stacks(processes, states, said))
+            if self.stacks is None:
+                self.stacks = "no stacks: the processes could not be listed"
             if proc.stdout is not None:
                 try:
                     proc.stdout.close()
@@ -508,7 +669,7 @@ class Job:
                 detail += f"; cleanup error: {err}"
             if left:
                 detail += f"; {not_ended(left)}"
-            raise TimedOut(f"the job's {self.limit} s limit ended: {' '.join(cmd)}{detail}")
+            raise TimedOut(f"{said}{detail}")
         # The leader has exited and been reaped (`leader_reaped=True`). End any
         # descendant/session process it left running (which also closes any held
         # stdout pipe so `reader` finishes promptly).
@@ -908,6 +1069,8 @@ def process(path, out):
             finally:
                 if running.left_running:
                     verdict["left running"] = running.left_running
+                if running.stacks:
+                    verdict["stacks"] = running.stacks
                 for name, meter in meters.items():
                     # sudo passes the signal on to powermetrics, which ends its
                     # last sample and exits, as top does. A meter that outlasts

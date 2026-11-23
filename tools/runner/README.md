@@ -59,7 +59,9 @@ pulls before each look; results land in `results/` with the machine's
 name in the folder. A job runs once per file name, so a changed job takes
 a new number. The job format is the docstring at the top of `runner.py`.
 A machine that serves the shared exchange runs nothing else, so a
-timing job there needs no arrangement with anyone.
+timing job there needs no arrangement with anyone. A job that ran into
+its time limit has `stacks.txt` among its results: its processes, and
+what each was doing when the limit came.
 
 ## A machine for the shared exchange (once)
 
