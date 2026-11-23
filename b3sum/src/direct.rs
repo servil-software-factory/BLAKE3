@@ -216,7 +216,7 @@ mod test {
     #[test]
     fn a_file_read_directly_hashes_as_its_bytes_do() {
         blake3::initialize();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let all: Vec<u8> = (0..7 * PIECE + 12345).map(|i: usize| (i.wrapping_mul(37) ^ (i >> 11)) as u8).collect();
         let key = [0x33u8; 32];
         let mut piece = Piece::new();
@@ -260,7 +260,7 @@ mod test {
         if crate::threads().get() == 1 {
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let path = dir.path().join("input");
         let original = vec![0x35u8; DIRECT_MIN as usize];
         std::fs::write(&path, &original).unwrap();
@@ -284,7 +284,7 @@ mod test {
     #[test]
     fn the_one_file_path_reads_a_cold_long_file_directly() {
         blake3::initialize();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let all: Vec<u8> = (0..DIRECT_MIN as usize + 4096).map(|i: usize| (i.wrapping_mul(41) ^ (i >> 9)) as u8).collect();
         let probe = dir.path().join("probe");
         std::fs::write(&probe, &all[..4096]).unwrap();

@@ -1,8 +1,134 @@
-use duct::cmd;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::prelude::*;
-use std::path::PathBuf;
+use std::io::{self, prelude::*};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+#[path = "../src/test_temp.rs"]
+mod tempfile;
+
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+#[derive(Clone)]
+struct Cmd {
+    program: OsString,
+    args: Vec<OsString>,
+    dir: Option<PathBuf>,
+    stdin_bytes: Option<Vec<u8>>,
+    stdout_capture: bool,
+    stderr_capture: bool,
+    stderr_null: bool,
+    unchecked: bool,
+}
+
+fn cmd<P, I, A>(program: P, args: I) -> Cmd
+where
+    P: AsRef<OsStr>,
+    I: IntoIterator<Item = A>,
+    A: AsRef<OsStr>,
+{
+    Cmd {
+        program: program.as_ref().to_os_string(),
+        args: args.into_iter().map(|a| a.as_ref().to_os_string()).collect(),
+        dir: None,
+        stdin_bytes: None,
+        stdout_capture: false,
+        stderr_capture: false,
+        stderr_null: false,
+        unchecked: false,
+    }
+}
+
+macro_rules! cmd {
+    ($prog:expr $(, $arg:expr)* $(,)?) => {{
+        #[allow(unused_mut)]
+        let mut c = cmd($prog, ::core::iter::empty::<&OsStr>());
+        $(c.args.push(AsRef::<OsStr>::as_ref(&$arg).to_os_string());)*
+        c
+    }};
+}
+
+impl Cmd {
+    fn dir(mut self, path: impl AsRef<Path>) -> Self {
+        self.dir = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    fn stdin_bytes(mut self, bytes: impl AsRef<[u8]>) -> Self {
+        self.stdin_bytes = Some(bytes.as_ref().to_vec());
+        self
+    }
+
+    fn stdout_capture(mut self) -> Self {
+        self.stdout_capture = true;
+        self
+    }
+
+    fn stderr_capture(mut self) -> Self {
+        self.stderr_capture = true;
+        self
+    }
+
+    fn stderr_null(mut self) -> Self {
+        self.stderr_null = true;
+        self
+    }
+
+    fn unchecked(mut self) -> Self {
+        self.unchecked = true;
+        self
+    }
+
+    fn run(self) -> io::Result<Output> {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        if let Some(dir) = &self.dir {
+            command.current_dir(dir);
+        }
+        command.stdin(if self.stdin_bytes.is_some() { Stdio::piped() } else { Stdio::inherit() });
+        command.stdout(if self.stdout_capture { Stdio::piped() } else { Stdio::inherit() });
+        command.stderr(if self.stderr_capture {
+            Stdio::piped()
+        } else if self.stderr_null {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        });
+        let mut child = command.spawn()?;
+        let writer = self.stdin_bytes.map(|bytes| {
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(&bytes);
+            })
+        });
+        let output = child.wait_with_output()?;
+        if let Some(handle) = writer {
+            let _ = handle.join();
+        }
+        if !self.unchecked && !output.status.success() {
+            return Err(io::Error::other(format!("command {:?} exited with {}", self.program, output.status)));
+        }
+        Ok(output)
+    }
+
+    fn read(self) -> io::Result<String> {
+        let output = self.stdout_capture().run()?;
+        let mut s = String::from_utf8(output.stdout).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        while s.ends_with('\n') || s.ends_with('\r') {
+            s.pop();
+        }
+        Ok(s)
+    }
+}
 
 pub fn b3sum_exe() -> PathBuf {
     env!("CARGO_BIN_EXE_b3sum").into()
@@ -285,7 +411,7 @@ fn test_derive_key() {
     let f = tempfile::NamedTempFile::new().unwrap();
     f.as_file().write_all(b"key material").unwrap();
     f.as_file().flush().unwrap();
-    let expected = hex::encode(*blake3::convenience::hash_with(blake3::Mode::DeriveKey(context), b"key material").as_bytes());
+    let expected = hex_encode(*blake3::convenience::hash_with(blake3::Mode::DeriveKey(context), b"key material").as_bytes());
     let output = cmd!(b3sum_exe(), "--derive-key", context, "--no-names", f.path()).read().unwrap();
     assert_eq!(&*expected, &*output);
 }
@@ -693,93 +819,6 @@ fn test_pseudo_files_among_many() {
     assert_eq!(expected.join("\n"), String::from_utf8_lossy(&output.stdout).trim_end());
 }
 
-/// --sigilcode writes each hash as a sigil, in every output form, and with
-/// --check reads sigils and hex side by side. Without it, b3sum writes and
-/// reads hex alone, as before.
-#[test]
-fn test_sigilcode() {
-    blake3::initialize();
-    // BLAKE3 of the empty input in Sigil 0.2 (leading LRM, 8 hex digits, 22 letters).
-    const EMPTY: &str = "\u{200e}af1349b9ꛡኾपⷃꢢꔹടꗐᘦꚧꢯꗔᚵᖣꗘᒬᔑৎሱसቝᗰ";
-    let dir = tempfile::tempdir().unwrap();
-    let empty = dir.path().join("empty");
-    let full = dir.path().join("full");
-    let full_bytes = vec![7u8; 1 << 20];
-    fs::write(&empty, b"").unwrap();
-    fs::write(&full, &full_bytes).unwrap();
-    let help = cmd!(b3sum_exe(), "--help").read().unwrap();
-    assert!(help.contains("--sigilcode") && help.contains("[experimental]"), "help marks --sigilcode experimental");
-    let out = cmd!(b3sum_exe(), "--sigilcode", "--no-names", &empty).read().unwrap();
-    assert_eq!(out, EMPTY);
-    let tagged = cmd!(b3sum_exe(), "--sigilcode", "--tag", &empty).read().unwrap();
-    assert_eq!(tagged, format!("BLAKE3 ({}) = {EMPTY}", empty.to_string_lossy()));
-    // A Sigil 0.2 encoding of any length from 8 bytes: LRM (3 UTF-8 bytes) +
-    // 8 ASCII hex digits + n letters (3 UTF-8 bytes each), decoding to the exact
-    // XOF bytes at both offset 0 and nonzero --seek; under 8 bytes is a clear error.
-    let mut hasher = blake3::convenience::Hasher::new(blake3::Mode::Plain, None);
-    hasher.update(&full_bytes);
-    for (len, letters, seek) in [(8usize, 5usize, 0u64), (16, 10, 0), (32, 22, 0), (64, 45, 0), (1000, 726, 0), (48, 34, 137)] {
-        let len_s = len.to_string();
-        let seek_s = seek.to_string();
-        let sigil = if seek == 0 {
-            cmd!(b3sum_exe(), "--sigilcode", "--no-names", "-l", &len_s, &full).read().unwrap()
-        } else {
-            cmd!(b3sum_exe(), "--sigilcode", "--no-names", "-l", &len_s, "--seek", &seek_s, &full).read().unwrap()
-        };
-        assert!(sigil.starts_with('\u{200e}'), "len={len} seek={seek}");
-        assert_eq!((sigil.chars().count(), sigil.len()), (1 + 8 + letters, 3 + 8 + 3 * letters), "len={len} seek={seek}");
-        let mut want = vec![0u8; len];
-        let mut reader = hasher.finalize_xof();
-        reader.set_position(seek);
-        reader.fill(&mut want);
-        assert_eq!(sigilcode::decode(&sigil, len).unwrap(), want, "decoded bytes match XOF for len={len} seek={seek}");
-    }
-    for short in ["0", "1", "7"] {
-        let f = cmd!(b3sum_exe(), "--sigilcode", "-l", short, &full).stderr_capture().unchecked().run().unwrap();
-        assert!(!f.status.success(), "--length {short}");
-        assert!(String::from_utf8_lossy(&f.stderr).contains("--sigilcode writes at least 8 output bytes"), "--length {short}");
-    }
-    // A checkfile mixing sigils (including one pasted without its leading LRM
-    // and with uppercase hex), hex, and the tagged form: --sigilcode checks it
-    // clean, and plain --check refuses its sigil lines.
-    let sigil_line = cmd!(b3sum_exe(), "--sigilcode", &full).read().unwrap();
-    let (full_sigil, full_name) = sigil_line.split_once("  ").unwrap();
-    let pasted_sigil = format!(
-        "{}{}",
-        full_sigil.trim_start_matches('\u{200e}').chars().take(8).collect::<String>().to_ascii_uppercase(),
-        full_sigil.trim_start_matches('\u{200e}').chars().skip(8).collect::<String>()
-    );
-    let hex_line = cmd!(b3sum_exe(), &empty).read().unwrap();
-    let checkfile = dir.path().join("sums.b3");
-    fs::write(&checkfile, format!("{sigil_line}\n{pasted_sigil}  {full_name}\n{hex_line}\n{tagged}\n")).unwrap();
-    let checked = cmd!(b3sum_exe(), "--sigilcode", "--check", &checkfile).read().unwrap();
-    assert_eq!(checked.lines().filter(|l| l.ends_with(": OK")).count(), 4, "{checked}");
-    let plain = cmd!(b3sum_exe(), "--check", &checkfile).stdout_capture().stderr_capture().unchecked().run().unwrap();
-    assert!(!plain.status.success());
-    assert_eq!(String::from_utf8_lossy(&plain.stdout).lines().filter(|l| l.ends_with(": OK")).count(), 1);
-    assert_eq!(String::from_utf8_lossy(&plain.stderr).matches("a sigil? check it with --sigilcode").count(), 3);
-    // A valid sigil for a different file must fail verification.
-    fs::write(&checkfile, format!("{EMPTY}  {full_name}\n")).unwrap();
-    let wrong = cmd!(b3sum_exe(), "--sigilcode", "--check", &checkfile).stdout_capture().stderr_capture().unchecked().run().unwrap();
-    assert!(!wrong.status.success());
-    assert!(String::from_utf8_lossy(&wrong.stdout).contains(": FAILED"));
-    // Two distinct neighbours swapped (once in the hex handle, once in the
-    // letters): the sigil's own check refuses both.
-    let base_chars: Vec<char> = full_sigil.chars().collect();
-    for range in [1..8usize, 9..base_chars.len() - 1] {
-        let i = range.into_iter().find(|&i| base_chars[i] != base_chars[i + 1]).expect("distinct neighbours");
-        let mut chars = base_chars.clone();
-        chars.swap(i, i + 1);
-        fs::write(&checkfile, format!("{}  {full_name}\n", chars.iter().collect::<String>())).unwrap();
-        let f = cmd!(b3sum_exe(), "--sigilcode", "--check", &checkfile).stderr_capture().unchecked().run().unwrap();
-        assert!(!f.status.success(), "swap at {i}");
-        assert!(String::from_utf8_lossy(&f.stderr).contains("Invalid hash, read as a sigil"), "swap at {i}");
-    }
-    // Raw bytes have no text form.
-    let f = cmd!(b3sum_exe(), "--sigilcode", "--raw", &empty).stderr_capture().unchecked().run().unwrap();
-    assert!(!f.status.success());
-}
-
 #[test]
 #[cfg(target_os = "linux")]
 fn test_linux_cold_evicted_mixed_batch_and_single_large() {
@@ -1105,7 +1144,7 @@ fn test_stdin_named_twice_is_read_once_in_order() {
         reader.set_position(seek);
         let mut out = [0u8; 33];
         reader.fill(&mut out);
-        hex::encode(out)
+        hex_encode(out)
     };
     for (seek, threads) in [(0u64, "2"), (0, "8"), (1, "2")] {
         let args = ["--length=33".to_string(), format!("--seek={seek}"), format!("--num-threads={threads}"), "-".into(), "-".into()];
@@ -1229,12 +1268,10 @@ fn test_the_outputs_last_byte_and_none_past_it() {
     reader.fill(&mut byte);
     let seek = format!("--seek={last}");
     let text = cmd!(b3sum_exe(), "--no-names", "--length=1", &seek).stdin_bytes("foo").read().unwrap();
-    assert_eq!(text, hex::encode(byte));
+    assert_eq!(text, hex_encode(byte));
     let raw = cmd!(b3sum_exe(), "--raw", "--length=1", &seek).stdin_bytes("foo").stdout_capture().run().unwrap().stdout;
     assert_eq!(raw, byte);
-    for args in
-        [&["--length=2", &seek][..], &["--raw", "--length=2", &seek], &["--length=1", "--seek=18446744073709551615"], &["--sigilcode", "--length=8", &seek]]
-    {
+    for args in [&["--length=2", &seek][..], &["--raw", "--length=2", &seek], &["--length=1", "--seek=18446744073709551615"]] {
         let refused = cmd(b3sum_exe(), args).stdin_bytes("foo").stdout_capture().stderr_capture().unchecked().run().unwrap();
         assert_eq!(refused.status.code(), Some(1), "{args:?}");
         assert!(refused.stdout.is_empty(), "{args:?}");
@@ -1243,16 +1280,6 @@ fn test_the_outputs_last_byte_and_none_past_it() {
     // No byte, asked for at the very end, is no byte past it.
     let none = cmd!(b3sum_exe(), "--length=0", "--seek=18446744073709551615").stdin_bytes("foo").read().unwrap();
     assert_eq!(none, "  -");
-    // A sigil is made whole, in memory, so it has a longest: more is
-    // refused when the options are read (it was an allocation that
-    // stopped the process).
-    for (length, taken) in [("65536", true), ("65537", false), ("18446744073709551615", false)] {
-        let out =
-            cmd!(b3sum_exe(), "--sigilcode", "--no-names", "--length", length).stdin_bytes("foo").stdout_capture().stderr_capture().unchecked().run().unwrap();
-        assert_eq!(out.status.code(), Some(if taken { 0 } else { 1 }), "--length {length}");
-        assert_eq!(out.stdout.is_empty(), !taken, "--length {length}");
-        assert_eq!(String::from_utf8_lossy(&out.stderr).contains("at most 65536 output bytes"), !taken, "--length {length}");
-    }
 }
 
 /// A checkfile read from a pipe cannot check that pipe by another of
@@ -1351,7 +1378,7 @@ fn test_relative_dev_stdin_alias_and_checkfile_order() {
         h.update(input);
         let mut out = [0u8; 33];
         h.finalize_xof().fill(&mut out);
-        hex::encode(out)
+        hex_encode(out)
     };
     let whole33 = xof33(&payload);
     let empty33 = xof33(b"");

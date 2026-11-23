@@ -376,12 +376,12 @@ fn wait_out_large_reads(
 /// Where results go, until the listener says to stop: after `done` returns
 /// false, nothing more is delivered.
 struct Sink<'a> {
-    done: &'a mut dyn FnMut(usize, anyhow::Result<blake3::Hash>) -> bool,
+    done: &'a mut dyn FnMut(usize, crate::err::Result<blake3::Hash>) -> bool,
     open: bool,
 }
 
 impl Sink<'_> {
-    fn put(&mut self, index: usize, result: anyhow::Result<blake3::Hash>) {
+    fn put(&mut self, index: usize, result: crate::err::Result<blake3::Hash>) {
         if self.open && !(self.done)(index, result) {
             self.open = false;
         }
@@ -594,7 +594,7 @@ fn finish_sync_hash(mode: blake3::Mode<'_>, file: &mut File, buf: &mut Vec<u8>) 
 
 struct WarmLargePipe {
     pipe: Pipeline<usize, ()>,
-    maps: Vec<(usize, Lent<'static>, memmap2::Mmap)>,
+    maps: Vec<(usize, Lent<'static>, crate::mmap::Mmap)>,
     in_flight: usize,
 }
 
@@ -617,7 +617,7 @@ impl WarmLargePipe {
         }
     }
 
-    fn submit_lent(&mut self, idx: usize, size: u64, map: memmap2::Mmap, sink: &mut Sink<'_>) {
+    fn submit_lent(&mut self, idx: usize, size: u64, map: crate::mmap::Mmap, sink: &mut Sink<'_>) {
         self.drain(sink);
         let m = block_on(self.pipe.message(idx, Some(size)));
         // Sound: the map is kept beside the guard in `maps` until the
@@ -831,7 +831,12 @@ impl ColdRingState {
 
 /// Hash `paths` in parallel and deliver `(index, result)` in exact `0..paths.len()`
 /// order to `on_ordered` (which returns `false` to stop early).
-pub(crate) fn hash_paths(args: &Args, paths: &[PathBuf], forbidden: Option<StreamId>, on_ordered: &mut dyn FnMut(usize, anyhow::Result<blake3::Hash>) -> bool) {
+pub(crate) fn hash_paths(
+    args: &Args,
+    paths: &[PathBuf],
+    forbidden: Option<StreamId>,
+    on_ordered: &mut dyn FnMut(usize, crate::err::Result<blake3::Hash>) -> bool,
+) {
     hash_paths_inner(args, paths, forbidden, false, on_ordered);
 }
 
@@ -852,7 +857,7 @@ fn hash_paths_inner(
     paths: &[PathBuf],
     forbidden: Option<StreamId>,
     force_no_uring: bool,
-    on_ordered: &mut dyn FnMut(usize, anyhow::Result<blake3::Hash>) -> bool,
+    on_ordered: &mut dyn FnMut(usize, crate::err::Result<blake3::Hash>) -> bool,
 ) {
     let nfiles = paths.len();
     if nfiles == 0 {
@@ -875,7 +880,7 @@ fn hash_paths_inner(
 
     if io_threads == 1 {
         let next = AtomicUsize::new(0);
-        let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..nfiles).map(|_| None).collect();
+        let mut results: Vec<Option<crate::err::Result<blake3::Hash>>> = (0..nfiles).map(|_| None).collect();
         let mut emitted = 0usize;
         let mut stop = false;
         run_hybrid_worker(args, paths, forbidden, slots_per_ring, total_threads, 1, force_no_uring, &next, &mut |idx, res| {
@@ -894,7 +899,7 @@ fn hash_paths_inner(
     }
 
     let next = AtomicUsize::new(0);
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<(usize, anyhow::Result<blake3::Hash>)>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<(usize, crate::err::Result<blake3::Hash>)>();
 
     std::thread::scope(|scope| {
         for _ in 1..io_threads {
@@ -910,10 +915,10 @@ fn hash_paths_inner(
         }
         drop(done_tx);
 
-        let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..nfiles).map(|_| None).collect();
+        let mut results: Vec<Option<crate::err::Result<blake3::Hash>>> = (0..nfiles).map(|_| None).collect();
         let mut emitted = 0usize;
         let mut stop = false;
-        let mut take = |idx: usize, res: anyhow::Result<blake3::Hash>| -> bool {
+        let mut take = |idx: usize, res: crate::err::Result<blake3::Hash>| -> bool {
             results[idx] = Some(res);
             while emitted < nfiles {
                 let Some(item) = results[emitted].take() else { break };
@@ -952,7 +957,7 @@ fn run_hybrid_worker(
     io_threads: usize,
     mut uring_unavailable: bool,
     next: &AtomicUsize,
-    done: &mut dyn FnMut(usize, anyhow::Result<blake3::Hash>) -> bool,
+    done: &mut dyn FnMut(usize, crate::err::Result<blake3::Hash>) -> bool,
 ) {
     let mut warm_batch = WarmBatch::new();
     let mut medium_buf: Vec<u8> = Vec::new();
@@ -991,7 +996,7 @@ fn run_hybrid_worker(
             match file_end::open_checked(&paths[i], forbidden) {
                 Ok(pair) => break pair,
                 Err(e) => {
-                    let is_fd_limit = e.downcast_ref::<io::Error>().is_some_and(|ioe| matches!(ioe.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)));
+                    let is_fd_limit = matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE));
                     if is_fd_limit
                         && let Some(ref mut c) = cold
                         && c.ring_in_flight > 0
@@ -1262,7 +1267,7 @@ mod test {
     #[test]
     fn sync_fallback_pread_and_uring_disabled_mode_match_reference() {
         blake3::initialize();
-        let dir = tempfile::tempdir_in(".").unwrap_or_else(|_| tempfile::tempdir().unwrap());
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
         let p = dir.path().join("grow");
         let content: Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
         std::fs::write(&p, &content).unwrap();
@@ -1300,7 +1305,7 @@ mod test {
         assert!(!wb.has_arena());
         let mut wb_out = Vec::new();
         {
-            let mut collect = |i, r: anyhow::Result<blake3::Hash>| {
+            let mut collect = |i, r: crate::err::Result<blake3::Hash>| {
                 wb_out.push((i, r.unwrap()));
                 true
             };
@@ -1313,7 +1318,7 @@ mod test {
 
         wb_out.clear();
         {
-            let mut collect = |i, r: anyhow::Result<blake3::Hash>| {
+            let mut collect = |i, r: crate::err::Result<blake3::Hash>| {
                 wb_out.push((i, r.unwrap()));
                 true
             };
@@ -1335,7 +1340,7 @@ mod test {
         let slot = super::WARM_SLOT_BLOCKS * 64;
         for lens in [&[super::WARM_BATCH_MAX_FILE + 1][..], &[slot][..], &[7, super::WARM_BATCH_MAX_FILE + 1, slot - 1, slot, 0][..]] {
             wb_out.clear();
-            let mut collect = |i, r: anyhow::Result<blake3::Hash>| {
+            let mut collect = |i, r: crate::err::Result<blake3::Hash>| {
                 wb_out.push((i, r.unwrap()));
                 true
             };
@@ -1382,7 +1387,7 @@ mod test {
         let Ok(mut ring) = crate::uring::Uring::new(64) else { return };
         crate::init_pool_once(2);
 
-        let dir = tempfile::tempdir_in(".").unwrap_or_else(|_| tempfile::tempdir().unwrap());
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
         for &len in &[0usize, 1, 65_535, 65_536, 65_537, 600_000, 4_500_000] {
             let p = dir.path().join(format!("large-{len}"));
             let data: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 8)) as u8).collect();
@@ -1462,7 +1467,7 @@ mod test {
     #[test]
     fn forced_misses_take_the_cold_paths_for_every_size_class() {
         blake3::initialize();
-        let dir = tempfile::tempdir_in(".").unwrap_or_else(|_| tempfile::tempdir().unwrap());
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
         // 34 files: the wide form (32 files and more). Then 5: the narrow one.
         let (paths, want) = files_of_every_size(dir.path(), 34);
         assert_eq!(hashes_in_order(&paths), want, "from the page cache");
@@ -1498,7 +1503,7 @@ mod test {
     fn forced_misses_with_one_thread_hash_every_size_class() {
         blake3::initialize();
         crate::THREADS.set(std::num::NonZeroUsize::MIN).expect("this test's process sets the thread count first");
-        let dir = tempfile::tempdir_in(".").unwrap_or_else(|_| tempfile::tempdir().unwrap());
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
         let (paths, want) = files_of_every_size(dir.path(), 34);
         super::FORCE_MISS.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(hashes_in_order(&paths), want);
@@ -1511,7 +1516,7 @@ mod test {
     fn a_file_beyond_its_slot_is_refused_before_the_copy() {
         blake3::initialize();
         let mut wb = super::WarmBatch::new();
-        let mut collect = |_, _: anyhow::Result<blake3::Hash>| true;
+        let mut collect = |_, _: crate::err::Result<blake3::Hash>| true;
         let mut sink = super::Sink { done: &mut collect, open: true };
         let msg = vec![0u8; super::WARM_SLOT_BLOCKS * 64 + 1];
         wb.push_slice(0, &msg, blake3::Mode::Plain, &mut sink);
@@ -1526,7 +1531,7 @@ mod test {
     fn a_cached_read_ends_only_where_a_read_gives_no_byte() {
         // Beside the test's executable: a temporary directory in memory
         // (a tmpfs) has no reads from the page cache alone to test.
-        let dir = tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
+        let dir = crate::tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
         let path = dir.path().join("f");
         let content: Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
         std::fs::write(&path, &content).unwrap();
@@ -1596,7 +1601,7 @@ mod test {
         use std::os::fd::AsRawFd;
         // Beside the test's own program: /tmp is often a file system
         // that has no reads of the cache alone.
-        let dir = tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
+        let dir = crate::tempfile::tempdir_in(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
         let path = dir.path().join("cached");
         std::fs::write(&path, [7u8; 5000]).unwrap();
         let file = std::fs::File::open(&path).unwrap();
@@ -1684,7 +1689,7 @@ mod test {
     /// ring can be made the reads are of another kind, and this says
     /// nothing.)
     fn spoiled_ring_reads_come_to_the_same_hashes() {
-        let dir = tempfile::tempdir_in(".").unwrap_or_else(|_| tempfile::tempdir().unwrap());
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
         let (paths, want) = files_of_every_size(dir.path(), 34);
         super::FORCE_MISS.store(true, std::sync::atomic::Ordering::Relaxed);
         for spoil in [1, 2] {
@@ -1720,7 +1725,7 @@ mod test {
     #[test]
     fn without_a_ring_the_file_opened_is_the_file_hashed() {
         blake3::initialize();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         // A regular file past the small files' reads, and a pipe-like
         // input that is no regular file: the two places that opened again.
         let first: Vec<u8> = (0..crate::MAP_LEN + 4096).map(|i| (i * 13) as u8).collect();
@@ -1752,7 +1757,7 @@ mod test {
     #[test]
     fn unsupported_op_read_falls_back_cleanly() {
         blake3::initialize();
-        let dir = tempfile::tempdir_in(".").unwrap_or_else(|_| tempfile::tempdir().unwrap());
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
         let (paths, want) = files_of_every_size(dir.path(), 6);
         crate::uring::REFUSE_OP_READ.store(true, std::sync::atomic::Ordering::Relaxed);
         super::FORCE_MISS.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1770,7 +1775,7 @@ mod test {
         use std::io::Write;
         use std::os::fd::AsRawFd;
         blake3::initialize();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let fifo = dir.path().join("manifest.fifo");
         assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
         // Open O_RDWR on the FIFO so a reader and writer stay open without blocking

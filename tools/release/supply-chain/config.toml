@@ -34,10 +34,6 @@ audit-as-crates-io = false
 [policy.blake3-servil-version]
 audit-as-crates-io = false
 
-[[exemptions.anyhow]]
-version = "1.0.104"
-criteria = "safe-to-deploy"
-
 [[exemptions.arrayvec]]
 version = "0.7.8"
 criteria = "safe-to-run"
@@ -98,10 +94,6 @@ criteria = "safe-to-run"
 version = "0.11.3"
 criteria = "safe-to-run"
 
-[[exemptions.duct]]
-version = "1.1.1"
-criteria = "safe-to-run"
-
 [[exemptions.fastrand]]
 version = "2.5.0"
 criteria = "safe-to-run"
@@ -152,14 +144,6 @@ criteria = "safe-to-run"
 
 [[exemptions.memchr]]
 version = "2.8.3"
-criteria = "safe-to-run"
-
-[[exemptions.memmap2]]
-version = "0.9.11"
-criteria = "safe-to-deploy"
-
-[[exemptions.os_pipe]]
-version = "1.2.3"
 criteria = "safe-to-run"
 
 [[exemptions.owo-colors]]
@@ -234,28 +218,8 @@ criteria = "safe-to-deploy"
 version = "1.0.154"
 criteria = "safe-to-run"
 
-[[exemptions.shared_child]]
-version = "1.1.1"
-criteria = "safe-to-run"
-
-[[exemptions.shared_thread]]
-version = "0.2.0"
-criteria = "safe-to-run"
-
 [[exemptions.shuttle]]
 version = "0.8.1"
-criteria = "safe-to-run"
-
-[[exemptions.sigchld]]
-version = "0.2.4"
-criteria = "safe-to-run"
-
-[[exemptions.sigilcode]]
-version = "0.2.0+3d45e305e2204f7d52a9728edc3d9f3e9ee809c1"
-criteria = "safe-to-deploy"
-
-[[exemptions.signal-hook]]
-version = "0.3.18"
 criteria = "safe-to-run"
 
 [[exemptions.smallvec]]

@@ -330,7 +330,7 @@ pub(crate) mod test {
     fn a_file_read_directly_gives_the_same_outboard() {
         use std::os::unix::fs::OpenOptionsExt;
         blake3::initialize();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let all = painted(5 * PIECE + 3 * GROUP + 17);
         let key = [0x42u8; 32];
         let (mut cvs, mut piece) = (Vec::new(), Piece::new());

@@ -234,13 +234,13 @@ def _write_path_crate(crate_dir, name, licence):
 
 
 def an_unsound_version(stage):
-    # RUSTSEC-2026-0486. Both locks reach rustix through tempfile (tests only). Replace all audit evidence
-    # for rustix with a safe-to-run exemption for 1.1.4 so the advisory is all that fails, even if rustix
+    # RUSTSEC-2026-0007. Both locks reach bytes through bao-tree (tests only). Replace all audit evidence
+    # for bytes with a safe-to-run exemption for 1.11.0 so the advisory is all that fails, even if bytes
     # is later audited.
     for lock in (stage / "release" / "Cargo.lock", stage / "cli" / "b3sum" / "Cargo.lock"):
-        edit(lock, r'(name = "rustix"\nversion = ")[^"]*("\nsource = "[^"]*"\nchecksum = ")[0-9a-f]*',
-             r"\g<1>1.1.4\g<2>b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190")
-    strip_audit_evidence(stage, "rustix", replace_with=[("1.1.4", "safe-to-run")])
+        edit(lock, r'(name = "bytes"\nversion = ")[^"]*("\nsource = "[^"]*"\nchecksum = ")[0-9a-f]*',
+             r"\g<1>1.11.0\g<2>b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3")
+    strip_audit_evidence(stage, "bytes", replace_with=[("1.11.0", "safe-to-run")])
 
 
 def no_licence_exception(stage):
@@ -285,9 +285,9 @@ def an_optional_feature_gpl_crate(stage):
         f.write('\n[[package]]\nname = "opt_gpl"\nversion = "0.1.0"\n')
 
 
-def no_audit_record_anyhow(stage):
-    """Drop all evidence (exemption, local audit, imported audit, trust) for anyhow."""
-    strip_audit_evidence(stage, "anyhow")
+def no_audit_record_libc(stage):
+    """Drop all evidence (exemption, local audit, imported audit, trust) for libc."""
+    strip_audit_evidence(stage, "libc")
 
 
 def serde_only_safe_to_run(stage):
@@ -356,7 +356,7 @@ CONTROLS = [
     ("a GPL crate behind a non-default feature (tests all-features in metadata and deny)",
      an_optional_feature_gpl_crate, {"release": ["by path", "licenses"], "cli": []}),
     ("a shipped crate with all audit evidence stripped",
-     no_audit_record_anyhow, {"release": ["audits"], "cli": ["audits"]}),
+     no_audit_record_libc, {"release": ["audits"], "cli": ["audits"]}),
     ("optional serde feature downgraded to safe-to-run only (tests deploy check under all-features)",
      serde_only_safe_to_run, {"release": ["audits"], "cli": []}),
     ("arrayvec (safe-to-run only) reintroduced into what ships",

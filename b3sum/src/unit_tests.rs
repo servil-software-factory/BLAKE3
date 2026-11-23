@@ -9,7 +9,7 @@ fn test_parse_check_line() {
 
     // the basic case
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("0909090909090909090909090909090909090909090909090909090909090909  foo", false).unwrap();
+        crate::parse_check_line("0909090909090909090909090909090909090909090909090909090909090909  foo").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x09; 32]));
     assert!(!is_escaped);
     assert_eq!(file_string, "foo");
@@ -17,7 +17,7 @@ fn test_parse_check_line() {
 
     // regular whitespace
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("fafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafa   \t\r\n\n\r \t\r\n\n\r", false).unwrap();
+        crate::parse_check_line("fafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafa   \t\r\n\n\r \t\r\n\n\r").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0xfa; 32]));
     assert!(!is_escaped);
     assert_eq!(file_string, " \t\r\n\n\r \t");
@@ -25,7 +25,7 @@ fn test_parse_check_line() {
 
     // path is one space
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("4242424242424242424242424242424242424242424242424242424242424242   ", false).unwrap();
+        crate::parse_check_line("4242424242424242424242424242424242424242424242424242424242424242   ").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x42; 32]));
     assert!(!is_escaped);
     assert_eq!(file_string, " ");
@@ -35,7 +35,7 @@ fn test_parse_check_line() {
     // backslash, so something like "\" + "n" is interpreted as *two*
     // characters.
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("4343434343434343434343434343434343434343434343434343434343434343  fo\\a\\no", false).unwrap();
+        crate::parse_check_line("4343434343434343434343434343434343434343434343434343434343434343  fo\\a\\no").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x43; 32]));
     assert!(!is_escaped);
     assert_eq!(file_string, "fo\\a\\no");
@@ -43,7 +43,7 @@ fn test_parse_check_line() {
 
     // escaped newlines
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("\\4444444444444444444444444444444444444444444444444444444444444444  fo\\r\\n\\n\\ro", false).unwrap();
+        crate::parse_check_line("\\4444444444444444444444444444444444444444444444444444444444444444  fo\\r\\n\\n\\ro").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x44; 32]));
     assert!(is_escaped);
     assert_eq!(file_string, "fo\\r\\n\\n\\ro");
@@ -51,7 +51,7 @@ fn test_parse_check_line() {
 
     // Escaped newline and backslash.
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("\\4545454545454545454545454545454545454545454545454545454545454545  fo\\n\\\\o", false).unwrap();
+        crate::parse_check_line("\\4545454545454545454545454545454545454545454545454545454545454545  fo\\n\\\\o").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x45; 32]));
     assert!(is_escaped);
     assert_eq!(file_string, "fo\\n\\\\o");
@@ -59,7 +59,7 @@ fn test_parse_check_line() {
 
     // non-ASCII path
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("4646464646464646464646464646464646464646464646464646464646464646  否认", false).unwrap();
+        crate::parse_check_line("4646464646464646464646464646464646464646464646464646464646464646  否认").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x46; 32]));
     assert!(!is_escaped);
     assert_eq!(file_string, "否认");
@@ -67,7 +67,7 @@ fn test_parse_check_line() {
 
     // untagged separator "  " in the file name
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("4747474747474747474747474747474747474747474747474747474747474747  foo  bar", false).unwrap();
+        crate::parse_check_line("4747474747474747474747474747474747474747474747474747474747474747  foo  bar").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x47; 32]));
     assert!(!is_escaped);
     assert_eq!(file_string, "foo  bar");
@@ -75,7 +75,7 @@ fn test_parse_check_line() {
 
     // tagged separator ") = " in the file name
     let crate::ParsedCheckLine { file_string, is_escaped, file_path, expected_hash } =
-        crate::parse_check_line("BLAKE3 (foo) = bar) = 4848484848484848484848484848484848484848484848484848484848484848", false).unwrap();
+        crate::parse_check_line("BLAKE3 (foo) = bar) = 4848484848484848484848484848484848484848484848484848484848484848").unwrap();
     assert_eq!(expected_hash, blake3::Hash::from([0x48; 32]));
     assert!(!is_escaped);
     assert_eq!(file_string, "foo) = bar");
@@ -86,35 +86,35 @@ fn test_parse_check_line() {
     // =========================
 
     // too short
-    crate::parse_check_line("", false).unwrap_err();
-    crate::parse_check_line("0", false).unwrap_err();
-    crate::parse_check_line("00", false).unwrap_err();
-    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000", false).unwrap_err();
-    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000  ", false).unwrap_err();
+    crate::parse_check_line("").unwrap_err();
+    crate::parse_check_line("0").unwrap_err();
+    crate::parse_check_line("00").unwrap_err();
+    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000").unwrap_err();
+    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000  ").unwrap_err();
 
     // not enough spaces
-    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000 foo", false).unwrap_err();
+    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000 foo").unwrap_err();
 
     // capital letter hex
-    crate::parse_check_line("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  foo", false).unwrap_err();
+    crate::parse_check_line("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  foo").unwrap_err();
 
     // non-hex hex
-    crate::parse_check_line("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  foo", false).unwrap_err();
+    crate::parse_check_line("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  foo").unwrap_err();
 
     // non-ASCII hex
-    crate::parse_check_line("你好, 我叫杰克. 认识你很高兴. 要不要吃个香蕉?  foo", false).unwrap_err();
+    crate::parse_check_line("你好, 我叫杰克. 认识你很高兴. 要不要吃个香蕉?  foo").unwrap_err();
 
     // invalid escape sequence
-    crate::parse_check_line("\\0000000000000000000000000000000000000000000000000000000000000000  fo\\o", false).unwrap_err();
+    crate::parse_check_line("\\0000000000000000000000000000000000000000000000000000000000000000  fo\\o").unwrap_err();
 
     // truncated escape sequence
-    crate::parse_check_line("\\0000000000000000000000000000000000000000000000000000000000000000  foo\\", false).unwrap_err();
+    crate::parse_check_line("\\0000000000000000000000000000000000000000000000000000000000000000  foo\\").unwrap_err();
 
     // null char
-    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000  fo\0o", false).unwrap_err();
+    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000  fo\0o").unwrap_err();
 
     // Unicode replacement char
-    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000  fo�o", false).unwrap_err();
+    crate::parse_check_line("0000000000000000000000000000000000000000000000000000000000000000  fo�o").unwrap_err();
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn test_a_files_size_does_not_decide_where_it_ends() {
 #[test]
 fn test_no_mmap_maps_no_file() {
     blake3::initialize();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempfile::tempdir().unwrap();
     let bytes: Vec<u8> = (0..crate::MAP_LEN + 4096).map(|i| (i * 31) as u8).collect();
     let paths: Vec<_> = (0..2).map(|i| dir.path().join(format!("file-{i}"))).collect();
     for path in &paths {
@@ -208,7 +208,7 @@ fn test_a_cold_long_file_on_one_thread_without_a_ring_is_read_in_pieces() {
     crate::THREADS.set(std::num::NonZeroUsize::MIN).expect("this test's process sets the thread count first");
     crate::uring::REFUSED.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::linux_pipe::set_force_miss(true);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempfile::tempdir().unwrap();
     let bytes: Vec<u8> = (0..crate::POOL_START_LEN + 12_345).map(|i| (i.wrapping_mul(37) ^ (i >> 10)) as u8).collect();
     for (len, in_pieces) in [(crate::POOL_START_LEN - 1, 0), (crate::POOL_START_LEN, 1), (bytes.len(), 1)] {
         let path = dir.path().join(format!("file-{len}"));

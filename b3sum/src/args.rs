@@ -16,18 +16,14 @@ Arguments:
 Options:
       --keyed                 Use the keyed mode, reading the 32-byte key from stdin
       --derive-key <CONTEXT>  Use the key derivation mode, with the given context string
-  -l, --length <LEN>          The number of output bytes, before hex or sigil encoding [default: 32]
-      --seek <SEEK>           The starting output byte offset, before hex or sigil encoding
+  -l, --length <LEN>          The number of output bytes, before hex encoding [default: 32]
+      --seek <SEEK>           The starting output byte offset, before hex encoding
                               [default: 0]
       --num-threads <NUM>     The most threads hashing at once [default: as fast as b3sum can]
       --no-mmap               Read every file and map none: a file that another program shortens
                               while b3sum hashes it then cannot stop the run
       --no-names              Omit filenames in the output
       --raw                   Write raw output bytes to stdout, rather than hex
-      --sigilcode             [experimental] Write 8 to 65536 digest bytes as a Sigil 0.2 sigil
-                              (8 hex digits and 22 letters for 32 bytes; see johnservil/sigil)
-                              instead of hex; with --check, accept Sigil 0.2 or hex for the
-                              standard unkeyed 32-byte digest at offset zero
       --tag                   Output BSD-style checksums: BLAKE3 ([FILE]) = [HASH]
   -c, --check                 Read BLAKE3 sums from the [FILE]s and check them
       --quiet                 Skip printing OK for each checked file
@@ -52,7 +48,6 @@ pub(crate) struct ParsedArgs {
     pub(crate) no_mmap: bool,
     pub(crate) no_names: bool,
     pub(crate) raw: bool,
-    pub(crate) sigilcode: bool,
     pub(crate) tag: bool,
     pub(crate) check: bool,
     pub(crate) quiet: bool,
@@ -136,7 +131,6 @@ where
     let mut no_mmap = false;
     let mut no_names = false;
     let mut raw = false;
-    let mut sigilcode = false;
     let mut tag = false;
     let mut check = false;
     let mut quiet = false;
@@ -233,11 +227,6 @@ where
                     reject_duplicate("--raw", raw)?;
                     raw = true;
                 }
-                "--sigilcode" => {
-                    reject_val("--sigilcode", &inline_val)?;
-                    reject_duplicate("--sigilcode", sigilcode)?;
-                    sigilcode = true;
-                }
                 "--tag" => {
                     reject_val("--tag", &inline_val)?;
                     reject_duplicate("--tag", tag)?;
@@ -310,9 +299,6 @@ where
     if derive_key.is_some() && keyed {
         return Err("the argument '--derive-key <CONTEXT>' cannot be used with '--keyed'".to_owned());
     }
-    if sigilcode && raw {
-        return Err("the argument '--sigilcode' cannot be used with '--raw'".to_owned());
-    }
     if check {
         for (present, other) in [
             (derive_key.is_some(), "--derive-key <CONTEXT>"),
@@ -352,7 +338,6 @@ where
         no_mmap,
         no_names,
         raw,
-        sigilcode,
         tag,
         check,
         quiet,

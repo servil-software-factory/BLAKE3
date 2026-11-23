@@ -82,18 +82,14 @@ Arguments:
 Options:
       --keyed                 Use the keyed mode, reading the 32-byte key from stdin
       --derive-key <CONTEXT>  Use the key derivation mode, with the given context string
-  -l, --length <LEN>          The number of output bytes, before hex or sigil encoding [default: 32]
-      --seek <SEEK>           The starting output byte offset, before hex or sigil encoding
+  -l, --length <LEN>          The number of output bytes, before hex encoding [default: 32]
+      --seek <SEEK>           The starting output byte offset, before hex encoding
                               [default: 0]
       --num-threads <NUM>     The most threads hashing at once [default: as fast as b3sum can]
       --no-mmap               Read every file and map none: a file that another program shortens
                               while b3sum hashes it then cannot stop the run
       --no-names              Omit filenames in the output
       --raw                   Write raw output bytes to stdout, rather than hex
-      --sigilcode             [experimental] Write 8 to 65536 digest bytes as a Sigil 0.2 sigil
-                              (8 hex digits and 22 letters for 32 bytes; see johnservil/sigil)
-                              instead of hex; with --check, accept Sigil 0.2 or hex for the
-                              standard unkeyed 32-byte digest at offset zero
       --tag                   Output BSD-style checksums: BLAKE3 ([FILE]) = [HASH]
   -c, --check                 Read BLAKE3 sums from the [FILE]s and check them
       --quiet                 Skip printing OK for each checked file
@@ -201,28 +197,3 @@ $ mkdir outboards && b3sum --outboard outboards big.iso
 $ ls outboards
 5da5ad397cd129294c30f415b7d4e091b155a5faa37ba0b154ed10a5e5dbfca9.obao4
 ```
-
-## Hashes as sigils (experimental)
-
-> **Experimental:** `--sigilcode` uses [Sigil](https://github.com/johnservil/sigil) 0.2 (hex-prefixed), which is on trial and not yet stabilized. Sigil 0.2 replaces Sigil 0.1 (which had a Unicode 15.1 line-break flaw in Cham letters) and is incompatible with 0.1 checkfiles.
-
-`--sigilcode` prints each 32-byte hash as a 30-character visible
-[sigil](https://github.com/johnservil/sigil) (a leading left-to-right mark,
-the first 8 hex digits, and 22 letters) instead of 64 hex digits. A sigil is a
-single word (easy to double-click to select), uses visually distinct characters,
-and includes its own error check so typos or swapped adjacent characters fail
-before hashing begins. Writing supports `--length` of 8 to 65,536 output bytes
-(the sigil is made whole in memory). With `--check --sigilcode`, checkfiles may
-mix Sigil 0.2 sigils and hex for the standard unkeyed 32-byte digest at offset
-zero (and sigils copied without their leading mark or with uppercase hex still
-verify).
-
-```
-$ b3sum --sigilcode empty
-‎af1349b9ꛡኾपⷃꢢꔹടꗐᘦꚧꢯꗔᚵᖣꗘᒬᔑৎሱसቝᗰ  empty
-$ b3sum --sigilcode empty > sums.b3 && b3sum --sigilcode --check sums.b3
-empty: OK
-```
-
-Without `--sigilcode`, `b3sum` expects hex only, and `--check` will tell you if
-a line looks like a sigil.

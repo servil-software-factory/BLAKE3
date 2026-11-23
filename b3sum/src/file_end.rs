@@ -297,11 +297,11 @@ pub(crate) fn path_matches_stream(path: &Path, stream: StreamId) -> bool {
 /// waiting for another writer, then re-verifies `fstat(fd)` after open to
 /// close pathname-swap TOCTOU races.
 #[cfg(unix)]
-pub(crate) fn open_checked(path: &Path, forbidden: Option<StreamId>) -> anyhow::Result<(File, FdMeta)> {
+pub(crate) fn open_checked(path: &Path, forbidden: Option<StreamId>) -> crate::err::Result<(File, FdMeta)> {
     if let Some(forbid) = forbidden
         && path_matches_stream(path, forbid)
     {
-        anyhow::bail!("this checkfile is a stream, and cannot also be a file to check");
+        crate::bail!("this checkfile is a stream, and cannot also be a file to check");
     }
     let file = File::open(path)?;
     let meta = fstat_fd(file.as_raw_fd())?;
@@ -309,7 +309,7 @@ pub(crate) fn open_checked(path: &Path, forbidden: Option<StreamId>) -> anyhow::
         && meta.kind == FileKind::Stream
         && meta.id == forbid
     {
-        anyhow::bail!("this checkfile is a stream, and cannot also be a file to check");
+        crate::bail!("this checkfile is a stream, and cannot also be a file to check");
     }
     Ok((file, meta))
 }
@@ -573,7 +573,7 @@ mod test {
 
     #[test]
     fn small_read_capped_promotes_above_cap_without_oom() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let path = dir.path().join("big-virtual");
         let data: Vec<u8> = (0..100_000usize).map(|i| (i * 17) as u8).collect();
         std::fs::write(&path, &data).unwrap();

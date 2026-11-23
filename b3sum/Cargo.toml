@@ -17,22 +17,15 @@ path = "src/main.rs"
 [features]
 
 [dependencies]
-anyhow = "1.0.25"
 blake3 = { version = "=0.10.0+dev", path = "../threads", package = "blake3-servil" }
-# --sigilcode: each hash as a sigil (johnservil/sigil), its full version pinned.
-sigilcode = "=0.2.0+3d45e305e2204f7d52a9728edc3d9f3e9ee809c1"
 
-# A file already in the page cache is mapped and hashed in place.
+# Unix syscalls: memory-mapped reads, direct I/O, io_uring, signals, fstat.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-memmap2 = "0.9"
 
 [dev-dependencies]
 # bao-tree, the outboard's independent implementation (--outboard's tests).
 bao-tree = { version = "=0.17.0", default-features = false }
-duct = "1.0.0"
-hex = "0.4.0"
-tempfile = "3.1.0"
 
 # A panic stops the process at once (crash-only): nothing unwinds past a
 # thread's reads that the kernel still has in flight, whose buffers the

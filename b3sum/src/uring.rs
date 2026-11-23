@@ -597,7 +597,7 @@ mod test {
             eprintln!("no 4 GiB of address space to try this with");
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
         std::fs::write(&path, [7u8; 100]).unwrap();
         let file = std::fs::File::open(&path).unwrap();
@@ -667,7 +667,7 @@ mod test {
         let cap = ring.sq_space_left();
         assert!(cap >= 8);
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempfile::tempdir().unwrap();
         let p = dir.path().join("f0");
         let data: Vec<u8> = (0..10_000usize).map(|k| (k * 13 + 7) as u8).collect();
         std::fs::write(&p, &data).unwrap();

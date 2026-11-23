@@ -23,8 +23,13 @@
 //! cloning a 26 KiB `Hasher` per file. Unified file-end rules and descriptor
 //! identity checks live in `file_end`.
 
-use anyhow::{bail, ensure};
 mod args;
+mod err;
+#[cfg(unix)]
+mod mmap;
+#[cfg(test)]
+#[path = "test_temp.rs"]
+mod tempfile;
 use args::{ParseOutcome, ParsedArgs as Inner};
 use std::cmp;
 use std::fs::File;
@@ -71,7 +76,7 @@ struct Args {
 }
 
 impl Args {
-    fn parse() -> anyhow::Result<Self> {
+    fn parse() -> err::Result<Self> {
         let inner = match args::parse_from(std::env::args_os()) {
             Ok(ParseOutcome::Parsed(inner)) => inner,
             Ok(ParseOutcome::Help) => {
@@ -100,15 +105,6 @@ impl Args {
         let file_args = if !inner.file.is_empty() { inner.file.clone() } else { vec!["-".into()] };
         if inner.raw && file_args.len() > 1 {
             bail!("Only one filename can be provided when using --raw");
-        }
-        if inner.sigilcode && inner.length < SIGIL_MIN_LEN && !inner.check {
-            bail!("--sigilcode writes at least {SIGIL_MIN_LEN} output bytes; --length is {}", inner.length);
-        }
-        // A sigil is made whole, in memory: a length of gigabytes was an
-        // allocation that stopped the process, where hex is written in
-        // pieces.
-        if inner.sigilcode && inner.length > SIGIL_MAX_LEN && !inner.check {
-            bail!("--sigilcode writes at most {SIGIL_MAX_LEN} output bytes as one sigil; --length is {}", inner.length);
         }
         // BLAKE3's output is 2^64 - 1 bytes long. A request past its end
         // was a panic for text, and for --raw fewer bytes than asked for,
@@ -142,7 +138,6 @@ impl Args {
             no_mmap: false,
             no_names: false,
             raw: false,
-            sigilcode: false,
             tag: false,
             check: false,
             quiet: false,
@@ -176,10 +171,6 @@ impl Args {
         self.inner.tag
     }
 
-    fn sigilcode(&self) -> bool {
-        self.inner.sigilcode
-    }
-
     fn no_names(&self) -> bool {
         self.inner.no_names
     }
@@ -200,7 +191,7 @@ impl Args {
     /// (`explain_sigbus`). (BLAKE3 #432: the option was accepted and did
     /// nothing.)
     #[cfg(unix)]
-    pub(crate) fn map(&self, file: &impl std::os::fd::AsRawFd) -> Option<memmap2::Mmap> {
+    pub(crate) fn map(&self, file: &impl std::os::fd::AsRawFd) -> Option<mmap::Mmap> {
         if self.inner.no_mmap {
             return None;
         }
@@ -209,7 +200,7 @@ impl Args {
         // Sound: the mapping is read-only and the CLI documents that files
         // must not be modified concurrently while hashed (pass `--no-mmap`
         // for mutable inputs; truncation triggers `explain_sigbus`).
-        unsafe { memmap2::Mmap::map(file) }.ok()
+        unsafe { mmap::Mmap::map(file) }.ok()
     }
 
     fn keyed(&self) -> bool {
@@ -397,7 +388,7 @@ pub(crate) fn stdin_named_twice(paths: &[PathBuf], stdin_ctx: &StdinContext) -> 
 /// Hash a regular-file fd 0 on macOS from offset 0 via `mmap` or positioned
 /// `pread`, without moving fd 0's shared open-file-description offset.
 #[cfg(target_os = "macos")]
-fn hash_darwin_regular_fd0_hash(args: &Args) -> anyhow::Result<blake3::Hash> {
+fn hash_darwin_regular_fd0_hash(args: &Args) -> err::Result<blake3::Hash> {
     let meta = file_end::fstat_fd(0)?;
     if meta.len < MAP_LEN as u64 {
         let mut buf = Vec::with_capacity((usize::try_from(meta.len).expect("len < MAP_LEN") + 1).max(4096).min(SMALL_MEM_CAP + 1));
@@ -435,7 +426,7 @@ fn hash_darwin_regular_fd0_hash(args: &Args) -> anyhow::Result<blake3::Hash> {
 }
 
 /// Fast standard-mode (`seek == 0 && len <= 32`) single-path hasher.
-pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext, forbidden: Option<StreamId>) -> anyhow::Result<blake3::Hash> {
+pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext, forbidden: Option<StreamId>) -> err::Result<blake3::Hash> {
     match stdin_ctx.classify(path) {
         InputRole::StdinDash => {
             if args.keyed() {
@@ -524,13 +515,13 @@ fn stdin_file() -> Option<File> {
 /// [`hash_path_hash`] for an open file. Every path hashes this file,
 /// including when its original pathname has since been replaced.
 #[cfg(target_os = "linux")]
-pub(crate) fn hash_open_file(args: &Args, file: File) -> anyhow::Result<blake3::Hash> {
+pub(crate) fn hash_open_file(args: &Args, file: File) -> err::Result<blake3::Hash> {
     Ok(hash_open_file_ex(args, file)?.hash)
 }
 
 /// Hash an already-opened `file`, returning the digest along with exact byte
 /// count and whether the file descriptor's cursor was advanced.
-pub(crate) fn hash_open_file_ex(args: &Args, mut file: File) -> anyhow::Result<HashRead> {
+pub(crate) fn hash_open_file_ex(args: &Args, mut file: File) -> err::Result<HashRead> {
     if let Ok(meta) = file.metadata()
         && meta.is_file()
     {
@@ -612,7 +603,7 @@ pub(crate) fn hash_open_file_ex(args: &Args, mut file: File) -> anyhow::Result<H
     Ok(HashRead { hash: hasher.finalize(), bytes_hashed, cursor_moved: true })
 }
 
-fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> anyhow::Result<blake3::OutputReader> {
+fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> err::Result<blake3::OutputReader> {
     let mut hasher = args.base_hasher.clone();
     match stdin_ctx.classify(path) {
         InputRole::StdinDash => {
@@ -675,7 +666,7 @@ fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> anyhow::Resu
 const HOLD_PAGES: u64 = 1 << 18;
 
 #[cfg(unix)]
-pub(crate) fn hold(map: memmap2::Mmap) {
+pub(crate) fn hold(map: mmap::Mmap) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static HELD: AtomicU64 = AtomicU64::new(0);
     // Sound: a query with no memory argument.
@@ -694,7 +685,7 @@ pub(crate) fn hold(map: memmap2::Mmap) {
 pub(crate) static MAPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(unix)]
-fn mapped(args: &Args, file: &File) -> Option<memmap2::Mmap> {
+fn mapped(args: &Args, file: &File) -> Option<mmap::Mmap> {
     let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
     if len < MAP_LEN {
         return None;
@@ -707,7 +698,7 @@ fn mapped(args: &Args, file: &File) -> Option<memmap2::Mmap> {
 }
 
 #[cfg(unix)]
-pub(crate) fn resident(map: &memmap2::Mmap) -> bool {
+pub(crate) fn resident(map: &mmap::Mmap) -> bool {
     let mut vec = 0u8;
     // Sound: one page of the map (a map is at least one byte here, the
     // callers') and one byte for the answer.
@@ -717,10 +708,6 @@ pub(crate) fn resident(map: &memmap2::Mmap) -> bool {
 
 #[cfg(unix)]
 pub(crate) const MAP_LEN: usize = POOL_LEN;
-
-/// The fewest and most output bytes --sigilcode writes as one sigil.
-const SIGIL_MIN_LEN: u64 = 8;
-const SIGIL_MAX_LEN: u64 = 1 << 16;
 
 const POOL_LEN: usize = 512 << 10;
 /// Starting the thread pool in a one-shot CLI process costs ~15-25 us per worker
@@ -967,20 +954,15 @@ pub(crate) fn update_from_counted(hasher: &mut blake3::convenience::Hasher, mut 
     })
 }
 
-fn write_hash_text(hash: &blake3::Hash, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
+fn write_hash_text(hash: &blake3::Hash, args: &Args, out: &mut OutBuf) -> err::Result<()> {
     let take = usize::try_from(args.len()).expect("standard 32-byte mode len <= 32");
-    if args.sigilcode() {
-        let s = sigilcode::encode(&hash.as_bytes()[..take]);
-        out.write_bytes(s.as_bytes())?;
-    } else {
-        let mut hex_buf = [0u8; 2 * blake3::OUT_LEN];
-        encode_hex_stack(&hash.as_bytes()[..take], &mut hex_buf[..2 * take]);
-        out.write_bytes(&hex_buf[..2 * take])?;
-    }
+    let mut hex_buf = [0u8; 2 * blake3::OUT_LEN];
+    encode_hex_stack(&hash.as_bytes()[..take], &mut hex_buf[..2 * take]);
+    out.write_bytes(&hex_buf[..2 * take])?;
     Ok(())
 }
 
-pub(crate) fn print_hash_output(hash: blake3::Hash, path: &Path, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
+pub(crate) fn print_hash_output(hash: blake3::Hash, path: &Path, args: &Args, out: &mut OutBuf) -> err::Result<()> {
     let take = usize::try_from(args.len()).expect("standard 32-byte mode len <= 32");
     if args.raw() {
         out.write_bytes(&hash.as_bytes()[..take])?;
@@ -1030,7 +1012,7 @@ pub(crate) fn print_hash_output(hash: blake3::Hash, path: &Path, args: &Args, ou
     Ok(())
 }
 
-fn write_hex_output(mut output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
+fn write_hex_output(mut output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> err::Result<()> {
     let mut len = args.len();
     let mut block = [0u8; blake3::BLOCK_LEN];
     let mut hex_buf = [0u8; 2 * blake3::BLOCK_LEN];
@@ -1046,19 +1028,11 @@ fn write_hex_output(mut output: blake3::OutputReader, args: &Args, out: &mut Out
     Ok(())
 }
 
-fn write_sigil_output(mut output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
-    let mut bytes = vec![0; usize::try_from(args.len()).expect("sigilcode length <= SIGIL_MAX_LEN")];
-    output.fill(&mut bytes);
-    let encoded = sigilcode::encode(&bytes);
-    out.write_bytes(encoded.as_bytes())?;
-    Ok(())
+fn write_text_output(output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> err::Result<()> {
+    write_hex_output(output, args, out)
 }
 
-fn write_text_output(output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
-    if args.sigilcode() { write_sigil_output(output, args, out) } else { write_hex_output(output, args, out) }
-}
-
-fn write_raw_output(output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
+fn write_raw_output(output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> err::Result<()> {
     out.flush()?;
     let mut output = output.take(args.len());
     let stdout = std::io::stdout();
@@ -1067,7 +1041,7 @@ fn write_raw_output(output: blake3::OutputReader, args: &Args, out: &mut OutBuf)
     Ok(())
 }
 
-fn print_output(output: blake3::OutputReader, path: &Path, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
+fn print_output(output: blake3::OutputReader, path: &Path, args: &Args, out: &mut OutBuf) -> err::Result<()> {
     if args.raw() {
         write_raw_output(output, args, out)?;
         return Ok(());
@@ -1096,7 +1070,7 @@ fn print_output(output: blake3::OutputReader, path: &Path, args: &Args, out: &mu
     Ok(())
 }
 
-fn read_key_from_stdin() -> anyhow::Result<[u8; blake3::KEY_LEN]> {
+fn read_key_from_stdin() -> err::Result<[u8; blake3::KEY_LEN]> {
     let mut bytes = Vec::with_capacity(blake3::KEY_LEN + 1);
     let n = std::io::stdin().lock().take(blake3::KEY_LEN as u64 + 1).read_to_end(&mut bytes)?;
     if n < blake3::KEY_LEN {
@@ -1124,7 +1098,7 @@ fn filepath_to_string(filepath: &Path) -> FilepathString {
     FilepathString { filepath_string, is_escaped }
 }
 
-fn hex_half_byte(c: char) -> anyhow::Result<u8> {
+fn hex_half_byte(c: char) -> err::Result<u8> {
     if '0' <= c && c <= '9' {
         return Ok(c as u8 - b'0');
     }
@@ -1134,7 +1108,7 @@ fn hex_half_byte(c: char) -> anyhow::Result<u8> {
     bail!("Invalid hex");
 }
 
-fn check_for_invalid_characters(utf8_path: &str) -> anyhow::Result<()> {
+fn check_for_invalid_characters(utf8_path: &str) -> err::Result<()> {
     if utf8_path.contains('\0') {
         bail!("Null character in path");
     }
@@ -1144,7 +1118,7 @@ fn check_for_invalid_characters(utf8_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn unescape(mut path: &str) -> anyhow::Result<String> {
+fn unescape(mut path: &str) -> err::Result<String> {
     let mut unescaped = String::with_capacity(path.len());
     while let Some(i) = path.find('\\') {
         ensure!(i < path.len() - 1, "Invalid backslash escape");
@@ -1181,7 +1155,7 @@ fn split_tagged_check_line(line_after_slash: &str) -> Option<(&str, &str)> {
     line_after_slash[prefix.len()..].rsplit_once(") = ")
 }
 
-fn parse_check_line(mut line: &str, sigils: bool) -> anyhow::Result<ParsedCheckLine> {
+fn parse_check_line(mut line: &str) -> err::Result<ParsedCheckLine> {
     line = line.trim_end_matches(['\r', '\n']);
     let Some(first) = line.chars().next() else {
         bail!("Empty line");
@@ -1213,20 +1187,12 @@ fn parse_check_line(mut line: &str, sigils: bool) -> anyhow::Result<ParsedCheckL
     }
 
     let mut hash_bytes = [0; blake3::OUT_LEN];
-    if sigils && !hash_text.chars().all(|c| c.is_ascii_hexdigit()) {
-        let decoded = sigilcode::decode(hash_text, blake3::OUT_LEN).map_err(|e| anyhow::anyhow!("Invalid hash, read as a sigil: {e}"))?;
-        hash_bytes.copy_from_slice(&decoded);
-    } else {
-        if !sigils && !hash_text.is_ascii() {
-            bail!("Invalid hash: not hex (a sigil? check it with --sigilcode)");
-        }
-        ensure!(hash_text.len() == 2 * blake3::OUT_LEN, "Invalid hash length");
-        let mut hex_chars = hash_text.chars();
-        for byte in &mut hash_bytes {
-            let high_char = hex_chars.next().unwrap();
-            let low_char = hex_chars.next().unwrap();
-            *byte = 16 * hex_half_byte(high_char)? + hex_half_byte(low_char)?;
-        }
+    ensure!(hash_text.len() == 2 * blake3::OUT_LEN, "Invalid hash length");
+    let mut hex_chars = hash_text.chars();
+    for byte in &mut hash_bytes {
+        let high_char = hex_chars.next().unwrap();
+        let low_char = hex_chars.next().unwrap();
+        *byte = 16 * hex_half_byte(high_char)? + hex_half_byte(low_char)?;
     }
     let expected_hash: blake3::Hash = hash_bytes.into();
 
@@ -1246,7 +1212,7 @@ fn hash_paths_32(
     stdin_ctx: &StdinContext,
     #[cfg(unix)] forbidden: Option<StreamId>,
     #[cfg(not(unix))] forbidden: Option<()>,
-    on_ordered: &mut dyn FnMut(usize, anyhow::Result<blake3::Hash>) -> bool,
+    on_ordered: &mut dyn FnMut(usize, err::Result<blake3::Hash>) -> bool,
 ) {
     if paths.is_empty() {
         return;
@@ -1295,8 +1261,8 @@ fn hash_paths_32(
 
         let mut emitted = 0usize;
         let mut stop = false;
-        let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
-        let mut take = |i: usize, output: anyhow::Result<blake3::Hash>| -> bool {
+        let mut results: Vec<Option<err::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
+        let mut take = |i: usize, output: err::Result<blake3::Hash>| -> bool {
             results[i] = Some(output);
             while emitted < paths.len() {
                 let Some(item) = results[emitted].take() else { break };
@@ -1351,7 +1317,7 @@ fn outboard_inputs(args: &Args, dir: &Path, stdin_ctx: &StdinContext, out: &mut 
     let workers = if stdin_named_twice(paths, stdin_ctx) { 1 } else { max_workers.min(paths.len()) };
     let in_a_file = (total / workers.max(1)).max(1);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let done = Mutex::new(Vec::<(usize, anyhow::Result<blake3::Hash>)>::new());
+    let done = Mutex::new(Vec::<(usize, err::Result<blake3::Hash>)>::new());
     // To the writers: a file's index, its hash, its outboard; no more
     // waiting than a few a writer, so that outboards are not made faster
     // than they are written. Back from them: the outboards' buffers, for
@@ -1416,7 +1382,7 @@ fn outboard_inputs(args: &Args, dir: &Path, stdin_ctx: &StdinContext, out: &mut 
         });
     }
     let unwritten = unwritten.into_inner().unwrap();
-    let mut results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
+    let mut results: Vec<Option<err::Result<blake3::Hash>>> = (0..paths.len()).map(|_| None).collect();
     for (i, result) in done.into_inner().unwrap() {
         results[i] = Some(result);
     }
@@ -1473,7 +1439,7 @@ fn outboard_of(
     threads: usize,
     rooms: &mut outboard::Rooms,
     nodes: &mut Vec<u8>,
-) -> anyhow::Result<blake3::Hash> {
+) -> err::Result<blake3::Hash> {
     let mode = args.mode;
     let bytes = &mut rooms.bytes;
     bytes.clear();
@@ -1566,8 +1532,8 @@ fn hash_inputs_with<O: Send>(
     args: &Args,
     threads: usize,
     out: &mut OutBuf,
-    work: impl Fn(&Args, &std::sync::atomic::AtomicUsize, &mut dyn FnMut(usize, anyhow::Result<O>) -> bool) + Sync,
-    print_one: impl Fn(O, &Path, &Args, &mut OutBuf) -> anyhow::Result<()>,
+    work: impl Fn(&Args, &std::sync::atomic::AtomicUsize, &mut dyn FnMut(usize, err::Result<O>) -> bool) + Sync,
+    print_one: impl Fn(O, &Path, &Args, &mut OutBuf) -> err::Result<()>,
 ) -> u64 {
     let _file_threads_guard = args.num_threads().map(|_| FileThreadsGuard::enter(threads));
     let paths = &args.file_args;
@@ -1584,8 +1550,8 @@ fn hash_inputs_with<O: Send>(
         drop(done_tx);
         let mut failed = 0u64;
         let mut printed = 0usize;
-        let mut results: Vec<Option<anyhow::Result<O>>> = (0..paths.len()).map(|_| None).collect();
-        let mut take = |i: usize, output: anyhow::Result<O>| {
+        let mut results: Vec<Option<err::Result<O>>> = (0..paths.len()).map(|_| None).collect();
+        let mut take = |i: usize, output: err::Result<O>| {
             results[i] = Some(output);
             while printed < paths.len() {
                 let Some(item) = results[printed].take() else { break };
@@ -1615,7 +1581,7 @@ fn hash_some(
     args: &Args,
     stdin_ctx: &StdinContext,
     next: &std::sync::atomic::AtomicUsize,
-    done: &mut dyn FnMut(usize, anyhow::Result<blake3::OutputReader>) -> bool,
+    done: &mut dyn FnMut(usize, err::Result<blake3::OutputReader>) -> bool,
 ) {
     loop {
         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1625,7 +1591,7 @@ fn hash_some(
     }
 }
 
-fn emit_checked_entry(parsed: ParsedCheckLine, res: anyhow::Result<blake3::Hash>, args: &Args, out: &mut OutBuf) -> anyhow::Result<bool> {
+fn emit_checked_entry(parsed: ParsedCheckLine, res: err::Result<blake3::Hash>, args: &Args, out: &mut OutBuf) -> err::Result<bool> {
     let ParsedCheckLine { file_string, is_escaped, expected_hash, .. } = parsed;
     let display = if is_escaped { "\\".to_string() + &file_string } else { file_string };
     let found_hash = match res {
@@ -1658,7 +1624,7 @@ const MAX_CHECK_LINE_BYTES: usize = 1 << 20;
 /// any oversized remainder up to `\n` or EOF without allocating, and decoding
 /// UTF-8 per record so one invalid-UTF-8 line does not discard earlier valid
 /// entries in the same batch.
-fn read_check_line_bounded(reader: &mut impl BufRead, raw: &mut Vec<u8>, max_bytes: usize) -> io::Result<Option<Result<String, anyhow::Error>>> {
+fn read_check_line_bounded(reader: &mut impl BufRead, raw: &mut Vec<u8>, max_bytes: usize) -> io::Result<Option<Result<String, err::Error>>> {
     raw.clear();
     let mut too_long = false;
     let mut saw_any = false;
@@ -1698,18 +1664,18 @@ fn read_check_line_bounded(reader: &mut impl BufRead, raw: &mut Vec<u8>, max_byt
         return Ok(None);
     }
     if too_long {
-        return Ok(Some(Err(anyhow::anyhow!("Check line exceeds maximum length"))));
+        return Ok(Some(Err(format_err!("Check line exceeds maximum length"))));
     }
     match std::str::from_utf8(raw) {
         Ok(s) => Ok(Some(Ok(s.to_owned()))),
-        Err(_) => Ok(Some(Err(anyhow::anyhow!("Invalid UTF-8 in check line")))),
+        Err(_) => Ok(Some(Err(format_err!("Invalid UTF-8 in check line")))),
     }
 }
 
-fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files_failed: &mut u64, out: &mut OutBuf) -> anyhow::Result<()> {
+fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files_failed: &mut u64, out: &mut OutBuf) -> err::Result<()> {
     const CHECK_CHUNK: usize = 4096;
     enum Entry {
-        ParseErr(anyhow::Error),
+        ParseErr(err::Error),
         Own(ParsedCheckLine),
         Stdin(ParsedCheckLine),
         File { parsed: ParsedCheckLine, batch_idx: usize },
@@ -1803,7 +1769,7 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
                 break;
             };
             saw_line = true;
-            let parsed_res = line_res.and_then(|line| parse_check_line(&line, args.sigilcode()));
+            let parsed_res = line_res.and_then(|line| parse_check_line(&line));
             match parsed_res {
                 Err(e) => entries.push(Entry::ParseErr(e)),
                 Ok(parsed) if is_the_checkfile(&parsed.file_path) => entries.push(Entry::Own(parsed)),
@@ -1821,7 +1787,7 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
             break;
         }
 
-        let mut batch_results: Vec<Option<anyhow::Result<blake3::Hash>>> = (0..batch_paths.len()).map(|_| None).collect();
+        let mut batch_results: Vec<Option<err::Result<blake3::Hash>>> = (0..batch_paths.len()).map(|_| None).collect();
         hash_paths_32(args, &batch_paths, stdin_ctx, own, &mut |idx, res| {
             batch_results[idx] = Some(res);
             true
@@ -1836,7 +1802,7 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
                 }
                 Entry::Own(parsed) => {
                     let what = if checkfile_is_stdin { "standard input is the checkfile; it" } else { "this checkfile is a stream, and" };
-                    emit_checked_entry(parsed, Err(anyhow::anyhow!("{what} cannot also be a file to check")), args, out)?
+                    emit_checked_entry(parsed, Err(format_err!("{what} cannot also be a file to check")), args, out)?
                 }
                 Entry::Stdin(parsed) => {
                     let res = hash_path_hash(args, &parsed.file_path, stdin_ctx, own);
@@ -1879,7 +1845,7 @@ fn explain_sigbus() {
     unsafe { libc::signal(libc::SIGBUS, handler as libc::sighandler_t) };
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> err::Result<()> {
     #[cfg(unix)]
     // Sound: before any thread starts; a broken pipe then ends b3sum, as it
     // does other tools.
@@ -1944,7 +1910,6 @@ mod test {
         // Conflicts & requirements
         assert!(parse_from(["b3sum", "--keyed"]).is_err());
         assert!(parse_from(["b3sum", "--keyed", "--derive-key", "ctx", "f"]).is_err());
-        assert!(parse_from(["b3sum", "--raw", "--sigilcode"]).is_err());
         assert!(parse_from(["b3sum", "--quiet"]).is_err());
         assert!(parse_from(["b3sum", "--check", "--seek", "0"]).is_err());
         assert!(parse_from(["b3sum", "--check", "--length", "32"]).is_err());
@@ -1958,8 +1923,8 @@ mod test {
         assert!(parse_from(["b3sum", "--outboard", "d", "--seek", "0"]).is_err());
         assert!(parse_from(["b3sum", "--outboard", "d", "--raw"]).is_err());
         assert!(parse_from(["b3sum", "--outboard", "d", "--derive-key", "x"]).is_err());
-        // Check + sigilcode + quiet IS allowed; outboard + keyed + file IS allowed
-        assert!(matches!(parse_from(["b3sum", "-c", "--quiet", "--sigilcode"]), Ok(ParseOutcome::Parsed(_))));
+        // Check + quiet IS allowed; outboard + keyed + file IS allowed
+        assert!(matches!(parse_from(["b3sum", "-c", "--quiet"]), Ok(ParseOutcome::Parsed(_))));
         assert!(matches!(parse_from(["b3sum", "--outboard", "d", "--keyed", "f"]), Ok(ParseOutcome::Parsed(_))));
         // Duplicate flags rejected
         assert!(parse_from(["b3sum", "--raw", "--raw"]).is_err());

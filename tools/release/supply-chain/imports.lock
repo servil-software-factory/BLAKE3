@@ -406,13 +406,6 @@ Mostly removes some deprecated and unsound APIs.
 """
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.signal-hook-registry]]
-who = "Henrik Skupin <mail@hskupin.info>"
-criteria = "safe-to-run"
-version = "1.4.8"
-notes = "Well-maintained crate for low-level OS signal handling, used via tokio's signal feature."
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
 [[audits.mozilla.audits.tempfile]]
 who = "Chris Martin <cmartin@mozilla.com>"
 criteria = "safe-to-deploy"
