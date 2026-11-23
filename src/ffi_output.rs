@@ -60,22 +60,8 @@ pub(crate) fn lanes(platform: Platform) -> usize {
 /// less waiting in the stage, padded there (`update`'s, `Hasher::first_block`).
 /// Other states keep Hasher's existing finalization path.
 pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
-    let c = &hasher.core.chunk_state;
-    // Its first chunk, from the message's start: the counter starts at a
-    // subtree's offset and counts every chunk finished since.
-    if c.chunk_counter != 0 {
-        return None;
-    }
-    if hasher.staged == 0 {
-        return Some(Input { block: &c.buf, cv: &c.cv, len: c.buf_len, flags: c.flags | c.start_flag() | CHUNK_END | ROOT });
-    }
-    // Staged bytes behind a chunk state that holds none: the whole message.
-    (hasher.staged <= BLOCK_LEN && hasher.core.count() == 0).then(|| Input {
-        block: hasher.first_block(),
-        cv: &c.cv,
-        len: hasher.staged as u8,
-        flags: c.flags | CHUNK_START | CHUNK_END | ROOT,
-    })
+    let (block, cv, len, flags) = hasher.single_compression_root()?;
+    Some(Input { block, cv, len, flags })
 }
 
 /// Requires AVX2 for W=8, AVX-512F+VL for W=16, on Linux. Every descriptor
@@ -120,12 +106,13 @@ pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Plat
         let h = &hashers[i];
         let (counter, bytes) = h.held_group().expect("a held group");
         let refs: [&[u8; CHUNK_LEN]; PER] = core::array::from_fn(|j| bytes[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap());
+        let domain = h.domain_ref();
         platform.hash_many(
             &refs,
-            &h.core.key,
+            domain.key(),
             counter,
             crate::IncrementCounter::Yes,
-            h.core.chunk_state.flags,
+            domain.flags(),
             CHUNK_START,
             CHUNK_END,
             level[k * PER..(k + 1) * PER].as_flattened_mut(),
@@ -136,11 +123,12 @@ pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Plat
         let count = n * per_message;
         let input = |j: usize| {
             let h = &hashers[held[j / per_message]];
+            let domain = h.domain_ref();
             Input {
                 block: level.as_flattened()[j * BLOCK_LEN..(j + 1) * BLOCK_LEN].try_into().unwrap(),
-                cv: &h.core.key,
+                cv: domain.key(),
                 len: BLOCK_LEN as u8,
-                flags: h.core.chunk_state.flags | crate::PARENT,
+                flags: domain.flags() | crate::PARENT,
             }
         };
         let mut full = count / width * width;
@@ -202,8 +190,14 @@ fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; OUT_LEN]]))
     hash(&inputs, &mut out);
     crate::self_test::fold(out.as_flattened())
 }
-fn check_self_test(answer: u64) {
-    assert_eq!(answer, SELF_TEST_EXPECTED, "blake3-servil startup self-test failed: independent counter-zero compressions");
+fn check_self_test_value(answer: u64) -> bool {
+    answer == SELF_TEST_EXPECTED
+}
+
+pub(crate) fn check_self_test(answer: u64) {
+    if !check_self_test_value(answer) {
+        crate::self_test::fail(format_args!("blake3-servil startup self-test failed: independent counter-zero compressions"));
+    }
 }
 unsafe fn hash_eight_groups(inputs: &[Input<'_>; 16], out: &mut [[u8; OUT_LEN]]) {
     for (inputs, out) in inputs.chunks_exact(8).zip(out.chunks_mut(8)) {
@@ -368,7 +362,7 @@ mod tests {
 
     #[test]
     fn startup_rejects_corrupted_answer() {
-        assert!(std::panic::catch_unwind(|| check_self_test(SELF_TEST_EXPECTED ^ 1)).is_err());
+        assert!(!check_self_test_value(SELF_TEST_EXPECTED ^ 1));
     }
 
     #[test]

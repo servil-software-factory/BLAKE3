@@ -43,7 +43,10 @@ fn fill(reader: &mut impl io::Read, buffer: &mut [u8]) -> (usize, io::Result<()>
     while filled < buffer.len() {
         match reader.read(&mut buffer[filled..]) {
             Ok(0) => break,
-            Ok(n) => filled += n,
+            Ok(n) => {
+                assert!(n <= buffer.len() - filled, "Read returned {n} bytes for a {}-byte slice", buffer.len() - filled);
+                filled += n;
+            }
             // see test_update_reader_interrupted
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return (filled, Err(e)),
