@@ -35,7 +35,6 @@ name = "b3_servil"
 filename = "b3_servil"
 
 [dev-dependencies]
-serde_json = "1"
 libc = "0.2"
 
 [profile.release]

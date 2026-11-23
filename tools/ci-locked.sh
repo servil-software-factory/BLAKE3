@@ -4,7 +4,7 @@
 # (tools/release/workspace.toml), without adding a second lockfile.
 #
 #     sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features
-#     sh tools/ci-locked.sh nextest run -p blake3-servil-core --features=serde
+#     sh tools/ci-locked.sh nextest run -p blake3-servil-core
 #     sh tools/ci-locked.sh test --doc -p blake3-servil
 #
 # The virtual workspace is staged outside the repository tree at a

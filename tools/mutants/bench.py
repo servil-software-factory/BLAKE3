@@ -113,7 +113,7 @@ def main():
     tests_tsv = os.path.join(check.ROOT, "tmp", "mutants-last", "run", "tests.tsv")
     assert os.path.exists(tests_tsv), "check.py's last full run names the caught places: run check.py first"
     caught = caught_places(open(tests_tsv))
-    listing = ["cargo", "mutants", "--list", "--json", "--diff", "--profile", "mutants", "--features", "serde"]
+    listing = ["cargo", "mutants", "--list", "--json", "--diff", "--profile", "mutants"]
     for f in sorted({f for f, _ in rows}):
         listing += ["--file", f]
     mutants = json.loads(subprocess.run(listing, cwd=check.ROOT, capture_output=True, text=True, check=True).stdout)

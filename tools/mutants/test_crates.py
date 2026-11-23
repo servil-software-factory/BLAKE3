@@ -35,7 +35,7 @@ class Crates(unittest.TestCase):
         self.assertEqual(check.other_crates([], lambda d: True), [])
 
     def test_the_features_are_the_root_crates(self):
-        self.assertEqual(check.build_args(""), ["--profile", "mutants", "--features", "serde"])
+        self.assertEqual(check.build_args(""), ["--profile", "mutants"])
         self.assertEqual(check.build_args("threads"), ["--profile", "mutants"])
 
     def test_a_list_divides_by_the_files_that_moved(self):

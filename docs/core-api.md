@@ -11,7 +11,7 @@ Call `initialize()` once at startup before hashing. Hashing functions live in tw
 - `convenience` takes ordinary `&[u8]` slices and is tuned for occasional calls amid other work.
 - `throughput` takes 64-byte-aligned `Block`s and batches, writes into caller-supplied buffers, and is tuned for sustained back-to-back calls.
 
-Disable default features (`default-features = false`) for an allocator-free `no_std` build. The optional `serde` feature adds `Serialize` and `Deserialize` for `Hash`. The crate does not wipe what it held from memory.
+Disable default features (`default-features = false`) for an allocator-free `no_std` build. The crate does not wipe what it held from memory.
 
 `blake3-servil` re-exports this crate and adds multithreading via a shared thread pool. [`capi/b3.h`](../capi/b3.h) provides the convenience API for C and C++.
 
@@ -43,7 +43,7 @@ fn to_hex(&self) -> HexHash
 fn from_hex(hex: impl AsRef<[u8]>) -> Result<Self, HexError>
 ```
 
-Implements: `Clone`, `Copy`, `Debug`, `Deserialize`, `Display`, `Eq`, `From`, `FromStr`, `Hash`, `PartialEq`, `Serialize`.
+Implements: `Clone`, `Copy`, `Debug`, `Display`, `Eq`, `From`, `FromStr`, `Hash`, `PartialEq`.
 
 
 ### `struct HexHash`

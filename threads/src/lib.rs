@@ -244,8 +244,7 @@
 //! # Cargo Features
 //!
 //! This crate needs the standard library; the core alone builds without
-//! it. The `serde` feature (off by default) is the core's, passed on:
-//! `Serialize` and `Deserialize` for [`Hash`](struct@Hash).
+//! it.
 //!
 //! The build needs a C compiler that assembles the kernels (GCC 12 or
 //! later, or Clang); without one it stops and says so. This crate runs its

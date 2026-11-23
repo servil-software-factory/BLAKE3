@@ -27,16 +27,11 @@ default = ["std"]
 # toggles a runtime feature check on 64-bit ARM targets.
 std = ["constant_time_eq/std"]
 
-[package.metadata.docs.rs]
-# Document the Serialize/Deserialize impls on docs.rs.
-features = ["serde"]
-
 [dependencies]
 # BUILD_VERSION, in a crate of its own: its build script reruns on every
 # edit, and the library's, which assembles the kernels, does not.
 blake3-servil-version = { version = "=0.10.0+dev", path = "version" }
 constant_time_eq = { version = "0.4.2", default-features = false }
-serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
 
 [target.'cfg(all(target_arch = "aarch64", any(target_vendor = "apple", target_os = "linux")))'.dependencies]
 libc = { version = "0.2", default-features = false }
@@ -50,12 +45,6 @@ libc = { version = "0.2", default-features = false }
 # fixed expected values (BLAKE3_GOLDEN=1, src/test.rs's `golden`), and the
 # co-linking test checks its native symbols never replace ours.
 blake3 = { version = "=1.8.7", default-features = false, features = ["std"] }
-rand = "0.10.0"
-hmac = "0.13.0"
-hex = "0.4.2"
-tempfile = "3.8.0"
-serde_json = "1.0.107"
-ciborium = "0.2.2"
 
 [build-dependencies]
 cc = "1.1.12"

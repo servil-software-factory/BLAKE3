@@ -44,8 +44,7 @@ allow = [
 confidence-threshold = 0.8
 # unicode-ident carries tables made from the Unicode Character Database,
 # under Unicode's licence beside MIT or Apache-2.0. It is compiled into
-# procedural macros, which run in a build and stay out of what is built:
-# serde's derive (the libraries' `serde` feature) and the tests' crates.
+# procedural macros used by dev-dependencies (such as bao-tree's ref-cast-impl).
 exceptions = [
     { allow = ["Unicode-3.0"], crate = "unicode-ident" },
 ]

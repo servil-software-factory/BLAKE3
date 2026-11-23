@@ -1160,7 +1160,7 @@ mod test {
                     }
                 }
                 for ((words, flags), anchor) in modes.iter().zip(anchors) {
-                    let expected: [u8; OUT_LEN] = hex::decode(anchor).unwrap().try_into().unwrap();
+                    let expected: [u8; OUT_LEN] = crate::Hash::from_hex(anchor).unwrap().into();
                     for platform in crate::test::every_platform() {
                         let mut out = vec![[0u8; OUT_LEN]; *count];
                         hash_across(&input, len, words, *flags, &mut out, platform);
@@ -1193,7 +1193,7 @@ mod test {
         for count in [4, 17] {
             let input = message.repeat(count);
             for ((words, flags), anchor) in modes.iter().zip(anchors) {
-                let expected: [u8; OUT_LEN] = hex::decode(anchor).unwrap().try_into().unwrap();
+                let expected: [u8; OUT_LEN] = crate::Hash::from_hex(anchor).unwrap().into();
                 for platform in crate::test::every_platform() {
                     let mut out = vec![[0u8; OUT_LEN]; count];
                     hash_across(&input, 2 * CHUNK_LEN, words, *flags, &mut out, platform);
@@ -1224,7 +1224,7 @@ mod test {
         for count in [4, 17] {
             let input = message.repeat(count);
             for ((words, flags), anchor) in modes.iter().zip(anchors) {
-                let expected: [u8; OUT_LEN] = hex::decode(anchor).unwrap().try_into().unwrap();
+                let expected: [u8; OUT_LEN] = crate::Hash::from_hex(anchor).unwrap().into();
                 for platform in crate::test::every_platform() {
                     let mut out = vec![[0u8; OUT_LEN]; count];
                     hash_across(&input, 4 * CHUNK_LEN, words, *flags, &mut out, platform);

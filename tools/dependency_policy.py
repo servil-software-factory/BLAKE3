@@ -290,11 +290,14 @@ def no_audit_record_libc(stage):
     strip_audit_evidence(stage, "libc")
 
 
-def serde_only_safe_to_run(stage):
-    """Downgrade serde to safe-to-run only: dev-dep ciborium still passes under --no-all-features, so ONLY
-    deploy-strength checking of the optional `serde` feature catches it."""
-    ver = locked_version(stage / "release" / "Cargo.lock", "serde")
-    strip_audit_evidence(stage, "serde", replace_with=[(ver, "safe-to-run")])
+def optional_feature_only_safe_to_run(stage):
+    """Plant an optional feature depending on safe-to-run-only arrayvec: default builds ignore it, so ONLY
+    deploy-strength checking under --all-features catches it."""
+    ver = locked_version(stage / "release" / "Cargo.lock", "arrayvec")
+    edit(stage / "release" / "checkout" / "Cargo.toml", r"^\[dependencies\]\n",
+         f'[dependencies]\narrayvec = {{ version = "={ver}", default-features = false, optional = true }}\n')
+    edit(stage / "release" / "Cargo.lock", r'(name = "blake3-servil-core"\nversion = "[^"]*"\ndependencies = \[\n)',
+         r'\g<1> "arrayvec",\n')
 
 
 def arrayvec_in_what_ships(stage):
@@ -326,6 +329,9 @@ def cli_selects_unapproved_version(stage):
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         edit(manifest, rf'^syn = "={re.escape(pinned)}"\n', 'syn = ">=2, <4"\n')
     strip_audit_evidence(stage, "syn", replace_with=[(syn3_ver, "safe-to-deploy"), (syn2_ver, "safe-to-run")])
+    for dep in ("proc-macro2", "unicode-ident"):
+        dep_ver = locked_version(release_lock, dep)
+        strip_audit_evidence(stage, dep, replace_with=[(dep_ver, "safe-to-deploy")])
 
 
 def an_unread_index(stage):
@@ -357,8 +363,8 @@ CONTROLS = [
      an_optional_feature_gpl_crate, {"release": ["by path", "licenses"], "cli": []}),
     ("a shipped crate with all audit evidence stripped",
      no_audit_record_libc, {"release": ["audits"], "cli": ["audits"]}),
-    ("optional serde feature downgraded to safe-to-run only (tests deploy check under all-features)",
-     serde_only_safe_to_run, {"release": ["audits"], "cli": []}),
+    ("optional feature depending on safe-to-run-only arrayvec (tests deploy check under all-features)",
+     optional_feature_only_safe_to_run, {"release": ["audits"], "cli": []}),
     ("arrayvec (safe-to-run only) reintroduced into what ships",
      arrayvec_in_what_ships, {"release": ["audits"], "cli": ["audits"]}),
     ("two valid locks where standalone cli selects an unapproved build-dep version",

@@ -23,16 +23,13 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
+#[path = "../../test_vectors/src/parse.rs"]
+mod vectors;
+
 fn official_vectors() -> Vec<(usize, [[u8; 32]; 3])> {
-    let text = include_str!("../../test_vectors/test_vectors.json");
-    let json: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-    let hex32 = |v: &serde_json::Value| -> [u8; 32] { hex::decode(&v.as_str().unwrap()[..64]).unwrap().try_into().unwrap() };
-    json["cases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| (c["input_len"].as_u64().unwrap() as usize, [hex32(&c["hash"]), hex32(&c["keyed_hash"]), hex32(&c["derive_key"])]))
-        .collect()
+    let data = vectors::parse_json(include_str!("../../test_vectors/test_vectors.json"));
+    let hex32 = |s: &str| -> [u8; 32] { vectors::hex_decode(&s[..64]).try_into().unwrap() };
+    data.cases.iter().map(|c| (c.input_len, [hex32(&c.hash), hex32(&c.keyed_hash), hex32(&c.derive_key)])).collect()
 }
 
 #[test]

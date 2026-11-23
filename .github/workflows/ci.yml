@@ -91,15 +91,11 @@ jobs:
     # "Tests run under nextest"); the doc examples under cargo test --doc.
     # Every Cargo build and test runs --locked against tools/release/Cargo.lock
     # via tools/ci-locked.sh.
-    # Default tests plus the optional trait implementations (every public
-    # feature).
-    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --features=serde
-    - run: sh tools/ci-locked.sh test --doc -p blake3-servil-core --features=serde
-    # no_std library checks (with and without optional features; --lib
-    # leaves #[cfg(test)] off so dead-code warnings surface under -D warnings)
-    # and no_std tests.
+    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core
+    - run: sh tools/ci-locked.sh test --doc -p blake3-servil-core
+    # no_std library checks (--lib leaves #[cfg(test)] off so dead-code
+    # warnings surface under -D warnings) and no_std tests.
     - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features
-    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features --features=serde
     - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --no-default-features
     - name: Make sure enabling LTO via CFLAGS doesn't break the build.
       run: sh tools/ci-locked.sh build -p blake3-servil-core --tests
@@ -173,9 +169,8 @@ jobs:
     - run: sh tools/ci-rust.sh stable
     - run: sh tools/ci-tools.sh nextest cargo-c
     - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features
-    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features --features=serde
     - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --no-default-features
-    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests --features=serde
+    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests
     - name: threads
       run: sh tools/ci-locked.sh nextest run -p blake3-servil -P ci --lib --tests --no-fail-fast
     # Both suites once more on a build without the SME2 unit, as a C
@@ -196,8 +191,7 @@ jobs:
         unset BLAKE3_CI
         for cmd in \
           "sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features" \
-          "sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features --features=serde" \
-          "sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests --features=serde"; do
+          "sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests"; do
           # Each build gets its own transcript and target dir so one build's
           # fallback notice cannot certify another (review 8dff8004).
           rm -rf "$CARGO_TARGET_DIR"
@@ -217,7 +211,7 @@ jobs:
         cargo run -q --release --locked --manifest-path b3sum/Cargo.toml -- -c qemu.b3
         ar x qemu-user_11.1.2+ds-3_arm64.deb data.tar.xz && tar xJf data.tar.xz ./usr/bin/qemu-aarch64
         sudo install usr/bin/qemu-aarch64 /usr/local/bin/qemu-aarch64 && qemu-aarch64 --version
-    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests --features=serde
+    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests
       env:
         CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -cpu cortex-a72
         # tests/pool_fairness.rs measures the pool's shares by time, which an
@@ -242,7 +236,6 @@ jobs:
     - run: sh tools/ci-tools.sh nextest cargo-c
     # no_std checks on Apple Silicon under -D warnings (without #[cfg(test)]).
     - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features
-    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features --features=serde
     # The same installed-consumer test as on Linux: shared and static
     # installations, pkg-config flags, C11 and C++11 callers.
     - name: C API

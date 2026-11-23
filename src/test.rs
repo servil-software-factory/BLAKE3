@@ -1014,48 +1014,6 @@ fn test_update_reader_interrupted() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Hash's wire format: an array of 32 bytes in JSON and CBOR, and a CBOR
-/// bytestring still read. The format comes from a derive no mutant touches,
-/// so this test is its one check.
-#[test]
-#[cfg(feature = "std")]
-#[cfg(feature = "serde")]
-fn test_serde() {
-    // Henrik suggested that we use 0xfe / 254 for byte test data instead of 0xff / 255, due to the
-    // fact that 0xfe is not a well formed CBOR item.
-    let hash: crate::Hash = [0xfe; 32].into();
-
-    let json = serde_json::to_string(&hash).unwrap();
-    assert_eq!(json, "[254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254]",);
-    let hash2: crate::Hash = serde_json::from_str(&json).unwrap();
-    assert_eq!(hash, hash2);
-
-    let mut cbor = Vec::<u8>::new();
-    ciborium::into_writer(&hash, &mut cbor).unwrap();
-    assert_eq!(
-        cbor,
-        [
-            0x98, 0x20, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe,
-            0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe,
-            0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe, 0x18, 0xfe,
-        ]
-    );
-    let hash_from_cbor: crate::Hash = ciborium::from_reader(&cbor[..]).unwrap();
-    assert_eq!(hash_from_cbor, hash);
-
-    // Version 1.5.2 of this crate changed the default serialization format to a bytestring
-    // (instead of an array/list) to save bytes on the wire. That was a backwards compatibility
-    // mistake for non-self-describing formats, and it's been reverted. Since some small number of
-    // serialized bytestrings will probably exist forever in the wild, we should test that we can
-    // still deserialize these from self-describing formats.
-    let bytestring_cbor: &[u8] = &[
-        0x58, 0x20, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe,
-        0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe, 0xfe,
-    ];
-    let hash_from_bytestring_cbor: crate::Hash = ciborium::from_reader(bytestring_cbor).unwrap();
-    assert_eq!(hash_from_bytestring_cbor, hash);
-}
-
 // BLAKE3-Servil's unsafe paths on small inputs: the batch tables and padded
 // lanes of many.rs, and the pool's jobs from concurrent callers. Each
 // against crate::convenience::hash().

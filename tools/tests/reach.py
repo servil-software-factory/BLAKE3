@@ -57,7 +57,7 @@ TARGET = os.path.join(ROOT, "target", "tests-coverage")
 # the integration tests, release), with the public features on, as the
 # mutation check builds (tools/mutants/check.py): the tests behind them
 # are in the map too, so a map serves the mutation check's narrowing.
-SUITE = ["--release", "--lib", "--tests", "--features", "serde"]
+SUITE = ["--release", "--lib", "--tests"]
 # Changes here reach code coverage cannot see: every test runs.
 EVERYTHING = re.compile(r"^(c/|build\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/|\.config/|src/.*\.(S|c|h)$)")
 # Crates and suites of their own, which the library's tests never run:

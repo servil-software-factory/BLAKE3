@@ -212,13 +212,7 @@
 //! later, or Clang); without one it stops and says so. This crate runs its
 //! assembly or not at all: for portable Rust, use official BLAKE3.
 //!
-//! The `serde` feature (off by default, on for [docs.rs]) implements
-//! [`serde::Serialize`](https://docs.rs/serde/latest/serde/trait.Serialize.html) and
-//! [`serde::Deserialize`](https://docs.rs/serde/latest/serde/trait.Deserialize.html)
-//! for [`Hash`](struct@Hash).
-//!
 //! [BLAKE3]: https://blake3.io
-//! [docs.rs]: https://docs.rs/
 //! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
 //! [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
 //! [`Seek`]: https://doc.rust-lang.org/std/io/trait.Seek.html
@@ -487,9 +481,6 @@ pub(crate) const DERIVE_KEY_MATERIAL: u8 = 1 << 6;
 /// - `Copy` leaves the same digest available at both places.
 /// - `Debug` includes the full digest in hexadecimal, even for a derived
 ///   key.
-/// - `Deserialize` (with `serde`) reads a sequence of exactly 32 bytes (in
-///   JSON an array of 32 numbers, not the hex string) and takes them as
-///   the digest, hashing nothing.
 /// - `Display` prints all 32 bytes in lowercase hexadecimal, even for a
 ///   derived key.
 /// - `Eq` treats digests with identical bytes as equal.
@@ -502,9 +493,6 @@ pub(crate) const DERIVE_KEY_MATERIAL: u8 = 1 << 6;
 ///   depend on those bytes.
 /// - `PartialEq` compares digests, arrays and slices in constant time for
 ///   32-byte operands; a different length is unequal.
-/// - `Serialize` (with `serde`) writes the digest as a sequence of 32 bytes
-///   (in JSON an array of 32 numbers, not a hex string).
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Eq)]
 #[repr(transparent)]
 pub struct Hash([u8; OUT_LEN]);

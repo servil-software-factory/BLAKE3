@@ -1792,11 +1792,37 @@ pub(crate) mod places {
         /// node, so nothing is bound and the pool runs on the allowed
         /// CPUs. Each case is a directory in the shape of
         /// `/sys/devices/system`, read as `Node::current` reads the
+        #[cfg(target_os = "linux")]
+        struct TempDir(std::path::PathBuf);
+
+        #[cfg(target_os = "linux")]
+        impl TempDir {
+            fn new(tag: &str) -> Self {
+                static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+                let id = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!("blake3-servil-{tag}-{}-{id}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&path);
+                std::fs::create_dir_all(&path).unwrap();
+                Self(path)
+            }
+
+            fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
         /// machine's: the list of nodes first.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_node_is_found_only_where_the_system_tells_all_of_it() {
-            let root = tempfile::tempdir().unwrap();
+            let root = TempDir::new("node-find");
             // A machine of two nodes: CPUs 0-1 on node 0, CPUs 2-3 on node
             // 1, as `find` reads it for CPU 2; `change` then takes
             // something away.
@@ -1849,7 +1875,7 @@ pub(crate) mod places {
         #[test]
         #[cfg(target_os = "linux")]
         fn the_node_that_holds_the_most_allowed_cpus_is_kept_to() {
-            let root = tempfile::tempdir().unwrap();
+            let root = TempDir::new("node-largest");
             let case = |name: &str, cpu: usize, allowed: &str, change: &dyn Fn(&std::path::Path)| {
                 let system = root.path().join(name);
                 for cpu in 0..12 {

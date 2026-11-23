@@ -27,12 +27,9 @@ step cargo test -q --release --doc --no-default-features
 # (compile_fail,E0308) where the compiler gives one a code. Stable
 # rustdoc takes any failure for it; with
 # this switch it holds each such example to its reason, in both crates.
-step sh -c 'RUSTC_BOOTSTRAP=1 cargo test -q --doc --features serde && cd threads && RUSTC_BOOTSTRAP=1 cargo test -q --doc'
+step sh -c 'RUSTC_BOOTSTRAP=1 cargo test -q --doc && cd threads && RUSTC_BOOTSTRAP=1 cargo test -q --doc'
 RUSTFLAGS="-D warnings" step cargo check -q --lib --no-default-features
-RUSTFLAGS="-D warnings" step cargo check -q --lib --no-default-features --features serde
-RUSTFLAGS="-D warnings" step cargo check -q --tests --no-default-features --features serde
 RUSTFLAGS="-D warnings" step cargo check -q --release --tests --examples
-RUSTFLAGS="-D warnings" step cargo check -q --release --all-features --tests --examples
 # The crate with the pool (threads/). One CPU, as in a one-CPU container:
 # the pool has no worker thread, and the caller hashes everything (the
 # suites run on many CPUs and never reach that path). The CPU is the
@@ -50,7 +47,6 @@ step python3 tools/pipeline_model_controls.py
 # Shuttle's SC model cannot check the RCpc wake-publication barrier.
 step python3 tools/check-waker-order.py
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo nextest run --cargo-quiet --release --no-default-features'
-RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --lib --no-default-features --features serde'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --tests'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --all-features --tests'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --tests --target x86_64-unknown-linux-gnu'

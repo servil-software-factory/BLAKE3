@@ -14,8 +14,27 @@
 //! new method or trait implementation joins the walk, or says why not.
 #![cfg(feature = "std")]
 use blake3_servil_core::{Mode, convenience::Hasher, initialize, throughput::*};
-use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::io::{Read, Seek, SeekFrom, Write};
+
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn next_u8(&mut self) -> u8 {
+        self.next_u64() as u8
+    }
+
+    fn range(&mut self, lo: usize, hi: usize) -> usize {
+        lo + (self.next_u64() as usize % (hi - lo))
+    }
+}
 
 // WALKED
 // Hasher::new Hasher::update Hasher::update_with Hasher::update_reader Hasher::finalize Hasher::finalize_xof
@@ -251,14 +270,14 @@ fn long_histories_preserve_every_message() {
     initialize();
     const SEED: u64 = 0x104f_4d32;
     eprintln!("seed {SEED:#x}");
-    let mut rng = StdRng::seed_from_u64(SEED);
+    let mut rng = SplitMix64(SEED);
     let mut w = Walk::new(17, false);
     w.check();
-    let data: Vec<_> = (0..300_000).map(|_| rng.random()).collect();
+    let data: Vec<_> = (0..300_000).map(|_| rng.next_u8()).collect();
     for step in 0..2500 {
-        let len = if step % 61 == 0 { rng.random_range(200_000..data.len()) } else { EDGES[rng.random_range(0..8)] };
-        let off = rng.random_range(0..=data.len() - len);
-        w.step(STEPS[rng.random_range(0..STEPS.len())], rng.random_range(0..17), &data[off..off + len]);
+        let len = if step % 61 == 0 { rng.range(200_000, data.len()) } else { EDGES[rng.range(0, 8)] };
+        let off = rng.range(0, data.len() - len + 1);
+        w.step(STEPS[rng.range(0, STEPS.len())], rng.range(0, 17), &data[off..off + len]);
     }
 }
 #[test]

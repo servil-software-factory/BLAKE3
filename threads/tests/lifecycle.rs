@@ -13,7 +13,23 @@ use blake3_servil::{Mode, throughput::*};
 
 #[path = "../../tools/require_nextest.rs"]
 mod require_nextest;
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn range(&mut self, len: usize) -> usize {
+        self.next_u64() as usize % len
+    }
+}
+
 use std::{
     collections::VecDeque,
     future::Future,
@@ -317,11 +333,11 @@ async fn exercise() {
     eprintln!("{paths} depth-five paths");
     const SEED: u64 = 0x774aa90;
     eprintln!("seed {SEED:#x}");
-    let mut rng = StdRng::seed_from_u64(SEED);
+    let mut rng = SplitMix64(SEED);
     let mut w = Walk::new(MODES[1], Limits { messages: 3, rooms: 2 }, &data);
     for _ in 0..2300 {
         let choices = w.choices();
-        w.step(choices[rng.random_range(0..choices.len())]).await;
+        w.step(choices[rng.range(choices.len())]).await;
     }
     w.finish().await;
 }

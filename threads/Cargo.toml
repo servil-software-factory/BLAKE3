@@ -15,8 +15,6 @@ include = ["/src", "/build.rs", "/LICENSE-*"]
 # with the bench's line, bench-hashes #169).
 default = ["std"]
 std = []
-# The core's optional trait implementations, passed on.
-serde = ["blake3-servil-core/serde"]
 
 [dependencies]
 # The one-thread library: the kernels and their proofs, the Hasher, the
@@ -31,10 +29,6 @@ libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 blake3 = { version = "=1.8.7", default-features = false, features = ["std"] }
-rand = "0.10.0"
-hex = "0.4.2"
-tempfile = "3.8.0"
-serde_json = "1.0.107"
 # tests/shuttle_*.rs: the pool's handshakes under a model checker.
 shuttle = "0.8"
 

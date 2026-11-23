@@ -1,5 +1,9 @@
 use blake3::{BLOCK_LEN, CHUNK_LEN};
-use serde::{Deserialize, Serialize};
+
+#[path = "parse.rs"]
+mod parse;
+
+pub use parse::{Case, Cases};
 
 // Reading files at runtime requires special configuration under WASM/WASI, so including this at
 // compile time is simpler.
@@ -72,22 +76,6 @@ pub fn paint_test_input(buf: &mut [u8]) {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Cases {
-    pub _comment: String,
-    pub key: String,
-    pub context_string: String,
-    pub cases: Vec<Case>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Case {
-    pub input_len: usize,
-    pub hash: String,
-    pub keyed_hash: String,
-    pub derive_key: String,
-}
-
 pub fn generate_json() -> String {
     let mut cases = Vec::new();
     for &input_len in TEST_CASES {
@@ -111,27 +99,22 @@ pub fn generate_json() -> String {
 
         cases.push(Case {
             input_len,
-            hash: hex::encode(&hash_out[..]),
-            keyed_hash: hex::encode(&keyed_hash_out[..]),
-            derive_key: hex::encode(&derive_key_out[..]),
+            hash: parse::hex_encode(&hash_out[..]),
+            keyed_hash: parse::hex_encode(&keyed_hash_out[..]),
+            derive_key: parse::hex_encode(&derive_key_out[..]),
         });
     }
 
-    let mut json = serde_json::to_string_pretty(&Cases {
+    parse::format_cases(&Cases {
         _comment: COMMENT.trim().replace("\n", " "),
         key: std::str::from_utf8(TEST_KEY).unwrap().to_string(),
         context_string: TEST_CONTEXT.to_string(),
         cases,
     })
-    .unwrap();
-
-    // Add a trailing newline.
-    json.push('\n');
-    json
 }
 
 pub fn parse_test_cases() -> Cases {
-    serde_json::from_str(TEST_VECTORS_JSON).expect("failed to parse test_vectors.json")
+    parse::parse_json(TEST_VECTORS_JSON)
 }
 
 #[cfg(test)]
@@ -206,9 +189,9 @@ mod tests {
             dbg!(case.input_len);
             let mut input = vec![0; case.input_len];
             paint_test_input(&mut input);
-            let expected_hash = hex::decode(&case.hash).unwrap();
-            let expected_keyed_hash = hex::decode(&case.keyed_hash).unwrap();
-            let expected_derive_key = hex::decode(&case.derive_key).unwrap();
+            let expected_hash = parse::hex_decode(&case.hash);
+            let expected_keyed_hash = parse::hex_decode(&case.keyed_hash);
+            let expected_derive_key = parse::hex_decode(&case.derive_key);
 
             test_incremental_all_at_once(key, &input, &expected_hash, &expected_keyed_hash, &expected_derive_key);
 
