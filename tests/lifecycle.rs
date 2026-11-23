@@ -20,7 +20,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 // WALKED
 // Hasher::new Hasher::update Hasher::update_with Hasher::update_reader Hasher::finalize Hasher::finalize_xof
 // Hasher::Clone Hasher::Debug Hasher::Write
-// throughput::update_each throughput::update_each_with throughput::finalize_each
+// throughput::update_each throughput::finalize_each
 // OutputReader::fill OutputReader::position OutputReader::set_position OutputReader::Clone OutputReader::Read OutputReader::Seek OutputReader::Debug
 // NOT_WALKED
 // END
@@ -70,7 +70,6 @@ enum Step {
     Clone,
     CloneFrom,
     Turn,
-    TurnWith,
     TurnSome,
     TurnOne,
     TurnNone,
@@ -80,8 +79,7 @@ enum Step {
     New,
 }
 use Step::*;
-const STEPS: [Step; 17] =
-    [Update, With, Reader, Write, WriteAll, Flush, Clone, CloneFrom, Turn, TurnWith, TurnSome, TurnOne, TurnNone, Finish, Debug, Xof, New];
+const STEPS: [Step; 16] = [Update, With, Reader, Write, WriteAll, Flush, Clone, CloneFrom, Turn, TurnSome, TurnOne, TurnNone, Finish, Debug, Xof, New];
 
 struct Walk {
     h: Vec<Hasher>,
@@ -126,13 +124,9 @@ impl Walk {
                 }
                 self.m[j] = self.m[i].clone();
             }
-            Turn | TurnWith => {
+            Turn => {
                 let pieces: Vec<_> = (0..n).map(|k| ((i + k) % n, &bytes[k.min(bytes.len())..])).chain([(i, &bytes[..bytes.len().min(3)])]).collect();
-                if matches!(op, Turn) {
-                    update_each(&mut self.h, &pieces)
-                } else {
-                    update_each_with(&mut self.h, &pieces, 16384, &TreeHasher::subtree_halves)
-                }
+                update_each(&mut self.h, &pieces);
                 for (k, b) in pieces {
                     self.m[k].bytes.extend_from_slice(b);
                 }
@@ -150,11 +144,7 @@ impl Walk {
                     TurnOne => vec![(i, bytes)],
                     _ => vec![],
                 };
-                if i % 2 == 0 {
-                    update_each(&mut self.h, &pieces)
-                } else {
-                    update_each_with(&mut self.h, &pieces, 16384, &TreeHasher::subtree_halves)
-                }
+                update_each(&mut self.h, &pieces);
                 for (k, b) in pieces {
                     self.m[k].bytes.extend_from_slice(b);
                 }

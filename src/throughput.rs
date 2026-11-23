@@ -26,7 +26,7 @@
 pub use crate::block::Packed;
 pub use crate::block::{Batch, Block, Part, Prepared};
 #[cfg(feature = "std")]
-pub use crate::each::{finalize_each, hash_each, update_each, update_each_with};
+pub use crate::each::{finalize_each, hash_each, update_each};
 
 use crate::{CHUNK_LEN, ContextKey, DERIVE_KEY_CONTEXT, Hash, IV, Mode, OUT_LEN};
 

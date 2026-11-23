@@ -194,7 +194,7 @@ replaces every `Platform` the threads crate passes.
 
 ## Layer 2: a Hasher that takes its large subtrees from the caller
 
-`update_multithreaded` and `update_each_multithreaded` are the core's
+`update_multithreaded` is the core's
 Hasher with one change: a subtree of 512 KiB or more is hashed by the
 pool. Today the core takes a hidden `Pool` (a length and a function
 pointer) through the hidden `Hasher::update_on`.

@@ -67,17 +67,7 @@ use crate::{CHUNK_END, CHUNK_LEN, CHUNK_START, CVBytes, CVWords, ChunkState, Has
 /// assert_eq!((&out[0], &out[1]), (hash(b"abc").as_bytes(), hash(b"xyz").as_bytes()));
 /// ```
 pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
-    update_turn(hashers, pieces, None);
-}
-
-/// Feed a turn of pieces, letting the caller hash large whole subtrees.
-/// As in [`update_each`], each hasher takes its pieces in order. The
-/// callback and `min_len` have [`Hasher::update_with`]'s contract, with
-/// `tree` prepared for the mode of whichever hasher needs the subtree.
-/// If the callback panics, every hasher of the turn is as
-/// [after a panic](Hasher#after-a-panic).
-pub fn update_each_with(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2]) {
-    update_turn(hashers, pieces, Some(&crate::incremental::Pool { min_len, halves }));
+    update_turn(hashers, pieces);
 }
 
 /// Mark each hasher `which` names, and panic on one named twice. In every
@@ -215,10 +205,10 @@ fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]
 /// drain un-holds, and a drain leaves nothing waiting), so a hasher that
 /// is not held has no earlier bytes waiting, and takes its piece now. Both
 /// lists live on the stack: a turn allocates nothing.
-fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option<&crate::incremental::Pool<'_>>) {
+fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
     /// The stages a turn holds, hashed however the turn ends. A turn that
-    /// panics part-way (an index that names no hasher, the caller's
-    /// callback) unwinds through here: a full stage that no list named
+    /// panics part-way (an index that names no hasher) unwinds through
+    /// here: a full stage that no list named
     /// any more would have no room for its hasher's next update, and its
     /// next turn would wait for ever for a pass to hash it. (A panic out
     /// of the hashing itself, which runs none of the caller's code and so
@@ -239,15 +229,15 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], pooled: Option
     let mut waiting = crate::stack_vec::StackVec::<(usize, &[u8]), TABLE>::new();
     for &(i, bytes) in pieces {
         if waiting.is_full() || turn.held.is_full() {
-            drain(turn.hashers, &mut turn.held, &mut waiting, pooled);
+            drain(turn.hashers, &mut turn.held, &mut waiting);
         }
         if turn.hashers[i].held_group().is_some() {
             waiting.push((i, bytes));
             continue;
         }
-        gather(turn.hashers, i, bytes, pooled, &mut turn.held, &mut waiting);
+        gather(turn.hashers, i, bytes, &mut turn.held, &mut waiting);
     }
-    drain(turn.hashers, &mut turn.held, &mut waiting, pooled);
+    drain(turn.hashers, &mut turn.held, &mut waiting);
 }
 
 /// `bytes` into hasher `i`, which is not held: as much as fills its stage;
@@ -256,12 +246,11 @@ fn gather<'a>(
     hashers: &mut [Hasher],
     i: usize,
     bytes: &'a [u8],
-    pooled: Option<&crate::incremental::Pool<'_>>,
     held: &mut crate::stack_vec::StackVec<usize, TABLE>,
     waiting: &mut crate::stack_vec::StackVec<(usize, &'a [u8]), TABLE>,
 ) {
     debug_assert!(hashers[i].held_group().is_none(), "a held hasher's bytes wait");
-    let rest = hashers[i].gather_part(bytes, pooled, true);
+    let rest = hashers[i].gather_part(bytes, None, true);
     assert!(rest.len() < bytes.len() || bytes.is_empty(), "a turn's pass gathered nothing");
     if hashers[i].held_group().is_some() {
         held.push(i);
@@ -277,12 +266,7 @@ fn gather<'a>(
 /// in play; a hasher filled again in the pass sends its later pieces back
 /// to wait. A pass holds at most one group per hasher and keeps at most
 /// as many pieces waiting as it took, so neither list overflows.
-fn drain<'a>(
-    hashers: &mut [Hasher],
-    held: &mut crate::stack_vec::StackVec<usize, TABLE>,
-    waiting: &mut crate::stack_vec::StackVec<(usize, &'a [u8]), TABLE>,
-    pooled: Option<&crate::incremental::Pool<'_>>,
-) {
+fn drain<'a>(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usize, TABLE>, waiting: &mut crate::stack_vec::StackVec<(usize, &'a [u8]), TABLE>) {
     loop {
         flush_held(hashers, held);
         if waiting.is_empty() {
@@ -293,7 +277,7 @@ fn drain<'a>(
             if hashers[i].held_group().is_some() {
                 waiting.push((i, bytes));
             } else {
-                gather(hashers, i, bytes, pooled, held, waiting);
+                gather(hashers, i, bytes, held, waiting);
             }
         }
     }
@@ -928,25 +912,6 @@ mod test {
     }
 
     #[test]
-    fn a_turn_uses_the_callback_in_each_hashers_mode_and_order() {
-        crate::initialize();
-        let key = [3; crate::KEY_LEN];
-        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Keyed(&key), None)];
-        let mut input = vec![0; 2 * crate::STAGE_LEN + 7];
-        crate::test::paint_test_input(&mut input);
-        let (first, rest) = input.split_at(crate::STAGE_LEN);
-        let calls = core::cell::Cell::new(0);
-        update_each_with(&mut hashers, &[(0, first), (1, rest), (0, rest)], crate::STAGE_LEN, &|tree, level, index, bytes| {
-            assert_eq!(bytes.len(), crate::STAGE_LEN);
-            calls.set(calls.get() + 1);
-            tree.subtree_halves(level, index, bytes)
-        });
-        assert_eq!(calls.get(), 3);
-        assert_eq!(hashers[0].finalize().as_bytes(), blake3::hash(&input).as_bytes());
-        assert_eq!(hashers[1].finalize().as_bytes(), blake3::keyed_hash(&key, rest).as_bytes());
-    }
-
-    #[test]
     fn prepare_thread_reserves_collection_storage() {
         // nextest gives this test a fresh thread-local store.
         SHARED.with(|s| assert_eq!((s.borrow().messages.capacity(), s.borrow().cvs.capacity()), (0, 0)));
@@ -1077,14 +1042,6 @@ mod test {
         let call = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| update_each(&mut hashers, &turn)));
         assert!(call.is_err(), "an index that names no hasher was accepted");
         then(&mut hashers, "an index out of range");
-
-        // The caller's callback panics on hasher 1's subtree, after the same.
-        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
-        let turn = [(0, &bytes[..half]), (0, &bytes[half..2 * half + 1]), (1, &bytes[..])];
-        let panics = |_: &TreeHasher, _: u32, _: u64, _: &[u8]| -> [Cv; 2] { panic!("this callback panics") };
-        let call = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| update_each_with(&mut hashers, &turn, crate::STAGE_LEN, &panics)));
-        assert!(call.is_err(), "the callback was not called");
-        then(&mut hashers, "a callback that panics");
     }
 
     // Expected routes are independent of the implementation's predicate:
@@ -1507,82 +1464,6 @@ mod test {
         update_each(&mut pair, &[(0, a), (1, &input[..7]), (0, b), (1, &input[7..])]);
         assert_eq!(pair[0].clone().finalize(), crate::test::official::hash(Mode::Plain, &input));
         assert_eq!(pair[1].clone().finalize(), crate::test::official::hash(Mode::Plain, &input));
-    }
-
-    /// The threshold is held against what goes to the core, not against a
-    /// turn's pieces. On x86-64 a fresh hasher's first byte goes to the
-    /// core at once and the next 16,383 gather up to the group's boundary;
-    /// the turn of one byte that completes them sends the core a slice
-    /// whose last half group is a subtree of the threshold's length, the
-    /// callback's. (As before the pool was kept from shorter slices: a
-    /// filter on the pieces' lengths would take this subtree from it.)
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
-    #[test]
-    fn a_turn_of_one_byte_can_complete_a_subtree_for_the_callback() {
-        crate::initialize();
-        let mut input = vec![0u8; crate::STAGE_LEN];
-        crate::test::paint_test_input(&mut input);
-        let mut hashers = vec![Hasher::new(Mode::Plain, None)];
-        let asked = core::cell::RefCell::new(Vec::new());
-        let mut at = 0;
-        for n in [1, 8191, 8191, 1] {
-            update_each_with(&mut hashers, &[(0, &input[at..at + n])], crate::STAGE_LEN / 2, &|tree, level, index, bytes| {
-                asked.borrow_mut().push((level, index, bytes.len()));
-                tree.subtree_halves(level, index, bytes)
-            });
-            at += n;
-        }
-        assert_eq!(asked.borrow().as_slice(), &[(3, 1, crate::STAGE_LEN / 2)], "the second half group, once");
-        assert_eq!(*hashers[0].finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input));
-    }
-
-    /// A turn that sends the core nothing as long as the pool's threshold
-    /// does `update_each`'s work: the callback is not asked, and the
-    /// counts are the same (the rows whole groups are cut into, the flat
-    /// walks to one value on SME2, the passes over held groups), turn
-    /// after turn; the digests are the same either way. The threshold
-    /// here is above every piece and every group the pieces fill; what
-    /// is held to it is what goes to the core, not the piece
-    /// (`a_turn_of_one_byte_can_complete_a_subtree_for_the_callback`).
-    /// Eight messages fed a group at a time, the pattern of BLAKE3 #470
-    /// (where `update_each_multithreaded` took 9% to 15% longer than
-    /// `update_each`: its groups cut no rows), then pieces that leave the
-    /// boundary and come back to it.
-    #[cfg(feature = "std")]
-    #[test]
-    fn a_turn_below_the_pools_threshold_is_update_eachs() {
-        crate::initialize();
-        const N: usize = 8;
-        let mut input = vec![0u8; 8 * crate::STAGE_LEN];
-        crate::test::paint_test_input(&mut input);
-        let counts = || [crate::Counted::Row, crate::Counted::Flat, crate::Counted::HeldPass].map(|what| crate::COUNTED.with(|c| c[what as usize].replace(0)));
-        // The threshold of the library with threads: 512 KiB, above every
-        // piece here.
-        const THRESHOLD: usize = 32 * crate::STAGE_LEN;
-        let key = [0x53u8; 32];
-        for mode in [Mode::Plain, Mode::Keyed(&key)] {
-            let mut serial: Vec<Hasher> = (0..N).map(|_| Hasher::new(mode, None)).collect();
-            let mut pooled = serial.clone();
-            let (mut fed, mut seen) = (0, [0u64; 3]);
-            for n in [crate::STAGE_LEN, crate::STAGE_LEN, crate::STAGE_LEN + 4096, 4096, crate::STAGE_LEN - 8192, 4 * crate::STAGE_LEN] {
-                let pieces: Vec<(usize, &[u8])> = (0..N).map(|i| (i, &input[fed..fed + n])).collect();
-                fed += n;
-                counts();
-                update_each(&mut serial, &pieces);
-                let want = counts();
-                update_each_with(&mut pooled, &pieces, THRESHOLD, &|_, _, _, _| panic!("a piece below the threshold holds no subtree for the callback"));
-                assert_eq!(counts(), want, "{fed} bytes in, pieces of {n}: update_each's rows, flat walks and held passes");
-                for (a, b) in serial.iter().zip(&pooled) {
-                    assert_eq!(a.finalize(), b.finalize(), "{fed} bytes");
-                }
-                seen = core::array::from_fn(|k| seen[k] + want[k]);
-            }
-            assert_eq!(fed, input.len());
-            assert!(seen.iter().any(|&n| n > 0), "the turns cut rows, walked flat or passed held groups: the comparison is of something");
-            for h in &pooled {
-                assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(mode, &input));
-            }
-        }
     }
 
     /// Public mode and independent-parent availability choose the held

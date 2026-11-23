@@ -202,49 +202,6 @@ fn worker_counter_sees_an_owned_background_allocation() {
     assert_eq!(work, Counts { allocations: 1, deallocations: 1, bytes: 4096, ..Counts::default() });
 }
 
-/// Setup precedes the first measured cycle. Grouped whole-message updates
-/// reach the pool as well as the caller; output consumption and the
-/// resets remain inside three complete cycles (#325).
-#[test]
-fn prepared_multithreaded_cycles_include_the_workers() {
-    pool_ready(4);
-    let inputs: Vec<_> = (0..3).map(|i| vec![37u8 + i; 4 << 20]).collect();
-    let keys = [[19u8; 32], [91u8; 32]];
-    for shared in [true, false] {
-        let mode = |i| match i {
-            0 => Mode::Plain,
-            2 => Mode::DeriveKey("prepared worker allocation cycles"),
-            _ => Mode::Keyed(&keys[usize::from(!shared && i == 3)]),
-        };
-        let mut hashers: Vec<_> = (0..4).map(|i| Hasher::new(mode(i), None)).collect();
-        let which = [0usize, 1, 2, 3];
-        let mut pieces = Vec::with_capacity(4);
-        let mut outputs = vec![[0u8; 32]; 3 * 4];
-        let work = counts_with_workers(|| {
-            for (input, out) in inputs.iter().zip(outputs.chunks_mut(4)) {
-                pieces.clear();
-                pieces.extend((0..4).map(|i| (i, &input[..])));
-                throughput::update_each_multithreaded(&mut hashers, &pieces);
-                throughput::finalize_each(&mut hashers, &which, out);
-                let consumed = out.as_flattened().iter().fold(0usize, |sum, &b| sum.wrapping_add(b as usize));
-                std::hint::black_box(consumed);
-            }
-        });
-        assert_eq!(work, Counts::default(), "prepared worker cycles, shared={shared}");
-        for (input, out) in inputs.iter().zip(outputs.chunks(4)) {
-            for (i, digest) in out.iter().enumerate() {
-                let expected = match mode(i) {
-                    Mode::Plain => *blake3::hash(input).as_bytes(),
-                    Mode::Keyed(k) => *blake3::keyed_hash(k, input).as_bytes(),
-                    Mode::DeriveKey(c) => blake3::derive_key(c, input),
-                    _ => unreachable!("the test's three modes"),
-                };
-                assert_eq!(*digest, expected);
-            }
-        }
-    }
-}
-
 /// Only key bytes vary: caller preparation stays outside the allocator
 /// counters. Three complete cycles cover first use, reset and storage reuse;
 /// each input has two held stages (zero and nonzero chunk counters).
@@ -322,7 +279,7 @@ fn grouped_fragmentation_reuses_storage_at_table_boundaries() {
     let expected = [*blake3::hash(&input).as_bytes(), *blake3::keyed_hash(&key, &input).as_bytes(), blake3::derive_key("bounded grouped storage", &input)];
     for n in [1usize, 127, 128, 129, 257] {
         for interleaved in [false, true] {
-            for pooled in [false, true] {
+            {
                 for piece_len in [4093, 4096] {
                     let mut hashers: Vec<_> = (0..n)
                         .map(|i| {
@@ -342,14 +299,10 @@ fn grouped_fragmentation_reuses_storage_at_table_boundaries() {
                     let which: Vec<_> = (0..n).collect();
                     let mut outputs = vec![[0; 32]; n];
                     let work = counts(|| {
-                        if pooled {
-                            throughput::update_each_multithreaded(&mut hashers, &pieces);
-                        } else {
-                            throughput::update_each(&mut hashers, &pieces);
-                        }
+                        throughput::update_each(&mut hashers, &pieces);
                         throughput::finalize_each(&mut hashers, &which, &mut outputs);
                     });
-                    assert_eq!(work, Counts::default(), "n={n} interleaved={interleaved} pooled={pooled} piece_len={piece_len}");
+                    assert_eq!(work, Counts::default(), "n={n} interleaved={interleaved} piece_len={piece_len}");
                     for (i, output) in outputs.iter().enumerate() {
                         assert_eq!(*output, expected[i % 3]);
                     }

@@ -740,7 +740,8 @@ impl HasherCore {
     /// Kept pooled, it would lose what the hooks do only without a pool:
     /// the rows a whole group is cut into, and the SME2 turn over the
     /// whole slice. (64 open messages fed 16 KiB at a time took 9% to 15%
-    /// longer through update_each_multithreaded than through update_each,
+    /// longer through a pooled turn (update_each_multithreaded, a call
+    /// since removed) than through update_each,
     /// on a Ryzen 9700X and an EPYC 9255: BLAKE3 #470.) The threshold is
     /// held against the slice, not against the update that completed it:
     /// a group gathered from shorter updates is the pool's where it
@@ -865,7 +866,8 @@ mod test {
     /// into, and on SME2 the flat walks to one value. (Kept pooled, such
     /// an update cut no row, and no subtree of it walked flat to its one
     /// value: 64 open messages fed 16 KiB at a time took 9% to 15% longer
-    /// through `update_each_multithreaded` than through `update_each`,
+    /// through a pooled turn (`update_each_multithreaded`, a call since
+    /// removed) than through `update_each`,
     /// BLAKE3 #470.) The threshold here
     /// is above every piece and every group the pieces fill in the stage;
     /// what is held to it is the group, not the piece that completes it
