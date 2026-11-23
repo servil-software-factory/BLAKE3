@@ -37,7 +37,7 @@ jobs:
         ref: ${{ github.event.release.tag_name || inputs.tag }}
         # The version commit and its parent, which it names.
         fetch-depth: 2
-    - run: docker run --rm -v "$PWD":/src -w /src ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db sh tools/b3sum-release-container.sh
+    - run: docker run --rm -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: b3sum-${{ runner.arch }}

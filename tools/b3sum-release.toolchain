@@ -1,5 +1,5 @@
 # What builds b3sum's Linux release binaries, each line a name and a
-# version: tools/b3sum-release.sh stops on any other. The same source,
+# version: tools/b3sum-release.sh stops on another compiler or C library. The same source,
 # these, and the script's fixed build directory give the same bytes on
 # any machine, so anyone can rebuild a release's binary and compare
 # (CONTRIBUTING.md, "Every artifact is a clean build of the version
@@ -10,3 +10,8 @@
 rustc 1.99.1
 libc6-dev 2.43-2ubuntu2.7
 apt-snapshot 20261116T000000Z
+# image is the container the build runs in, by its digest (the one for
+# both architectures): the commands in CONTRIBUTING.md and b3sum/README.md
+# and the workflows read it from this line, so a rebuild anywhere starts
+# from the bytes GitHub's machines start from.
+image ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db

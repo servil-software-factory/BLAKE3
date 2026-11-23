@@ -4,7 +4,7 @@
 # machines build b3sum's release binary (.github/workflows), and how
 # anyone can, with Docker or Podman, from a clone at a release's tag:
 #
-#     docker run --rm -v "$PWD":/src -w /src ubuntu:26.04 sh tools/b3sum-release-container.sh
+#     docker run --rm -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
 #
 # The binary and its digests are then in dist/: the same bytes as the
 # release's, or the release's was not built from this source.

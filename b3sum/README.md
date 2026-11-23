@@ -29,7 +29,7 @@ checkout of a release tag, you can rebuild them in Docker or Podman and verify
 that your build matches the published file byte for byte:
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src ubuntu:26.04 sh tools/b3sum-release-container.sh
+docker run --rm -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
 sha256sum dist/b3sum-*
 ```
 

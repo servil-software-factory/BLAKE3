@@ -505,7 +505,7 @@ with Docker or Podman:
 
 ```sh
 git checkout TAG
-docker run --rm -v "$PWD":/src -w /src ubuntu:26.04 sh tools/b3sum-release-container.sh
+docker run --rm -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
 python3 tools/release_artifacts.py TAG --published --rebuilt dist
 ```
 

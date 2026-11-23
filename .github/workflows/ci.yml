@@ -29,9 +29,7 @@ jobs:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - name: Long-proof cache identity
       run: python3 -m unittest discover -s tools/verify -p test_long_proof_inputs.py -v
-    - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-      with:
-        components: rustfmt
+    - run: sh tools/ci-rust.sh stable rustfmt
     - name: cargo fmt --check, in each crate
       run: for d in $(git ls-files '*Cargo.toml' | xargs -n1 dirname); do (cd "$d" && cargo fmt --all -- --check) || exit 1; done
     - name: Release-tool controls
@@ -54,9 +52,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-      with:
-        toolchain: ${{ format('{0}-{1}', matrix.channel, matrix.target.toolchain) }}
+    - run: sh tools/ci-rust.sh ${{ matrix.channel }}
     - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
     - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
       with:
@@ -114,9 +110,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-      with:
-        toolchain: ${{ format('{0}-{1}', matrix.channel, matrix.target.toolchain) }}
+    - run: sh tools/ci-rust.sh ${{ matrix.channel }}
     - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
     # Test b3sum.
     - name: test b3sum
@@ -145,7 +139,7 @@ jobs:
       CC: clang
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+    - run: sh tools/ci-rust.sh stable
     - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
     - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
       with:
@@ -206,12 +200,11 @@ jobs:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+    - run: sh tools/ci-rust.sh stable
     - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
     - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
       with:
         tool: cargo-c@0.10.26
-    - run: brew install pkg-config
     # The same installed-consumer test as on Linux: shared and static
     # installations, pkg-config flags, C11 and C++11 callers.
     - name: C API
@@ -237,7 +230,7 @@ jobs:
           cat /proc/cpuinfo
           curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init
           echo "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55  /tmp/rustup-init" | sha256sum -c
-          chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal && rm /tmp/rustup-init
+          chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain "$(sed -n 's/^rustc //p' /work/tools/b3sum-release.toolchain)" && rm /tmp/rustup-init
           curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/nextest.tar.gz https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz
           echo "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a  /tmp/nextest.tar.gz" | sha256sum -c
           tar zxf /tmp/nextest.tar.gz -C ~/.cargo/bin && rm /tmp/nextest.tar.gz
@@ -272,7 +265,7 @@ jobs:
         ]
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+    - run: sh tools/ci-rust.sh stable
     - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
     # What this runner is, beside what it is about to run as.
     - run: grep -o -w 'avx512f\|avx512vl\|avx2\|sse4_1' /proc/cpuinfo | sort -u
@@ -307,15 +300,27 @@ jobs:
     # GitHub's runners vary: the AVX-512 forms are checked on those that
     # have AVX-512, and this line says which this one is.
     - run: grep -o -w 'avx512f\|avx512vl\|avx2\|sse4_1' /proc/cpuinfo | sort -u
+    # In the container releases are built in, with LLVM 18 from the day of
+    # Ubuntu's archive the toolchain file names (GitHub's image has no
+    # llvm-objdump): what the check installs is the same on every run.
+    # ca-certificates comes first, from the archive of the day, as in
+    # tools/b3sum-release-container.sh: the snapshot is served over HTTPS.
     - run: |
-        sudo apt-get install -y llvm lld clang
         printf '%s\n' \
           'z3-solver==5.4.1.0 \' \
           '  --hash=sha256:e680ce083683abca5d07c3e55c2f620ff9a29cb91c548eeeea27ae29e8060522 \' \
           '  --hash=sha256:f2c745d1623128400c208d875fba741ccd88f061cb89b5661a9f2169eb24b110' \
           > /tmp/z3.req
-        pip install --require-hashes -r /tmp/z3.req && rm /tmp/z3.req
-    - run: python3 tools/verify/cross_check_x86.py
+        docker run --rm -v "$PWD":/src -v /tmp/z3.req:/tmp/z3.req:ro -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh -euc '
+          snapshot=$(sed -n "s/^apt-snapshot //p" tools/b3sum-release.toolchain)
+          export DEBIAN_FRONTEND=noninteractive
+          apt="apt-get -q -o Acquire::Retries=3"
+          $apt update
+          $apt install -y --no-install-recommends ca-certificates
+          $apt update --snapshot "$snapshot"
+          $apt install -y --no-install-recommends --snapshot "$snapshot" python3 python3-pip gcc libc6-dev llvm-18 lld-18 clang-18
+          pip install --break-system-packages --require-hashes -r /tmp/z3.req
+          python3 tools/verify/cross_check_x86.py'
 
   b3sum_release_build:
     # b3sum's release binary, built as a release builds it
@@ -334,7 +339,7 @@ jobs:
       with:
         # The commit and its parent: a version commit names its parent.
         fetch-depth: 2
-    - run: docker run --rm -e B3SUM_RELEASE_ANY_COMMIT=1 -v "$PWD":/src -w /src ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db sh tools/b3sum-release-container.sh
+    - run: docker run --rm -e B3SUM_RELEASE_ANY_COMMIT=1 -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: b3sum-${{ runner.arch }}
