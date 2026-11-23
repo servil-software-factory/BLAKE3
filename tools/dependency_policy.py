@@ -137,7 +137,20 @@ def check_graph(manifest, checkout, expected_members, deny_config, audit_store, 
                "check", "-D", "index-failure")
     if deny.returncode:
         names += re.findall(r"(\w+) FAILED", deny.stdout + deny.stderr) or ["cargo-deny"]
-    vet = run("cargo", "vet", "--manifest-path", manifest, "--store-path", audit_store, "--locked")
+    vet_store = audit_store
+    unused_policies = sorted(set(OURS) - set(ours))
+    with tempfile.TemporaryDirectory(prefix="vet-store-", dir=audit_store.parent) as tmp_store:
+        if unused_policies:
+            vet_store = Path(tmp_store) / "supply-chain"
+            shutil.copytree(audit_store, vet_store)
+            cfg = vet_store / "config.toml"
+            text = cfg.read_text()
+            for crate in unused_policies:
+                text = strip_toml_crate_sections(text, crate, kinds=("policy",))
+            cfg.write_text(text)
+            subprocess.run(["cargo", "vet", "fmt", "--manifest-path", manifest, "--store-path", vet_store],
+                           cwd=manifest.parent, env=environment, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        vet = run("cargo", "vet", "--manifest-path", manifest, "--store-path", vet_store, "--locked")
     return names + (["audits"] if vet.returncode else [])
 
 
@@ -155,8 +168,8 @@ def failed(stage, say=print, environment=None):
     }
 
 
-def _header_matches_crate(header_line, crate):
-    """Does a TOML section header (`[...]` or `[[...]]`) belong to an audit/exemption/trust record for `crate`?"""
+def _header_matches_crate(header_line, crate, kinds=("audits", "exemptions", "trusted", "wildcard-audits")):
+    """Does a TOML section header (`[...]` or `[[...]]`) belong to one of `kinds` for `crate`?"""
     inner = header_line.strip()
     if inner.startswith("[[") and inner.endswith("]]"):
         inner = inner[2:-2].strip()
@@ -165,11 +178,11 @@ def _header_matches_crate(header_line, crate):
     else:
         return False
     parts = [p.strip().strip('"').strip("'") for p in re.findall(r'"[^"]*"|\'[^\']*\'|[^.\s]+', inner)]
-    return len(parts) >= 2 and parts[-1] == crate and parts[-2] in ("audits", "exemptions", "trusted", "wildcard-audits")
+    return len(parts) >= 2 and parts[-1] == crate and parts[-2] in kinds
 
 
-def strip_toml_crate_sections(text, crate):
-    """Remove every TOML section whose header records audit/exemption/trust evidence for `crate`."""
+def strip_toml_crate_sections(text, crate, kinds=("audits", "exemptions", "trusted", "wildcard-audits")):
+    """Remove every TOML section whose header matches `kinds` for `crate`."""
     out = []
     skip = False
     in_triple = None
@@ -182,7 +195,7 @@ def strip_toml_crate_sections(text, crate):
             continue
         stripped = line.lstrip()
         if stripped.startswith("["):
-            skip = _header_matches_crate(stripped, crate)
+            skip = _header_matches_crate(stripped, crate, kinds=kinds)
         if not skip:
             out.append(line)
         for quote in ('"""', "'''"):
@@ -240,7 +253,7 @@ def a_vulnerable_version(stage):
     for lock in (stage / "release" / "Cargo.lock", stage / "cli" / "b3sum" / "Cargo.lock"):
         edit(lock, r'(name = "bytes"\nversion = ")[^"]*("\nsource = "[^"]*"\nchecksum = ")[0-9a-f]*',
              r"\g<1>1.11.0\g<2>b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3")
-    strip_audit_evidence(stage, "bytes", replace_with=[("1.11.0", "safe-to-run")])
+    strip_audit_evidence(stage, "bytes", replace_with=[("1.11.0", "agent-safe-to-run")])
 
 
 def no_licence_exception(stage):
@@ -294,7 +307,7 @@ def optional_feature_only_safe_to_run(stage):
     """Plant an optional feature depending on safe-to-run-only arrayvec: default builds ignore it, so ONLY
     deploy-strength checking under --all-features catches it."""
     ver = locked_version(stage / "release" / "Cargo.lock", "arrayvec")
-    strip_audit_evidence(stage, "arrayvec", replace_with=[(ver, "safe-to-run")])
+    strip_audit_evidence(stage, "arrayvec", replace_with=[(ver, "agent-safe-to-run")])
     edit(stage / "release" / "checkout" / "Cargo.toml", r"^\[dependencies\]\n",
          f'[dependencies]\narrayvec = {{ version = "={ver}", default-features = false, optional = true }}\n')
     edit(stage / "release" / "Cargo.lock", r'(name = "blake3-servil-core"\nversion = "[^"]*"\ndependencies = \[\n)',
@@ -304,7 +317,7 @@ def optional_feature_only_safe_to_run(stage):
 def arrayvec_in_what_ships(stage):
     """arrayvec is safe-to-run only (tests); adding it to b3sum's normal dependencies must fail audits."""
     ver = locked_version(stage / "release" / "Cargo.lock", "arrayvec")
-    strip_audit_evidence(stage, "arrayvec", replace_with=[(ver, "safe-to-run")])
+    strip_audit_evidence(stage, "arrayvec", replace_with=[(ver, "agent-safe-to-run")])
     for checkout, lock in ((stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
                            (stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
         edit(checkout / "b3sum" / "Cargo.toml", r"^\[dependencies\]\n", f'[dependencies]\narrayvec = "{ver}"\n')
@@ -330,10 +343,13 @@ def cli_selects_unapproved_version(stage):
         subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1"], cwd=workdir,
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         edit(manifest, rf'^syn = "={re.escape(pinned)}"\n', 'syn = ">=2, <4"\n')
-    strip_audit_evidence(stage, "syn", replace_with=[(syn3_ver, "safe-to-deploy"), (syn2_ver, "safe-to-run")])
-    for dep in ("proc-macro2", "unicode-ident"):
+    strip_audit_evidence(stage, "syn", replace_with=[(syn3_ver, "agent-safe-to-deploy"), (syn2_ver, "agent-safe-to-run")])
+    # Promoting syn from test-only to a core build-dependency also promotes its three proc-macro
+    # support crates from dev-criteria to deploy-criteria; exempt them at deploy strength in this
+    # synthetic stage so only syn 2.x vs 3.x decides the outcome.
+    for dep in ("proc-macro2", "quote", "unicode-ident"):
         dep_ver = locked_version(release_lock, dep)
-        strip_audit_evidence(stage, dep, replace_with=[(dep_ver, "safe-to-deploy")])
+        strip_audit_evidence(stage, dep, replace_with=[(dep_ver, "agent-safe-to-deploy")])
 
 
 def an_unread_index(stage):

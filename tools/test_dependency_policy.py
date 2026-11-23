@@ -2,6 +2,7 @@
 `strip_toml_crate_sections`)."""
 import os
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -95,6 +96,32 @@ class StripEvidence(unittest.TestCase):
         self.assertNotIn("[[audits.google.audits.anyhow]]", got)
         self.assertNotIn("[[trusted.anyhow]]", got)
         self.assertNotIn("[keep-inside]", got)
+
+
+class AgentCriteriaIsolation(unittest.TestCase):
+    def test_agent_criteria_do_not_imply_builtin_human_criteria(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        audits = tomllib.loads((repo_root / "tools" / "release" / "supply-chain" / "audits.toml").read_text())
+        builtins = {"safe-to-deploy", "safe-to-run"}
+        for name, entry in audits.get("criteria", {}).items():
+            implies = entry.get("implies", [])
+            if isinstance(implies, str):
+                implies = [implies]
+            self.assertEqual(
+                set(implies) & builtins,
+                set(),
+                f"custom criterion {name} must stay separate from built-in {builtins}",
+            )
+        for crate, entries in audits.get("audits", {}).items():
+            for entry in entries:
+                criteria = entry.get("criteria", [])
+                if isinstance(criteria, str):
+                    criteria = [criteria]
+                self.assertEqual(
+                    set(criteria) & builtins,
+                    set(),
+                    f"local agent-authored audit for {crate} must use a custom agent-* criterion",
+                )
 
 
 if __name__ == "__main__":

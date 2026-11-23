@@ -1,4 +1,41 @@
 
 # cargo-vet audits file
 
-[audits]
+[criteria.agent-safe-to-deploy]
+description = """
+Reviewed by an AI coding agent (not a human auditor) to the safe-to-deploy standard:
+no serious security vulnerability to production software exposed to untrusted input.
+Does not imply built-in safe-to-deploy, so downstream importers opt in explicitly via criteria-map.
+"""
+implies = "agent-safe-to-run"
+
+[criteria.agent-safe-to-run]
+description = """
+Reviewed by an AI coding agent (not a human auditor) to the safe-to-run standard:
+safe to compile and run in development, test, or build environments.
+Does not imply built-in safe-to-run, so downstream importers opt in explicitly via criteria-map.
+"""
+
+[[audits.arrayvec]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-run"
+delta = "0.7.6 -> 0.7.8"
+notes = "Fixes ZST double-free in extend via mem::forget, adds safe spare_capacity_mut, 16-bit LenUint, and lifetime annotations."
+
+[[audits.proc-macro2]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-deploy"
+delta = "1.0.106 -> 1.0.107"
+notes = "MSRV 1.68->1.71, is_some_and cleanup, removes redundant else after panic, docs/CI updates."
+
+[[audits.rand]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-run"
+delta = "0.8.6 -> 0.8.8"
+notes = "Fixes UniformChar deserialization soundness by validating sampler.max() <= char::MAX - CHAR_SURROGATE_LEN plus tests."
+
+[[audits.rustversion]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-run"
+delta = "1.0.22 -> 1.0.23"
+notes = "Sets RUSTVERSION=1 when running rustc --version in build.rs plus docs/CI updates."
