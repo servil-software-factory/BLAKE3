@@ -33,20 +33,25 @@ jobs:
     - name: cargo fmt --check, in each crate
       run: for d in $(git ls-files '*Cargo.toml' | xargs -n1 dirname); do (cd "$d" && cargo fmt --all -- --check) || exit 1; done
     - name: Release-tool controls
-      run: python3 tools/test_one_assignee.py && python3 tools/test_release_check.py && python3 tools/test_release_artifacts.py && python3 tools/test_gen_ver.py && python3 tools/test_land.py && python3 tools/test_unsafe_reasons.py && python3 tools/unsafe_reasons.py && python3 tools/test_pipeline_model_controls.py && python3 tools/test_api.py
+      run: python3 tools/test_one_assignee.py && python3 tools/test_release_check.py && python3 tools/test_release_artifacts.py && python3 tools/test_gen_ver.py && python3 tools/test_land.py && python3 tools/test_unsafe_reasons.py && python3 tools/unsafe_reasons.py && python3 tools/test_pipeline_model_controls.py && python3 tools/test_api.py && python3 tools/test_dependency_policy.py
 
-  # Every package the four crates are released with (b3sum/Cargo.lock)
-  # against the policy (deny.toml: advisories, yanked versions, sources,
-  # licences) and the audits (b3sum/supply-chain/: a published audit or a
-  # recorded exemption for each version). CONTRIBUTING.md, "The dependency
-  # policy". Both tools are fetched by their hashes; the machine's own
-  # cargo reads the lock.
+  # Both locked resolutions — the release workspace
+  # (tools/release/Cargo.lock) and standalone b3sum (b3sum/Cargo.lock) —
+  # under every feature, against the policy (deny.toml: advisories, yanked
+  # versions, sources, licences) and the audits (tools/release/supply-chain/:
+  # a published audit or a recorded exemption for each version); and no
+  # package taken by path but the four. CONTRIBUTING.md, "The dependency
+  # policy". Both tools are fetched by their hashes, and the release's cargo
+  # reads the locks.
   dependency_policy:
     name: "dependency policy (cargo-deny, cargo-vet)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        # tools/gen-ver.py --check reads HEAD^ on a stamped release commit.
+        fetch-depth: 2
     - name: cargo-deny 0.22.0 and cargo-vet 0.10.4, by their hashes
       run: |
         curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/cargo-deny.tar.gz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.22.0/cargo-deny-0.22.0-x86_64-unknown-linux-musl.tar.gz
@@ -58,8 +63,10 @@ jobs:
         tar Jxf /tmp/cargo-vet.tar.xz -C /tmp --strip-components=1 --wildcards '*/cargo-vet'
         install -m 755 /tmp/cargo-vet ~/.cargo/bin/cargo-vet
         rm -f /tmp/cargo-deny.tar.gz /tmp/cargo-deny /tmp/cargo-vet.tar.xz /tmp/cargo-vet
-    - run: cargo deny --manifest-path b3sum/Cargo.toml --locked check
-    - run: cargo vet --manifest-path b3sum/Cargo.toml --locked
+    - run: sh tools/ci-rust.sh stable
+    - run: python3 tools/gen-ver.py --check
+    - run: python3 tools/dependency_policy.py
+    - run: python3 tools/dependency_policy.py controls
 
   library_tests:
     name: ${{ matrix.target.name }} ${{ matrix.channel }}

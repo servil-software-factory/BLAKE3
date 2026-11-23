@@ -1,0 +1,7 @@
+# The four crates as one workspace, beside a copy of the repository named
+# `checkout` and with tools/release/Cargo.lock as its lock:
+# tools/crates-release.sh packages the crates from it, and
+# tools/dependency_policy.py checks their dependencies in it.
+[workspace]
+members = ["checkout/version", "checkout", "checkout/threads", "checkout/b3sum"]
+resolver = "3"

@@ -59,7 +59,8 @@ rm -rf "$stage"
 mkdir -p "$stage"
 git clone --quiet --no-checkout . "$stage/checkout"
 git -C "$stage/checkout" checkout --quiet --detach "$commit"
-printf '[workspace]\nmembers = ["checkout/version", "checkout", "checkout/threads", "checkout/b3sum"]\nresolver = "3"\n' > "$stage/Cargo.toml"
+# The four crates as one workspace, beside the clone.
+cp "$stage/checkout/tools/release/workspace.toml" "$stage/Cargo.toml"
 if [ -n "$relock" ]; then
 	cp "$stage/checkout/b3sum/Cargo.lock" "$stage/Cargo.lock"
 	cargo fetch --quiet --manifest-path "$stage/Cargo.toml"

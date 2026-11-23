@@ -462,29 +462,58 @@ libraries' test dependencies; `python3 tools/gen-ver.py --check` fails
 where the two differ. To change a dependency: change it in `b3sum/`
 (`cargo update -p NAME --precise VERSION`), commit, then
 `sh tools/crates-release.sh --relock`, read the lock's change, and commit
-it.
+it. The dependency policy's checks, below, then run on the new lock.
 
 ### The dependency policy
 
-Every package in `b3sum/Cargo.lock` (the four crates and all they bring)
-passes two checks in CI (`dependency policy`), each tool fetched by its
-hash:
+Both locked resolutions — the four crates in the release workspace
+(`tools/release/Cargo.lock`) and the standalone CLI (`b3sum/Cargo.lock`) —
+pass three checks in CI (`dependency policy`), under every feature;
+`python3 tools/dependency_policy.py` runs the same checks here. That
+covers what a build compiles in, what a build runs (build scripts,
+procedural macros), and the locked test dependencies of both graphs.
 
-- `cargo deny --manifest-path b3sum/Cargo.toml --locked check`, against
-  `deny.toml`: no advisory in RustSec's database, no yanked version,
-  crates.io as the one source, and a licence of MIT or Apache-2.0.
-- `cargo vet --manifest-path b3sum/Cargo.toml --locked`, against
-  `b3sum/supply-chain/`: every version has an audit published by Mozilla,
-  Google, the Bytecode Alliance, Zcash, Embark or ISRG, or an exemption
-  recorded in `config.toml`. The exemptions are the versions that were in
-  the lock when the check began (November 2026): a list to shorten, one
-  audit at a time.
+- **Ours or from crates.io.** A package that a manifest takes by path
+  must be one of the four crates, which `tools/release/workspace.toml`
+  names. The two tools below take any such package for ours, so a
+  library copied into the repository would pass them unaudited.
+- **`cargo-deny`, against `deny.toml`.** No advisory in RustSec's
+  database, wherever the package is in the graph. No yanked version,
+  and a version whose yank status could not be read fails too.
+  crates.io as the one source. A licence of MIT, Apache-2.0 or
+  TGPPL-1.0 (BOSL-1.0 is welcome too; since SPDX has no identifier for
+  it, a crate under it needs both a `clarify` entry identifying its
+  licence text as `LicenseRef-BOSL-1.0` and an `allow` or `exceptions`
+  entry for `LicenseRef-BOSL-1.0`); the one exception (`unicode-ident`,
+  `Unicode-3.0`) is recorded there with its reason.
+- **`cargo-vet`, against `tools/release/supply-chain/`.** Every version
+  has an audit published by Mozilla, Google, the Bytecode Alliance,
+  Zcash, Embark or ISRG, or an exemption recorded in `config.toml`:
+  `safe-to-run` for a package that only tests use, `safe-to-deploy` for
+  any other. The exemptions are a list to shorten, one audit at a time.
 
-A commit that changes a dependency runs both. For a new version without
-a published audit, read what changed (`cargo vet diff NAME OLD NEW`, in
-`b3sum/`) and record the audit with `cargo vet certify`, or add an
-exemption and give the reason in the commit. The libraries' test
-dependencies, which the release lock adds to these, are not yet checked.
+CI fetches both tools by their hashes, checks that `b3sum/Cargo.lock`
+and `tools/release/Cargo.lock` agree (`tools/gen-ver.py --check`), and
+runs ten planted-fault controls (`python3 tools/dependency_policy.py
+controls`) beside the checks.
+
+A commit that changes a dependency runs the checks. For a new version
+without a published audit, read what changed and record the audit
+(`python3 tools/dependency_policy.py vet diff NAME OLD NEW`, then `vet
+certify NAME OLD NEW`), or add an exemption (`vet add-exemption NAME
+VERSION`) and give the reason in the commit.
+
+What the checks leave out:
+
+- The libraries' tests in CI take their test dependencies as Cargo
+  resolves them that day, since the libraries carry no lock of their
+  own; the checks hold the versions that the release lock names for
+  them. Holding the test runs to those versions is the next step
+  (BLAKE3 #479).
+- The C library (`capi/`) builds from the core library alone, which is
+  inside the checks. Its tests' packages, the test vectors' crate and
+  SUPERCOP's packaging are outside: none of them is published as a
+  crate.
 
 ### Every artifact is a clean build of the version commit
 

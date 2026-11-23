@@ -1,16 +1,21 @@
 # What a dependency of the four crates must be (CONTRIBUTING.md, "The
 # dependency policy"): free of advisories in RustSec's database, not
-# yanked, from crates.io, and under a licence listed here. CI holds
-# b3sum/Cargo.lock to it:
+# yanked, from crates.io, and under a licence listed here. CI holds every
+# package of the release lock to it, with the crates' test dependencies
+# and every feature's:
 #
-#     cargo deny --manifest-path b3sum/Cargo.toml --locked check
+#     python3 tools/dependency_policy.py
 
 [graph]
-all-features = false
+all-features = true
 
 [advisories]
 version = 2
 yanked = "deny"
+# Wherever the package is in the graph. Left unset, these two look at the
+# crates' direct dependencies alone.
+unsound = "all"
+unmaintained = "all"
 
 [bans]
 multiple-versions = "allow"
@@ -24,8 +29,23 @@ allow-git = []
 
 [licenses]
 version = 2
+# The packages that only tests use are held to the list too.
+include-dev = true
 allow = [
     "MIT",
     "Apache-2.0",
+    "TGPPL-1.0",
 ]
+# BOSL-1.0 is welcome too (Zooko, November 23, 2026). SPDX has no identifier
+# for it, so cargo-deny cannot read it directly: when a crate arrives under
+# it, add both a `clarify` entry identifying its licence text (by file hash)
+# as `LicenseRef-BOSL-1.0` and an entry allowing `LicenseRef-BOSL-1.0` (here
+# or in `exceptions`).
 confidence-threshold = 0.8
+# unicode-ident carries tables made from the Unicode Character Database,
+# under Unicode's licence beside MIT or Apache-2.0. It is compiled into
+# procedural macros, which run in a build and stay out of what is built:
+# serde's derive (the libraries' `serde` feature) and the tests' crates.
+exceptions = [
+    { allow = ["Unicode-3.0"], crate = "unicode-ident" },
+]
