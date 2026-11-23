@@ -137,8 +137,6 @@ The throughput API, for power users.
   The hash of each message, of any lengths, on the calling thread.
 - `fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])])`  
   Feed each piece to its hasher.
-- `fn update_each_with(hashers: &mut [Hasher], pieces: &[(usize, &[u8])], min_len: usize, halves: &dyn Fn(&TreeHasher, u32, u64, &[u8]) -> [Cv; 2])`  
-  Feed a turn of pieces, letting the caller hash large whole subtrees.
 - `fn hash(mode: Mode<'_>, input: &[Block], len: usize) -> Hash`  
   The hash in `mode` of the message of `len` bytes that starts `input`.
 - `fn hash_many<P: Prepared>(mode: Mode<'_>, batch: &P, out: &mut [[u8; 32]])`  

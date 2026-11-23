@@ -150,8 +150,6 @@
 //!   collection allocates nothing.
 //! - **Grouped incremental calls** use bounded stack tables and tree buffers.
 //!   [`throughput::update_each`] allocates and frees nothing.
-//!   [`throughput::update_each_multithreaded`] may allocate worker-job lists
-//!   when a large piece uses other cores.
 //! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction and allocates nothing thereafter on the calling thread or the workers.
 //! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
 //!   where it hashes on the calling thread. Above that length it keeps a list
@@ -239,6 +237,8 @@ pub use blake3_servil_core::{
     BLOCK_LEN, BUILD_VERSION, CHUNK_LEN, ContextKey, Hash, HexError, HexHash, KEY_LEN, Mode, OUT_LEN, OutputReader, convenience, initialize,
 };
 
+// For the documentation's links and the tests: no code of the library names it.
+#[allow(unused_imports)]
 pub(crate) use blake3_servil_core::convenience::Hasher;
 pub(crate) use blake3_servil_core::thread_support::{MAX_SIMD_DEGREE, Platform, Sme2Turn, assert_slots, prepare_collection_thread, slot_len};
 #[allow(unused_imports)]
@@ -492,7 +492,7 @@ pub fn __all_workers_parked() -> bool {
 /// The throughput API: the core's, and the calls that use other cores.
 pub mod throughput {
     pub use crate::pipeline::{Event, Lent, Limits, Message, Pipeline, ROOM_LEN, Room, block_on};
-    use crate::{Hash, Hasher, Mode, OUT_LEN};
+    use crate::{Hash, Mode, OUT_LEN};
     pub use blake3_servil_core::throughput::*;
 
     /// [`Hasher::update`](crate::convenience::Hasher::update), using other CPU
@@ -557,7 +557,7 @@ pub mod throughput {
     /// [`hash`], using other CPU cores where that is faster: the same
     /// [`Hash`](struct@Hash), never slower. For a message whose bytes are not
     /// in blocks (a mapped file, say), [`update_multithreaded`] into a
-    /// [`Hasher`] takes any slice, at the same
+    /// [`Hasher`](crate::convenience::Hasher) takes any slice, at the same
     /// speed on the i7-12700K from 512 KiB to 1 GiB (about 1% slower at 1 MiB).
     ///
     /// ```
@@ -637,27 +637,5 @@ pub mod throughput {
                 *out = *crate::lanes::hash_over_pool(&tree, &Block::bytes(item.0)[..item.1]).as_bytes();
             }
         }
-    }
-
-    /// [`update_each`], using other CPU cores where
-    /// that is faster (pieces of 512 KiB and more): the same result, never
-    /// slower.
-    /// Requires each `i < hashers.len()`.
-    ///
-    /// It gains in the turns whose pieces are that long: with pieces of
-    /// 512 KiB to 4 MiB it took 40% to 60% less time than [`update_each`]
-    /// on a Ryzen 9700X and 30% to 50% less on an EPYC 9255, and the same
-    /// time with shorter pieces. A [`Pipeline`] fed the same arrivals took
-    /// less time and less CPU time at every size (November 22, 2026,
-    /// BLAKE3 #470): [`update_each`] says when the Pipeline is the one to
-    /// use.
-    ///
-    /// # Key-dependent timing
-    ///
-    /// The same [key-independence contract](crate#key-dependent-timing) as
-    /// [`update_each`] applies when workers participate.
-    pub fn update_each_multithreaded(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
-        crate::lanes::require();
-        update_each_with(hashers, pieces, crate::lanes::MIN_SPLIT_LEN, &crate::lanes::subtree_halves);
     }
 }

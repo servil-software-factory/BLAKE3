@@ -63,7 +63,7 @@ fn splitting_work_across_threads_preserves_each_message() {
             let a = &Block::bytes(blocks[0])[..len];
             let b = &Block::bytes(blocks[1])[..len - 1];
             assert_eq!(out, [expect[0], *hash_with(mode, b).as_bytes()]);
-            update_each_multithreaded(&mut h, &[(1, b), (0, a), (1, b"!")]);
+            update_each(&mut h, &[(1, b), (0, a), (1, b"!")]);
             assert_eq!(h[0].finalize().as_bytes(), &expect[0]);
             assert_eq!(h[1].finalize().as_bytes(), blake3::Hasher::new().update(b).update(b"!").finalize().as_bytes());
             update_multithreaded(&mut h[0], b);

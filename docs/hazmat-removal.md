@@ -9,7 +9,7 @@ values, or raw compression calls.
   and the right edge carries its position and length. The joins check
   these places. A root checks the submitted message length separately.
 - `TreeHasher::subtree_halves` gives two checked whole values. The
-  Hasher's `update_with` and the turn's `update_each_with` take the same
+  Hasher's `update_with` takes a
   borrowed callback for large subtrees. The Hasher checks both places
   before its stack takes their bytes. The threads crate uses these calls
   for its own multithreaded updates.
