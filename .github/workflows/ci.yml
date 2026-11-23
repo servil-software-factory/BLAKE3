@@ -82,10 +82,7 @@ jobs:
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - run: sh tools/ci-rust.sh ${{ matrix.channel }}
-    - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
-    - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
-      with:
-        tool: cargo-c@0.10.26
+    - run: sh tools/ci-tools.sh nextest cargo-c
     # The compiler and the instruction sets, for debugging (the two tools
     # that printed them went in d6390649).
     - name: print compiler version and instruction set support
@@ -144,16 +141,16 @@ jobs:
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - run: sh tools/ci-rust.sh ${{ matrix.channel }}
-    - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
-    # Test b3sum.
+    - run: sh tools/ci-tools.sh nextest
+    # Test b3sum (locked against b3sum/Cargo.lock, gated by dependency_policy).
     - name: test b3sum
-      run: cargo nextest run
+      run: cargo nextest run --locked
       working-directory: ./b3sum
     - name: test b3sum --no-default-features
-      run: cargo nextest run --no-default-features
+      run: cargo nextest run --locked --no-default-features
       working-directory: ./b3sum
     - name: Make sure enabling LTO via CFLAGS doesn't break the build.
-      run: cargo build
+      run: cargo build --locked
       env:
         CFLAGS: -flto
       working-directory: ./b3sum
@@ -173,10 +170,7 @@ jobs:
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - run: sh tools/ci-rust.sh stable
-    - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
-    - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
-      with:
-        tool: cargo-c@0.10.26
+    - run: sh tools/ci-tools.sh nextest cargo-c
     - run: cargo check --lib --no-default-features
     - run: cargo check --lib --no-default-features --features=serde
     - run: cargo nextest run --no-default-features
@@ -220,7 +214,7 @@ jobs:
         curl -sSfLO --retry 3 https://snapshot.debian.org/archive/debian/20261115T000000Z/pool/main/q/qemu/qemu-user_11.1.2+ds-3_arm64.deb
         echo "e278d393447a97b548728918af8e395a33086f5b7100138e38cf06a41766612e  qemu-user_11.1.2+ds-3_arm64.deb" | sha256sum -c
         echo "7c3f49bb0945cf7e2148480118a34dc34ef1641cf5f83f0137996b78f2202945  qemu-user_11.1.2+ds-3_arm64.deb" > qemu.b3
-        cargo run -q --release --manifest-path b3sum/Cargo.toml -- -c qemu.b3
+        cargo run -q --release --locked --manifest-path b3sum/Cargo.toml -- -c qemu.b3
         ar x qemu-user_11.1.2+ds-3_arm64.deb data.tar.xz && tar xJf data.tar.xz ./usr/bin/qemu-aarch64
         sudo install usr/bin/qemu-aarch64 /usr/local/bin/qemu-aarch64 && qemu-aarch64 --version
     - run: cargo nextest run --lib --tests --features=serde
@@ -245,10 +239,7 @@ jobs:
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - run: sh tools/ci-rust.sh stable
-    - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
-    - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
-      with:
-        tool: cargo-c@0.10.26
+    - run: sh tools/ci-tools.sh nextest cargo-c
     # no_std checks on Apple Silicon under -D warnings (without #[cfg(test)]).
     - run: cargo check --lib --no-default-features
     - run: cargo check --lib --no-default-features --features=serde
@@ -269,22 +260,17 @@ jobs:
     timeout-minutes: 30
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - uses: addnab/docker-run-action@4f65fabd2431ebc8d299f8e5a018d79a769ae185 # v3
-      with:
-        image: gcc:12@sha256:3d3af69c72edf0652bb3a829965142e81891899c7827d849bc3c0dbb9edd216a
-        options: -v ${{ github.workspace }}:/work
-        run: |
+    - run: |
+        docker run --rm -e BLAKE3_CI -e RUSTFLAGS -e RUST_BACKTRACE -v "$PWD":/work -w /work \
+          gcc:12@sha256:3d3af69c72edf0652bb3a829965142e81891899c7827d849bc3c0dbb9edd216a sh -euc '
           cat /proc/cpuinfo
-          curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init
+          curl --proto "=https" --tlsv1.2 -sSfL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init
           echo "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55  /tmp/rustup-init" | sha256sum -c
-          chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain "$(sed -n 's/^rustc //p' /work/tools/b3sum-release.toolchain)" && rm /tmp/rustup-init
-          curl --proto '=https' --tlsv1.2 -sSfL -o /tmp/nextest.tar.gz https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz
-          echo "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a  /tmp/nextest.tar.gz" | sha256sum -c
-          tar zxf /tmp/nextest.tar.gz -C ~/.cargo/bin && rm /tmp/nextest.tar.gz
-          cd /work
+          chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain "$(sed -n "s/^rustc //p" /work/tools/b3sum-release.toolchain)" && rm /tmp/rustup-init
+          sh tools/ci-tools.sh nextest
           ~/.cargo/bin/cargo nextest run
           ~/.cargo/bin/cargo test --doc
-          cd threads && ~/.cargo/bin/cargo nextest run --no-fail-fast
+          cd threads && ~/.cargo/bin/cargo nextest run --no-fail-fast'
 
   # x86-64's three kernel widths, whichever CPU this runner is: the suites
   # as an AVX-512 CPU (Ice Lake server), as one with AVX2 and no AVX-512
@@ -313,7 +299,7 @@ jobs:
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - run: sh tools/ci-rust.sh stable
-    - uses: taiki-e/install-action@2b545d4fd42fdd72ed2a44eab8fedd1850e8f731 # nextest
+    - run: sh tools/ci-tools.sh nextest
     # What this runner is, beside what it is about to run as.
     - run: grep -o -w 'avx512f\|avx512vl\|avx2\|sse4_1' /proc/cpuinfo | sort -u
     - name: Intel SDE 9.58.0
@@ -321,7 +307,7 @@ jobs:
         curl -sSfL -o sde.tar.xz https://downloadmirror.intel.com/859732/sde-external-9.58.0-2025-06-16-lin.tar.xz
         echo "f849acecad4c9b108259c643b2688fd65c35723cd23368abe5dd64b917cc18c0  sde.tar.xz" | sha256sum -c
         echo "22b6383cfadc97177e0bf3e432ca339a734222b53fb8c00d4a6e51797d96f27f  sde.tar.xz" > sde.b3
-        cargo run -q --release --manifest-path b3sum/Cargo.toml -- -c sde.b3
+        cargo run -q --release --locked --manifest-path b3sum/Cargo.toml -- -c sde.b3
         mkdir "$RUNNER_TEMP/sde" && tar xJf sde.tar.xz -C "$RUNNER_TEMP/sde" --strip-components=1
         rm sde.tar.xz sde.b3
         "$RUNNER_TEMP/sde/sde64" -version | head -n 1
