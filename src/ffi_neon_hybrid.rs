@@ -624,12 +624,16 @@ fn read_apple_cores() -> bool {
 /// where the kernel lets a program read the register.
 #[cfg(all(not(target_vendor = "apple"), target_os = "linux"))]
 fn midr_implementer() -> Option<u8> {
+    use core::ffi::c_ulong;
+    unsafe extern "C" {
+        fn getauxval(kind: c_ulong) -> c_ulong;
+    }
     {
         // AT_HWCAP from <elf.h>, HWCAP_CPUID from <asm/hwcap.h>.
-        const AT_HWCAP: libc::c_ulong = 16;
-        const HWCAP_CPUID: libc::c_ulong = 1 << 11;
+        const AT_HWCAP: c_ulong = 16;
+        const HWCAP_CPUID: c_ulong = 1 << 11;
         // Sound: getauxval reads the process's own vector.
-        if unsafe { libc::getauxval(AT_HWCAP) } & HWCAP_CPUID == 0 {
+        if unsafe { getauxval(AT_HWCAP) } & HWCAP_CPUID == 0 {
             return None;
         }
         let midr: u64;

@@ -233,6 +233,7 @@ mod test_support;
 
 mod block;
 pub mod convenience;
+mod ct;
 #[cfg(feature = "std")]
 mod each;
 pub mod throughput;
@@ -724,7 +725,7 @@ impl core::str::FromStr for Hash {
 impl PartialEq for Hash {
     #[inline]
     fn eq(&self, other: &Hash) -> bool {
-        constant_time_eq::constant_time_eq_32(&self.0, &other.0)
+        ct::eq_32(&self.0, &other.0)
     }
 }
 
@@ -739,7 +740,7 @@ impl core::hash::Hash for Hash {
 impl PartialEq<[u8; OUT_LEN]> for Hash {
     #[inline]
     fn eq(&self, other: &[u8; OUT_LEN]) -> bool {
-        constant_time_eq::constant_time_eq_32(&self.0, other)
+        ct::eq_32(&self.0, other)
     }
 }
 
@@ -747,7 +748,7 @@ impl PartialEq<[u8; OUT_LEN]> for Hash {
 impl PartialEq<[u8]> for Hash {
     #[inline]
     fn eq(&self, other: &[u8]) -> bool {
-        constant_time_eq::constant_time_eq(&self.0, other)
+        ct::eq_slice_32(&self.0, other)
     }
 }
 

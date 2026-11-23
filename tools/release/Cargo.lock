@@ -94,7 +94,6 @@ dependencies = [
  "blake3",
  "blake3-servil-version",
  "cc",
- "constant_time_eq",
  "libc",
 ]
 

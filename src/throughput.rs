@@ -311,7 +311,7 @@ impl core::fmt::Debug for Cv {
 impl PartialEq for Cv {
     #[inline]
     fn eq(&self, other: &Cv) -> bool {
-        (self.place == other.place) & constant_time_eq::constant_time_eq_32(&self.value, &other.value)
+        (self.place == other.place) & crate::ct::eq_32(&self.value, &other.value)
     }
 }
 
@@ -397,7 +397,7 @@ impl core::fmt::Debug for LastCv {
 impl PartialEq for LastCv {
     #[inline]
     fn eq(&self, other: &LastCv) -> bool {
-        (self.first_chunk == other.first_chunk) & (self.len == other.len) & constant_time_eq::constant_time_eq_32(&self.value, &other.value)
+        (self.first_chunk == other.first_chunk) & (self.len == other.len) & crate::ct::eq_32(&self.value, &other.value)
     }
 }
 
