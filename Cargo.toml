@@ -23,21 +23,15 @@ default = ["std"]
 # for OutputReader, and the Hasher::update_reader method. This feature is
 # enabled by default. (Previously this also controlled runtime CPU feature
 # detection on x86, which now reads CPUID directly, with or without std.)
-# Also enables the `std` feature of the `constant_time_eq` dependency, which
-# toggles a runtime feature check on 64-bit ARM targets.
-std = ["constant_time_eq/std"]
+std = []
 
 [dependencies]
 # BUILD_VERSION, in a crate of its own: its build script reruns on every
 # edit, and the library's, which assembles the kernels, does not.
 blake3-servil-version = { version = "=0.10.0+dev", path = "version" }
-constant_time_eq = { version = "0.4.2", default-features = false }
 
-[target.'cfg(all(target_arch = "aarch64", any(target_vendor = "apple", target_os = "linux")))'.dependencies]
-libc = { version = "0.2", default-features = false }
-
-# The guard-page tests (src/test.rs, tests/guard_alloc.rs) on x86-64 too.
-[target.'cfg(all(target_arch = "x86_64", any(target_vendor = "apple", target_os = "linux")))'.dev-dependencies]
+# The guard-page and self-test pipe tests on Linux and macOS.
+[target.'cfg(any(target_vendor = "apple", target_os = "linux"))'.dev-dependencies]
 libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]

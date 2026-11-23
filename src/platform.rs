@@ -860,22 +860,30 @@ fn sme2_detect_uncached() -> bool {
 
 #[cfg(all(blake3_sme2, target_vendor = "apple"))]
 fn sme2_reported() -> bool {
+    use core::ffi::{c_char, c_int, c_void};
+    unsafe extern "C" {
+        fn sysctlbyname(name: *const c_char, oldp: *mut c_void, oldlenp: *mut usize, newp: *mut c_void, newlen: usize) -> c_int;
+    }
     let mut value: u32 = 0;
     let mut size = core::mem::size_of::<u32>();
-    // Sound: `value` and `size` are live writable stack storage for a 4-byte sysctl query.
-    let rc =
-        unsafe { libc::sysctlbyname(c"hw.optional.arm.FEAT_SME2".as_ptr(), &mut value as *mut u32 as *mut libc::c_void, &mut size, core::ptr::null_mut(), 0) };
+    // Sound: `c"hw.optional.arm.FEAT_SME2"` is NUL-terminated, `value` and
+    // `size` are live writable stack storage for a 4-byte sysctl query, and
+    // `newp` is null with length 0.
+    let rc = unsafe { sysctlbyname(c"hw.optional.arm.FEAT_SME2".as_ptr(), (&raw mut value).cast::<c_void>(), &raw mut size, core::ptr::null_mut(), 0) };
     rc == 0 && value != 0
 }
 
 #[cfg(all(blake3_sme2, target_os = "linux"))]
 fn sme2_reported() -> bool {
+    use core::ffi::c_ulong;
+    unsafe extern "C" {
+        fn getauxval(kind: c_ulong) -> c_ulong;
+    }
     // AT_HWCAP2 from <elf.h> and HWCAP2_SME2 from <asm/hwcap.h> (Linux 6.4+).
-    // The libc crate doesn't expose either for glibc targets yet.
-    const AT_HWCAP2: libc::c_ulong = 26;
-    const HWCAP2_SME2: libc::c_ulong = 1 << 37;
+    const AT_HWCAP2: c_ulong = 26;
+    const HWCAP2_SME2: c_ulong = 1 << 37;
     // Sound: `getauxval` reads the immutable auxiliary vector without dereferencing caller pointers.
-    let hwcap2 = unsafe { libc::getauxval(AT_HWCAP2) };
+    let hwcap2 = unsafe { getauxval(AT_HWCAP2) };
     hwcap2 & HWCAP2_SME2 != 0
 }
 
