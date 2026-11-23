@@ -80,10 +80,11 @@
 //!
 //! | Your data | Call |
 //! |---|---|
-//! | One message in memory | [`convenience::hash`], or for call after call [`throughput::hash`] |
+//! | One message in memory (now and then) | [`convenience::hash`] (or [`convenience::hash_with`]) |
+//! | One message in memory, repeated call after call | [`throughput::hash`] (on aligned [`Block`](throughput::Block)s), or [`throughput::TreeHasher::hash`] directly on caller-owned `&[u8]` slices with no copy |
 //! | One message arriving in pieces | [`convenience::Hasher`] |
-//! | Many messages of one length, in one buffer | [`throughput::hash_many`] |
-//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many`] over a [`throughput::Packed`] |
+//! | Many messages of one length, in one buffer | [`throughput::hash_many`] over a [`throughput::Batch`] |
+//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many`] over a [`throughput::Batch`] (fastest when reused) or [`throughput::Packed`] (compact storage; expands into padded blocks internally) |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::update_each`], then [`throughput::finalize_each`] |
 //!

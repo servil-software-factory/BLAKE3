@@ -547,12 +547,21 @@ impl TreeHasher {
         crate::tree::root_children(&crate::tree::PlatformKernels { key: &self.key, flags: self.flags, platform }, input, 0, first_chunk)
     }
 
-    /// This `TreeHasher`, its calls kept to the calling core's own kernels: for
-    /// a program that runs many of them at once on different cores. On
-    /// Apple M4 and later one accelerator serves the whole chip, and a
-    /// call that hashes 16 KiB or more takes it when it is free; calls on
-    /// many cores at once would share it, each slower than on its own
-    /// core's kernels. On other CPUs this changes nothing.
+    /// This `TreeHasher`, its calls kept to the calling core's own kernels.
+    ///
+    /// On Apple M4 and later, one shared matrix accelerator (SME2) serves
+    /// the whole chip, and calls hashing 16 KiB or more (or batches of 11
+    /// or more one-block messages) take it when free. Keeping calls on the
+    /// calling core's own NEON kernels helps in two situations:
+    ///
+    /// - **Several threads hashing at once:** threads on different cores
+    ///   would otherwise contend for the single shared accelerator.
+    /// - **Single-threaded workloads interleaving small batches (roughly
+    ///   11–24 short messages) with scalar hashes:** entering and leaving
+    ///   SME2 streaming mode (and the resulting core clock transitions)
+    ///   can cost more than hashing the small batch on NEON directly.
+    ///
+    /// On other CPUs this changes nothing.
     pub fn on_this_core(mut self) -> Self {
         self.on_this_core = true;
         self
@@ -580,9 +589,15 @@ impl TreeHasher {
 
     /// The hash of the whole message `input`: what
     /// [`convenience::hash_with`](crate::convenience::hash_with) returns
-    /// for this `TreeHasher`'s mode, the mode's key not derived again. A
-    /// program that hashes many messages under one key-derivation context
-    /// pays for the context once, in [`new`](TreeHasher::new).
+    /// for this `TreeHasher`'s mode, the mode's key not derived again.
+    ///
+    /// Unlike [`convenience::hash_with`](crate::convenience::hash_with),
+    /// this runs the hot throughput path (no cold-call code prefetch), and
+    /// unlike [`hash`], it takes any unaligned `&[u8]` slice directly with
+    /// no copy into [`Block`]s — making it the direct call for repeated
+    /// back-to-back hashing of caller-owned `&[u8]` slices (and for deriving
+    /// many hashes under one key-derivation context, paid once in
+    /// [`new`](TreeHasher::new)).
     ///
     /// ```
     /// # blake3_servil_core::initialize();

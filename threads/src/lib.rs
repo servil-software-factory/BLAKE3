@@ -84,17 +84,24 @@
 //!
 //! | Your data | Call |
 //! |---|---|
-//! | One message in memory | [`convenience::hash`], or for speed [`throughput::hash_multithreaded`] |
+//! | One message in memory (now and then) | [`convenience::hash`] |
+//! | One message in memory, repeated call after call | [`throughput::hash_multithreaded`] (on aligned [`Block`](throughput::Block)s), or [`throughput::TreeHasher::hash`] directly on caller-owned `&[u8]` slices with no copy |
 //! | One message arriving in pieces | [`convenience::Hasher`], or for speed [`throughput::update_multithreaded`] |
-//! | Many messages of one length, in one buffer | [`throughput::hash_many_multithreaded`] |
-//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Packed`] |
+//! | Many messages of one length, in one buffer | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] |
+//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] (fastest when reused) or [`throughput::Packed`] (compact storage; expands into padded blocks internally) |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::Pipeline`]; on one thread, or holding each message's running state, [`throughput::update_each`] |
 //! | Continuous stream of messages or batches | [`throughput::Pipeline`] |
 //!
 //! Each call returns once its hash is done, and uses other CPU cores
 //! where that is faster (the forms without `multithreaded` stay on the
-//! calling thread).
+//! calling thread). As a current heuristic (not a frozen contract),
+//! [`throughput::hash_multithreaded`] and
+//! [`throughput::hash_many_multithreaded`] stay on the calling thread
+//! below 512 KiB — measured in raw input bytes for single messages, and
+//! in padded slot bytes (`batch.bytes().len()`, 64 B per message for
+//! messages up to 64 B) for batches — and wake worker threads from
+//! 512 KiB up.
 //!
 //! Short messages hash fastest together: 1024 messages of 64 bytes in one
 //! [`throughput::hash_many`] call take about a fifth of the time of 1024
@@ -528,7 +535,10 @@ pub mod throughput {
     /// assert!(hashes.iter().all(|h| h == blake3_servil::convenience::hash(&[7u8; 256]).as_bytes()));
     /// ```
     ///
-    /// **Speed**: below 512 KiB in all it runs on the calling thread, at
+    /// **Speed**: below 512 KiB of padded slot bytes (`batch.bytes().len()` —
+    /// e.g. 64 B per message for messages up to 64 B, so 4,096 × 36 B stays on
+    /// the calling thread and 8,192 × 36 B engages workers; an implementation
+    /// heuristic, not a frozen contract) it runs on the calling thread, at
     /// [`hash_many`]'s speed; larger batches use the other cores too (on an
     /// Apple M4 Max, 64-byte messages from about 10 down to 3 ns each). It
     /// shares the cores with other callers as [`hash_multithreaded`] does.
@@ -566,11 +576,13 @@ pub mod throughput {
     /// assert_eq!(hash, blake3_servil::convenience::hash(&[0u8; 1 << 20]));
     /// ```
     ///
-    /// **Speed**, on an Apple M4 Max (16 cores): below 512 KiB it hashes on the
-    /// calling thread, at [`hash`](crate::convenience::hash)'s speed; from 512 KiB it uses the other cores
-    /// too: about 14 GB/s at 1 MiB, 21 GB/s at 4 MiB, and 26 to 29 GB/s from
-    /// 16 MiB, 2 to 5 times [`hash`](crate::convenience::hash). The extra threads wait asleep between calls and
-    /// use no CPU then.
+    /// **Speed**, on an Apple M4 Max (16 cores): below 512 KiB (an
+    /// implementation heuristic, not a frozen contract) it hashes on the
+    /// calling thread, at [`hash`](crate::convenience::hash)'s speed; from
+    /// 512 KiB it uses the other cores too: about 14 GB/s at 1 MiB, 21 GB/s
+    /// at 4 MiB, and 26 to 29 GB/s from 16 MiB, 2 to 5 times
+    /// [`hash`](crate::convenience::hash). The extra threads wait asleep
+    /// between calls and use no CPU then.
     ///
     /// **Several callers at once**: calls from several threads of one program
     /// share the cores in turn, each getting a fair part; a call that finds the

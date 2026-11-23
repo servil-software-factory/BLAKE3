@@ -195,14 +195,21 @@ impl<'a> Batch<'a> {
 struct Line([u8; 128]);
 
 /// `count` messages of `N` bytes each, packed end to end with nothing
-/// between them, on a 128-byte boundary: the prepared input for many
-/// short messages of one length (a Merkle layer's leaves or digests), as
-/// the program holds them, with no copy into blocks and no padding in
-/// memory. `N` is 16 or 32. It reads and writes as a `[[u8; N]]`
-/// (`leaves[i] = digest`), and the batch calls take it as they take a
-/// [`Batch`]; a layer's digests written into one are the next layer's
-/// input. The alignment is the type's: only this constructor makes one,
-/// so a call checks nothing.
+/// between them, on a 128-byte boundary: a compact layout for many
+/// short messages of one length (a Merkle layer's leaves or digests)
+/// without per-message block padding in caller memory. `N` is 16 or 32.
+/// It reads and writes as a `[[u8; N]]` (`leaves[i] = digest`), and the
+/// batch calls take it as they take a [`Batch`]; a layer's digests
+/// written into one can be borrowed directly as 64-byte parent pairs via
+/// [`Packed::as_blocks`].
+///
+/// **Speed vs. [`Batch`]:** `hash_many` currently expands `Packed`
+/// messages into padded 64-byte blocks internally on each call, so a
+/// reused [`Batch`] is faster today when throughput matters most (roughly
+/// 1.5–1.8× faster for 32-byte messages on Apple Silicon), while
+/// `Packed` uses half (`N = 32`) or a quarter (`N = 16`) as much memory.
+/// The alignment is the type's: only this constructor makes one, so a
+/// call checks nothing.
 ///
 /// # Trait implementations
 ///
