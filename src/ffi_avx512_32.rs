@@ -56,10 +56,21 @@ pub(crate) unsafe fn hash16<const N: usize>(inputs: &[&[u8; N]], key: &CVWords, 
 // reference-table test, never from these assembly kernels' output.
 pub(crate) const SELF_TEST_EXPECTED: [u64; 3] = [0x8418db51e3b4a019, 0x675dde19182e7dd6, 0xc1b6cd25e25d91f8];
 
-pub(crate) fn check_self_test(index: usize, folded: u64) {
+pub(crate) fn check_self_test_entry(index: usize, folded: u64) -> Result<(), &'static str> {
     let entry = ["AVX-512 k32", "AVX-512 p32", "AVX-512 p16"][index];
-    assert_eq!(folded, SELF_TEST_EXPECTED[index], "blake3-servil startup self-test failed: {entry}: this build or CPU computes wrong digests");
+    if folded == SELF_TEST_EXPECTED[index] { Ok(()) } else { Err(entry) }
 }
+
+pub(crate) fn check_self_test(index: usize, folded: u64) {
+    if let Err(entry) = check_self_test_entry(index, folded) {
+        crate::self_test::fail(format_args!("blake3-servil startup self-test failed: {entry}: this build or CPU computes wrong digests"));
+    }
+}
+
+/// Case index whose last output byte a subprocess test flips to verify
+/// every wide case (`0`, `1`, `2`) stops the process through `check_self_test`.
+#[cfg(test)]
+pub(crate) static PLANTED_WRONG_WIDE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
 
 /// Three chained startup cases, without a 32 KiB input allocation. Distinct,
 /// unaligned, overlapping windows fit in 512 bytes; all are keyed by the
@@ -78,6 +89,11 @@ pub(crate) fn self_test_chain(
         let inputs: [&[u8; 192]; 32] = core::array::from_fn(|i| input[1 + 8 * i..][..192].try_into().unwrap());
         let out = &mut out[..width * OUT_LEN];
         hash(&inputs[..width], &key, u64::MAX - 15, increment, out);
+        #[cfg(test)]
+        if index == PLANTED_WRONG_WIDE.load(core::sync::atomic::Ordering::Relaxed) {
+            let last = out.last_mut().expect("nonempty wide self-test output");
+            *last = !*last;
+        }
         check(index, crate::self_test::fold(out));
         input[..32].copy_from_slice(&out[..32]);
         key = crate::platform::words_from_le_bytes_32(out[..32].try_into().unwrap());

@@ -284,20 +284,23 @@ impl CvStack {
     /// way to push one they hold.
     #[cfg(test)]
     pub fn push_row<P: Parent>(&mut self, p: &P, row: &[Cv]) {
-        let place = self.place_on_top(p);
-        place[..row.len()].copy_from_slice(row);
-        self.pushed_row(row.len());
+        self.push_row_with(p, |place| {
+            place[..row.len()].copy_from_slice(row);
+            row.len()
+        });
     }
 
-    /// The place of a row about to go on top, for its values to be
-    /// written into where they will stay ([`CvStack::pushed_row`] then
-    /// says how many): a cut written elsewhere and copied here touched
-    /// its 16 cache lines twice and a kilobyte of zeroed scratch besides.
-    /// The rows below that keep theirs in the same place (ROWS, 2 ROWS,
-    /// ... entries down) give it up, condensed to their one value. A
-    /// place is zeroed the first time it is given out, once a stack: the
-    /// kernels then write into memory that holds values.
-    pub fn place_on_top<P: Parent>(&mut self, p: &P) -> &mut [Cv; ROW] {
+    /// Reserve the top row's place, let `fill` write a subtree's cut directly
+    /// into where it will stay (avoiding a separate scratch copy), and publish
+    /// the entry only once `fill` returns a valid power-of-two width in
+    /// `4..=ROW`. Any lower live rows colliding on the same slot (`i % ROWS`)
+    /// are condensed first; each slot is zeroed once on first use so kernels
+    /// always see initialized memory. If `fill` panics or returns an invalid
+    /// width, the stack length and logical chaining values stay unchanged
+    /// (any colliding lower row may already have been condensed to its
+    /// equivalent single chaining value).
+    pub fn push_row_with<P: Parent>(&mut self, p: &P, fill: impl FnOnce(&mut [Cv; ROW]) -> usize) {
+        assert!(self.len < DEPTH, "the stack holds DEPTH entries");
         for below in (self.len % ROWS..self.len).step_by(ROWS) {
             if self.is_row(below) {
                 self.narrow(p, below);
@@ -311,14 +314,9 @@ impl CvStack {
             self.ready |= 1 << slot;
         }
         // Sound: the slot's storage, every byte of it written (now or before).
-        unsafe { &mut *place }
-    }
-
-    /// The row written into [`CvStack::place_on_top`]'s place, `width`
-    /// values of it, is the top entry.
-    pub fn pushed_row(&mut self, width: usize) {
+        let width = fill(unsafe { &mut *place });
         assert!((4..=ROW).contains(&width) && width.is_power_of_two(), "a row of 4 to ROW values, a power of two");
-        self.widths[self.len % ROWS] = width as u8;
+        self.widths[slot] = width as u8;
         self.wide |= 1 << self.len;
         self.len += 1;
     }
@@ -518,8 +516,7 @@ pub fn feed<C: Chunk, K: Feed<C>>(k: &K, chunk: &mut C, stack: &mut CvStack, ini
                     // The merges the stack owes first, then the cut,
                     // written into the place it keeps.
                     stack.merge(k, ones(counter - initial));
-                    let n = k.cut(sub, ahead, counter, stack.place_on_top(k));
-                    stack.pushed_row(n);
+                    stack.push_row_with(k, |place| k.cut(sub, ahead, counter, place));
                 } else {
                     let [left, right] = k.children(sub, ahead, counter);
                     push(k, stack, initial, left, counter);
@@ -687,18 +684,87 @@ pub trait Blocks {
 /// explains.
 #[repr(C, align(64))]
 pub struct ChunkState<P> {
-    pub buf: [u8; BLOCK_LEN],
-    pub cv: [u32; 8],
-    pub chunk_counter: u64,
-    pub buf_len: u8,
-    pub blocks_compressed: u8,
-    pub flags: u8,
-    pub platform: P,
+    buf: [u8; BLOCK_LEN],
+    cv: [u32; 8],
+    chunk_counter: u64,
+    buf_len: u8,
+    blocks_compressed: u8,
+    flags: u8,
+    platform: P,
+}
+
+const _: () = {
+    assert!(core::mem::align_of::<ChunkState<crate::platform::Platform>>() == 64);
+    assert!(core::mem::offset_of!(ChunkState<crate::platform::Platform>, buf) == 0);
+};
+
+impl<P: Copy> Clone for ChunkState<P> {
+    #[inline]
+    fn clone(&self) -> Self {
+        ChunkState {
+            buf: self.buf,
+            cv: self.cv,
+            chunk_counter: self.chunk_counter,
+            buf_len: self.buf_len,
+            blocks_compressed: self.blocks_compressed,
+            flags: self.flags,
+            platform: self.platform,
+        }
+    }
 }
 
 impl<P: Blocks> ChunkState<P> {
     pub fn new(key: &[u32; 8], chunk_counter: u64, flags: u8, platform: P) -> Self {
         ChunkState { buf: [0; BLOCK_LEN], cv: *key, chunk_counter, buf_len: 0, blocks_compressed: 0, flags, platform }
+    }
+
+    /// Borrow the chunk's buffered block, chaining value, block length, and
+    /// block-output flags (`flags | start_flag | CHUNK_END`) together.
+    #[inline(always)]
+    pub(crate) fn output_parts(&self) -> (&[u8; BLOCK_LEN], &[u32; 8], u8, u8) {
+        (&self.buf, &self.cv, self.buf_len, self.flags | self.start_flag() | CHUNK_END)
+    }
+
+    #[inline(always)]
+    pub(crate) fn cv(&self) -> &[u32; 8] {
+        &self.cv
+    }
+
+    #[inline(always)]
+    pub(crate) fn chunk_counter(&self) -> u64 {
+        self.chunk_counter
+    }
+
+    /// Read-only access to the mode flags stored alongside `cv` in the
+    /// 64-byte-aligned chunk state (initialized from `Domain` at construction).
+    #[cfg(blake3_sse41_ffi)]
+    #[inline(always)]
+    pub(crate) fn flags(&self) -> u8 {
+        self.flags
+    }
+
+    #[inline(always)]
+    pub(crate) fn platform(&self) -> P
+    where
+        P: Copy,
+    {
+        self.platform
+    }
+
+    #[cfg(feature = "std")]
+    #[inline(always)]
+    pub(crate) fn advance_chunks(&mut self, chunks: u64) {
+        self.chunk_counter += chunks;
+    }
+
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn set_platform(&mut self, platform: P) {
+        self.platform = platform;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_chunk_counter(&mut self, counter: u64) {
+        self.chunk_counter = counter;
     }
 
     /// The bytes so far.
@@ -798,14 +864,8 @@ impl<P: Blocks> Output<P> {
 impl<P: Blocks + Copy> ChunkState<P> {
     /// The chunk's node.
     pub fn output(&self) -> Output<P> {
-        Output {
-            block: self.buf,
-            input_chaining_value: self.cv,
-            block_len: self.buf_len,
-            counter: self.chunk_counter,
-            flags: self.flags | self.start_flag() | CHUNK_END,
-            platform: self.platform,
-        }
+        let (block, cv, block_len, flags) = self.output_parts();
+        Output { block: *block, input_chaining_value: *cv, block_len, counter: self.chunk_counter, flags, platform: self.platform }
     }
 }
 
@@ -1320,13 +1380,64 @@ mod test {
         unsafe { stack.rows.as_mut_ptr().write_bytes(0xff, 1) };
         for round in 0..2 {
             for entry in 0..ROWS {
-                let place = stack.place_on_top(&k);
-                assert_eq!(*place, [[if round == 0 { 0 } else { 0xff }; 32]; ROW], "place {entry}, time {round}");
-                *place = [[0xff; 32]; ROW];
-                stack.pushed_row(4);
+                stack.push_row_with(&k, |place| {
+                    assert_eq!(*place, [[if round == 0 { 0 } else { 0xff }; 32]; ROW], "place {entry}, time {round}");
+                    *place = [[0xff; 32]; ROW];
+                    4
+                });
             }
             assert_eq!(stack.ready, (1 << ROWS) - 1);
             stack.clear();
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "the stack holds DEPTH entries")]
+    fn push_row_with_checks_capacity() {
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let mut stack = CvStack::new();
+        for i in 0..DEPTH {
+            stack.push([i as u8; 32]);
+        }
+        stack.push_row_with(&k, |_| 4);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn push_row_with_does_not_publish_on_panic() {
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        let mut stack = CvStack::new();
+        stack.push([1; 32]);
+        let before_wide = stack.wide;
+        let panicked = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            stack.push_row_with(&k, |_| panic!("simulated cut panic"));
+        }));
+        assert!(panicked.is_err());
+        assert_eq!((stack.len(), stack.wide), (1, before_wide));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn push_row_with_colliding_row_preserves_values_on_panic_or_bad_width() {
+        let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
+        let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
+        for bad_width in [false, true] {
+            let mut stack = CvStack::new();
+            let row = [[0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32]];
+            stack.push_row(&k, &row);
+            for i in 1..ROWS {
+                stack.push([i as u8; 32]);
+            }
+            let expected: std::vec::Vec<Cv> = (0..stack.len()).map(|i| stack.get(&k, i)).collect();
+            let failed = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                stack.push_row_with(&k, |_| if bad_width { 3 } else { panic!("colliding writer panic") });
+            }));
+            assert!(failed.is_err());
+            assert_eq!(stack.len(), ROWS);
+            let actual: std::vec::Vec<Cv> = (0..stack.len()).map(|i| stack.get(&k, i)).collect();
+            assert_eq!(actual, expected);
         }
     }
 

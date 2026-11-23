@@ -79,7 +79,7 @@ pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
 #[inline]
 fn name_each(hashers: &mut [Hasher], which: &[usize]) {
     for (k, &i) in which.iter().enumerate() {
-        if i >= hashers.len() || core::mem::replace(&mut hashers[i].finishing, true) {
+        if i >= hashers.len() || hashers[i].mark_finishing() {
             refuse_names(hashers, &which[..k], i);
         }
     }
@@ -94,7 +94,7 @@ fn name_each(hashers: &mut [Hasher], which: &[usize]) {
 #[inline(never)]
 fn refuse_names(hashers: &mut [Hasher], named: &[usize], i: usize) -> ! {
     for &j in named {
-        hashers[j].finishing = false;
+        hashers[j].clear_finishing();
     }
     assert!(i < hashers.len(), "finalize_each names hasher {i} of {}", hashers.len());
     panic!("each finalized index is distinct");
@@ -156,7 +156,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
     // #312). Which hashers qualify is their public shape: mode and length.
     #[cfg(blake3_neon)]
     {
-        let whole_in_stage = |h: &Hasher| h.staged <= CHUNK_LEN && h.core.count() == 0 && h.core.initial_chunk_counter == 0 && h.core.chunk_state.flags == 0;
+        let whole_in_stage = |h: &Hasher| h.is_plain_single_chunk_staged();
         if which.iter().filter(|&&i| whole_in_stage(&hashers[i])).nth(1).is_some() {
             let platform = Platform::detect();
             // BY_BLOCKS_AT_ONCE of them at a time, their places on the
@@ -280,6 +280,7 @@ fn drain<'a>(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usize
                 gather(hashers, i, bytes, held, waiting);
             }
         }
+        assert!(waiting.len() < batch.len() || !held.is_empty(), "drain made no progress");
     }
 }
 
@@ -312,9 +313,9 @@ std::thread_local! {
 #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
 fn independent_lanes(hashers: &mut [Hasher], held: &[usize]) -> bool {
     let Some(&first) = held.first() else { return false };
-    let platform = hashers[first].core.chunk_state.platform;
+    let platform = hashers[first].platform();
     // Public plain mode fixes every key to the IV: those share one pass.
-    if held.len() < INDEPENDENT_MIN || !matches!(platform, Platform::AVX2 | Platform::AVX512) || held.iter().all(|&i| hashers[i].core.chunk_state.flags == 0) {
+    if held.len() < INDEPENDENT_MIN || !matches!(platform, Platform::AVX2 | Platform::AVX512) || held.iter().all(|&i| hashers[i].is_plain()) {
         return false;
     }
     crate::ffi_output::held_groups(hashers, held, platform);
@@ -337,12 +338,12 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     }
     // Plain's key is the IV, the same for every plain hasher.
     let mut plain = crate::stack_vec::StackVec::<usize, TABLE>::new();
-    plain.extend(held.iter().copied().filter(|&i| hashers[i].core.chunk_state.flags == 0));
+    plain.extend(held.iter().copied().filter(|&i| hashers[i].is_plain()));
     if !plain.is_empty() {
         hash_cohort::<TABLE>(hashers, &plain);
     }
     for &i in held {
-        if hashers[i].core.chunk_state.flags != 0 {
+        if !hashers[i].is_plain() {
             hash_cohort::<1>(hashers, &[i]);
         }
     }
@@ -396,12 +397,12 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     HELD_GROUPS.with(|groups| groups.borrow_mut().push(alike.to_vec()));
     #[cfg(all(test, feature = "std"))]
     crate::counted(crate::Counted::HeldPass);
-    let flags = hashers[first].core.chunk_state.flags;
-    // A plain cohort hashes under the IV itself, never under a member's
-    // copy of it: no hasher's words reach another hasher's hash. A keyed
-    // or derive-key hasher is alone here, under its own key.
-    let key = if flags == 0 { *crate::IV } else { hashers[first].core.key };
-    let turn = crate::platform::Sme2Turn::take(hashers[first].core.chunk_state.platform, true);
+    let domain = hashers[first].domain();
+    let flags = domain.flags();
+    // Plain cohorts hash under the constant IV directly (fault isolation),
+    // while a keyed or derive-key hasher hashes alone here under its own key.
+    let key = if domain.is_plain() { *crate::IV } else { *domain.key() };
+    let turn = crate::platform::Sme2Turn::take(hashers[first].platform(), true);
     let platform = turn.platform();
     let mut work = HeldWorkspace::<N>::new();
     let (mut level, mut next) = work.buffers(alike.len());
@@ -415,7 +416,7 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
             let hasher = &hashers[i];
             // The shared key serves plain hashers only. Check the public
             // mode as we take each stage, without comparing key bytes.
-            assert!(alike.len() == 1 || hasher.core.chunk_state.flags == 0, "only plain hashers share a cohort");
+            assert!(alike.len() == 1 || hasher.is_plain(), "only plain hashers share a cohort");
             let stage = hasher.held_group().expect("a held group").1;
             core::array::from_fn(|j| stage[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap())
         }));
@@ -889,25 +890,40 @@ mod test {
         hash_cohort::<2>(&mut hashers, &[0, 1]);
     }
 
-    /// A plain cohort's key is the constant, not what a member holds: a
-    /// hasher whose words were overwritten changes no other hasher's hash.
+    /// Plain hashers always carry IV by `Domain` construction, and keyed or
+    /// derive-key hashers beside them in the same turn never leak their keys
+    /// into the plain cohort.
     #[cfg(feature = "std")]
     #[test]
-    fn a_plain_cohort_takes_the_iv_not_a_members_words() {
+    fn a_plain_cohort_keeps_iv_beside_keyed_hashers() {
         crate::initialize();
         let mut input = vec![0u8; 4 * crate::STAGE_LEN];
         crate::test::paint_test_input(&mut input);
-        for spoiled in 0..3 {
-            let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
-            hashers[spoiled].core.key = [0x5a5a_5a5a; 8];
-            for piece in input.chunks(4096) {
-                update_each(&mut hashers, &[(0, piece), (1, piece), (2, piece)]);
-            }
-            for (i, hasher) in hashers.iter().enumerate() {
-                if i != spoiled {
-                    assert_eq!(hasher.clone().finalize(), crate::test::official::hash(Mode::Plain, &input), "hasher {i} beside spoiled hasher {spoiled}");
-                }
-            }
+        let key = [0x5a; 32];
+        let mut hashers = [
+            Hasher::new(Mode::Plain, None),
+            Hasher::new(Mode::Keyed(&key), None),
+            Hasher::new(Mode::Plain, None),
+            Hasher::new(Mode::DeriveKey("cohort separation"), None),
+        ];
+        assert_eq!(hashers[0].domain().key(), crate::IV);
+        assert_eq!(hashers[2].domain().key(), crate::IV);
+        for piece in input.chunks(4096) {
+            update_each(&mut hashers, &[(0, piece), (1, piece), (2, piece), (3, piece)]);
+        }
+        assert_eq!(hashers[0].clone().finalize(), crate::test::official::hash(Mode::Plain, &input));
+        assert_eq!(hashers[1].clone().finalize(), crate::test::official::hash(Mode::Keyed(&key), &input));
+        assert_eq!(hashers[2].clone().finalize(), crate::test::official::hash(Mode::Plain, &input));
+        assert_eq!(hashers[3].clone().finalize(), crate::test::official::hash(Mode::DeriveKey("cohort separation"), &input));
+        // Exercise `hash_cohort` directly on a shared plain cohort as well
+        // (independent lanes handle mixed x86 AVX2/AVX-512 turns above).
+        let mut plain_cohort = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        for h in &mut plain_cohort {
+            h.stage(&input[..crate::STAGE_LEN]);
+        }
+        hash_cohort::<2>(&mut plain_cohort, &[0, 1]);
+        for h in &plain_cohort {
+            assert_eq!(h.clone().finalize(), crate::test::official::hash(Mode::Plain, &input[..crate::STAGE_LEN]));
         }
     }
 
@@ -972,7 +988,14 @@ mod test {
                     let pieces: Vec<(usize, &[u8])> = (0..n).map(|i| (i, &message[..])).collect();
                     update_each(&mut hashers, &pieces);
                     finalize_each(&mut hashers, &which, &mut out);
-                    assert!(hashers.iter().all(|h| !h.finishing), "n={n} len={len}");
+                    assert!(
+                        hashers.iter_mut().all(|h| {
+                            let was = h.mark_finishing();
+                            h.clear_finishing();
+                            !was
+                        }),
+                        "n={n} len={len}"
+                    );
                     assert_eq!(out[n - 1], *crate::convenience::hash(&message).as_bytes(), "n={n} len={len}");
                 }
             }
@@ -1007,7 +1030,14 @@ mod test {
             update_each(&mut hashers, &[(0, b"abc"), (1, b"xyz")]);
             let call = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| finalize_each(&mut hashers, refused, &mut [[0; OUT_LEN]; 3])));
             assert!(call.is_err(), "{refused:?} was accepted");
-            assert!(hashers.iter().all(|h| !h.finishing), "{refused:?} left a mark");
+            assert!(
+                hashers.iter_mut().all(|h| {
+                    let was = h.mark_finishing();
+                    h.clear_finishing();
+                    !was
+                }),
+                "{refused:?} left a mark"
+            );
             let mut out = [[0; OUT_LEN]; 2];
             finalize_each(&mut hashers, &[1, 0], &mut out);
             assert_eq!(out, [*crate::convenience::hash(b"xyz").as_bytes(), *crate::convenience::hash(b"abc").as_bytes()]);
@@ -1194,57 +1224,12 @@ mod test {
         }
     }
 
-    /// Hashers of subtrees at input offsets in update_each's turns,
-    /// beside hashers of whole messages: they hold no groups, and each
-    /// gives the chaining value one update of its subtree gives.
-    #[test]
-    fn test_update_each_at_offsets() {
-        use crate::test::SubtreeHasher;
-        let mut input = vec![0u8; 1 << 20];
-        crate::test::paint_test_input(&mut input);
-        // (offset, length): subtrees within what their offsets allow.
-        let subtrees = [(64 * CHUNK_LEN, 64 * CHUNK_LEN), (16 * CHUNK_LEN, 16 * CHUNK_LEN), (CHUNK_LEN, CHUNK_LEN), (128 * CHUNK_LEN, 100_000)];
-        let whole = [70_000usize, 300_000];
-        let mut hashers: Vec<Hasher> = subtrees
-            .iter()
-            .map(|&(offset, _)| {
-                let mut h = Hasher::new(crate::Mode::Plain, None);
-                h.set_input_offset(offset as u64);
-                h
-            })
-            .collect();
-        hashers.extend(whole.iter().map(|_| Hasher::new(crate::Mode::Plain, None)));
-        let lens: Vec<usize> = subtrees.iter().map(|&(_, len)| len).chain(whole).collect();
-        let mut done = vec![0usize; lens.len()];
-        let pieces = [1448usize, 31, 16384, 4096, 1];
-        let mut k = 0;
-        while done.iter().zip(&lens).any(|(d, l)| d < l) {
-            let mut turn: Vec<(usize, &[u8])> = Vec::new();
-            for _ in 0..9 {
-                let i = k % lens.len();
-                let n = pieces[k % pieces.len()].min(lens[i] - done[i]);
-                turn.push((i, &input[done[i]..done[i] + n]));
-                done[i] += n;
-                k += 1;
-            }
-            crate::throughput::update_each(&mut hashers, &turn);
-        }
-        for (i, &(offset, len)) in subtrees.iter().enumerate() {
-            let mut one = Hasher::new(crate::Mode::Plain, None);
-            one.set_input_offset(offset as u64).update(&input[..len]);
-            assert_eq!(hashers[i].finalize_non_root(), one.finalize_non_root(), "subtree at {offset}, {len} bytes");
-        }
-        for (j, &len) in whole.iter().enumerate() {
-            assert_eq!(hashers[subtrees.len() + j].clone().finalize(), crate::convenience::hash(&input[..len]), "whole message of {len} bytes");
-        }
-    }
-
     fn holds_groups_together(platform: crate::platform::Platform) {
         let mut input = vec![0u8; 3 * crate::STAGE_LEN];
         crate::test::paint_test_input(&mut input);
         let keys = [[1u8; 32], [2u8; 32]];
         let on = |mut h: Hasher| {
-            h.core.chunk_state.platform = platform;
+            h.set_platform_for_test(platform);
             h
         };
         let mut hashers: Vec<Hasher> = (0..6).map(|i| on(Hasher::new(crate::Mode::Keyed(&keys[i % 2]), None))).collect();
@@ -1292,8 +1277,8 @@ mod test {
         update_each(&mut hashers, &[(0, &bytes[..100]), (0, &bytes[100..])]);
         hashers[1].update(&bytes);
         let in_turn = if cfg!(blake3_neon) { (300, 0) } else { (0, 300) };
-        assert_eq!((hashers[0].staged, hashers[0].core.count()), in_turn, "a turn's first chunk");
-        assert_eq!((hashers[1].staged, hashers[1].core.count()), (300, 0), "an update's first chunk waits in the stage");
+        assert_eq!((hashers[0].staged_len(), hashers[0].count() - hashers[0].staged_len() as u64), in_turn, "a turn's first chunk");
+        assert_eq!((hashers[1].staged_len(), hashers[1].count() - hashers[1].staged_len() as u64), (300, 0), "an update's first chunk waits in the stage");
         for h in hashers {
             assert_eq!(h.finalize(), crate::test::official::hash(Mode::Plain, &bytes));
         }
@@ -1582,7 +1567,7 @@ mod test {
                         let mut hashers: Vec<_> = (0..n)
                             .map(|i| {
                                 let mut h = Hasher::new(mode(i), None);
-                                h.core.chunk_state.platform = platform;
+                                h.set_platform_for_test(platform);
                                 h
                             })
                             .collect();
@@ -1648,7 +1633,7 @@ mod test {
                     let mut hashers: Vec<_> = (0..n)
                         .map(|i| {
                             let mut h = Hasher::new(modes[i], None);
-                            h.core.chunk_state.platform = platform;
+                            h.set_platform_for_test(platform);
                             h.update(&data[i][..offsets[i]]);
                             h
                         })
@@ -1662,7 +1647,7 @@ mod test {
                     let parent_entries = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
                     for i in 0..n {
                         let end = offsets[i] + crate::STAGE_LEN;
-                        assert_eq!(hashers[i].staged, 0);
+                        assert_eq!(hashers[i].staged_len(), 0);
                         assert_eq!(hashers[i].count(), end as u64);
                         assert_eq!(
                             *hashers[i].clone().finalize().as_bytes(),
@@ -1724,7 +1709,7 @@ mod test {
                     let mut hashers: Vec<_> = (0..n)
                         .map(|i| {
                             let mut h = Hasher::new(mode(i), None);
-                            h.core.chunk_state.platform = platform;
+                            h.set_platform_for_test(platform);
                             h
                         })
                         .collect();

@@ -43,11 +43,44 @@ fn fill(reader: &mut impl io::Read, buffer: &mut [u8]) -> (usize, io::Result<()>
     while filled < buffer.len() {
         match reader.read(&mut buffer[filled..]) {
             Ok(0) => break,
-            Ok(n) => filled += n,
+            Ok(n) => {
+                assert!(n <= buffer.len() - filled, "Read returned {n} bytes for a {}-byte slice", buffer.len() - filled);
+                filled += n;
+            }
             // see test_update_reader_interrupted
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return (filled, Err(e)),
         }
     }
     (filled, Ok(()))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    struct LyingReader {
+        calls: usize,
+    }
+    impl io::Read for LyingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            match self.calls {
+                1 => {
+                    buf[0] = b'a';
+                    Ok(1)
+                }
+                2 => Ok(usize::MAX),
+                _ => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Read returned")]
+    fn copy_wide_rejects_lying_read_length() {
+        crate::initialize();
+        let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
+        let _ = copy_wide(LyingReader { calls: 0 }, &mut hasher);
+    }
 }
