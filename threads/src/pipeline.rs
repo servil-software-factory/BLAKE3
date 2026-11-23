@@ -113,7 +113,58 @@ impl<X> Ring<X> {
 
 impl<X> Drop for Ring<X> {
     fn drop(&mut self) {
-        while self.pop_front().is_some() {}
+        // Recursive drop guard ensures remaining initialized elements still
+        // drop if dropping an earlier element unwinds.
+        struct Rest<'a, X>(&'a mut Ring<X>);
+        impl<X> Drop for Rest<'_, X> {
+            fn drop(&mut self) {
+                while let Some(item) = self.0.pop_front() {
+                    let _rest = Rest(&mut *self.0);
+                    drop(item);
+                    core::mem::forget(_rest);
+                }
+            }
+        }
+        let _ = Rest(self);
+    }
+}
+
+/// Move-insensitive heap array of uninitialized interior-mutable slots
+/// (matching `Rooms::backing`): held by raw pointer rather than `Box<[...]>`,
+/// so moving `Pipeline` by value never retags pointers derived from inline
+/// values stored inside the array. The caller drops every initialized element
+/// before dropping `RawSlots`; `Drop` frees the backing allocation itself.
+struct RawSlots<T> {
+    ptr: *mut UnsafeCell<MaybeUninit<T>>,
+    len: usize,
+}
+
+// Sound: `RawSlots<T>` exclusively owns its heap allocation of `len` slots.
+unsafe impl<T: Send> Send for RawSlots<T> {}
+
+impl<T> RawSlots<T> {
+    fn new(len: usize) -> Self {
+        let v: Vec<UnsafeCell<MaybeUninit<T>>> = (0..len).map(|_| UnsafeCell::new(MaybeUninit::uninit())).collect();
+        let ptr = Box::into_raw(v.into_boxed_slice()) as *mut UnsafeCell<MaybeUninit<T>>;
+        RawSlots { ptr, len }
+    }
+
+    #[inline(always)]
+    fn slot(&self, index: usize) -> *mut MaybeUninit<T> {
+        debug_assert!(index < self.len);
+        // Sound: `index < self.len`, within the owned allocation.
+        unsafe { (*self.ptr.add(index)).get() }
+    }
+}
+
+impl<T> Drop for RawSlots<T> {
+    fn drop(&mut self) {
+        // Sound: `ptr` and `len` came from `Box::into_raw(boxed_slice)`; all
+        // initialized elements have already been dropped (or leaked if the
+        // Pipeline was forgotten), and `MaybeUninit<T>` has no drop glue.
+        unsafe {
+            drop(Box::from_raw(core::ptr::slice_from_raw_parts_mut(self.ptr, self.len)));
+        }
     }
 }
 
@@ -369,6 +420,21 @@ process_static! {
     static STORAGES_MADE: AtomicUsize = AtomicUsize::new(0);
 }
 
+#[cfg(shuttle)]
+struct OwnedStoragePtr(*mut PipeStorage);
+
+#[cfg(shuttle)]
+// Sound: only pushed at creation and drained in `free_storages_for_model`
+// after all Shuttle worker threads have joined.
+unsafe impl Send for OwnedStoragePtr {}
+
+#[cfg(shuttle)]
+process_static! {
+    /// Original `Box::into_raw` owning pointers for model teardown so
+    /// `free_storages_for_model` never casts `&'static PipeStorage` to `*mut`.
+    static MODEL_OWNED_STORAGES: Mutex<Vec<OwnedStoragePtr>> = Mutex::new(Vec::new());
+}
+
 /// The model's alone (tests/shuttle_pipeline.rs): frees a run's storages
 /// at its end. In a file of its own, outside the files the mutation
 /// check changes: no build that check tests holds this code.
@@ -405,7 +471,7 @@ impl PipeStorage {
         let dummy = GroupMemberMeta { room: NONE };
         #[cfg(any(test, shuttle))]
         STORAGES_MADE.fetch_add(1, Ordering::Relaxed);
-        Box::leak(Box::new(PipeStorage {
+        let raw = Box::into_raw(Box::new(PipeStorage {
             source: Source::with_actions(actions),
             waker: WakerSlot::new(),
             rooms: Rooms::new(rooms),
@@ -422,7 +488,12 @@ impl PipeStorage {
             saved_group_epoch: UnsafeCell::new(1),
             shared: UnsafeCell::new(core::ptr::null_mut()),
             holders: OwnLine(AtomicUsize::new(1)),
-        }))
+        }));
+        #[cfg(shuttle)]
+        MODEL_OWNED_STORAGES.lock().unwrap().push(OwnedStoragePtr(raw));
+        // Sound: `raw` is a valid leaked allocation (freed only after all
+        // Shuttle workers join in `model_storages::free_storages_for_model`).
+        unsafe { &*raw }
     }
 }
 
@@ -620,13 +691,12 @@ impl Shared {
         let storage = self.storage;
         let group = &storage.groups[group_idx];
         // Sound: the owner wrote this group's task, epoch and metas before it
-        // dispatched the group (publish_open), and writes them again only
-        // after it has seen `completed_epoch` reach this epoch, which is this
-        // function's last store.
+        // dispatched the group (publish_open), keeping every member's input
+        // and output valid until `completed_epoch` reaches this epoch.
         let task = unsafe { &*group.task.get() };
         let count = task.members;
         let epoch = unsafe { *group.epoch.get() };
-        task.run_members(self.tree(), platform);
+        unsafe { task.run_members(self.tree(), platform) };
         let metas = unsafe { &*group.metas.get() };
 
         // Coalesce consecutive members sharing a Room into a single atomic subtraction.
@@ -972,8 +1042,8 @@ pub struct Pipeline<T, B = ()> {
     shared: *mut Shared,
     slots: Box<[SlotMeta<T>]>,
     room_streams: Box<[RoomStream]>,
-    owners: Box<[UnsafeCell<MaybeUninit<B>>]>,
-    batches: Box<[UnsafeCell<MaybeUninit<(Batch<'static>, Box<[[u8; OUT_LEN]]>)>>]>,
+    owners: RawSlots<B>,
+    batches: RawSlots<(Batch<'static>, Box<[[u8; OUT_LEN]]>)>,
     /// FIFO ring of free message slots: slots cycle around the full ring
     /// before reuse so worker-written cache lines cool before another worker writes them.
     free_slots: Ring<u32>,
@@ -1074,9 +1144,10 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
         self.open_messages -= 1;
 
         // Sound: the slot is open and has no owner yet (assert_uncommitted);
-        // the owner stays in the slot, where its bytes cannot move, until the
-        // slot's event reads it out or the Pipeline's drop drops it.
-        let slot: *mut B = unsafe { (*self.owners[s].get()).write(owner) };
+        // the owner stays in the move-insensitive raw slot, where its bytes
+        // cannot move or be retagged by moving `Pipeline`, until the slot's
+        // event reads it out or the Pipeline's drop drops it.
+        let slot: *mut B = unsafe { (*self.owners.slot(s)).write(owner) };
         // `as_ref` is the program's code. Until the slice is submitted
         // nothing records that the slot holds an owner, so if `as_ref`
         // unwinds, the owner is dropped here, where it lies (the
@@ -1126,6 +1197,16 @@ impl<T, B> Pipeline<T, B> {
         let actions_cap = m * MAX_SLOT_PIECES + p_cap + g_cap;
         // An action names a slot, a piece or a group in 29 bits (pack_arg).
         assert!(m < 1 << 29 && p_cap < 1 << 29, "Pipeline Limits beyond what an action can name");
+        // Reserve a non-wrapping identity before acquiring storage or a source
+        // slot, and keep exhaustion sticky at u64::MAX so a later caller cannot
+        // wrap back to previously issued IDs.
+        let id = loop {
+            let cur = NEXT_PIPELINE_ID.load(Ordering::Relaxed);
+            assert!(cur < u64::MAX, "Pipeline ID counter exhausted");
+            if NEXT_PIPELINE_ID.compare_exchange(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                break cur;
+            }
+        };
 
         let storage = PipeStorage::acquire(actions_cap, m, limits.rooms, g_cap);
         // Sound: this Pipeline now holds the storage alone
@@ -1211,15 +1292,15 @@ impl<T, B> Pipeline<T, B> {
         }
 
         Pipeline {
-            id: NEXT_PIPELINE_ID.fetch_add(1, Ordering::Relaxed),
+            id,
             limits,
             group_count: g_cap,
             source_slot,
             shared,
             slots: (0..m).map(|_| SlotMeta { tag: None, kind: SlotKind::Free }).collect(),
             room_streams: vec![RoomStream::EMPTY; m].into_boxed_slice(),
-            owners: (0..m).map(|_| UnsafeCell::new(MaybeUninit::uninit())).collect(),
-            batches: (0..m).map(|_| UnsafeCell::new(MaybeUninit::uninit())).collect(),
+            owners: RawSlots::new(m),
+            batches: RawSlots::new(m),
             free_slots,
             open_messages: 0,
             end_queue: Ring::new(m),
@@ -1253,7 +1334,7 @@ impl<T, B> Pipeline<T, B> {
     #[inline(always)]
     pub fn message(&mut self, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + '_ {
         let _ = length_hint;
-        MessageFut { pipe: self, tag: Some(tag) }
+        MessageFut { pipe: self, tag: Some(tag), registered: false }
     }
 
     fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<u32> {
@@ -1274,12 +1355,6 @@ impl<T, B> Pipeline<T, B> {
                 if let Some(slot) = self.free_slots.pop_front() {
                     return Poll::Ready(slot);
                 }
-            }
-            if block_on_polls_again(cx) {
-                if self.source_slot.is_some() {
-                    self.shared().storage.source.wake_for_waiting();
-                }
-                return Poll::Pending;
             }
         }
         self.shared().storage.waker.register(cx);
@@ -1321,7 +1396,7 @@ impl<T, B> Pipeline<T, B> {
     /// If the Pipeline has no Rooms (`Limits.rooms` is 0).
     #[inline(always)]
     pub fn room(&mut self) -> impl Future<Output = Room> + '_ {
-        RoomFut { pipe: self }
+        RoomFut { pipe: self, registered: false }
     }
 
     #[inline(always)]
@@ -1365,12 +1440,6 @@ impl<T, B> Pipeline<T, B> {
                 if let Some(r) = self.try_take_room() {
                     return Poll::Ready(r);
                 }
-            }
-            if block_on_polls_again(cx) {
-                if self.source_slot.is_some() {
-                    self.shared().storage.source.wake_for_waiting();
-                }
-                return Poll::Pending;
             }
         }
         self.shared().storage.waker.register(cx);
@@ -1634,7 +1703,7 @@ impl<T, B> Pipeline<T, B> {
             (&self.shared().storage.groups[group as usize].completed_epoch.0, epoch)
         } else {
             let epoch = self.next_loan_epoch;
-            self.next_loan_epoch += 1;
+            self.next_loan_epoch = epoch.checked_add(1).expect("Pipeline loan epoch counter exhausted");
             self.submit_multi_slice(s, bytes.as_ptr(), bytes.len(), false, epoch);
             (&self.shared().storage.loan_completed[s].0, epoch)
         };
@@ -1657,9 +1726,9 @@ impl<T, B> Pipeline<T, B> {
         self.open_messages -= 1;
 
         // Sound: the slot is open and holds no batch (assert_uncommitted); the
-        // batch and digests stay in the slot until its event reads them out or
-        // the Pipeline's drop drops them.
-        let hold = unsafe { (*self.batches[s].get()).write((batch, digests)) };
+        // batch and digests stay in the move-insensitive raw slot until its
+        // event reads them out or the Pipeline's drop drops them.
+        let hold = unsafe { (*self.batches.slot(s)).write((batch, digests)) };
         let msg_len = hold.0.message_len();
         let slot_len = hold.0.slot();
         let bytes = hold.0.bytes();
@@ -1724,7 +1793,7 @@ impl<T, B> Pipeline<T, B> {
     /// whose event is still to come: nothing would end the wait.
     #[inline(always)]
     pub fn ready(&mut self) -> impl Future<Output = ()> + '_ {
-        ReadyFut { pipe: self }
+        ReadyFut { pipe: self, registered: false }
     }
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
@@ -1746,12 +1815,6 @@ impl<T, B> Pipeline<T, B> {
                 if !self.events.is_empty() {
                     return Poll::Ready(());
                 }
-            }
-            if block_on_polls_again(cx) {
-                if self.source_slot.is_some() {
-                    self.shared().storage.source.wake_for_waiting();
-                }
-                return Poll::Pending;
             }
         }
         self.shared().storage.waker.register(cx);
@@ -1882,7 +1945,7 @@ impl<T, B> Pipeline<T, B> {
     fn open_new_group(&mut self, batch: Option<usize>) -> (u32, u64) {
         let g = self.acquire_free_group();
         let epoch = self.next_group_epoch;
-        self.next_group_epoch += 1;
+        self.next_group_epoch = epoch.checked_add(1).expect("Pipeline group epoch counter exhausted");
         self.local_count = 0;
         self.local_bytes = 0;
         self.local_batch = batch;
@@ -1929,7 +1992,9 @@ impl<T, B> Pipeline<T, B> {
     fn dispatch_one(&mut self, arg: u64) {
         let ctx = self.shared as *const Shared as *const ();
         match self.source_slot {
-            Some(_) => self.shared().storage.source.publish_actions(Shared::run_action, ctx, core::slice::from_ref(&arg)),
+            // Sound: this Pipeline exclusively publishes to its own action
+            // source, and `ctx` stays valid for the lifetime of `Shared`.
+            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, core::slice::from_ref(&arg)) },
             // Sound: `ctx` is this Pipeline's Shared, as run_action requires.
             None => unsafe { Shared::run_action(ctx, arg, pool_platform()) },
         }
@@ -1938,7 +2003,8 @@ impl<T, B> Pipeline<T, B> {
     fn dispatch_many(&mut self, count: usize) {
         let ctx = self.shared as *const Shared as *const ();
         match self.source_slot {
-            Some(_) => self.shared().storage.source.publish_actions(Shared::run_action, ctx, &self.action_buf[..count]),
+            // Sound: as dispatch_one's.
+            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, &self.action_buf[..count]) },
             None => {
                 for i in 0..count {
                     let arg = self.action_buf[i];
@@ -2063,7 +2129,7 @@ impl<T, B> Pipeline<T, B> {
                 // writer; `has_owner` says the slot holds an owner, read out
                 // here once (the slot is then Free).
                 let hash = Hash::from_bytes(unsafe { *self.shared().hashes[s].get() });
-                let owner = if has_owner { Some(unsafe { (*self.owners[s].get()).assume_init_read() }) } else { None };
+                let owner = if has_owner { Some(unsafe { (*self.owners.slot(s)).assume_init_read() }) } else { None };
                 Event::Hashed { tag, hash, owner }
             }
             SlotKind::WaitRoomMulti => {
@@ -2074,7 +2140,7 @@ impl<T, B> Pipeline<T, B> {
             SlotKind::WaitBatch { .. } => {
                 // Sound: a WaitBatch slot holds its batch and digests (batch
                 // wrote them), read out here once.
-                let (batch, digests) = unsafe { (*self.batches[s].get()).assume_init_read() };
+                let (batch, digests) = unsafe { (*self.batches.slot(s)).assume_init_read() };
                 Event::Batch { tag, batch, digests }
             }
             _ => unreachable!(),
@@ -2141,39 +2207,68 @@ impl<T, B> Drop for Pipeline<T, B> {
         }
         crate::lanes::sources::closed();
         let storage = self.shared().storage;
-        storage.waker.clear();
         // Sound: the Pipeline still holds the storage; these cells are its
-        // holder's.
+        // holder's. Save epochs before any user drop (waker or owner) can unwind.
         unsafe {
             *storage.saved_loan_epoch.get() = self.next_loan_epoch;
             *storage.saved_group_epoch.get() = self.next_group_epoch;
         }
-
-        while let Some(s_idx) = self.end_queue.pop_front() {
-            let s = s_idx as usize;
-            match core::mem::replace(&mut self.slots[s].kind, SlotKind::Free) {
-                SlotKind::WaitSingle { has_owner: true, .. } | SlotKind::WaitMulti { has_owner: true } => {
-                    // Sound: a slot waiting with `has_owner` holds an owner no
-                    // event took.
-                    unsafe { (*self.owners[s].get()).assume_init_drop() };
-                }
-                SlotKind::WaitBatch { .. } => {
-                    // Sound: a WaitBatch slot holds its batch and digests.
-                    unsafe { (*self.batches[s].get()).assume_init_drop() };
-                }
-                _ => {}
+        struct ReleaseStorage(&'static PipeStorage);
+        impl Drop for ReleaseStorage {
+            fn drop(&mut self) {
+                PipeStorage::release(self.0);
             }
         }
-        PipeStorage::release(storage);
+        struct DrainPending<'a, T, B>(&'a mut Pipeline<T, B>);
+        impl<T, B> Drop for DrainPending<'_, T, B> {
+            fn drop(&mut self) {
+                while let Some(s_idx) = self.0.end_queue.pop_front() {
+                    let s = s_idx as usize;
+                    match core::mem::replace(&mut self.0.slots[s].kind, SlotKind::Free) {
+                        SlotKind::WaitSingle { has_owner: true, .. } | SlotKind::WaitMulti { has_owner: true } => {
+                            let ptr = self.0.owners.slot(s);
+                            let _rest = DrainPending(&mut *self.0);
+                            // Sound: a slot waiting with `has_owner` holds an owner no
+                            // event took.
+                            unsafe { (*ptr).assume_init_drop() };
+                            core::mem::forget(_rest);
+                        }
+                        SlotKind::WaitBatch { .. } => {
+                            let ptr = self.0.batches.slot(s);
+                            let _rest = DrainPending(&mut *self.0);
+                            // Sound: a WaitBatch slot holds its batch and digests.
+                            unsafe { (*ptr).assume_init_drop() };
+                            core::mem::forget(_rest);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Guards run in LIFO order (`_drain` then `_release`), so even if
+        // dropping the saved waker or one owner unwinds, every remaining owner
+        // and batch still drops and the storage returns to FREE_STORAGES.
+        let _release = ReleaseStorage(storage);
+        let _drain = DrainPending(self);
+        storage.waker.clear();
     }
 }
 
 struct MessageFut<'a, T, B> {
     pipe: &'a mut Pipeline<T, B>,
     tag: Option<T>,
+    registered: bool,
 }
 
 impl<T, B> Unpin for MessageFut<'_, T, B> {}
+
+impl<T, B> Drop for MessageFut<'_, T, B> {
+    fn drop(&mut self) {
+        if self.registered {
+            self.pipe.shared().storage.waker.clear();
+        }
+    }
+}
 
 impl<T, B> Future for MessageFut<'_, T, B> {
     type Output = Message;
@@ -2181,13 +2276,18 @@ impl<T, B> Future for MessageFut<'_, T, B> {
     #[inline(always)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Message> {
         let this = &mut *self;
+        assert!(this.tag.is_some(), "Pipeline::message future polled after completion");
         let slot = match this.pipe.free_slots.pop_front() {
             Some(s) => s,
             None => match this.pipe.poll_message(cx) {
                 Poll::Ready(s) => s,
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    this.registered = true;
+                    return Poll::Pending;
+                }
             },
         };
+        this.registered = false;
         let sm = &mut this.pipe.slots[slot as usize];
         sm.tag = this.tag.take();
         sm.kind = SlotKind::OpenEmpty;
@@ -2198,9 +2298,18 @@ impl<T, B> Future for MessageFut<'_, T, B> {
 
 struct RoomFut<'a, T, B> {
     pipe: &'a mut Pipeline<T, B>,
+    registered: bool,
 }
 
 impl<T, B> Unpin for RoomFut<'_, T, B> {}
+
+impl<T, B> Drop for RoomFut<'_, T, B> {
+    fn drop(&mut self) {
+        if self.registered {
+            self.pipe.shared().storage.waker.clear();
+        }
+    }
+}
 
 impl<T, B> Future for RoomFut<'_, T, B> {
     type Output = Room;
@@ -2208,17 +2317,36 @@ impl<T, B> Future for RoomFut<'_, T, B> {
     #[inline(always)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Room> {
         if let Some(r) = self.pipe.pop_cached_room() {
+            self.registered = false;
             return Poll::Ready(r);
         }
-        self.pipe.poll_room(cx)
+        match self.pipe.poll_room(cx) {
+            Poll::Ready(r) => {
+                self.registered = false;
+                Poll::Ready(r)
+            }
+            Poll::Pending => {
+                self.registered = true;
+                Poll::Pending
+            }
+        }
     }
 }
 
 struct ReadyFut<'a, T, B> {
     pipe: &'a mut Pipeline<T, B>,
+    registered: bool,
 }
 
 impl<T, B> Unpin for ReadyFut<'_, T, B> {}
+
+impl<T, B> Drop for ReadyFut<'_, T, B> {
+    fn drop(&mut self) {
+        if self.registered {
+            self.pipe.shared().storage.waker.clear();
+        }
+    }
+}
 
 impl<T, B> Future for ReadyFut<'_, T, B> {
     type Output = ();
@@ -2226,9 +2354,19 @@ impl<T, B> Future for ReadyFut<'_, T, B> {
     #[inline(always)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         if !self.pipe.events.is_empty() {
+            self.registered = false;
             return Poll::Ready(());
         }
-        self.pipe.poll_ready(cx)
+        match self.pipe.poll_ready(cx) {
+            Poll::Ready(()) => {
+                self.registered = false;
+                Poll::Ready(())
+            }
+            Poll::Pending => {
+                self.registered = true;
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -2260,28 +2398,17 @@ crate::pipeline_sync::thread_local! {
 
 #[inline(always)]
 fn in_block_on() -> bool {
-    BLOCK_ON_STATE.with(core::cell::Cell::get) != 0
+    BLOCK_ON_STATE.try_with(core::cell::Cell::get).unwrap_or(0) != 0
 }
 
+#[cfg(all(test, not(shuttle)))]
 #[inline(always)]
 fn block_on_spinning() -> bool {
     BLOCK_ON_STATE.with(core::cell::Cell::get) == 1
 }
 
-/// Whether the poll that `cx` is of will be made again with no wake:
-/// `block_on`, while it spins, polls its future again and again, and a
-/// wait under it keeps no waker. Only where the waker is `block_on`'s
-/// own: a future between the two that polls a child only when the child's
-/// own waker has woken (as `FuturesUnordered` does) gives it another
-/// waker, and a wait that kept none of that one would never be polled
-/// again.
-#[inline(always)]
-fn block_on_polls_again(cx: &Context<'_>) -> bool {
-    block_on_spinning() && BLOCK_ON_WAKER.with(|own| cx.waker().will_wake(own))
-}
-
 fn prepare_thread() {
-    BLOCK_ON_WAKER.with(|_| {});
+    let _ = BLOCK_ON_WAKER.try_with(|_| {});
 }
 
 /// Drive `future` to completion on the current thread, parking between polls.
@@ -3321,7 +3448,7 @@ mod test {
     }
 
     #[test]
-    fn a_wait_keeps_no_waker_only_where_block_on_itself_polls_again() {
+    fn every_pending_wait_registers_its_waker_even_during_block_on_spin() {
         struct Count(AtomicUsize);
         impl std::task::Wake for Count {
             fn wake(self: Arc<Self>) {
@@ -3340,18 +3467,20 @@ mod test {
         let s = message_in_flight(&mut p);
         block_on(core::future::poll_fn(|own| {
             assert!(block_on_spinning());
-            // Under block_on's own waker, while it spins: none is kept,
-            // and a notice wakes nobody.
+            // Even while block_on spins, every Pending poll registers its
+            // waker so composed outer futures that gate child polls never lose
+            // a wake.
             own_woken();
             assert!(p.poll_ready(own).is_pending());
             notify(&p);
+            assert!(own_woken(), "ready() must register waker on first Pending poll");
             assert!(p.poll_message(own).is_pending());
             notify(&p);
+            assert!(own_woken(), "message() must register waker on first Pending poll");
             assert!(p.poll_room(own).is_pending());
             notify(&p);
-            assert!(!own_woken(), "a wait kept block_on's waker while block_on spins");
-            // Under another waker (a future between the two gave the wait
-            // its own, and polls it again only when that one wakes): kept.
+            assert!(own_woken(), "room() must register waker on first Pending poll");
+            // Under another waker: also kept and woken.
             let mut cx = Context::from_waker(&other);
             assert!(p.poll_ready(&mut cx).is_pending());
             notify(&p);
@@ -3373,6 +3502,166 @@ mod test {
         // The hashing ends, and the Pipeline is as any other.
         p.shared().slot_done[s].store(true, Ordering::SeqCst);
         assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 7, .. })));
+    }
+
+    /// A composed outer future under `block_on` that polls `room()` once during
+    /// spin and then waits on a producer flag (set right before dropping the
+    /// Room) must be woken when the Room drops rather than sleeping forever.
+    #[test]
+    fn composed_wait_under_block_on_receives_room_wake() {
+        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
+        let room = block_on(p.room());
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_p = Arc::clone(&flag);
+        let producer = std::thread::spawn(move || {
+            std::thread::sleep(5 * crate::lanes::SPIN_BEFORE_SLEEP);
+            flag_p.store(true, Ordering::Release);
+            drop(room);
+        });
+        let mut polled_child = false;
+        let got = block_on(core::future::poll_fn(|cx| {
+            if !polled_child {
+                polled_child = true;
+                assert!(p.poll_room(cx).is_pending());
+                return Poll::Pending;
+            }
+            if !flag.load(Ordering::Acquire) {
+                return Poll::Pending;
+            }
+            p.poll_room(cx)
+        }));
+        producer.join().unwrap();
+        drop(got);
+    }
+
+    /// Dropping a cancelled `room()`, `message()`, or `ready()` future must
+    /// immediately release the installed Waker so no reference cycle lingers.
+    #[test]
+    fn cancelling_wait_future_releases_its_waker() {
+        struct Track(AtomicUsize);
+        impl std::task::Wake for Track {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let track = Arc::new(Track(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&track));
+        let mut cx = Context::from_waker(&waker);
+        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
+        let room = block_on(p.room());
+        {
+            let mut fut = core::pin::pin!(p.room());
+            assert!(fut.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(Arc::strong_count(&track), 3, "room(): track + waker + WakerSlot");
+        }
+        assert_eq!(Arc::strong_count(&track), 2, "dropping cancelled room() future must clear WakerSlot");
+        // Now hold the single message slot in flight and cancel both message() and ready().
+        let s = message_in_flight(&mut p);
+        {
+            let mut fut = core::pin::pin!(p.message(9, None));
+            assert!(fut.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(Arc::strong_count(&track), 3, "message(): track + waker + WakerSlot");
+        }
+        assert_eq!(Arc::strong_count(&track), 2, "dropping cancelled message() future must clear WakerSlot");
+        {
+            let mut fut = core::pin::pin!(p.ready());
+            assert!(fut.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(Arc::strong_count(&track), 3, "ready(): track + waker + WakerSlot");
+        }
+        assert_eq!(Arc::strong_count(&track), 2, "dropping cancelled ready() future must clear WakerSlot");
+        p.shared().slot_done[s].store(true, Ordering::SeqCst);
+        assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 7, .. })));
+        drop(room);
+    }
+
+    /// If dropping one unreaped owner panics during `Pipeline::drop`, all
+    /// remaining owners must still drop and `PipeStorage` must still return to
+    /// `FREE_STORAGES`.
+    #[test]
+    fn pipeline_drop_cleans_remaining_owners_and_storage_after_panicking_owner() {
+        struct DropOwner {
+            data: [u8; 8],
+            drops: Arc<AtomicUsize>,
+            panic_on_drop: bool,
+        }
+        impl AsRef<[u8]> for DropOwner {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+        impl Drop for DropOwner {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if self.panic_on_drop {
+                    panic!("deliberate owner drop panic");
+                }
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut p = Pipeline::<u32, DropOwner>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        let st = p.shared().storage;
+        let holders_before = st.holders.load(Ordering::Acquire);
+        let m1 = block_on(p.message(1, None));
+        let m2 = block_on(p.message(2, None));
+        // Short messages stay buffered locally in open_group (not dispatched),
+        // so Pipeline::drop drops them quietly without aborting.
+        p.owned(m1, DropOwner { data: [1; 8], drops: Arc::clone(&drops), panic_on_drop: true });
+        p.owned(m2, DropOwner { data: [2; 8], drops: Arc::clone(&drops), panic_on_drop: false });
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(p)));
+        assert!(res.is_err(), "first owner panic should unwind");
+        assert_eq!(drops.load(Ordering::SeqCst), 2, "second owner must still be dropped on unwind");
+        assert_eq!(st.holders.load(Ordering::Acquire), holders_before - 1, "storage must be released back to free list");
+    }
+
+    /// Polling a completed `Pipeline::message` future a second time panics
+    /// before popping another free slot.
+    #[test]
+    fn repolling_completed_message_future_panics_without_taking_slot() {
+        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let msg = {
+            let mut fut = core::pin::pin!(p.message(42, None));
+            let Poll::Ready(msg) = fut.as_mut().poll(&mut cx) else { panic!("first poll must succeed") };
+            let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                let _ = fut.as_mut().poll(&mut cx);
+            }));
+            assert!(res.is_err(), "repolling completed MessageFut must panic");
+            msg
+        };
+        assert_eq!(p.open_messages, 1, "repoll must not consume a second slot");
+        p.end(msg);
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 42, .. })));
+    }
+
+    /// Moving a `Pipeline` holding pending inline (`[u8; 64]`) owners by value
+    /// to another thread before publishing/reaping must preserve exact digests
+    /// and owners via the move-insensitive `RawSlots` backing.
+    #[test]
+    fn moving_pipeline_with_pending_inline_owners_across_threads() {
+        let mut p = Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 });
+        for i in 0..4u32 {
+            let m = block_on(p.message(i, None));
+            p.owned(m, [i as u8 + 1; 64]);
+        }
+        let results = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            while out.len() < 4 {
+                if let Some(Event::Hashed { tag, hash, owner }) = p.next_event() {
+                    out.push((tag, hash, owner.unwrap()));
+                } else {
+                    block_on(p.ready());
+                }
+            }
+            out
+        })
+        .join()
+        .unwrap();
+        for (tag, hash, owner) in results {
+            assert_eq!(owner, [tag as u8 + 1; 64]);
+            assert_eq!(hash, crate::convenience::hash(&owner));
+        }
     }
 
     #[test]

@@ -627,10 +627,12 @@ std::thread_local! {
 }
 
 /// Allocate the calling thread's scratch before its first task. The
-/// pool's SME2 worker does this before it first parks.
+/// pool's SME2 worker does this before it first parks. Uses `try_with` so
+/// a repeated `initialize_multithreaded()` from a thread-local destructor
+/// during teardown never panics.
 #[cfg(feature = "std")]
 pub fn prepare_thread_scratch() {
-    SCRATCH_BLOCK.with(|_| ());
+    let _ = SCRATCH_BLOCK.try_with(|_| ());
 }
 
 /// The flat walk in `block`, SCRATCH bytes on a 4 KiB boundary, which

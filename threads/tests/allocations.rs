@@ -655,3 +655,37 @@ fn prepare_after_pooled_job_allocates_nothing() {
     let prep = counts(|| blake3_servil::initialize_multithreaded(std::num::NonZeroUsize::new(4)));
     assert_eq!(prep, Counts::default(), "already-sufficient pool scratch must not reallocate after pooled job: {prep:?}");
 }
+
+/// Dropping a quiescent `Pipeline` holding an unreaped pending `Batch` must
+/// deallocate every per-Pipeline allocation (including `RawSlots` backing and
+/// both the pending `Batch` and digest box) with zero leaked allocations.
+#[test]
+fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
+    use blake3_servil::throughput::{Limits, Pipeline, block_on};
+    pool_ready(2);
+    // Warm up reusable storage and FREE_STORAGES capacity first.
+    let warm = Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 });
+    drop(warm);
+    let mut pipe = None;
+    let create = counts(|| {
+        pipe = Some(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
+    });
+    let mut pipe = pipe.unwrap();
+    let msg = block_on(pipe.message(1, None));
+    let (batch_allocs, (batch, digests)) = {
+        let mut out = None;
+        let c = counts(|| {
+            out = Some((Batch::new(64, 2), vec![[0u8; 32]; 2].into_boxed_slice()));
+        });
+        (c, out.unwrap())
+    };
+    // Short batch stays buffered locally in open_group, so Pipeline::drop drops
+    // it quietly and frees both allocations alongside RawSlots.
+    pipe.batch(msg, batch, digests);
+    let dropped = counts(|| drop(pipe));
+    assert_eq!(
+        dropped.deallocations,
+        create.allocations + batch_allocs.allocations,
+        "Pipeline::drop must free every per-Pipeline allocation (create={create:?}, batch={batch_allocs:?}, dropped={dropped:?})"
+    );
+}

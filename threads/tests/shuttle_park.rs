@@ -18,7 +18,7 @@
 
 /// Shuttle's primitives, under the names src/park.rs imports them by.
 mod park_sync {
-    pub use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
+    pub use shuttle::sync::atomic::{AtomicU64, Ordering, fence};
     pub use shuttle::thread;
 
     /// A once-set cell, as std's OnceLock (which Shuttle lacks): set once,
@@ -254,6 +254,55 @@ fn wakes_fan_out_no_waker_makes_more_than_its_share() {
                 most.load(Ordering::SeqCst),
                 woken.load(Ordering::SeqCst)
             );
+        },
+        3000,
+        3,
+    );
+}
+
+/// Coincident publishers and payers: two publishers issue fan-out wakes while
+/// woken workers pay owed wakes concurrently across two rounds. An empty-scan
+/// clear from an earlier round must never ABA-clear freshly published debt.
+#[test]
+fn coincident_publishers_and_payers_keep_fresh_fanout() {
+    shuttle::check_pct(
+        || {
+            let park = Arc::new(Park::new(4, 1));
+            let published = Arc::new(AtomicUsize::new(0));
+            let done = Arc::new(AtomicUsize::new(0));
+            let mut threads = Vec::new();
+            for me in 0..4 {
+                let (park, published, done) = (park.clone(), published.clone(), done.clone());
+                threads.push(thread::spawn(move || {
+                    park.register(me);
+                    for round in 1..=2 {
+                        if park.park_unless(me, || published.load(Ordering::SeqCst) >= round) {
+                            park.pay_owed();
+                        }
+                        done.fetch_add(1, Ordering::SeqCst);
+                    }
+                }));
+            }
+            let mut pubs = Vec::new();
+            for round in 1..=2 {
+                let (park, published, done) = (park.clone(), published.clone(), done.clone());
+                pubs.push(thread::spawn(move || {
+                    if round == 2 {
+                        while done.load(Ordering::SeqCst) < 4 {
+                            thread::yield_now();
+                        }
+                    }
+                    published.store(round, Ordering::SeqCst);
+                    park.wake_for(4, 4);
+                }));
+            }
+            for t in pubs {
+                t.join().unwrap();
+            }
+            for t in threads {
+                t.join().unwrap();
+            }
+            assert_eq!(done.load(Ordering::SeqCst), 8);
         },
         3000,
         3,

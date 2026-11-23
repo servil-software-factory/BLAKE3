@@ -168,7 +168,7 @@
 //!   [`throughput::update_each`] allocates and frees nothing beyond the
 //!   one-time per-thread SME2 flat-walk scratch noted above if a fresh thread
 //!   hashes a whole 32 KiB+ piece on a 512-bit SME2 CPU.
-//! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction and allocates nothing thereafter on the calling thread or the workers.
+//! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction and allocates nothing during steady-state message submission, hashing, and reaping on the calling thread or the workers (teardown may grow the global reusable-storage free list when the last holder retires a storage).
 //! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
 //!   where it hashes on the calling thread. Above that length it keeps a list
 //!   of the pieces it hands out, 56 bytes for each piece (most are of up
@@ -280,7 +280,7 @@ mod finish;
 /// own `park_sync`.
 mod park_sync {
     pub use std::sync::OnceLock;
-    pub use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
+    pub use std::sync::atomic::{AtomicU64, Ordering, fence};
     pub use std::thread;
 }
 mod waker_sync {
@@ -515,11 +515,11 @@ pub mod throughput {
     use crate::{Hash, Hasher, Mode, OUT_LEN};
     pub use blake3_servil_core::throughput::*;
 
-    /// [`Hasher::update`](crate::convenience::Hasher::update), using other CPU
-    /// cores where that is faster: the same result, never slower. Pieces of
-    /// 512 KiB and more use them, as [`hash_multithreaded`] does; shorter ones
-    /// hash on the calling thread. One `Hasher` may take both calls. The
-    /// program calls
+    /// [`Hasher::update`](crate::convenience::Hasher::update), eligible to use
+    /// other CPU cores above the split threshold (512 KiB per eligible aligned
+    /// subtree, an implementation heuristic): always the same digest as
+    /// single-threaded `update`. Shorter updates hash on the calling thread.
+    /// One `Hasher` may take both calls. The program calls
     /// [`initialize_multithreaded`](crate::initialize_multithreaded) first.
     ///
     /// ```
@@ -537,8 +537,8 @@ pub mod throughput {
         hasher.update_with(input, crate::lanes::MIN_SPLIT_LEN, &crate::lanes::subtree_halves)
     }
 
-    /// [`hash_many`], using other CPU cores where that is faster: the same
-    /// hashes, never slower.
+    /// [`hash_many`], eligible to use other CPU cores above the split
+    /// threshold: always the same digests as single-threaded `hash_many`.
     ///
     /// ```
     /// # blake3_servil::initialize_multithreaded(None);
@@ -578,10 +578,10 @@ pub mod throughput {
         crate::lanes::hash_many_in(kind, key, context, batch.part(0..out.len()), out);
     }
 
-    /// [`hash`], using other CPU cores where that is faster: the same
-    /// [`Hash`](struct@Hash), never slower. For a message whose bytes are not
-    /// in blocks (a mapped file, say), [`update_multithreaded`] into a
-    /// [`Hasher`] takes any slice, at the same
+    /// [`hash`], eligible to use other CPU cores above the split threshold:
+    /// always the same [`Hash`](struct@Hash) as single-threaded `hash`. For a
+    /// message whose bytes are not in blocks (a mapped file, say),
+    /// [`update_multithreaded`] into a [`Hasher`] takes any slice, at the same
     /// speed on the i7-12700K from 512 KiB to 1 GiB (about 1% slower at 1 MiB).
     ///
     /// ```

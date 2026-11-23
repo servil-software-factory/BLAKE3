@@ -1,9 +1,12 @@
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    for cfg_name in ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "shuttle"] {
+    for cfg_name in ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "blake3_has_std", "shuttle"] {
         println!("cargo::rustc-check-cfg=cfg({cfg_name}, values(none()))");
     }
+    // `blake3-servil` always links std, even when its compatibility `std` feature
+    // is disabled (`--no-default-features`), so shared test helpers stay enabled.
+    println!("cargo::rustc-cfg=blake3_has_std");
     let var = |name: &str| env::var(name).unwrap_or_default();
     let arch = var("CARGO_CFG_TARGET_ARCH");
     // The core's build conditions, where this crate's code reads them.

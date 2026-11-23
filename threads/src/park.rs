@@ -14,7 +14,9 @@
 //! and does not park, or a publisher that must wake a worker sees its bit.
 //! Shuttle checks the handshake under SC, not the weaker load order on Arm.
 
-use super::park_sync::{AtomicU64, AtomicUsize, OnceLock, Ordering, fence, thread};
+use super::park_sync::{AtomicU64, OnceLock, Ordering, fence, thread};
+
+const OWED_COUNT_MASK: u64 = u32::MAX as u64;
 
 /// Any value on a cache line of its own.
 #[repr(align(128))]
@@ -35,9 +37,12 @@ pub(crate) struct Park {
     parked: Box<[Line<AtomicU64>]>,
     /// Each worker's thread, set as it starts.
     handles: Box<[OnceLock<thread::Thread>]>,
-    /// Wakes still owed: each woken worker pays up to `fanout` of them
-    /// before it works.
-    owed: AtomicUsize,
+    /// Wakes still owed, packed as `(generation: u32) << 32 | (count: u32)`:
+    /// each woken worker pays up to `fanout` of `count` before it works.
+    /// Every publisher addition increments `generation` so an empty-scan
+    /// clear from an earlier generation cannot wipe out freshly published
+    /// debt via ABA.
+    owed: AtomicU64,
     /// The most wakes any one waker makes (FANOUT; a test may choose).
     fanout: usize,
     /// Set once the workers have places (machines with more than one
@@ -71,7 +76,7 @@ impl Park {
         Park {
             parked: (0..workers.div_ceil(64).max(1)).map(|_| Line(AtomicU64::new(0))).collect(),
             handles: (0..workers).map(|_| OnceLock::new()).collect(),
-            owed: AtomicUsize::new(0),
+            owed: AtomicU64::new(0),
             fanout,
             near: OnceLock::new(),
         }
@@ -172,7 +177,15 @@ impl Park {
         // Nobody parked, or enough awake: nothing to wake.
         let (now, later) = split(wanted.saturating_sub(workers - parked).min(parked), self.fanout);
         if later > 0 {
-            self.owed.fetch_add(later, Ordering::SeqCst);
+            let add = later.min(u32::MAX as usize) as u64;
+            loop {
+                let cur = self.owed.load(Ordering::SeqCst);
+                let next_gen = (cur >> 32).wrapping_add(1);
+                let next_count = (cur & OWED_COUNT_MASK).saturating_add(add).min(OWED_COUNT_MASK);
+                if self.owed.compare_exchange(cur, (next_gen << 32) | next_count, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    break;
+                }
+            }
         }
         (0..now).take_while(|_| self.wake_one()).count()
     }
@@ -213,26 +226,40 @@ impl Park {
     pub(crate) fn pay_owed(&self) -> usize {
         let mut made = 0;
         while made < self.fanout {
-            let owed = self.owed.load(Ordering::SeqCst);
-            if owed == 0 {
+            let cur = self.owed.load(Ordering::SeqCst);
+            let count = cur & OWED_COUNT_MASK;
+            if count == 0 {
                 break;
             }
-            if self.owed.compare_exchange(owed, owed - 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            let next = cur - 1;
+            if self.owed.compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                 continue;
             }
             if !self.wake_one() {
-                self.owed.store(0, Ordering::SeqCst);
+                // Retire only obsolete debt from the exact generation we
+                // decremented: any concurrent publisher bumps the upper 32-bit
+                // generation, preventing ABA from wiping fresh fan-out debt.
+                let cleared = next & !OWED_COUNT_MASK;
+                let _ = self.owed.compare_exchange(next, cleared, Ordering::SeqCst, Ordering::SeqCst);
                 break;
             }
             made += 1;
         }
         made
     }
+
+    #[cfg(all(test, not(shuttle)))]
+    fn owed_count(&self) -> usize {
+        (self.owed.load(Ordering::SeqCst) & OWED_COUNT_MASK) as usize
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use super::{Park, split};
+    #[cfg(not(shuttle))]
+    use super::Park;
+    use super::split;
+    #[cfg(not(shuttle))]
     use std::sync::atomic::Ordering;
 
     /// A park of `workers` slots, every slot this thread's (an unpark of
@@ -321,31 +348,47 @@ mod test {
         let all: Vec<usize> = (0..12).collect();
         let park = park_with(12, 4, &all);
         assert_eq!(park.wake_for(1, 12), 1, "one wanted, twelve parked: one wake");
-        assert_eq!((park.parked_count(), park.owed.load(Ordering::SeqCst)), (11, 0));
+        assert_eq!((park.parked_count(), park.owed_count()), (11, 0));
         // Ten wanted, one worker awake already: nine to wake, four now
         // and five owed.
         assert_eq!(park.wake_for(10, 12), 4);
-        assert_eq!((park.parked_count(), park.owed.load(Ordering::SeqCst)), (7, 5));
+        assert_eq!((park.parked_count(), park.owed_count()), (7, 5));
         // A woken worker pays four of the five, then another the last.
         assert_eq!(park.pay_owed(), 4);
-        assert_eq!((park.parked_count(), park.owed.load(Ordering::SeqCst)), (3, 1));
+        assert_eq!((park.parked_count(), park.owed_count()), (3, 1));
         assert_eq!(park.pay_owed(), 1);
-        assert_eq!((park.parked_count(), park.owed.load(Ordering::SeqCst)), (2, 0));
+        assert_eq!((park.parked_count(), park.owed_count()), (2, 0));
         assert_eq!(park.pay_owed(), 0, "nothing owed: nothing paid");
         // Five wanted with ten awake: they cover it.
         assert_eq!(park.wake_for(5, 12), 0);
-        assert_eq!((park.parked_count(), park.owed.load(Ordering::SeqCst)), (2, 0));
+        assert_eq!((park.parked_count(), park.owed_count()), (2, 0));
         // A hundred wanted, two parked: those two, nothing owed.
         assert_eq!(park.wake_for(100, 12), 2);
-        assert_eq!((park.parked_count(), park.owed.load(Ordering::SeqCst)), (0, 0));
-        // Owed wakes with no one parked are dropped.
-        park.owed.store(3, Ordering::SeqCst);
+        assert_eq!((park.parked_count(), park.owed_count()), (0, 0));
+        // Owed wakes with no one parked are dropped, preserving generation.
+        let before_gen = park.owed.load(Ordering::SeqCst) >> 32;
+        park.owed.store((before_gen << 32) | 3, Ordering::SeqCst);
         assert_eq!(park.pay_owed(), 0);
-        assert_eq!(park.owed.load(Ordering::SeqCst), 0);
+        assert_eq!(park.owed_count(), 0);
+        assert_eq!(park.owed.load(Ordering::SeqCst) >> 32, before_gen);
+        // Fresh publisher additions bump the generation so an empty-scan clear
+        // carrying an older generation with the same numeric count cannot ABA-clear it.
+        let park = park_with(8, 2, &[0, 1, 2, 3, 4, 5, 6, 7]);
+        let gen0 = park.owed.load(Ordering::SeqCst) >> 32;
+        assert_eq!(park.wake_for(5, 8), 2);
+        assert_eq!(park.owed_count(), 3);
+        let gen1 = park.owed.load(Ordering::SeqCst) >> 32;
+        assert_eq!(gen1, gen0.wrapping_add(1));
+        // A second publisher addition on the same Park bumps gen1 -> gen2
+        // (proving high-32 generation bits are read with `>> 32`, not `<< 32`).
+        assert_eq!(park.wake_for(8, 8), 2);
+        assert_eq!(park.owed_count(), 7);
+        let gen2 = park.owed.load(Ordering::SeqCst) >> 32;
+        assert_eq!(gen2, gen1.wrapping_add(1));
         // Exactly the fan-out wanted of as many parked: all now, none owed.
         let park = park_with(4, 4, &[0, 1, 2, 3]);
         assert_eq!(park.wake_for(4, 4), 4);
-        assert_eq!((park.parked_count(), park.owed.load(Ordering::SeqCst)), (0, 0));
+        assert_eq!((park.parked_count(), park.owed_count()), (0, 0));
     }
 
     /// A waker's share: at most its fan-out now, the rest owed, nothing

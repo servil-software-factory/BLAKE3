@@ -50,7 +50,30 @@ impl WakerSlot {
     }
 
     /// Publish interest before the caller rechecks the completion predicate.
+    /// When an equivalent waker is already installed (`will_wake`), skips
+    /// cloning/dropping while still issuing the SeqCst fence before the
+    /// caller's completion re-check.
     pub(crate) fn register(&self, cx: &Context<'_>) {
+        let old = self.install_waker(cx);
+        // The completion re-check may load with Acquire (RCpc
+        // on Arm). It must not move before publishing the waiter.
+        fence(Ordering::SeqCst);
+        drop(old);
+    }
+
+    #[inline(always)]
+    fn install_waker(&self, cx: &Context<'_>) -> Option<Waker> {
+        // Fast path: if already REGISTERED with a waker that `will_wake` the
+        // caller's, keep it without cloning or running user code under WRITING.
+        if self.state.0.compare_exchange(REGISTERED, WRITING, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            // Sound: WRITING is held exclusively; `Waker::will_wake` compares
+            // raw data/vtable pointers and invokes no user code.
+            let same = unsafe { with_mut(&self.waker, |slot| slot.as_ref().is_some_and(|w| w.will_wake(cx.waker()))) };
+            self.state.0.store(REGISTERED, Ordering::SeqCst);
+            if same {
+                return None;
+            }
+        }
         let next = cx.waker().clone();
         loop {
             let s = self.state.0.load(Ordering::SeqCst);
@@ -60,11 +83,7 @@ impl WakerSlot {
                 // below ends that.
                 let old = unsafe { with_mut(&self.waker, |slot| slot.replace(next)) };
                 self.state.0.store(REGISTERED, Ordering::SeqCst);
-                // The completion re-check may load with Acquire (RCpc
-                // on Arm). It must not move before publishing the waiter.
-                fence(Ordering::SeqCst);
-                drop(old);
-                return;
+                return old;
             }
             spin();
         }

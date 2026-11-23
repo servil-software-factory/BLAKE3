@@ -13,7 +13,6 @@ src/lanes.rs	replace & with ^ in sme2_serve	2	same code: every test binary hashe
 src/lanes.rs	replace & with | in sme2_serve	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace && with || in initialize	2	compiled out on x86: the SME2 thread (cfg!(blake3_sme2) is false, so the expression is false whatever the comparison)
 src/lanes.rs	replace * with + in merge_to_children	1	array capacity: 2 + MAX children a call instead of 2 * MAX, the same tree in more calls
-src/lanes.rs	replace + with - in sources::Source::publish_job	1	another architecture's: `own`, the caller's own pieces, is nonzero only where the SME2 thread takes a prefix (cut_with_prefix on AArch64); on x86 own is 0 and base - 0 is base, so claimed is where it was. On AArch64 the change strands the job (the old hangs.txt had it)
 src/lanes.rs	replace - with + in Pool::run_job	3	OPEN: the pool's scheduling: `pieces - own`, where own, the caller's own pieces, is nonzero only with the SME2 thread's prefix; on x86-64 own is 0 and the sum is the difference (the wake count itself is tested, test_a_job_wakes_one_worker_a_piece_past_its_own). Two places survive every run; the third is caught in some (November 10, 2026)
 src/lanes.rs	replace - with / in Pool::run_job	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103). It survived the AVX-512 machines' whole runs of November 10, 2026, and the AVX2 machine's caught it
 src/lanes.rs	replace == with != in sme2_serve	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -37,7 +36,6 @@ src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is 
 src/park.rs	replace > with >= in Park::wake_for	1	equivalent: `later >= 0` adds `later` to the owed when it is 0, which is adding nothing; the `if` keeps an atomic add off the path of a job that owes none
 src/pipeline.rs	delete ! in Pipeline<T, B>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
 src/pipeline.rs	delete ! in Pipeline<T, B>::alloc_piece_node	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
-src/pipeline.rs	delete match arm SlotKind::WaitBatch{..} in <impl Drop for Pipeline<T, B>>::drop	1	cleanup: only frees an unpulled completed batch allocation when Pipeline is dropped before draining events
 src/pipeline.rs	replace != with == in <impl Drop for Pipeline<T, B>>::drop	1	cleanup: only releases a room credit if an uncommitted Message was mem::forget-ed before Pipeline::drop
 src/pipeline.rs	replace * with +	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the piece alongside NEON workers (identical digests)
 src/pipeline.rs	replace * with + in Pipeline<T, B>::batch	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the batch piece (identical digests)

@@ -172,7 +172,7 @@ mod lanes {
         }
 
         /// As the pool's, each member alone.
-        pub(crate) fn run_members(&self, tree: &TreeHasher, platform: Platform) {
+        pub(crate) unsafe fn run_members(&self, tree: &TreeHasher, platform: Platform) {
             for m in &self.member[..self.members] {
                 // A worker may be switched away from before each member.
                 shuttle::thread::yield_now();
@@ -254,7 +254,7 @@ mod lanes {
             pub(crate) fn unregister(slot: usize) {
                 REGISTERED.lock().unwrap().retain(|&at| at != slot);
             }
-            pub(crate) fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64]) {
+            pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64]) {
                 let mut waiting = self.waiting.lock().unwrap();
                 assert!(waiting.len() + args.len() <= self.actions, "more actions than the Source was made for");
                 waiting.extend(args.iter().map(|&arg| (run, context as usize, arg)));

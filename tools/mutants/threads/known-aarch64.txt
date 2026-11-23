@@ -62,7 +62,6 @@ src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is 
 src/park.rs	replace > with >= in Park::wake_for	1	speed: changes how many parked workers a publisher wakes or owes (BLAKE3 #119: every wake direct, the cascade alone and 8 direct measured 4-25% apart on the EPYC and the i7); no result waits on a worker waking: the publisher hashes every piece no worker takes, and finish.rs's handshake wakes a waiting caller
 src/pipeline.rs	delete ! in Pipeline<T, B>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
 src/pipeline.rs	delete ! in Pipeline<T, B>::alloc_piece_node	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
-src/pipeline.rs	delete match arm SlotKind::WaitBatch{..} in <impl Drop for Pipeline<T, B>>::drop	1	cleanup: only frees an unpulled completed batch allocation when Pipeline is dropped before draining events
 src/pipeline.rs	replace != with == in <impl Drop for Pipeline<T, B>>::drop	1	cleanup: only releases a room credit if an uncommitted Message was mem::forget-ed before Pipeline::drop
 src/pipeline.rs	replace * with +	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the piece alongside NEON workers (identical digests)
 src/pipeline.rs	replace * with + in Pipeline<T, B>::batch	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the batch piece (identical digests)

@@ -46,7 +46,7 @@ impl<T> std::ops::Deref for Line<T> {
 }
 
 /// The top bit of `state`: the caller is parked, waiting.
-const SLEEPING: usize = 1 << (usize::BITS - 1);
+pub(crate) const SLEEPING: usize = 1 << (usize::BITS - 1);
 
 pub(crate) struct Finish {
     /// The number past the last piece or task published.
@@ -91,6 +91,7 @@ impl Finish {
     /// false when the while is up), then parked until the worker finishing
     /// the last piece unparks this thread.
     pub(crate) fn wait(&self, target: usize, mut poll: impl FnMut() -> bool) {
+        assert!(target < SLEEPING, "Finish target must stay below the SLEEPING flag bit");
         loop {
             if self.finished_count() >= target {
                 return;
@@ -196,5 +197,12 @@ mod tests {
         waiter.join().unwrap();
         assert_eq!(returned.load(Ordering::SeqCst), 1);
         assert_eq!(finish.finished_count(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "SLEEPING")]
+    fn wait_rejects_target_reaching_sleeping_bit() {
+        let finish = Finish::new();
+        finish.wait(SLEEPING, || false);
     }
 }

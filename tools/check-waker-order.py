@@ -68,9 +68,13 @@ def compile_probe(sources, directory):
     return asm.read_text()
 
 
-def ordered(asm, function, announce):
+def function_body(asm, function):
     body = asm.split(f"\n_{function}:\n", 1)[1]
-    body = re.split(r"^[ \t]*\.(?:cfi_endproc|globl|subsections_via_symbols)\b", body, maxsplit=1, flags=re.M)[0]
+    return re.split(r"^[ \t]*\.(?:cfi_endproc|globl|subsections_via_symbols)\b", body, maxsplit=1, flags=re.M)[0]
+
+
+def ordered(asm, function, announce):
+    body = function_body(asm, function)
     # Fail rather than credit a different instruction sequence, or a
     # barrier belonging to another function.
     stores = list(re.finditer(rf"^[ \t]+{announce}\b[^\n]*\n", body, re.M))
@@ -79,6 +83,70 @@ def ordered(asm, function, announce):
         raise SystemExit(f"sleep ordering: no unique {announce}/ldapr pair in {function}")
     between = body[stores[0].end():loads[0].start()]
     return re.match(r"[ \t]+dmb[ \t]+ish[ \t]*\n", between) is not None
+
+
+def ordered_cfg(asm, function, announce):
+    """Verify every CFG path from entry to every `ldapr` passes through
+    `announce` followed later by `dmb ish` before reaching `ldapr`."""
+    body = function_body(asm, function)
+    blocks = []
+    cur_label = "__entry__"
+    cur_insns = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(".") or line.startswith(";"):
+            continue
+        m_lbl = re.match(r"^([A-Za-z0-9_.$]+):$", line)
+        if m_lbl:
+            blocks.append((cur_label, cur_insns))
+            cur_label = m_lbl.group(1)
+            cur_insns = []
+        else:
+            cur_insns.append(line)
+    blocks.append((cur_label, cur_insns))
+    idx_of = {lbl: i for i, (lbl, _) in enumerate(blocks)}
+
+    # States: 0 = no announce yet, 1 = announced (no dmb ish since), 2 = announced + dmb ish.
+    seen_ldapr = 0
+    seen_fenced = 0
+    visited = set()
+    work = [(0, 0)]
+    while work:
+        bi, state = work.pop()
+        if (bi, state) in visited:
+            continue
+        visited.add((bi, state))
+        _, insns = blocks[bi]
+        s = state
+        fallthrough = True
+        for insn in insns:
+            op = insn.split()[0]
+            if op == announce:
+                s = 1
+            elif re.match(r"^dmb\s+ish$", insn):
+                if s == 1:
+                    s = 2
+                    seen_fenced += 1
+            elif op == "ldapr":
+                seen_ldapr += 1
+                if s != 2:
+                    return False
+            elif op == "ret":
+                fallthrough = False
+                break
+            elif op == "b":
+                target = insn.split()[1]
+                if target in idx_of:
+                    work.append((idx_of[target], s))
+                fallthrough = False
+                break
+            elif op.startswith("b.") or op in ("cbz", "cbnz", "tbz", "tbnz"):
+                target = insn.split(",")[-1].strip()
+                if target in idx_of:
+                    work.append((idx_of[target], s))
+        if fallthrough and bi + 1 < len(blocks):
+            work.append((bi + 1, s))
+    return seen_ldapr > 0 and seen_fenced > 0
 
 
 def main():
@@ -95,9 +163,9 @@ def main():
         raise SystemExit("sleep ordering: SME2 must order its announcement before the work re-check")
     probe = PROBE.replace("// SME2_ADVERTISEMENT", advertisement[1].replace("SME2_PARKED", "flag"))
     paths = {
-        "waker.rs": [("register_then_recheck", "stlr")],
-        "park.rs": [("park_then_recheck", "ldsetal")],
-        "probe.rs": [("sme2_then_recheck", "stlrb")],
+        "waker.rs": [("register_then_recheck", "stlr", ordered_cfg)],
+        "park.rs": [("park_then_recheck", "ldsetal", ordered)],
+        "probe.rs": [("sme2_then_recheck", "stlrb", ordered)],
     }
     with tempfile.TemporaryDirectory(prefix="sleep-order-") as tmp:
         directory = Path(tmp)
@@ -109,10 +177,10 @@ def main():
             if sources[name].count(fence) != 1:
                 raise SystemExit(f"sleep ordering: expected one SeqCst fence in {name}")
             unfenced = compile_probe({**sources, name: sources[name].replace(fence, "")}, directory)
-            for function, announce in checks:
-                if not ordered(asm, function, announce):
+            for function, announce, check in checks:
+                if not check(asm, function, announce):
                     raise SystemExit(f"sleep ordering: missing dmb ish in {function}")
-                if ordered(unfenced, function, announce):
+                if check(unfenced, function, announce):
                     raise SystemExit(f"sleep ordering: negative control retained a barrier in {function}")
                 print(f"sleep ordering: {function} has {announce}/dmb ish/ldapr; unfenced control rejected")
 

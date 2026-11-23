@@ -300,6 +300,12 @@ fn tree_threads(len: usize, available: usize, degree: usize) -> usize {
 }
 
 fn spare_pool() -> Option<(&'static Pool, Caller<'static>)> {
+    // During thread-local teardown, if this thread's pool scratch or job source
+    // TLS key is already destroyed, decline the pool so callers fall back
+    // cleanly to their serial paths instead of panicking inside a destructor.
+    if SCRATCH.try_with(|_| ()).is_err() || !sources::job_source_available() {
+        return None;
+    }
     let pool = pool();
     let callers = pool.callers.fetch_add(1, Ordering::SeqCst) + 1;
     let caller = Caller(&pool.callers);
@@ -339,14 +345,14 @@ std::thread_local! {
 /// (`each::prepare_thread`). After this, its calls on inputs the scratch
 /// holds allocate nothing.
 pub(crate) fn prepare_thread() {
-    SCRATCH.with(|s| {
+    let _ = SCRATCH.try_with(|s| {
         let mut s = s.borrow_mut();
         s.pieces.clear();
         s.cvs.clear();
         s.pieces.reserve(PREPARED_PIECES);
         s.cvs.reserve(PREPARED_PIECES);
     });
-    sources::job_source();
+    let _ = sources::try_job_source();
     crate::prepare_collection_thread();
     #[cfg(blake3_sme2)]
     if matches!(Platform::detect(), Platform::SME2 { .. }) {
@@ -2720,7 +2726,10 @@ impl Pool {
         // wait is over: nothing runs on the normal path).
         let ptr = &job as *const Job as *mut Job<'static>;
         let published = AbortOnUnwind;
-        let target = source.publish_job(ptr, pieces, own, near);
+        // Sound: `job` stays alive on this stack until `source.wait(target)`
+        // returns (guaranteed even on unwind by `end_on_unwind`), and `source`
+        // is this thread's exclusive one-shot job source.
+        let target = unsafe { source.publish_job(ptr, pieces, own, near) };
         if slot.is_some() {
             // A worker for each piece past the caller's first (none for a
             // job of one past its own: a wake for none is nothing); for a
@@ -2966,9 +2975,16 @@ pub(crate) mod sources {
         /// Publish one or more pipeline actions in order with one Release
         /// store and one fence, then wake parked workers only where awake
         /// workers fall short of the items waiting.
-        pub(crate) fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64]) {
+        ///
+        /// # Safety
+        ///
+        /// This source must be an action source with a single publisher at a
+        /// time, and every `(run, context, arg)` tuple published must be safe
+        /// for a worker (or caller) to invoke once with the assigned `Platform`.
+        pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64]) {
             debug_assert!(!args.is_empty());
             let p = self.finish.published.load(Ordering::Relaxed);
+            let next = p.checked_add(args.len()).expect("Source action ticket counter exhausted");
             assert!(p - self.claimed.load(Ordering::Acquire) + args.len() <= self.actions.len(), "a source's actions hold every item not yet taken");
             let cap = self.actions.len();
             for (k, &arg) in args.iter().enumerate() {
@@ -2977,7 +2993,7 @@ pub(crate) mod sources {
                 slot.context.store(context as *mut (), Ordering::Relaxed);
                 slot.arg.store(arg, Ordering::Relaxed);
             }
-            self.finish.published.store(p + args.len(), Ordering::Release);
+            self.finish.published.store(next, Ordering::Release);
             core::sync::atomic::fence(Ordering::SeqCst);
             let pool = pool();
             if pool.sme2 {
@@ -3003,20 +3019,33 @@ pub(crate) mod sources {
             }
         }
 
+        #[cfg(test)]
+        pub(super) fn own_for_test(&self) {
+            self.finish.own();
+        }
+
         /// Make `job` the caller's current job, its pieces `0..own` the
         /// caller's own: the number `finished` must reach when it is done.
-        pub(crate) fn publish_job(&self, job: *mut Job<'static>, pieces: usize, own: usize, near: bool) -> usize {
+        ///
+        /// # Safety
+        ///
+        /// This source must be a single-publisher job source, `own <= pieces`,
+        /// and `job` (along with all buffers its pieces read/write) must stay
+        /// valid until `self.wait(target)` returns.
+        pub(crate) unsafe fn publish_job(&self, job: *mut Job<'static>, pieces: usize, own: usize, near: bool) -> usize {
             let base = self.finish.published.load(Ordering::Relaxed);
             debug_assert_eq!(self.finish.finished_count(), base, "the last job is finished");
+            let target = base.checked_add(pieces).expect("Source job counter overflow");
+            assert!(target < crate::finish::SLEEPING, "Source job counter reached Finish::SLEEPING limit");
             self.near.store(near, Ordering::Relaxed);
             self.job.store(job, Ordering::Relaxed);
             self.base.store(base, Ordering::Relaxed);
             // No worker can claim a number yet (claimed == published), so
             // this store alone moves `claimed` past the caller's own pieces.
             self.claimed.store(base + own, Ordering::Relaxed);
-            self.finish.published.store(base + pieces, Ordering::Release);
+            self.finish.published.store(target, Ordering::Release);
             core::sync::atomic::fence(Ordering::SeqCst);
-            base + pieces
+            target
         }
 
         /// Claim the next published item, if any.
@@ -3137,9 +3166,15 @@ pub(crate) mod sources {
         static MINE: std::cell::OnceCell<Held> = const { std::cell::OnceCell::new() };
     }
 
-    /// This thread's source for its one-shot jobs.
-    pub(crate) fn job_source() -> &'static Source {
-        MINE.with(|mine| {
+    /// Whether this thread's job-source TLS key is still live (false only
+    /// during thread-local destruction after `MINE` has been destroyed).
+    pub(crate) fn job_source_available() -> bool {
+        MINE.try_with(|_| ()).is_ok()
+    }
+
+    /// This thread's source for its one-shot jobs, or `None` during TLS teardown.
+    pub(crate) fn try_job_source() -> Option<&'static Source> {
+        MINE.try_with(|mine| {
             mine.get_or_init(|| {
                 let source = FREE_JOBS.lock().unwrap().pop().unwrap_or_else(|| Box::leak(Box::new(Source::new())));
                 source.finish.own();
@@ -3147,6 +3182,12 @@ pub(crate) mod sources {
             })
             .0
         })
+        .ok()
+    }
+
+    /// This thread's source for its one-shot jobs.
+    pub(crate) fn job_source() -> &'static Source {
+        try_job_source().expect("job_source called after TLS destruction")
     }
 
     pub(crate) fn opened() {
@@ -3306,7 +3347,7 @@ pub(crate) mod sources {
             unsafe fn noop(_: *const (), _: u64, _: Platform) {}
             let source: &'static Source = &*Box::leak(Box::new(Source::with_actions(4)));
             let slot = source.register().expect("a free slot");
-            source.publish_actions(noop, core::ptr::null(), &[77]);
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[77]) };
             let item = take_stream_item();
             Source::unregister(slot);
             assert!(matches!(item, Some(Item::Action { arg: 77, .. })));
@@ -3359,8 +3400,10 @@ pub(crate) mod sources {
             unsafe fn noop(_: *const (), _: u64, _: Platform) {}
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
             let source = Source::with_actions(2);
-            source.publish_actions(noop, core::ptr::null(), &[1, 2]);
-            source.publish_actions(noop, core::ptr::null(), &[3]);
+            unsafe {
+                source.publish_actions(noop, core::ptr::null(), &[1, 2]);
+                source.publish_actions(noop, core::ptr::null(), &[3]);
+            }
         }
 
         #[test]
@@ -3373,7 +3416,7 @@ pub(crate) mod sources {
             assert_eq!(source.actions_len(), 3);
             assert!(!source.run_waiting_action());
             let flag = AtomicU64::new(0);
-            source.publish_actions(set_val, (&flag as *const AtomicU64).cast(), &[42 | ACTION_SME2]);
+            unsafe { source.publish_actions(set_val, (&flag as *const AtomicU64).cast(), &[42 | ACTION_SME2]) };
             assert!(source.run_waiting_action());
             assert_eq!(flag.load(Ordering::SeqCst), 42, "ACTION_SME2 bit stripped before running");
             assert!(!source.run_waiting_action());
@@ -3574,7 +3617,16 @@ impl Task {
     /// multi-lane kernels (`hash_many`'s, from a table of pointers) where
     /// that length is one block, or on x86 two to sixteen blocks of a power
     /// of two (128 B to 1 KiB); any others one at a time.
-    pub(crate) fn run_members(&self, tree: &TreeHasher, platform: Platform) {
+    ///
+    /// # Safety
+    ///
+    /// `self.members <= MEMBERS`, and for every active member `m` in
+    /// `self.member[..self.members]`: `m.input` must be valid for reads of
+    /// `m.len` initialized bytes (and for `self.batch = Some(message_len)`,
+    /// whole slots of a validated `Batch` with padding zeroed), and `m.out`
+    /// must point to non-overlapping writable output space for the member's
+    /// digest(s) until completion is published.
+    pub(crate) unsafe fn run_members(&self, tree: &TreeHasher, platform: Platform) {
         let members = &self.member[..self.members];
         if let Some(message_len) = self.batch {
             for m in members {
@@ -3768,8 +3820,12 @@ mod test {
         // thread below it would end that thread alone and leave the wait
         // waiting forever (a broken build's every mutant hung this test).
         let _ = pool();
-        let source = sources::job_source();
-        let target = source.publish_job(core::ptr::null_mut(), 1, 0, false);
+        let source: &'static sources::Source = Box::leak(Box::new(sources::Source::new()));
+        source.own_for_test();
+        // Sound: `source` is an isolated test-only Source never registered in
+        // the global pool registry; only our spawned worker thread claims it
+        // without dereferencing the null job pointer.
+        let target = unsafe { source.publish_job(core::ptr::null_mut(), 1, 0, false) };
         // An unpark this thread received earlier would let one park()
         // return at once and hide a missing wake-up.
         std::thread::park_timeout(core::time::Duration::ZERO);
@@ -3837,7 +3893,7 @@ mod test {
                                     task.member[m] = Member { input: inputs[m][offset..].as_ptr(), len: inputs[m].len() - offset, out };
                                 }
                                 crate::RAN.with(|r| r.set(0));
-                                task.run_members(&tree, platform);
+                                unsafe { task.run_members(&tree, platform) };
                                 // Which path (BLAKE3 #219): one length, two
                                 // members or more, a length with a kernel
                                 // (one block everywhere; 128 B to 1 KiB on
@@ -4152,7 +4208,7 @@ mod test {
         let _ = pool();
         unsafe fn noop(_: *const (), _: u64, _: Platform) {}
         let source: &'static sources::Source = Box::leak(Box::new(sources::Source::with_actions(8)));
-        let pub1 = || source.publish_actions(noop, core::ptr::null(), &[0]);
+        let pub1 = || unsafe { source.publish_actions(noop, core::ptr::null(), &[0]) };
         counts();
         pub1();
         assert_eq!(counts()[Noted::WakeTry as usize], 0, "one task waiting: the caller's");
@@ -4355,7 +4411,7 @@ mod test {
             task.members = 1;
             task.member[0] = Member { input: input.as_ptr(), len, out: out.as_mut_ptr().cast::<u8>() };
             crate::RAN.with(|r| r.set(0));
-            task.run_members(&TreeHasher::new(crate::Mode::Plain), Platform::detect());
+            unsafe { task.run_members(&TreeHasher::new(crate::Mode::Plain), Platform::detect()) };
             let ran = crate::RAN.with(|r| r.get());
             assert!(ran & crate::Ran::MemberAlone as u32 != 0 && ran & crate::Ran::EqualMembers as u32 == 0, "{len} B alone");
             assert_eq!(out[0], *crate::convenience::hash(&input).as_bytes());
@@ -4759,5 +4815,75 @@ mod test {
         while !all_parked() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    /// Calling synchronous multithreaded APIs from a thread-local destructor
+    /// after `SCRATCH` and `MINE` have already been destroyed must fall back
+    /// cleanly to serial hashing without panicking.
+    #[test]
+    fn pool_calls_inside_tls_destructor_succeed() {
+        crate::initialize_multithreaded(std::num::NonZeroUsize::new(2));
+        let ran = std::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let ok = std::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        struct OnExit {
+            ran: std::sync::Arc<core::sync::atomic::AtomicBool>,
+            ok: std::sync::Arc<core::sync::atomic::AtomicBool>,
+        }
+        impl Drop for OnExit {
+            fn drop(&mut self) {
+                self.ran.store(true, Ordering::SeqCst);
+                crate::initialize_multithreaded(None);
+                let data = vec![crate::throughput::Block([0x5Au8; 64]); (MIN_SPLIT_LEN + 1024) / 64];
+                let bytes = crate::throughput::Block::bytes(&data);
+                let expected = *blake3::hash(bytes).as_bytes();
+                let got_whole = crate::throughput::hash_multithreaded(crate::Mode::Plain, &data, bytes.len());
+                let batch = crate::throughput::Batch::from_blocks(&data, 64);
+                let mut batch_out = vec![[0u8; 32]; batch.len()];
+                crate::throughput::hash_many_multithreaded(crate::Mode::Plain, &batch, &mut batch_out);
+                let expected_block = *blake3::hash(&[0x5Au8; 64]).as_bytes();
+                let item_blocks = vec![crate::throughput::Block([0x3Cu8; 64]); 32];
+                let items = vec![(&item_blocks[..], 2048); 300];
+                let mut each_out = vec![[0u8; 32]; items.len()];
+                crate::throughput::hash_each_multithreaded(crate::Mode::Plain, &items, &mut each_out);
+                let expected_item = *blake3::hash(&[0x3Cu8; 2048]).as_bytes();
+                if *got_whole.as_bytes() == expected && batch_out[0] == expected_block && each_out[0] == expected_item {
+                    self.ok.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        std::thread_local! {
+            static EARLIER: core::cell::RefCell<Option<OnExit>> = const { core::cell::RefCell::new(None) };
+        }
+        let ran_c = std::sync::Arc::clone(&ran);
+        let ok_c = std::sync::Arc::clone(&ok);
+        std::thread::spawn(move || {
+            // Initialize EARLIER first so LIFO TLS teardown destroys SCRATCH,
+            // MINE, and any SME2 scratch TLS before EARLIER's Drop runs.
+            EARLIER.with(|slot| *slot.borrow_mut() = Some(OnExit { ran: ran_c, ok: ok_c }));
+            crate::initialize_multithreaded(None);
+            let warmup = vec![crate::throughput::Block([0x11u8; 64]); (MIN_SPLIT_LEN + 1024) / 64];
+            let _ = crate::throughput::hash_multithreaded(crate::Mode::Plain, &warmup, crate::throughput::Block::bytes(&warmup).len());
+        })
+        .join()
+        .expect("pool calls during TLS teardown must not panic");
+        assert!(ran.load(Ordering::SeqCst), "TLS destructor must have run");
+        assert!(ok.load(Ordering::SeqCst), "TLS destructor hashes must match reference");
+
+        // Second thread: initialize SCRATCH *before* EARLIER and MINE *after*
+        // EARLIER so only MINE is destroyed while SCRATCH is still live when
+        // EARLIER's Drop runs.
+        ran.store(false, Ordering::SeqCst);
+        ok.store(false, Ordering::SeqCst);
+        let ran_c = std::sync::Arc::clone(&ran);
+        let ok_c = std::sync::Arc::clone(&ok);
+        std::thread::spawn(move || {
+            SCRATCH.with(|s| s.borrow_mut().pieces.reserve(1));
+            EARLIER.with(|slot| *slot.borrow_mut() = Some(OnExit { ran: ran_c, ok: ok_c }));
+            let _ = sources::job_source();
+        })
+        .join()
+        .expect("pool calls with only MINE destroyed must not panic");
+        assert!(ran.load(Ordering::SeqCst), "second TLS destructor must have run");
+        assert!(ok.load(Ordering::SeqCst), "second TLS destructor hashes must match reference");
     }
 }

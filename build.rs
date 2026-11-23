@@ -212,7 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // As of Rust 1.80, unrecognized config names are warnings. Give Cargo all of our config names.
     // `shuttle` gates tests/shuttle_*.rs (RUSTFLAGS="--cfg shuttle"); the
     // library compiles the same either way.
-    let all_cfgs = ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "shuttle"];
+    let all_cfgs = ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "blake3_has_std", "shuttle"];
     for cfg_name in all_cfgs {
         // https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-build-script
         println!("cargo::rustc-check-cfg=cfg({cfg_name}, values(none()))");
