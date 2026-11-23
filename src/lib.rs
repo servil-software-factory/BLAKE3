@@ -72,8 +72,8 @@
 //! The [`Hasher`] runs on the calling thread; its
 //! first update is treated as a call now and then (its code fetched first
 //! where that helps), and its later updates as call after call. The
-//! throughput call that takes it, [`throughput::update_each`], is tuned
-//! as a throughput call.
+//! throughput call that takes it, `throughput::update_each` (with `std`),
+//! is tuned as a throughput call.
 //!
 //! Start with the convenience calls; when a program needs more speed, it
 //! moves to the throughput ones.
@@ -84,15 +84,15 @@
 //! | One message in memory, repeated call after call | [`throughput::hash`] (on aligned [`Block`](throughput::Block)s), or [`throughput::TreeHasher::hash`] directly on caller-owned `&[u8]` slices without copying into aligned blocks |
 //! | One message arriving in pieces | [`convenience::Hasher`] |
 //! | Many messages of one length, in one buffer | [`throughput::hash_many`] over a [`throughput::Batch`] |
-//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | With `std`, [`throughput::hash_many`] over a [`throughput::Batch`] (fastest for already-prepared batches) or [`throughput::Packed`] (compact storage; expands on the stack internally, avoids refill copies in chains). Without `std`, a prepared [`throughput::TreeHasher`] per message. |
-//! | Many messages of different lengths, in memory | [`throughput::hash_each`] |
-//! | Many messages arriving at once (a server's uploads) | [`throughput::update_each`], then [`throughput::finalize_each`] |
+//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | With `std`, [`throughput::hash_many`] over a [`throughput::Batch`] (fastest for already-prepared batches) or `throughput::Packed` (compact storage; expands on the stack internally, avoids refill copies in chains). Without `std`, a prepared [`throughput::TreeHasher`] per message. |
+//! | Many messages of different lengths, in memory | `throughput::hash_each` (with `std`) |
+//! | Many messages arriving at once (a server's uploads) | `throughput::update_each`, then `throughput::finalize_each` (with `std`) |
 //!
 //! Each call returns once its hash is done, on the calling thread. For
 //! long inputs and large batches on several cores, the crate
 //! `blake3-servil` adds a multithreaded form of each, and for messages
 //! that keep arriving its Pipeline
-//! ([`throughput::update_each`] says when each is the one to use).
+//! (`throughput::update_each` says when each is the one to use).
 //!
 //! Short messages hash fastest together: 1024 messages of 64 bytes in one
 //! [`throughput::hash_many`] call take about a fifth of the time of 1024
@@ -135,21 +135,31 @@
 //! # Memory
 //!
 //! - **A [`Hasher`] is 26 KiB**; box it where that matters.
-//! - **These single-threaded calls allocate nothing**: [`convenience::hash`],
-//!   [`throughput::hash`], [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
-//!   and [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
-//!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 64 KiB
-//!   stack buffer for the first read (even on immediate EOF), and promotes to a
-//!   1 MiB heap buffer once 65,536 bytes or more are read before EOF, freed when
-//!   it returns. [`throughput::hash_each`] keeps, on the
-//!   thread that calls it, 32 bytes for each chunk of the collection's
-//!   messages of 2 to 15 chunks and 16 for each such message: its first
-//!   collection and a larger one grow that storage, and a repeated
-//!   collection allocates nothing.
+//! - **These single-threaded calls allocate nothing** (except on 512-bit SME2
+//!   CPUs under `std`, where the first flat-walk tree of 32 KiB or more on
+//!   each thread lazily allocates one reusable 64 KiB thread-local scratch
+//!   block; without `std`, or during thread-local teardown after that block is
+//!   destroyed, that 64 KiB scratch sits on the stack instead):
+//!   [`convenience::hash`], [`throughput::hash`], [`throughput::hash_many`],
+//!   [`Hasher::update`](convenience::Hasher::update) and
+//!   [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
+//!   With `std`, `Hasher::update_reader` uses a 64 KiB stack buffer for the
+//!   first read (even on immediate EOF), and promotes to a 1 MiB heap buffer
+//!   once 65,536 bytes or more are read before EOF, freed when it returns.
+//!   `throughput::hash_each` (with `std`) keeps reusable per-thread `Vec`
+//!   storage for messages of 2 to 15 chunks (16 bytes per message and 32 bytes
+//!   per chunk of payload, plus `Vec` capacity): its first such collection and
+//!   a larger one grow that storage, and a repeated collection on a live
+//!   thread allocates nothing; during thread-local teardown after that storage
+//!   is destroyed, a collection with multi-chunk items falls back to
+//!   call-local `Vec`s.
 //! - **Grouped incremental calls** use bounded stack tables and tree buffers.
-//!   [`throughput::update_each`] allocates and frees nothing.
-//! - **Once per process**: the startup self-test's buffers, about 45 KiB
-//!   of the calling thread's stack while it runs (it allocates nothing).
+//!   `throughput::update_each` (with `std`) allocates and frees nothing beyond
+//!   the one-time per-thread SME2 flat-walk scratch noted above if a fresh
+//!   thread hashes a whole 32 KiB+ piece on a 512-bit SME2 CPU.
+//! - **Once per process**: the startup self-test's buffers on the calling
+//!   thread's stack while it runs (plus the SME2 flat-walk scratch noted above
+//!   on 512-bit SME2 CPUs).
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] holds and the chaining values made from them stay in the
@@ -166,9 +176,16 @@
 //!
 //! # Startup self-test
 //!
-//! **Every program calls [`initialize`] once, before any other call of
-//! this crate**: a call before it panics, in every build, saying so. The
-//! check costs nothing: it is part of the platform load every call makes.
+//! **Every program calls [`initialize`] once, before hashing**: any call
+//! that loads the detected platform (including [`convenience::hash`],
+//! [`Hasher::new`](convenience::Hasher::new), `Mode::DeriveKey` context
+//! hashing, and hashing methods on [`TreeHasher`](throughput::TreeHasher))
+//! panics before `initialize` completes, in every build, saying so. Pure
+//! constructors and `const` coordinate helpers that need no runtime platform
+//! (such as [`TreeHasher::new`](throughput::TreeHasher::new) for `Plain`,
+//! `Keyed`, or `DeriveKeyWith`, an empty `parent_cvs` call, and
+//! [`throughput::left_len`]) do not load the platform. The check costs
+//! nothing: it is part of the platform load made when selecting kernels.
 //!
 //! `initialize` checks the build and the CPU before the process first
 //! hashes, in well under a millisecond. It runs the assembly kernels built
@@ -187,9 +204,9 @@
 //! # Cargo Features
 //!
 //! The `std` feature (the only feature enabled by default) enables the
-//! [`Write`] implementation and the [`update_reader`](convenience::Hasher::update_reader)
-//! method for [`Hasher`], and also the [`Read`] and [`Seek`] implementations
-//! for [`OutputReader`].
+//! [`Write`] implementation and `Hasher::update_reader` for [`Hasher`],
+//! the [`Read`] and [`Seek`] implementations for [`OutputReader`], owned
+//! `Batch`/`Packed` builders, and the `hash_each`/`update_each` calls.
 //!
 //! The build needs a C compiler that assembles the kernels (GCC 12 or
 //! later, or Clang); without one it stops and says so. This crate runs its
@@ -314,7 +331,7 @@ std::thread_local! {
 #[allow(dead_code)]
 pub(crate) fn ran(kind: Ran) {
     #[cfg(all(test, feature = "std"))]
-    RAN.with(|r| r.set(r.get() | kind as u32));
+    let _ = RAN.try_with(|r| r.set(r.get() | kind as u32));
     let _ = kind;
 }
 
@@ -364,7 +381,7 @@ std::thread_local! {
 #[allow(dead_code)]
 pub(crate) fn counted(what: Counted) {
     #[cfg(all(test, feature = "std"))]
-    COUNTED.with(|c| c[what as usize].set(c[what as usize].get() + 1));
+    let _ = COUNTED.try_with(|c| c[what as usize].set(c[what as usize].get() + 1));
     let _ = what;
 }
 
@@ -381,7 +398,7 @@ std::thread_local! {
 #[allow(dead_code)]
 pub(crate) fn ran_kernel(entry: *const ()) {
     #[cfg(all(test, feature = "std"))]
-    RAN_ENTRIES.with(|r| r.borrow_mut().insert(entry as usize));
+    let _ = RAN_ENTRIES.try_with(|r| r.borrow_mut().insert(entry as usize));
     let _ = entry;
 }
 
@@ -1180,8 +1197,8 @@ fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
 }
 
 /// Run the startup self-test and detect the CPU: every program calls this
-/// once, before any other call of this
-/// crate, and a call before it panics. Under 0.2 ms, once per process
+/// once before hashing (any call that loads the detected platform before
+/// `initialize` completes panics). Under 0.2 ms, once per process
 /// (see the crate's documentation); later calls return at once.
 ///
 /// ```

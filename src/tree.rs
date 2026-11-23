@@ -23,6 +23,12 @@ pub trait Kernels {
     /// What `wide` returns for `input`, computed another way where the
     /// kernels have one (None: they have none for it). `ahead` bytes of the
     /// caller's input follow `input`.
+    ///
+    /// Called only when `input.len() > self.degree() * CHUNK_LEN`. When it
+    /// returns `Some(n)`, `n` must be in `1..=self.degree()`, and for a whole
+    /// power-of-two subtree (`input.len().is_power_of_two()`) `n` must equal
+    /// `self.degree()` so `wide` can join the right subtree directly at
+    /// `cvs[self.degree()..]`.
     fn subtree(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [Cv]) -> Option<usize>;
     /// What `root_children` returns for `input`, computed another way where
     /// the kernels have one (None: they have none for it).
@@ -49,19 +55,25 @@ pub fn left_len(len: usize) -> usize {
 /// n, between 1 and degree. `out` holds at least that many.
 /// `ahead` bytes of the caller's input follow `input`.
 pub fn wide<K: Kernels>(k: &K, input: &[u8], ahead: usize, counter: u64, out: &mut [Cv]) -> usize {
-    if input.len() <= k.degree() * CHUNK_LEN {
+    let degree = k.degree();
+    if input.len() <= degree * CHUNK_LEN {
         return k.chunks(input, counter, out);
     }
     if let Some(n) = k.subtree(input, ahead, counter, out) {
+        assert!((1..=degree).contains(&n), "a subtree cut returns 1 to degree values");
+        if input.len().is_power_of_two() {
+            assert_eq!(n, degree, "a whole subtree cut fills degree values");
+        }
         return n;
     }
     let l = left_len(input.len());
     let (a, b) = input.split_at(l);
-    // More than degree chunks (2 or more), so the left half holds two
-    // chunks or more, and gives two values or more (up to degree).
+    // More than degree chunks, so the whole power-of-two left half has at
+    // least degree chunks and its canonical cut fills all `degree` slots.
     let mut cvs = [[0u8; OUT_LEN]; 2 * MAX];
-    let (lo, hi) = cvs.split_at_mut(k.degree());
+    let (lo, hi) = cvs.split_at_mut(degree);
     let ln = wide(k, a, b.len() + ahead, counter, lo);
+    assert_eq!(ln, degree, "a whole left subtree cut fills degree values");
     let rn = wide(k, b, ahead, counter + (l / CHUNK_LEN) as u64, hi);
     k.parents(&cvs[..ln + rn], out)
 }
@@ -148,10 +160,11 @@ impl Kernels for PlatformKernels<'_> {
     #[inline(always)]
     #[allow(unused_variables)]
     fn subtree(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [Cv]) -> Option<usize> {
-        // Whole subtrees of 32 KiB to 1 MiB on SME2: the flat walk, SME2
-        // alone (see sme2::compress_subtree_flat).
+        // Whole subtrees of 256 KiB to 1 MiB (> DEGREE chunks) on SME2:
+        // the flat walk keeps DEGREE chaining values (see
+        // sme2::compress_subtree_flat).
         #[cfg(blake3_sme2)]
-        if matches!(self.platform, Platform::SME2) && crate::sme2::flat_takes(input.len()) {
+        if matches!(self.platform, Platform::SME2) && crate::sme2::flat_subtree_takes(input.len()) {
             // Safe: the SME2 platform is selected only where the CPU has it,
             // and `out` holds simd_degree() values, which is sme2::DEGREE.
             return Some(unsafe { crate::sme2::compress_subtree_flat(input, ahead, self.key, counter, self.flags, out.as_flattened_mut()) });
@@ -252,6 +265,103 @@ mod test {
             let k = Rooms { chunks: RefCell::new(Vec::new()), parents: RefCell::new(Vec::new()) };
             root_children(&k, &input[..chunks * CHUNK_LEN], 0, 0);
             assert_eq!((k.chunks.into_inner(), k.parents.into_inner()), (rooms, parents), "{chunks} chunks");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a whole subtree cut fills degree values")]
+    fn wide_rejects_a_short_left_subtree_cut() {
+        struct ShortCut;
+        impl Kernels for ShortCut {
+            fn degree(&self) -> usize {
+                4
+            }
+            fn chunks(&self, input: &[u8], _: u64, _: &mut [Cv]) -> usize {
+                input.len().div_ceil(CHUNK_LEN)
+            }
+            fn parents(&self, children: &[Cv], _: &mut [Cv]) -> usize {
+                children.len().div_ceil(2)
+            }
+            fn subtree(&self, input: &[u8], _: usize, _: u64, _: &mut [Cv]) -> Option<usize> {
+                input.len().is_power_of_two().then_some(2)
+            }
+            fn children(&self, _: &[u8], _: usize, _: u64) -> Option<[Cv; 2]> {
+                None
+            }
+            fn chunk_root(&self, _: &[u8]) -> Cv {
+                [0; OUT_LEN]
+            }
+            fn parent_root(&self, _: &[Cv; 2]) -> Cv {
+                [0; OUT_LEN]
+            }
+        }
+        // 8 chunks: top-level whole subtree (> degree 4) returning 2 instead of 4.
+        let input = [0u8; 8 * CHUNK_LEN];
+        let mut out = [[0u8; OUT_LEN]; 4];
+        wide(&ShortCut, &input, 0, 0, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "a whole left subtree cut fills degree values")]
+    fn wide_rejects_a_short_left_join_from_chunks() {
+        struct ShortChunks;
+        impl Kernels for ShortChunks {
+            fn degree(&self) -> usize {
+                4
+            }
+            fn chunks(&self, _: &[u8], _: u64, _: &mut [Cv]) -> usize {
+                2
+            }
+            fn parents(&self, children: &[Cv], _: &mut [Cv]) -> usize {
+                children.len().div_ceil(2)
+            }
+            fn subtree(&self, _: &[u8], _: usize, _: u64, _: &mut [Cv]) -> Option<usize> {
+                None
+            }
+            fn children(&self, _: &[u8], _: usize, _: u64) -> Option<[Cv; 2]> {
+                None
+            }
+            fn chunk_root(&self, _: &[u8]) -> Cv {
+                [0; OUT_LEN]
+            }
+            fn parent_root(&self, _: &[Cv; 2]) -> Cv {
+                [0; OUT_LEN]
+            }
+        }
+        // 5 chunks: left half is 4 chunks (base case), returning 2 instead of 4.
+        let input = [0u8; 5 * CHUNK_LEN];
+        let mut out = [[0u8; OUT_LEN]; 4];
+        wide(&ShortChunks, &input, 0, 0, &mut out);
+    }
+
+    #[test]
+    fn platform_kernels_subtree_declines_inputs_at_or_below_degree() {
+        crate::initialize();
+        let platform = Platform::detect();
+        let k = PlatformKernels { key: crate::IV, flags: 0, platform };
+        let mut out = [[0u8; OUT_LEN]; MAX];
+        let input = std::vec![0x5au8; 256 * CHUNK_LEN];
+        for chunks in [32usize, 64, 128] {
+            assert_eq!(k.subtree(&input[..chunks * CHUNK_LEN], 0, 0, &mut out[..k.degree()]), None, "{chunks} chunks");
+        }
+        let got = k.subtree(&input, 0, 0, &mut out[..k.degree()]);
+        #[cfg(blake3_sme2)]
+        let expect_some = matches!(platform, Platform::SME2);
+        #[cfg(not(blake3_sme2))]
+        let expect_some = false;
+        if expect_some {
+            let n = got.expect("256-chunk subtree must use SME2 flat shortcut");
+            assert_eq!(n, k.degree());
+            let mut cvs = out;
+            let mut next = [[0u8; OUT_LEN]; MAX / 2];
+            let mut cur = n;
+            while cur > 2 {
+                cur = k.parents(&cvs[..cur], &mut next);
+                cvs[..cur].copy_from_slice(&next[..cur]);
+            }
+            assert_eq!(k.parent_root(&[cvs[0], cvs[1]]), *blake3::hash(&input).as_bytes());
+        } else {
+            assert_eq!(got, None);
         }
     }
 }

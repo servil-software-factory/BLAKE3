@@ -320,7 +320,7 @@ fn independent_lanes(hashers: &mut [Hasher], held: &[usize]) -> bool {
     }
     crate::ffi_output::held_groups(hashers, held, platform);
     #[cfg(test)]
-    HELD_GROUPS.with(|groups| groups.borrow_mut().push(held.to_vec()));
+    let _ = HELD_GROUPS.try_with(|groups| groups.borrow_mut().push(held.to_vec()));
     crate::counted(crate::Counted::HeldPass);
     true
 }
@@ -394,7 +394,7 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     use crate::{BLOCK_LEN, PARENT};
     let first = alike[0];
     #[cfg(all(test, feature = "std"))]
-    HELD_GROUPS.with(|groups| groups.borrow_mut().push(alike.to_vec()));
+    let _ = HELD_GROUPS.try_with(|groups| groups.borrow_mut().push(alike.to_vec()));
     #[cfg(all(test, feature = "std"))]
     crate::counted(crate::Counted::HeldPass);
     let domain = hashers[first].domain();
@@ -744,71 +744,104 @@ pub(crate) fn hash_each_on<I: Item>(key: &CVWords, flags: u8, items: &[I], out: 
             }
         }
     }
+    if items.is_empty() {
+        return;
+    }
     // The messages of 2 to ALONE_CHUNKS - 1 chunks share the lanes, their
     // k-th whole chunks side by side across the whole collection (the more
     // messages a round holds, the fuller its lanes). Their places and chunk
-    // values live in this thread's storage, kept between calls (SHARED).
-    SHARED.with(|shared| {
-        let mut shared = shared.try_borrow_mut().expect("one collection at a time on a thread");
-        let Shared { messages, cvs } = &mut *shared;
-        messages.clear();
-        let mut slots = 0;
-        let mut most_full = 0;
-        for (i, item) in items.iter().map(Item::bytes).enumerate() {
-            let chunks = item.len().div_ceil(CHUNK_LEN);
-            if chunks <= 1 && by_blocks {
-                continue;
-            }
-            if chunks <= 1 || chunks >= ALONE_CHUNKS {
-                out[i] = *alone(item).as_bytes();
-            } else {
-                most_full = most_full.max(item.len() / CHUNK_LEN);
-                messages.push((i, slots));
-                slots += chunks;
-            }
+    // values live in this thread's storage, kept between calls (SHARED),
+    // falling back to call-local storage during thread-local teardown.
+    if SHARED
+        .try_with(|shared| {
+            let mut shared = shared.try_borrow_mut().expect("one collection at a time on a thread");
+            hash_each_middle(&mut shared, &key, flags, items, out, platform, by_blocks, &alone);
+        })
+        .is_err()
+    {
+        let mut local = Shared { messages: Vec::new(), cvs: Vec::new() };
+        hash_each_middle(&mut local, &key, flags, items, out, platform, by_blocks, &alone);
+    }
+}
+
+/// Shared-lane rounds for a nonempty collection (handles single/large items
+/// through `alone` and `2..ALONE_CHUNKS`-chunk items through `shared`).
+#[allow(clippy::too_many_arguments)]
+fn hash_each_middle<I: Item>(
+    shared: &mut Shared,
+    key: &CVWords,
+    flags: u8,
+    items: &[I],
+    out: &mut [[u8; OUT_LEN]],
+    platform: Platform,
+    by_blocks: bool,
+    alone: &impl Fn(&[u8]) -> Hash,
+) {
+    let Shared { messages, cvs } = shared;
+    messages.clear();
+    let mut slots = 0;
+    let mut most_full = 0;
+    for (i, item) in items.iter().map(Item::bytes).enumerate() {
+        let chunks = item.len().div_ceil(CHUNK_LEN);
+        if chunks <= 1 && by_blocks {
+            continue;
         }
-        cvs.clear();
-        cvs.resize(slots, [0u8; OUT_LEN]);
-        for k in 0..most_full {
-            crate::counted(crate::Counted::EachRound);
-            // A round's lanes go to the kernels LANES_AT_ONCE at a time,
-            // their chunks and places on the stack.
-            let mut refs = crate::stack_vec::StackVec::<&[u8; CHUNK_LEN], LANES_AT_ONCE>::new();
-            let mut owners = crate::stack_vec::StackVec::<usize, LANES_AT_ONCE>::new();
-            let mut flush = |refs: &mut crate::stack_vec::StackVec<&[u8; CHUNK_LEN], LANES_AT_ONCE>,
-                             owners: &mut crate::stack_vec::StackVec<usize, LANES_AT_ONCE>| {
-                let mut lane_out = [0u8; LANES_AT_ONCE * OUT_LEN];
-                let lanes = &mut lane_out[..refs.len() * OUT_LEN];
-                platform.hash_many(refs, &key, k as u64, IncrementCounter::No, flags, CHUNK_START, CHUNK_END, lanes);
-                for (j, &slot) in owners.iter().enumerate() {
-                    cvs[slot].copy_from_slice(&lanes[j * OUT_LEN..(j + 1) * OUT_LEN]);
-                }
-                refs.clear();
-                owners.clear();
-            };
-            for &(i, at) in messages.iter() {
-                if let Some(chunk) = items[i].bytes().get(k * CHUNK_LEN..(k + 1) * CHUNK_LEN) {
-                    refs.push(chunk.try_into().unwrap());
-                    owners.push(at + k);
-                    if refs.is_full() {
-                        flush(&mut refs, &mut owners);
-                    }
-                }
-            }
-            if !refs.is_empty() {
-                flush(&mut refs, &mut owners);
-            }
+        if chunks <= 1 || chunks >= ALONE_CHUNKS {
+            out[i] = *alone(item).as_bytes();
+        } else {
+            most_full = most_full.max(item.len() / CHUNK_LEN);
+            messages.push((i, slots));
+            slots += chunks;
         }
+    }
+    cvs.clear();
+    cvs.resize(slots, [0u8; OUT_LEN]);
+    // Acquire one best-effort SME2 turn across the shared full-chunk rounds
+    // when at least one full SME2 group (16 messages) participates.
+    let turn = crate::platform::Sme2Turn::take(platform, messages.len() >= 16);
+    let round_platform = turn.platform();
+    for k in 0..most_full {
+        crate::counted(crate::Counted::EachRound);
+        // A round's lanes go to the kernels LANES_AT_ONCE at a time,
+        // their chunks and places on the stack.
+        let mut refs = crate::stack_vec::StackVec::<&[u8; CHUNK_LEN], LANES_AT_ONCE>::new();
+        let mut owners = crate::stack_vec::StackVec::<usize, LANES_AT_ONCE>::new();
+        let mut flush = |refs: &mut crate::stack_vec::StackVec<&[u8; CHUNK_LEN], LANES_AT_ONCE>,
+                         owners: &mut crate::stack_vec::StackVec<usize, LANES_AT_ONCE>| {
+            let mut lane_out = [0u8; LANES_AT_ONCE * OUT_LEN];
+            let lanes = &mut lane_out[..refs.len() * OUT_LEN];
+            round_platform.hash_many(refs, key, k as u64, IncrementCounter::No, flags, CHUNK_START, CHUNK_END, lanes);
+            for (j, &slot) in owners.iter().enumerate() {
+                cvs[slot].copy_from_slice(&lanes[j * OUT_LEN..(j + 1) * OUT_LEN]);
+            }
+            refs.clear();
+            owners.clear();
+        };
         for &(i, at) in messages.iter() {
-            let item = items[i].bytes();
-            let chunks = item.len().div_ceil(CHUNK_LEN);
-            let full = item.len() / CHUNK_LEN;
-            if full < chunks {
-                cvs[at + full] = ChunkState::new(&key, full as u64, flags, platform).update(&item[full * CHUNK_LEN..]).output().chaining_value();
+            if let Some(chunk) = items[i].bytes().get(k * CHUNK_LEN..(k + 1) * CHUNK_LEN) {
+                refs.push(chunk.try_into().unwrap());
+                owners.push(at + k);
+                if refs.is_full() {
+                    flush(&mut refs, &mut owners);
+                }
             }
-            out[i] = *root(&cvs[at..at + chunks], &key, flags, platform).as_bytes();
         }
-    });
+        if !refs.is_empty() {
+            flush(&mut refs, &mut owners);
+        }
+    }
+    drop(turn);
+    for &(i, at) in messages.iter() {
+        let item = items[i].bytes();
+        let chunks = item.len().div_ceil(CHUNK_LEN);
+        let full = item.len() / CHUNK_LEN;
+        if full < chunks {
+            cvs[at + full] = ChunkState::new(key, full as u64, flags, platform).update(&item[full * CHUNK_LEN..]).output().chaining_value();
+        }
+        out[i] = *root(&cvs[at..at + chunks], key, flags, platform).as_bytes();
+    }
+    messages.clear();
+    cvs.clear();
 }
 
 /// The lanes of one call to the kernels within a round of [`hash_each_on`].
@@ -840,8 +873,10 @@ const PREPARED_CVS: usize = 256;
 /// This thread's storage for the collections it hashes, made now: the
 /// pool's threads at their start, and the thread that initializes the pool.
 pub fn prepare_thread() {
-    SHARED.with(|shared| {
+    let _ = SHARED.try_with(|shared| {
         let mut shared = shared.borrow_mut();
+        shared.messages.clear();
+        shared.cvs.clear();
         shared.messages.reserve(PREPARED_MESSAGES);
         shared.cvs.reserve(PREPARED_CVS);
     });
@@ -1811,5 +1846,65 @@ mod test {
                 assert_eq!(digest, crate::convenience::hash_with(mode, item).as_bytes(), "length {}", item.len());
             }
         }
+    }
+
+    /// Calling `hash_each` (and `prepare_thread`) from an earlier-initialized
+    /// thread-local destructor after `SHARED` has already been destroyed must
+    /// not panic and must produce exact digests for both empty and multi-chunk
+    /// collections.
+    #[test]
+    fn hash_each_works_during_thread_local_teardown() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        crate::initialize();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ok = Arc::new(AtomicBool::new(false));
+        struct OnExit {
+            ran: Arc<AtomicBool>,
+            ok: Arc<AtomicBool>,
+        }
+        impl Drop for OnExit {
+            fn drop(&mut self) {
+                self.ran.store(true, Ordering::SeqCst);
+                let tree = crate::throughput::TreeHasher::new(Mode::Plain);
+                // Empty collection during teardown.
+                let mut empty: [[u8; OUT_LEN]; 0] = [];
+                tree.hash_each(&[], &mut empty);
+                // Middle-sized multi-chunk collection during teardown (forces
+                // the `SHARED.try_with` fallback once `SHARED` is destroyed).
+                let msg_a = [0x11u8; 2 * CHUNK_LEN + 7];
+                let msg_b = [0x22u8; 3 * CHUNK_LEN + 13];
+                let slices = [&msg_a[..], &msg_b[..]];
+                let blocks = crate::test::messages(&slices);
+                let items = crate::test::items(&blocks, &slices);
+                let mut out = [[0u8; OUT_LEN]; 2];
+                prepare_thread();
+                tree.hash_each(&items, &mut out);
+                let matched = out[0] == *blake3::hash(&msg_a).as_bytes() && out[1] == *blake3::hash(&msg_b).as_bytes();
+                self.ok.store(matched, Ordering::SeqCst);
+            }
+        }
+        std::thread_local! {
+            static EARLIER: core::cell::RefCell<Option<OnExit>> = const { core::cell::RefCell::new(None) };
+        }
+        let ran_c = Arc::clone(&ran);
+        let ok_c = Arc::clone(&ok);
+        std::thread::spawn(move || {
+            // Initialize EARLIER first so LIFO TLS teardown destroys SHARED
+            // before EARLIER's Drop runs.
+            EARLIER.with(|slot| *slot.borrow_mut() = Some(OnExit { ran: ran_c, ok: ok_c }));
+            // Now initialize SHARED via a middle-sized hash_each call.
+            let msg = [0x33u8; 2 * CHUNK_LEN];
+            let slices = [&msg[..]];
+            let blocks = crate::test::messages(&slices);
+            let items = crate::test::items(&blocks, &slices);
+            let mut out = [[0u8; OUT_LEN]; 1];
+            crate::throughput::hash_each(Mode::Plain, &items, &mut out);
+            assert_eq!(out[0], *blake3::hash(&msg).as_bytes());
+        })
+        .join()
+        .expect("thread teardown with hash_each must not panic");
+        assert!(ran.load(Ordering::SeqCst), "TLS destructor must have run");
+        assert!(ok.load(Ordering::SeqCst), "TLS destructor digests must match");
     }
 }

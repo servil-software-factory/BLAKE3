@@ -593,3 +593,20 @@ fn pipeline_allocates_nothing_after_creation() {
 
     assert_eq!(work, Counts::default(), "Pipeline allocated after creation: {work:?}");
 }
+
+/// Preparing a thread after a large `hash_each` collection (and an empty
+/// collection) must not reallocate or grow already-sufficient thread-local
+/// scratch buffers.
+#[test]
+fn prepare_after_large_and_empty_collection_allocates_nothing() {
+    pool_ready(1);
+    let data = blocks(2 * 1024, 9);
+    let items: Vec<(&[Block], usize)> = vec![(&data, 2 * 1024); 4096];
+    let mut out = vec![[0u8; 32]; 4096];
+    throughput::hash_each(Mode::Plain, &items, &mut out);
+    assert_eq!(out[0], *blake3::hash(Block::bytes(&data)).as_bytes());
+    let mut empty: [[u8; 32]; 0] = [];
+    throughput::hash_each(Mode::Plain, &[], &mut empty);
+    let prep = counts(|| blake3_servil::initialize_multithreaded(std::num::NonZeroUsize::new(1)));
+    assert_eq!(prep, Counts::default(), "already-sufficient TLS scratch must not reallocate: {prep:?}");
+}

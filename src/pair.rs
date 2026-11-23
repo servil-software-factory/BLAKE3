@@ -69,8 +69,13 @@ pub(crate) fn parent(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8,
 }
 
 /// The platform's assembly `hash_many`, with the block count at run time
-/// (AVX2 and AVX-512; elsewhere each input in turn). Unsafe: each of `inputs` reaches `blocks`
-/// blocks, and the CPU has the platform.
+/// (AVX2 and AVX-512; elsewhere each input in turn).
+///
+/// # Safety
+///
+/// Each pointer in `inputs` must be valid for reads of `blocks * BLOCK_LEN`
+/// initialized bytes for the duration of this call, must not overlap `out`,
+/// and the CPU must support `platform`.
 #[allow(clippy::too_many_arguments)]
 // Out of line: inlined into Platform::hash_many once its portable arm went,
 // batches of one to three 64 B messages after other work ran 5-12% slower on
@@ -89,7 +94,7 @@ pub(crate) unsafe fn hash_many_blocks(
     flags_end: u8,
     out: &mut [u8],
 ) {
-    assert!(out.len() >= inputs.len() * OUT_LEN && (1..=CHUNK_LEN / BLOCK_LEN).contains(&blocks));
+    assert!(inputs.len() <= out.len() / OUT_LEN && (1..=CHUNK_LEN / BLOCK_LEN).contains(&blocks));
     if !takes_platform(platform) {
         // Elsewhere one input after another on the platform's compression
         // (for the tests of hash_many's batches on every platform).
@@ -116,5 +121,36 @@ pub(crate) unsafe fn hash_many_blocks(
             crate::avx512::ffi::blake3_servil_hash_many_avx512(input, n, blocks, key, counter, increment, flags, flags_start, flags_end, out)
         },
         _ => unreachable!("takes_platform admitted AVX2 or AVX-512"),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn hash_many_blocks_checks_output_room_and_block_count() {
+        crate::initialize();
+        let platform = Platform::detect();
+        let block = [0u8; BLOCK_LEN];
+        let ptrs = [block.as_ptr(), block.as_ptr()];
+        let mut short_out = [0u8; 2 * OUT_LEN - 1];
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                hash_many_blocks(platform, &ptrs, 1, crate::IV, 0, false, 0, CHUNK_START, CHUNK_END, &mut short_out);
+            }))
+            .is_err(),
+            "one-byte-short output must panic"
+        );
+        let mut ok_out = [0u8; 2 * OUT_LEN];
+        for bad_blocks in [0usize, CHUNK_LEN / BLOCK_LEN + 1] {
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                    hash_many_blocks(platform, &ptrs, bad_blocks, crate::IV, 0, false, 0, CHUNK_START, CHUNK_END, &mut ok_out);
+                }))
+                .is_err(),
+                "invalid block count {bad_blocks} must panic"
+            );
+        }
     }
 }

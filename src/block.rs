@@ -67,8 +67,8 @@ impl core::fmt::Debug for Block {
 /// message starts a block, and every byte past each message's end is zero,
 /// since a `Batch` lets the program write only the messages' own bytes (so
 /// the bytes the batch kernels read in place, past a message, can never be
-/// wrong). It owns its blocks ([`Batch::new`]), or borrows blocks already in
-/// place whose messages fill them, with no bytes past their ends
+/// wrong). It owns its blocks (`Batch::new`, with `std`), or borrows blocks
+/// already in place whose messages fill them, with no bytes past their ends
 /// ([`Batch::from_blocks`]: a Merkle layer's 64-byte nodes, a mapped file's
 /// records).
 ///
@@ -285,7 +285,7 @@ impl<const N: usize> core::ops::DerefMut for Packed<N> {
 
 /// The batch calls' input: messages of one length, prepared so that a
 /// call reads them as they are. [`Batch`] holds them in blocks, any
-/// length; [`Packed`] holds 16- or 32-byte messages end to end. Sealed:
+/// length; `Packed` (with `std`) holds 16- or 32-byte messages end to end. Sealed:
 /// the crate's types alone.
 pub trait Prepared: sealed::Sealed {
     /// The messages' bytes, one every `slot` bytes.

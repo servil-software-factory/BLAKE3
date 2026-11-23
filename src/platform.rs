@@ -743,7 +743,7 @@ pub(crate) fn prefetch_code((start, end): (usize, usize)) {
         line += 512;
     }
     #[cfg(test)]
-    PREFETCHED.with(|p| {
+    let _ = PREFETCHED.try_with(|p| {
         // Recorded only while a counting test asks (test::prefetch_counts): the
         // other tests prefetch without end, as calls do.
         if let Some(p) = &mut *p.borrow_mut() {

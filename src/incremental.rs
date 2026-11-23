@@ -11,7 +11,7 @@ use crate::throughput::{Cv, TreeHasher};
 /// Every call runs on the calling thread and returns with its input
 /// incorporated. For other cores, the crate `blake3-servil` has
 /// `throughput::update_multithreaded`;
-/// for many messages at once, [`throughput::update_each`](crate::throughput::update_each).
+/// for many messages at once, `throughput::update_each` (requires `std`).
 ///
 /// A `Hasher` is 26 KiB (it holds short pieces until it has 16 KiB to
 /// hash at once, and rows of chaining values, so that parents are hashed
@@ -25,9 +25,8 @@ use crate::throughput::{Cv, TreeHasher};
 /// a part of its message that is not specified: of a turn's pieces some
 /// may be in and others not, and after a callback's panic bytes that
 /// earlier updates took may be gone. Its hash is then of no use: replace
-/// such a hasher with a new one (or let
-/// [`finalize_each`](crate::throughput::finalize_each) take that hash,
-/// which resets the hasher) before its next message.
+/// such a hasher with a new one (or let `finalize_each` take that hash,
+/// with `std`, which resets the hasher) before its next message.
 ///
 /// # Examples
 ///
@@ -254,8 +253,7 @@ fn check_input_room(count: u64, incoming: usize) {
 /// subtrees on `platform` (an SME2 turn's); `chunk_platform`, the chunk
 /// state's, otherwise.
 struct HasherHooks<'a> {
-    pub(crate) key: &'a CVWords,
-    flags: u8,
+    domain: &'a Domain,
     chunk_platform: Platform,
     platform: Platform,
     pooled: Option<&'a Pool<'a>>,
@@ -280,7 +278,7 @@ impl hasher::Hooks for HasherHooks<'_> {
         if self.pooled.is_none() && matches!(self.platform, Platform::SME2) && sme2::flat_takes(input.len()) {
             crate::counted(crate::Counted::Flat);
             // Safe: the SME2 platform is selected only where the CPU has it.
-            return Some(unsafe { sme2::compress_subtree_flat_to_cv(input, ahead, self.key, counter, self.flags) });
+            return Some(unsafe { sme2::compress_subtree_flat_to_cv(input, ahead, self.domain.key(), counter, self.domain.flags()) });
         }
         None
     }
@@ -291,16 +289,16 @@ impl hasher::Hooks for HasherHooks<'_> {
             let level = crate::throughput::level_of(input.len() as u64);
             let index = counter >> level;
             assert!(index << level == counter, "a subtree of {} bytes starts at its own boundary, not chunk {counter}", input.len());
-            let halves = (pool.halves)(&TreeHasher::of_words(self.key, self.flags), level, index, input);
+            let halves = (pool.halves)(&TreeHasher::of_domain(*self.domain), level, index, input);
             return Cv::halves_bytes(halves, level, index);
         }
         let pair = if self.pooled.is_some() {
             // Pooled, the subtrees below take the lock one at a time, and
             // the pool's own never use SME2.
             let own = platform::Sme2Turn::take(self.chunk_platform, input.len() >= SME2_SIZED_LEN);
-            compress_subtree_to_parent_node(input, ahead, self.key, counter, self.flags, own.platform())
+            compress_subtree_to_parent_node(input, ahead, self.domain.key(), counter, self.domain.flags(), own.platform())
         } else {
-            compress_subtree_to_parent_node(input, ahead, self.key, counter, self.flags, self.platform)
+            compress_subtree_to_parent_node(input, ahead, self.domain.key(), counter, self.domain.flags(), self.platform)
         };
         [pair[..OUT_LEN].try_into().unwrap(), pair[OUT_LEN..].try_into().unwrap()]
     }
@@ -316,13 +314,13 @@ impl hasher::Hooks for HasherHooks<'_> {
     #[inline(always)]
     fn cut(&self, input: &[u8], ahead: usize, counter: u64, out: &mut [CVBytes; hasher::ROW]) -> usize {
         crate::counted(crate::Counted::Row);
-        let kernels = crate::tree::PlatformKernels { key: self.key, flags: self.flags, platform: self.platform };
+        let kernels = crate::tree::PlatformKernels { key: self.domain.key(), flags: self.domain.flags(), platform: self.platform };
         crate::tree::wide(&kernels, input, ahead, counter, out)
     }
 
     #[inline(always)]
     fn parents(&self, children: &[CVBytes], out: &mut [CVBytes]) -> usize {
-        compress_parents_parallel(children.as_flattened(), self.key, self.flags, self.platform, out.as_flattened_mut())
+        compress_parents_parallel(children.as_flattened(), self.domain.key(), self.domain.flags(), self.platform, out.as_flattened_mut())
     }
 }
 
@@ -337,7 +335,7 @@ fn kernels_on<'a>(domain: &'a Domain, chunk_state: &ChunkState, platform: Platfo
         key: domain.key(),
         flags: domain.flags(),
         platform: chunk_state.platform(),
-        hooks: HasherHooks { key: domain.key(), flags: domain.flags(), chunk_platform: chunk_state.platform(), platform, pooled },
+        hooks: HasherHooks { domain, chunk_platform: chunk_state.platform(), platform, pooled },
     }
 }
 
@@ -613,8 +611,8 @@ impl Hasher {
     ///
     /// Panics if the cumulative input length would exceed BLAKE3's maximum
     /// message length of `2^64 - 1` bytes (this limit applies equally through
-    /// [`update_with`](Hasher::update_with), [`update_reader`](Hasher::update_reader),
-    /// [`Write`](std::io::Write), and grouped updates).
+    /// [`update_with`](Hasher::update_with), `update_reader`, `std::io::Write`,
+    /// and grouped updates).
     ///
     /// **Speed**: pieces of any size hash at nearly the speed of whole
     /// buffers: short pieces are copied into the `Hasher` until it holds

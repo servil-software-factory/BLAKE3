@@ -12,7 +12,7 @@
 //!   cannot go wrong. Bytes already in place become blocks with no copy
 //!   through [`Block::from_bytes`], and a batch through
 //!   [`Batch::from_blocks`] where its messages fill their blocks.
-//!   [`update_each`] and [`TreeHasher::hash`] take byte slices of any
+//!   `update_each` (with `std`) and [`TreeHasher::hash`] take byte slices of any
 //!   length and alignment directly (without the caller copying them
 //!   into aligned [`Block`]s); `update_each` copies short pieces into a
 //!   [`Hasher`](crate::convenience::Hasher), and `TreeHasher::hash`
@@ -62,7 +62,7 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// `out[i]` becomes the [`hash`] of message `i`, one digest a message. This
 /// is the shape of a Merkle tree's layer: leaves of one size, or nodes of
 /// two 32-byte children, which the layer below writes straight into the
-/// next layer's batch ([`Batch::digests_mut`]).
+/// next layer's batch (`Batch::digests_mut`, with `std`).
 ///
 /// Such a tree is one of your own design, not BLAKE3's own tree: each
 /// node here is the hash of a whole 64-byte message, where BLAKE3's
@@ -93,10 +93,10 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// same hashes over several cores, the crate `blake3-servil` has
 /// `hash_many_multithreaded`.
 ///
-/// A [`Packed`] of 16- or 32-byte messages is a batch too, as the program
+/// A `Packed` of 16- or 32-byte messages (with `std`) is a batch too, as the program
 /// holds them, with no caller-side copy into [`Block`]s (currently
 /// expanded into padded blocks on the stack in 128-message groups; see
-/// [`Packed`] for the layout trade-off against [`Batch`]):
+/// `Packed` for the layout trade-off against [`Batch`]):
 ///
 /// ```
 /// # blake3_servil_core::initialize();
@@ -500,22 +500,20 @@ impl From<Cv> for LastCv {
 ///   and core selection.
 #[derive(Clone)]
 pub struct TreeHasher {
-    key: crate::CVWords,
-    flags: u8,
+    domain: crate::Domain,
     on_this_core: bool,
 }
 
 impl TreeHasher {
     /// The tree of messages hashed in `mode`.
     pub fn new(mode: Mode) -> Self {
-        let (key, flags) = mode.key_and_flags();
-        Self { key, flags, on_this_core: false }
+        Self { domain: crate::Domain::from_mode(mode), on_this_core: false }
     }
 
-    /// The `TreeHasher` of a Hasher's key words and flags, for its large
-    /// subtrees' callback (Hasher::update_with).
-    pub(crate) fn of_words(key: &crate::CVWords, flags: u8) -> Self {
-        Self { key: *key, flags, on_this_core: false }
+    /// The `TreeHasher` of an existing validated [`crate::Domain`], for its large
+    /// subtrees' callback (`Hasher::update_with`).
+    pub(crate) fn of_domain(domain: crate::Domain) -> Self {
+        Self { domain, on_this_core: false }
     }
 
     /// The kernels of this `TreeHasher`'s parents: a core's own, or the
@@ -538,16 +536,16 @@ impl TreeHasher {
     #[inline]
     fn cv_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> crate::CVBytes {
         if input.len() <= CHUNK_LEN {
-            return crate::ChunkState::new(&self.key, first_chunk, self.flags, platform).update(input).output().chaining_value();
+            return crate::ChunkState::new(self.domain.key(), first_chunk, self.domain.flags(), platform).update(input).output().chaining_value();
         }
         let [left, right] = self.halves_on(platform, first_chunk, input);
-        crate::hasher::parent_output(&left, &right, &self.key, self.flags, platform).chaining_value()
+        crate::hasher::parent_output(&left, &right, self.domain.key(), self.domain.flags(), platform).chaining_value()
     }
 
     /// The values of a subtree's children, not yet labelled.
     #[inline]
     fn halves_on(&self, platform: crate::platform::Platform, first_chunk: u64, input: &[u8]) -> [crate::CVBytes; 2] {
-        crate::tree::root_children(&crate::tree::PlatformKernels { key: &self.key, flags: self.flags, platform }, input, 0, first_chunk)
+        crate::tree::root_children(&crate::tree::PlatformKernels { key: self.domain.key(), flags: self.domain.flags(), platform }, input, 0, first_chunk)
     }
 
     /// This `TreeHasher`, its calls kept to the calling core's own kernels.
@@ -620,7 +618,7 @@ impl TreeHasher {
     #[doc(hidden)]
     #[inline]
     pub fn hash_on(&self, platform: crate::platform::Platform, input: &[u8]) -> Hash {
-        crate::hash_serial_on(input, &self.key, self.flags, platform)
+        crate::hash_serial_on(input, self.domain.key(), self.domain.flags(), platform)
     }
 
     /// The hashes of a batch's messages, as [`hash_many`] gives them, in
@@ -643,7 +641,7 @@ impl TreeHasher {
     #[doc(hidden)]
     #[inline]
     pub fn hash_slots_on(&self, platform: crate::platform::Platform, bytes: &[u8], len: usize, slot: usize, out: &mut [[u8; OUT_LEN]]) {
-        crate::many::hash_many_on(bytes, len, slot, &self.key, self.flags, out, platform);
+        crate::many::hash_many_on(bytes, len, slot, self.domain.key(), self.domain.flags(), out, platform);
     }
 
     /// Try the whole-block lanes with separate readable inputs. Returns
@@ -657,7 +655,7 @@ impl TreeHasher {
         input: impl Fn(usize) -> &'a [u8],
         output: impl FnMut(usize, [u8; OUT_LEN]),
     ) -> bool {
-        crate::many::try_whole_group(count, input, &self.key, self.flags, platform, output)
+        crate::many::try_whole_group(count, input, self.domain.key(), self.domain.flags(), platform, output)
     }
 
     /// The hash of each message, of any lengths, as [`hash_each`] gives
@@ -669,30 +667,30 @@ impl TreeHasher {
     pub fn hash_each(&self, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LEN]]) {
         assert_eq!(items.len(), out.len(), "one digest per item");
         let platform = if self.on_this_core { crate::platform::Platform::own_core() } else { crate::platform::Platform::detect() };
-        crate::each::hash_each_on(&self.key, self.flags, items, out, platform, |item| self.hash(item));
+        crate::each::hash_each_on(self.domain.key(), self.domain.flags(), items, out, platform, |item| self.hash(item));
     }
 
     /// The chaining value of the parent of two subtrees.
     fn bare_parent_cv(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> crate::CVBytes {
-        crate::hasher::parent_output(left, right, &self.key, self.flags, self.parents_platform()).chaining_value()
+        crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.parents_platform()).chaining_value()
     }
 
-    /// A layer of parents: `out[i]` is the parent of `children[2 * i]` and
-    /// `children[2 * i + 1]`, side by side in the CPU's lanes.
+    /// A layer of parents on `platform`: `out[i]` is the parent of
+    /// `children[2 * i]` and `children[2 * i + 1]`, side by side in the
+    /// CPU's lanes.
     ///
     /// Requires an even number of children and half as many outputs.
-    fn bare_parent_cvs(&self, children: &[crate::CVBytes], out: &mut [crate::CVBytes]) {
+    fn bare_parent_cvs_on(&self, platform: crate::platform::Platform, children: &[crate::CVBytes], out: &mut [crate::CVBytes]) {
         assert_eq!(children.len() % 2, 0, "parents take their children in pairs");
         assert_eq!(out.len(), children.len() / 2, "one parent per pair of children");
-        let platform = self.parents_platform();
         // As many pairs a call as the kernels take.
         let pairs = crate::platform::MAX_SIMD_DEGREE;
         for (children, out) in children.chunks(2 * pairs).zip(out.chunks_mut(pairs)) {
             if children.len() == 2 {
-                out[0] = self.bare_parent_cv(&children[0], &children[1]);
+                out[0] = crate::hasher::parent_output(&children[0], &children[1], self.domain.key(), self.domain.flags(), platform).chaining_value();
                 continue;
             }
-            let parents = crate::compress_parents_parallel(children.as_flattened(), &self.key, self.flags, platform, out.as_flattened_mut());
+            let parents = crate::compress_parents_parallel(children.as_flattened(), self.domain.key(), self.domain.flags(), platform, out.as_flattened_mut());
             debug_assert_eq!(parents, out.len());
         }
     }
@@ -700,13 +698,13 @@ impl TreeHasher {
     /// The hash of the message whose root has these two children: the
     /// tree's top, where the chaining values end.
     fn bare_root_hash(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> Hash {
-        crate::hasher::parent_output(left, right, &self.key, self.flags, self.parents_platform()).root_hash()
+        crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.parents_platform()).root_hash()
     }
 
     /// The extended output of the message whose root has these two
     /// children: its first 32 bytes are [`bare_root_hash`](TreeHasher::bare_root_hash)'s.
     fn bare_root_output(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> crate::OutputReader {
-        crate::OutputReader::new(crate::hasher::parent_output(left, right, &self.key, self.flags, self.parents_platform()))
+        crate::OutputReader::new(crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.parents_platform()))
     }
     /// The chaining value of a whole subtree: the `index`-th of 2^`level`
     /// chunks.
@@ -805,13 +803,17 @@ impl TreeHasher {
         // 32 children are the widest kernel's two rounds, and the two
         // arrays are 1.5 KiB of the stack.
         const PAIRS: usize = 16;
+        // Take the shared accelerator's turn once for an eligible layer
+        // (32 children = 16 pairs or more: one full SME2 parent group).
+        let turn = self.turn_if(children.len() >= 32);
+        let platform = turn.platform();
         let mut values = [[0u8; OUT_LEN]; 2 * PAIRS];
         let mut parents = [[0u8; OUT_LEN]; PAIRS];
         for (children, out) in children.chunks(2 * PAIRS).zip(out.chunks_mut(PAIRS)) {
             for (value, child) in values.iter_mut().zip(children) {
                 *value = child.value;
             }
-            self.bare_parent_cvs(&values[..children.len()], &mut parents[..out.len()]);
+            self.bare_parent_cvs_on(platform, &values[..children.len()], &mut parents[..out.len()]);
             for (i, parent) in out.iter_mut().enumerate() {
                 *parent = Cv { value: parents[i], place: parent_place(children[2 * i].place) };
             }
@@ -1007,7 +1009,7 @@ mod tree_test {
             for pairs in (0..=40).chain([63, 64, 65, 127, 128, 129, 150]) {
                 let children = &cvs[..2 * pairs];
                 let mut out = std::vec![[0u8; 32]; pairs];
-                tree.bare_parent_cvs(children, &mut out);
+                tree.bare_parent_cvs_on(tree.parents_platform(), children, &mut out);
                 for (i, got) in out.iter().enumerate() {
                     assert_eq!(*got, tree.bare_parent_cv(&children[2 * i], &children[2 * i + 1]), "pair {i} of {pairs}");
                 }
@@ -1100,7 +1102,8 @@ mod tree_test {
     fn a_layer_of_parents_takes_pairs() {
         crate::initialize();
         let cvs = [[1u8; 32]; 3];
-        TreeHasher::new(Mode::Plain).bare_parent_cvs(&cvs, &mut [[0u8; 32]]);
+        let tree = TreeHasher::new(Mode::Plain);
+        tree.bare_parent_cvs_on(tree.parents_platform(), &cvs, &mut [[0u8; 32]]);
     }
 
     #[test]
@@ -1108,7 +1111,8 @@ mod tree_test {
     fn a_layer_of_parents_takes_one_output_a_pair() {
         crate::initialize();
         let cvs = [[1u8; 32]; 4];
-        TreeHasher::new(Mode::Plain).bare_parent_cvs(&cvs, &mut [[0u8; 32]]);
+        let tree = TreeHasher::new(Mode::Plain);
+        tree.bare_parent_cvs_on(tree.parents_platform(), &cvs, &mut [[0u8; 32]]);
     }
 
     /// The hash of a whole message, a batch and a collection in a prepared
@@ -1226,5 +1230,94 @@ mod tree_test {
         let batch = Batch::new(100, 9);
         #[allow(clippy::reversed_empty_ranges)]
         let _ = batch.part(3..2);
+    }
+
+    #[cfg(blake3_sme2)]
+    #[test]
+    fn parent_cvs_and_hash_each_honor_a_held_sme2_turn() {
+        crate::initialize();
+        if !matches!(crate::platform::Platform::detect(), crate::platform::Platform::SME2) {
+            return;
+        }
+        let tree = TreeHasher::new(Mode::Plain);
+        // 32 leaf CVs -> 16 parent pairs (one full SME2 parent group).
+        let input = painted(32 * CHUNK_LEN);
+        let children: std::vec::Vec<Cv> = (0..32).map(|i| tree.subtree_cv(0, i as u64, &input[i * CHUNK_LEN..(i + 1) * CHUNK_LEN])).collect();
+        let mut expected_parents = std::vec![Cv::unset(); 16];
+        tree.clone().on_this_core().parent_cvs(&children, &mut expected_parents);
+
+        // 16 distinct two-chunk messages -> one full SME2 message group per round.
+        let mut blocks = Batch::new(2 * CHUNK_LEN, 16);
+        for i in 0..16 {
+            blocks.message_mut(i).copy_from_slice(&input[i * 37..i * 37 + 2 * CHUNK_LEN]);
+        }
+        let items: std::vec::Vec<(&[Block], usize)> = (0..16).map(|i| (&blocks.blocks()[i * 32..(i + 1) * 32], 2 * CHUNK_LEN)).collect();
+        let mut expected_each = std::vec![[0u8; OUT_LEN]; 16];
+        tree.clone().on_this_core().hash_each(&items, &mut expected_each);
+
+        // Hold the SME2 turn: neither parent_cvs nor hash_each may enter SME2.
+        let mut held = None;
+        for _ in 0..10_000 {
+            let t = crate::platform::Sme2Turn::take(crate::platform::Platform::SME2, true);
+            if matches!(t.platform(), crate::platform::Platform::SME2) {
+                held = Some(t);
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let held = held.expect("failed to acquire SME2 turn within bounded retries");
+        let parents_fn = crate::sme2::ffi::blake3_servil_sme2_hash16_parents_512 as *const () as usize;
+        let messages_fn = crate::sme2::ffi::blake3_servil_sme2_hash16_messages_512 as *const () as usize;
+
+        // Subthreshold calls (30 children = 15 pairs; 15 two-chunk messages) must
+        // not even attempt to acquire the held turn (Ran::TurnTaken stays clear).
+        let mut got_parents = std::vec![Cv::unset(); 16];
+        let mut got_each = std::vec![[0u8; OUT_LEN]; 16];
+        crate::RAN.with(|r| r.set(0));
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        tree.parent_cvs(&children[..30], &mut got_parents[..15]);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "15 parent pairs must not try to take the SME2 turn");
+        tree.hash_each(&items[..15], &mut got_each[..15]);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "15 two-chunk messages must not try to take the SME2 turn");
+        assert_eq!(&got_parents[..15], &expected_parents[..15]);
+        assert_eq!(&got_each[..15], &expected_each[..15]);
+
+        // Eligible calls (32 children = 16 pairs; 16 two-chunk messages) DO consult
+        // the held turn (recording Ran::TurnTaken) and fall back off SME2.
+        crate::RAN.with(|r| r.set(0));
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        tree.parent_cvs(&children, &mut got_parents);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "16 parent pairs must consult the SME2 turn");
+        crate::RAN.with(|r| r.set(0));
+        tree.hash_each(&items, &mut got_each);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "16 two-chunk messages must consult the SME2 turn");
+        crate::RAN_ENTRIES.with(|r| {
+            let ran = r.borrow();
+            assert!(!ran.contains(&parents_fn), "parent_cvs bypassed a held SME2 turn");
+            assert!(!ran.contains(&messages_fn), "hash_each bypassed a held SME2 turn");
+        });
+        assert_eq!(got_parents, expected_parents);
+        assert_eq!(got_each, expected_each);
+        drop(held);
+
+        // With the turn free, 32 children (16 pairs) and 16 two-chunk messages
+        // DO enter SME2.
+        let mut ran = None;
+        for _ in 0..10_000 {
+            crate::RAN.with(|r| r.set(0));
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            tree.parent_cvs(&children, &mut got_parents);
+            tree.hash_each(&items, &mut got_each);
+            if crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32 == 0 {
+                ran = Some(crate::RAN_ENTRIES.with(|r| r.borrow().clone()));
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let ran = ran.expect("failed to observe an uncontended SME2 turn within bounded retries");
+        assert!(ran.contains(&parents_fn), "16 parent pairs should enter SME2 when turn is free");
+        assert!(ran.contains(&messages_fn), "16 two-chunk messages should enter SME2 when turn is free");
+        assert_eq!(got_parents, expected_parents);
+        assert_eq!(got_each, expected_each);
     }
 }

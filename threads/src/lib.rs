@@ -147,19 +147,27 @@
 //! # Memory
 //!
 //! - **A [`Hasher`] is 26 KiB**; box it where that matters.
-//! - **These single-threaded calls allocate nothing**: [`convenience::hash`],
-//!   [`throughput::hash`], [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
-//!   and [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
+//! - **These single-threaded calls allocate nothing** (except on 512-bit SME2
+//!   CPUs, where the first flat-walk tree of 32 KiB or more on each thread
+//!   lazily allocates one reusable 64 KiB thread-local scratch block; during
+//!   thread-local teardown after that block is destroyed, it falls back to
+//!   stack scratch): [`convenience::hash`], [`throughput::hash`],
+//!   [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
+//!   and [`Hasher::finalize`](convenience::Hasher::finalize), and
+//!   [`OutputReader`].
 //!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 64 KiB
 //!   stack buffer for the first read (even on immediate EOF), and promotes to a
 //!   1 MiB heap buffer once 65,536 bytes or more are read before EOF, freed when
-//!   it returns. [`throughput::hash_each`] keeps, on the
-//!   thread that calls it, 32 bytes for each chunk of the collection's
-//!   messages of 2 to 15 chunks and 16 for each such message: its first
-//!   collection and a larger one grow that storage, and a repeated
-//!   collection allocates nothing.
+//!   it returns. [`throughput::hash_each`] keeps reusable per-thread `Vec`
+//!   storage for messages of 2 to 15 chunks (16 bytes per message and 32 bytes
+//!   per chunk of payload, plus `Vec` capacity): its first such collection and
+//!   a larger one grow that storage, and a repeated collection on a live
+//!   thread allocates nothing; during thread-local teardown after that storage
+//!   is destroyed, multi-chunk collections fall back to call-local `Vec`s.
 //! - **Grouped incremental calls** use bounded stack tables and tree buffers.
-//!   [`throughput::update_each`] allocates and frees nothing.
+//!   [`throughput::update_each`] allocates and frees nothing beyond the
+//!   one-time per-thread SME2 flat-walk scratch noted above if a fresh thread
+//!   hashes a whole 32 KiB+ piece on a 512-bit SME2 CPU.
 //! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction and allocates nothing thereafter on the calling thread or the workers.
 //! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
 //!   where it hashes on the calling thread. Above that length it keeps a list
@@ -173,8 +181,9 @@
 //!   A call that needs no more pieces than an earlier one on that thread
 //!   allocates nothing. The pieces follow the cut and not the length
 //!   alone: 1 GiB less one byte is cut into more pieces than 1 GiB.
-//! - **Once per process**: the startup self-test's buffers, about 45 KiB
-//!   of the calling thread's stack while it runs (it allocates nothing),
+//! - **Once per process**: the startup self-test's buffers on the calling
+//!   thread's stack while it runs (plus the one-time 64 KiB SME2 flat-walk
+//!   scratch on 512-bit SME2 CPUs),
 //!   and the threads: by default a worker per CPU beyond the first, each with the
 //!   standard library's stack, started by [`initialize_multithreaded`].
 //! - **Nothing is wiped**: this crate does not clear what it held from
@@ -215,9 +224,10 @@
 //! # Startup self-test
 //!
 //! **Every program calls [`initialize`] (or [`initialize_multithreaded`])
-//! once, before any other call of this crate**: a call before it panics, in
-//! every build, saying so. The check costs nothing: it is part of the
-//! platform load every call makes. **A program that makes multithreaded
+//! once before hashing**: any call that loads the detected platform before
+//! initialization completes panics, in every build, saying so (pure
+//! constructors such as `TreeHasher::new(Mode::Plain)` and `const` coordinate
+//! helpers do not load the platform). **A program that makes multithreaded
 //! calls calls [`initialize_multithreaded`]**: a multithreaded call
 //! before it panics (one load per call).
 //!

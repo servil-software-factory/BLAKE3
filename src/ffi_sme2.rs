@@ -409,7 +409,7 @@ struct ChunkedScratch {
 }
 
 /// Whole subtrees from this many chunks to FLAT_MAX_CHUNKS, powers of two,
-/// take the flat walk ([`compress_subtree_flat`]): 32 chunks are the
+/// take the flat walk (`flat_walk` / [`flat_takes`]): 32 chunks are the
 /// fewest whose first parent level fills a group of 16.
 pub const FLAT_MIN_CHUNKS: usize = 32;
 /// The fewest chunks, a power of two, that split exactly into groups of 18
@@ -418,18 +418,29 @@ pub const FLAT_MIN_CHUNKS: usize = 32;
 /// per 144 chunks) makes this boundary; the dispatch test checks it.
 #[cfg(all(test, feature = "std"))]
 pub const LANE_MIN_CHUNKS: usize = 256;
-/// The most chunks the flat walk takes; its chaining values sit in 48 KiB
-/// of stack. Larger subtrees are split by the tree walk above it.
+/// The most chunks the flat walk takes; its chaining values sit in the
+/// 64 KiB aligned scratch buffer (`SCRATCH`). Larger subtrees are split by
+/// the tree walk above it.
 pub const FLAT_MAX_CHUNKS: usize = 1024;
 
-/// Whether [`compress_subtree_flat`] takes an input of `len` bytes.
+/// Whether [`compress_subtree_flat_to_parent`] and
+/// [`compress_subtree_flat_to_cv`] take an input of `len` bytes.
 #[inline]
 pub fn flat_takes(len: usize) -> bool {
     len.is_power_of_two() && (FLAT_MIN_CHUNKS * CHUNK_LEN..=FLAT_MAX_CHUNKS * CHUNK_LEN).contains(&len)
 }
 
+/// Whether [`compress_subtree_flat`] (which keeps `DEGREE` chaining values)
+/// takes an input of `len` bytes: a whole subtree of 256, 512, or 1024
+/// chunks, strictly larger than `DEGREE` so the flat walk performs at least
+/// one reduction layer.
+#[inline]
+pub fn flat_subtree_takes(len: usize) -> bool {
+    flat_takes(len) && len > DEGREE * CHUNK_LEN
+}
+
 /*
- * A whole subtree of 32 to 1024 chunks, bottom up, on SME2 alone: what
+ * A whole subtree of 256 to 1024 chunks, bottom up, on SME2 alone: what
  * the walk (`tree::wide`) returns for it, its DEGREE chaining values
  * (each covering n / DEGREE chunks). The chunks go to the kernel with an
  * integer lane in groups of 18 (8 of them per 144 chunks), the rest to the
@@ -437,13 +448,18 @@ pub fn flat_takes(len: usize) -> bool {
  * 16); then each parent level from n / 2 down to DEGREE values goes to the
  * parent kernel, every level a multiple of 16. No NEON work falls between
  * SME2 kernels, so the SME unit never idles on our account (the slow
- * state, in this module's documentation). Out of line: its 56 KiB of stack arrays belong to
- * large inputs alone. Unsafe because the CPU must have SME2 with 512-bit
- * streaming vectors; `flat_takes(input.len())` must hold, and `out` must
- * have room for DEGREE values.
+ * state, in this module's documentation). Out of line so its scratch setup
+ * stays off small inputs.
+ *
+ * # Safety
+ *
+ * The CPU must support SME2 with 512-bit streaming vectors,
+ * `flat_subtree_takes(input.len())` must hold (256, 512, or 1024 chunks),
+ * and `out` must have room for `DEGREE * OUT_LEN` bytes.
  */
 #[inline(never)]
 pub unsafe fn compress_subtree_flat(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8, out: &mut [u8]) -> usize {
+    assert!(flat_subtree_takes(input.len()), "a whole subtree of 256 to 1024 chunks");
     unsafe { flat_walk(input, ahead, key, chunk_counter, flags, DEGREE, out) }
 }
 
@@ -453,7 +469,12 @@ pub unsafe fn compress_subtree_flat(input: &[u8], ahead: usize, key: &CVWords, c
 /// level's parents compress bytes nobody reads), so no NEON or scalar work
 /// falls between the SME2 kernels: 0.25 µs of other work between them puts
 /// the SME unit in its slow state for the next ones (the module's
-/// documentation). Unsafe for the reasons of [`compress_subtree_flat`].
+/// documentation).
+///
+/// # Safety
+///
+/// The CPU must support SME2 with 512-bit streaming vectors, and
+/// [`flat_takes`]`(input.len())` must hold (32 to 1024 chunks, power of two).
 #[inline(never)]
 pub unsafe fn compress_subtree_flat_to_parent(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8) -> [u8; crate::BLOCK_LEN] {
     let mut out = [0u8; crate::BLOCK_LEN];
@@ -462,8 +483,12 @@ pub unsafe fn compress_subtree_flat_to_parent(input: &[u8], ahead: usize, key: &
 }
 
 /// The flat walk down to the subtree's own chaining value, for a subtree
-/// that cannot be the root (input comes before it). Unsafe for the
-/// reasons of [`compress_subtree_flat`].
+/// that cannot be the root (input comes before it).
+///
+/// # Safety
+///
+/// The CPU must support SME2 with 512-bit streaming vectors, and
+/// [`flat_takes`]`(input.len())` must hold (32 to 1024 chunks, power of two).
 #[inline(never)]
 pub unsafe fn compress_subtree_flat_to_cv(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8) -> crate::CVBytes {
     let mut out = [0u8; OUT_LEN];
@@ -770,5 +795,20 @@ pub mod ffi {
         /// `16 * groups` 32-byte chaining values to `out`. Returns the
         /// streaming vector length in 32-bit lanes.
         pub fn blake3_servil_sme2_hash16_parents_512(pairs: *const u8, key: *const u32, counter: u64, flags: u32, out: *mut u8, groups: u64) -> u64;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn flat_subtree_takes_requires_more_than_degree_chunks() {
+        for chunks in [0usize, 1, 16, 32, 64, 128, 129, 255, 257, 2048] {
+            assert!(!flat_subtree_takes(chunks * CHUNK_LEN), "{chunks} chunks must not be admitted");
+        }
+        for chunks in [256usize, 512, 1024] {
+            assert!(flat_subtree_takes(chunks * CHUNK_LEN), "{chunks} chunks must be admitted");
+        }
     }
 }
