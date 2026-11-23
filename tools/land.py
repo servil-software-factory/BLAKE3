@@ -217,6 +217,18 @@ def run_local(sha):
     subprocess.run(["git", "-C", ROOT, "worktree", "remove", "--force", tree], capture_output=True)
 
 
+def check_counts(base, sha):
+    """Run tools/counts.py --check unconditionally; fail if missing or rising."""
+    counts_script = os.path.join(ROOT, "tools", "counts.py")
+    if not os.path.isfile(counts_script):
+        sys.exit(f"land: required ratchet script missing: {counts_script}")
+    run = subprocess.run([sys.executable, counts_script, "--check", base, sha], capture_output=True, text=True)
+    if run.returncode != 0:
+        msg = (run.stderr or run.stdout).strip()
+        sys.exit(f"land: counts ratchet failed: {msg}")
+    return run.stdout.strip()
+
+
 def main(argv):
     if len(argv) < 2 or argv[0] not in ("status", "gate", "record", "land"):
         sys.exit(__doc__)
@@ -234,10 +246,16 @@ def main(argv):
         print(f"  {verdict:8s} {gate}: {description}")
     missing = [g for g, v, _ in gates if v != "success"]
     if argv[0] != "land":
+        try:
+            print("  " + check_counts(base, sha))
+        except SystemExit as e:
+            print(f"  failure  counts: {e}")
+            missing.append("counts")
         print(f"land: {sha[:12]} " + ("has every gate" if not missing else "lacks: " + ", ".join(missing)))
         return
     if missing:
         sys.exit(f"land: {sha[:12]} does not land: " + ", ".join(missing))
+    check_counts(base, sha)
     post(sha, "landable", "success", landable(base, [g for g, _, _ in gates]))
     subprocess.run(["git", "-C", ROOT, "push", "origin", f"{sha}:refs/heads/next"], check=True)
     print(f"land: next is {sha}")

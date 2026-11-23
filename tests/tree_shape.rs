@@ -437,7 +437,11 @@ fn equality_is_of_place_and_bytes_and_debug_shows_the_place() {
     assert_eq!(Cv::at(3, 4, bytes), Cv::at(3, 4, bytes));
     assert_ne!(Cv::at(3, 4, bytes), Cv::at(3, 5, bytes), "another index");
     assert_ne!(Cv::at(3, 4, bytes), Cv::at(2, 4, bytes), "another level");
-    assert_ne!(Cv::at(3, 4, bytes), Cv::at(3, 4, [0xac; 32]), "other bytes");
+    for offset in 0..32 {
+        let mut flipped = bytes;
+        flipped[offset] ^= 1;
+        assert_ne!(Cv::at(3, 4, bytes), Cv::at(3, 4, flipped), "Cv byte {offset} differs");
+    }
     assert_eq!(Cv::unset(), Cv::unset());
     // Zeroed memory is the unset value: a slot nothing wrote is refused.
     assert_eq!(unsafe { core::mem::zeroed::<Cv>() }, Cv::unset());
@@ -446,7 +450,11 @@ fn equality_is_of_place_and_bytes_and_debug_shows_the_place() {
     assert_eq!(LastCv::at(8, 100, bytes), LastCv::at(8, 100, bytes));
     assert_ne!(LastCv::at(8, 100, bytes), LastCv::at(8, 101, bytes), "another length");
     assert_ne!(LastCv::at(8, 100, bytes), LastCv::at(16, 100, bytes), "another first chunk");
-    assert_ne!(LastCv::at(8, 100, bytes), LastCv::at(8, 100, [0xac; 32]), "other bytes");
+    for offset in 0..32 {
+        let mut flipped = bytes;
+        flipped[offset] ^= 1;
+        assert_ne!(LastCv::at(8, 100, bytes), LastCv::at(8, 100, flipped), "LastCv byte {offset} differs");
+    }
     assert_eq!(LastCv::at(8, 100, bytes).as_bytes(), &bytes);
     assert_eq!(LastCv::from(Cv::at(3, 4, bytes)), LastCv::at(32, 8192, bytes), "a whole subtree as the last one keeps its place and bytes");
     assert_eq!(format!("{:?}", Cv::at(3, 4, bytes)), "the whole subtree at level 3 index 4");

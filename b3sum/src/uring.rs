@@ -339,7 +339,7 @@ impl Uring {
         // inside the ring's array and its SQEs; the kernel reads an SQE only
         // after the tail moves past it (submit_and_wait).
         unsafe {
-            *self.sq_array.add(idx) = idx as u32;
+            *self.sq_array.add(idx) = u32::try_from(idx).expect("sq index fits u32");
             *self.sqes_ptr.add(idx) = IoUringSqe {
                 opcode: IORING_OP_READ,
                 flags: 0,
@@ -434,7 +434,7 @@ pub(crate) const READ_MAX: usize = 1 << 30;
 /// at least one byte, in every build: nothing else may end a file.
 fn read_len(room: usize) -> u32 {
     assert!(room > 0, "a read is asked for at least one byte");
-    room.min(READ_MAX) as u32
+    u32::try_from(room.min(READ_MAX)).expect("clamped to READ_MAX")
 }
 
 /// Probe whether `ring_fd` supports `IORING_OP_READ`.
@@ -449,7 +449,13 @@ fn probe_op_read(ring_fd: RawFd) -> bool {
     // Sound: `probe` is zeroed on input with `PROBE_OPS` trailing
     // `io_uring_probe_op` entries matching the `nr_args` count passed.
     let rc = unsafe {
-        libc::syscall(libc::SYS_io_uring_register, ring_fd, IORING_REGISTER_PROBE, (&raw mut probe).cast::<libc::c_void>(), PROBE_OPS as libc::c_uint)
+        libc::syscall(
+            libc::SYS_io_uring_register,
+            ring_fd,
+            IORING_REGISTER_PROBE,
+            (&raw mut probe).cast::<libc::c_void>(),
+            libc::c_uint::try_from(PROBE_OPS).expect("PROBE_OPS fits c_uint"),
+        )
     };
     if rc < 0 {
         return false;
@@ -503,7 +509,7 @@ fn enter(fd: RawFd, to_submit: u32, min_complete: u32, flags: u32) -> Option<u32
     // Sound: a system call with plain values; no signal mask is passed.
     let rc = unsafe { libc::syscall(libc::SYS_io_uring_enter, fd, to_submit, min_complete, flags, ptr::null::<libc::sigset_t>(), size_of::<libc::sigset_t>()) };
     if rc >= 0 {
-        return Some(rc as u32);
+        return Some(u32::try_from(rc).expect("non-negative enter count fits u32"));
     }
     let err = io::Error::last_os_error();
     if err.kind() == io::ErrorKind::Interrupted {

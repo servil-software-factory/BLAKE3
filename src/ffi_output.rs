@@ -75,7 +75,7 @@ pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
     (staged <= BLOCK_LEN && c.count() == 0).then(|| Input {
         block: hasher.stage_first_block(),
         cv: c.cv(),
-        len: staged as u8,
+        len: staged.to_le_bytes()[0],
         flags: hasher.domain().flags() | CHUNK_START | CHUNK_END | ROOT,
     })
 }
@@ -152,7 +152,7 @@ fn held_groups_in<const N: usize>(hashers: &mut [Hasher], held: &[usize], platfo
             Input {
                 block: level.as_flattened()[j * BLOCK_LEN..(j + 1) * BLOCK_LEN].try_into().unwrap(),
                 cv: domain.key(),
-                len: BLOCK_LEN as u8,
+                len: u8::try_from(BLOCK_LEN).unwrap(),
                 flags: domain.flags() | crate::PARENT,
             }
         };
@@ -207,9 +207,14 @@ fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; OUT_LEN]]))
         shape | [0u8, 16, 32, 64][i % 4]
     });
     let cvs: [[u32; 8]; 16] = core::array::from_fn(|i| {
-        core::array::from_fn(|w| (0x1234abcdu32.wrapping_add(i as u32 * 0x9e37).wrapping_add(w as u32 * 0x1020304)).wrapping_mul(0x85ebca6b))
+        let i = u32::try_from(i).unwrap();
+        core::array::from_fn(|w| {
+            let w = u32::try_from(w).unwrap();
+            (0x1234abcdu32.wrapping_add(i * 0x9e37).wrapping_add(w * 0x1020304)).wrapping_mul(0x85ebca6b)
+        })
     });
-    let blocks: [[u8; 64]; 16] = core::array::from_fn(|i| core::array::from_fn(|j| if j < lens[i] as usize { ((i * 37 + j * 17) ^ 0x5a) as u8 } else { 0 }));
+    let blocks: [[u8; 64]; 16] =
+        core::array::from_fn(|i| core::array::from_fn(|j| if j < lens[i] as usize { ((i * 37 + j * 17) ^ 0x5a).to_le_bytes()[0] } else { 0 }));
     let inputs = core::array::from_fn(|i| Input { block: &blocks[i], cv: &cvs[i], len: lens[i], flags: flags[i] | if (i / 4) % 2 == 0 { ROOT } else { 0 } });
     let mut out = [[0u8; OUT_LEN]; 16];
     hash(&inputs, &mut out);
@@ -226,14 +231,17 @@ pub(crate) fn check_self_test(answer: u64) {
 }
 unsafe fn hash_eight_groups(inputs: &[Input<'_>; 16], out: &mut [[u8; OUT_LEN]]) {
     for (inputs, out) in inputs.chunks_exact(8).zip(out.chunks_mut(8)) {
+        // Sound: caller verified AVX2/AVX-512 support; each chunk has exact length 8 matching `hash_group::<8>`.
         unsafe { hash_group::<8>(inputs.try_into().unwrap(), out) };
     }
 }
 unsafe fn hash_on_platform(platform: Platform, inputs: &[Input<'_>; 16], out: &mut [[u8; OUT_LEN]]) {
     if lanes(platform) == 16 {
+        // Sound: `lanes(platform) == 16` guarantees AVX-512F+VL support; `inputs` and `out` hold 16 entries.
         unsafe { hash_group::<16>(inputs, out) };
     } else {
         assert_eq!(lanes(platform), 8);
+        // Sound: `lanes(platform) == 8` guarantees AVX2 support; `inputs` and `out` hold 16 entries.
         unsafe { hash_eight_groups(inputs, out) };
     }
 }
@@ -258,6 +266,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
             }
             // Check the wide output before the remainder kernel reuses it.
             check_self_test(crate::self_test::fold(out.as_flattened()));
+            // Sound: `avx2_detected()` is true above; `inputs` and `out` hold 16 entries.
             unsafe { hash_eight_groups(inputs, out) };
             checked = 2;
         }

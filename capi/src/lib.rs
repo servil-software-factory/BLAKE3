@@ -85,17 +85,19 @@ unsafe fn bytes<'a>(ptr: *const c_void, len: usize, what: &str) -> &'a [u8] {
     if len == 0 {
         return &[];
     }
-    // Sound by the contract: `len` readable bytes at `ptr`.
+    // Sound: caller's C contract guarantees `len` readable bytes at `ptr` (checked non-null above).
     unsafe { core::slice::from_raw_parts(ptr as *const u8, len) }
 }
 
 unsafe fn mode<'a>(mode: *const B3Mode) -> &'a B3Mode {
     check_range(mode.cast(), size_of::<B3Mode>(), "the mode");
+    // Sound: caller's C contract guarantees `mode` points to an initialized `B3Mode` (checked non-null above).
     unsafe { &*mode }
 }
 
 unsafe fn hasher_mut<'a>(hasher: *mut B3Hasher) -> &'a mut Hasher {
     check_hasher(hasher);
+    // Sound: caller's C contract guarantees `hasher` is exclusively borrowed and initialized via `b3_hasher_new`, and `check_hasher` verified alignment and non-null.
     unsafe { &mut *(hasher as *mut Hasher) }
 }
 
@@ -126,6 +128,7 @@ pub extern "C" fn b3_mode_plain() -> B3Mode {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn b3_mode_keyed(key: *const u8) -> B3Mode {
     check_range(key.cast(), 32, "the key");
+    // Sound: caller's C contract guarantees 32 readable bytes at `key` (checked non-null above).
     B3Mode { kind: 1, key: unsafe { *(key as *const [u8; 32]) } }
 }
 
@@ -135,6 +138,7 @@ pub unsafe extern "C" fn b3_mode_keyed(key: *const u8) -> B3Mode {
 pub unsafe extern "C" fn b3_mode_derive_key(context: *const c_char) -> B3Mode {
     blake3_servil::initialize();
     assert!(!context.is_null(), "b3: the context is NULL");
+    // Sound: caller's C contract guarantees `context` is a valid NUL-terminated C string (checked non-null above).
     let context = unsafe { CStr::from_ptr(context) }.to_str().expect("b3: the context is UTF-8");
     B3Mode { kind: 2, key: blake3_servil::throughput::context_key(context) }
 }
@@ -144,6 +148,7 @@ pub unsafe extern "C" fn b3_mode_derive_key(context: *const c_char) -> B3Mode {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn b3_hash(mode: *const B3Mode, input: *const c_void, len: usize) -> Digest {
     blake3_servil::initialize();
+    // Sound: caller's C contract guarantees `mode` and `(input, len)` are valid.
     let mode = unsafe { self::mode(mode) };
     digest(blake3_servil::convenience::hash_with(mode.mode(), unsafe { bytes(input, len, "the input") }))
 }
@@ -156,6 +161,7 @@ pub unsafe extern "C" fn b3_hasher_new(hasher: *mut B3Hasher, mode: *const B3Mod
     blake3_servil::initialize();
     check_hasher(hasher);
     check_disjoint(hasher.cast(), size_of::<B3Hasher>(), mode.cast(), size_of::<B3Mode>());
+    // Sound: caller's C contract guarantees `mode` points to an initialized `B3Mode` disjoint from `hasher`.
     let mode = unsafe { self::mode(mode) };
     let new = Hasher::new(mode.mode(), (has_length_hint != 0).then_some(length_hint));
     // Sound: the memory is the caller's, sized and aligned for a Hasher,
@@ -169,6 +175,7 @@ pub unsafe extern "C" fn b3_hasher_new(hasher: *mut B3Hasher, mode: *const B3Mod
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn b3_hasher_update(hasher: *mut B3Hasher, input: *const c_void, len: usize) {
     check_disjoint(hasher.cast(), size_of::<B3Hasher>(), input, len);
+    // Sound: caller's C contract guarantees initialized `hasher` and valid `(input, len)` disjoint from `hasher`.
     let hasher = unsafe { hasher_mut(hasher) };
     hasher.update(unsafe { bytes(input, len, "the input") });
 }
@@ -177,6 +184,7 @@ pub unsafe extern "C" fn b3_hasher_update(hasher: *mut B3Hasher, input: *const c
 /// `hasher` was initialized by `b3_hasher_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn b3_hasher_finalize(hasher: *mut B3Hasher) -> Digest {
+    // Sound: caller's C contract guarantees `hasher` was initialized by `b3_hasher_new`.
     digest(unsafe { hasher_mut(hasher) }.finalize())
 }
 
@@ -187,14 +195,15 @@ pub unsafe extern "C" fn b3_hasher_finalize(hasher: *mut B3Hasher) -> Digest {
 pub unsafe extern "C" fn b3_hasher_finalize_xof(hasher: *mut B3Hasher, offset: u64, out: *mut c_void, len: usize) {
     check_range(out, len, "the output");
     check_disjoint(hasher.cast(), size_of::<B3Hasher>(), out, len);
+    // Sound: caller's C contract guarantees `hasher` was initialized and is disjoint from `out`.
     let hasher = unsafe { hasher_mut(hasher) };
     if len == 0 {
         return;
     }
     let mut reader = hasher.finalize_xof();
     reader.set_position(offset);
-    // Sound by the contract: room for `len` bytes at `out`, zeroed first,
-    // since the caller's storage may be uninitialized (#155).
+    // Sound: caller's C contract guarantees writable room for `len` bytes at `out`;
+    // zeroed first because the caller's storage may be uninitialized (#155).
     unsafe { core::ptr::write_bytes(out.cast::<u8>(), 0, len) };
     reader.fill(unsafe { core::slice::from_raw_parts_mut(out as *mut u8, len) });
 }

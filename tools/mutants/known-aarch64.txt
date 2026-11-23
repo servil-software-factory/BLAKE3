@@ -405,4 +405,5 @@ src/throughput.rs	replace >= with < in TreeHasher::parent_cvs	1	[cpu lacks sme2]
 src/throughput.rs	replace >= with < in TreeHasher::turn	1	speed: moves a threshold between equally correct paths
 src/tree.rs	replace + with * in wide	1	speed: how far past its input a subtree prefetches (a prefetch never faults)
 src/tree.rs	replace + with - in wide	1	speed: how far past its input a subtree prefetches (a prefetch never faults)
+src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::children -> Option<[Cv; 2]> with None	1	[cpu lacks sme2] speed: SME2 flat-to-parent shortcut; falls back to the same two-child tree walk (caught on SME2 hosts)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	speed: subtrees then hash on the walk's one-chunk path, the same digests

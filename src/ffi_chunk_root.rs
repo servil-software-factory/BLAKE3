@@ -16,6 +16,7 @@ pub(crate) unsafe fn chunk_root(avx512: bool, input: &[u8], key: &CVWords, flags
     assert!(input.len() <= CHUNK_LEN, "one chunk or less");
     let blocks = input.len() / BLOCK_LEN;
     if blocks == 0 || input.len() % BLOCK_LEN != 0 {
+        // Sound: caller verified SSE4.1 (and AVX-512 if `avx512`) and `input.len() <= CHUNK_LEN` above.
         return unsafe { chunk_root_partial(avx512, input, key, flags) };
     }
     // Whole blocks only, the last in place: no copy, and no aligned stack

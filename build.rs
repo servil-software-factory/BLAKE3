@@ -202,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for name in [String::from("CFLAGS"), String::from("HOST_CFLAGS"), String::from("TARGET_CFLAGS"), format!("CFLAGS_{target}"), format!("CFLAGS_{target_u}")] {
         if let Some(mut flags) = env::var_os(&name) {
             flags.push(" -fno-lto");
-            // SAFETY: This build script is single-threaded.
+            // Sound: this build script runs single-threaded before invoking `cc`.
             unsafe {
                 env::set_var(&name, flags);
             }

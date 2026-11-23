@@ -41,7 +41,7 @@ serde = { version = "1.0", default-features = false, features = ["derive"], opti
 [target.'cfg(all(target_arch = "aarch64", any(target_vendor = "apple", target_os = "linux")))'.dependencies]
 libc = { version = "0.2", default-features = false }
 
-# The guard-page tests (src/test.rs) on x86-64 too.
+# The guard-page tests (src/test.rs, tests/guard_alloc.rs) on x86-64 too.
 [target.'cfg(all(target_arch = "x86_64", any(target_vendor = "apple", target_os = "linux")))'.dev-dependencies]
 libc = { version = "0.2", default-features = false }
 
@@ -80,6 +80,19 @@ overflow-checks = true
 [profile.mutants]
 inherits = "release"
 incremental = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+unreachable_patterns = "deny"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+style = { level = "allow", priority = -1 }
+perf = { level = "allow", priority = -1 }
+cast_possible_truncation = "deny"
 
 # The fairness probes (#213) use the pool, which needs std: the no_std
 # build (--no-default-features) leaves them out.

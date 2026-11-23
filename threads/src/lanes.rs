@@ -1376,14 +1376,14 @@ pub(crate) mod places {
         let mut places = Places {
             of_cpu: std::vec![u16::MAX; CPUS].into(),
             cpus: std::vec![[0u64; CPUS / 64]; caches.len()].into(),
-            of_worker: (0..workers).map(|k| order[(k + 1) % order.len()].0 as u8).collect(),
+            of_worker: (0..workers).map(|k| u8::try_from(order[(k + 1) % order.len()].0).expect("place fits u8")).collect(),
             near: std::vec![std::vec![0u64; words].into_boxed_slice(); caches.len()].into(),
             beside: std::vec![std::vec![0u64; words].into_boxed_slice(); caches.len()].into(),
             count: std::vec![0usize; caches.len()].into(),
         };
         let mut socket_of = std::vec![0usize; caches.len()];
         for &(place, c) in &order {
-            places.of_cpu[c.cpu] = place as u16;
+            places.of_cpu[c.cpu] = u16::try_from(place).expect("place fits u16");
             places.cpus[place][c.cpu / 64] |= 1 << (c.cpu % 64);
             socket_of[place] = c.socket;
         }
@@ -1457,7 +1457,7 @@ pub(crate) mod places {
     /// Whether `set` holds `member`.
     #[cfg(target_os = "linux")]
     fn has(set: &Set, member: usize) -> bool {
-        set.get(member / 64).is_some_and(|word| word & 1u64.rotate_left(member as u32) != 0)
+        set.get(member / 64).is_some_and(|word| word & 1u64.rotate_left(u32::try_from(member).expect("member fits u32")) != 0)
     }
 
     /// A kernel CPU list, such as `0-3,8,10-11`, in the affinity layout:
@@ -1474,7 +1474,7 @@ pub(crate) mod places {
                 return None;
             }
             for cpu in first..=last {
-                set[cpu / 64] |= 1u64.rotate_left(cpu as u32);
+                set[cpu / 64] |= 1u64.rotate_left(u32::try_from(cpu).expect("cpu fits u32"));
             }
         }
         Some(set)
@@ -1575,7 +1575,7 @@ pub(crate) mod places {
                     said.push((node, [0; CPUS / 64]));
                     said.len() - 1
                 });
-                said[at].1[other / 64] |= 1u64.rotate_left(other as u32);
+                said[at].1[other / 64] |= 1u64.rotate_left(u32::try_from(other).expect("cpu fits u32"));
             }
             if !said.iter().any(|(node, cpus)| *node == here && *cpus == own.0) {
                 return None;
@@ -2912,16 +2912,12 @@ pub(crate) mod sources {
         finish: crate::finish::Finish,
     }
 
-    // Sound: a place is written by the source's one publisher, and only
-    // once the task published into it `len` publications ago has been
-    // copied out by its claimer: the publisher's contract (`publish`),
-    // checked in tests and debug builds. It is read by the one thread
-    // whose CAS claimed the publication in it, across the Release store
-    // of `published` and the Acquire load. An action's words are atomics,
-    // read before the claimer's AcqRel CAS and written again only after an
-    // Acquire load of `claimed` passes that slot.
-    // `owner` is behind its lock; the rest is atomics.
+    // Sound: every slot is written by one publisher after the previous claimer
+    // copied its fields out (across Release/Acquire on `published` / `claimed`);
+    // action words are atomics, `Finish::owner` is synchronized by its mutex,
+    // and the remaining fields are atomic.
     unsafe impl Sync for Source {}
+    // Sound: `Source` holds only atomics, `Finish` (mutex-synchronized), and self-synchronized raw action slots.
     unsafe impl Send for Source {}
 
     /// What a claim takes: a stream's task, a pipeline's action, or a run
@@ -3010,6 +3006,7 @@ pub(crate) mod sources {
         pub(crate) fn run_waiting_action(&self) -> bool {
             match self.take() {
                 Some(Item::Action { run, context, arg }) => {
+                    // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
                     let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
                     unsafe { f(context as *const (), arg & !ACTION_SME2, pool_platform()) };
                     true
@@ -3210,7 +3207,7 @@ pub(crate) mod sources {
     /// The slot of the first registered source for which `f` says yes, in
     /// a walk of the slots from `start` up and then of those below it.
     fn find_from(start: usize, mut f: impl FnMut(&'static Source) -> bool) -> Option<usize> {
-        let mut active = ACTIVE.load(Ordering::SeqCst).rotate_right(start as u32);
+        let mut active = ACTIVE.load(Ordering::SeqCst).rotate_right(u32::from(start.to_le_bytes()[0]));
         while active != 0 {
             let slot = (active.trailing_zeros() as usize + start) % SLOTS;
             active &= active - 1;
@@ -3276,7 +3273,7 @@ pub(crate) mod sources {
         if in_turn {
             // The slot after this one (after the last, the first: the
             // walk takes its start round).
-            *turn = Turn { taken: 0, cursor: (slot + 1) as u32 };
+            *turn = Turn { taken: 0, cursor: u32::from((slot + 1).to_le_bytes()[0]) };
         } else {
             turn.taken += 1;
         }
@@ -3296,6 +3293,7 @@ pub(crate) mod sources {
         }
         match item {
             Item::Action { run, context, arg } => {
+                // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
                 let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
                 unsafe { f(context as *const (), arg & !ACTION_SME2, pool_platform()) };
             }
@@ -3603,6 +3601,7 @@ pub(crate) struct Member {
 
 const NO_MEMBER: Member = Member { input: core::ptr::null(), len: 0, out: core::ptr::null_mut() };
 
+// Sound: active prefix entries (`0..members`) carry caller-pinned input/output pointers synchronized by the task's claim/completion barrier; inactive trailing slots (`NO_MEMBER`) hold null pointers and are never dereferenced.
 unsafe impl Send for Task {}
 
 impl Task {
@@ -3687,6 +3686,7 @@ fn sme2_serve() -> ! {
         if let Some(item) = sources::take_stream_item() {
             match item {
                 sources::Item::Action { run, context, arg } => {
+                    // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
                     let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
                     if arg & sources::ACTION_SME2 == 0 {
                         unsafe { f(context as *const (), arg, pool_platform()) };

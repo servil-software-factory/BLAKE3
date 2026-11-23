@@ -251,6 +251,31 @@ fn test_counts_past_the_widest_kernel_split_into_groups_and_a_rounded_rest() {
     assert_eq!(crate::ROUNDED_WIDTH.with(|w| w.get()), 4);
 }
 
+#[test]
+fn test_hash_std_hash_distinguishes_values() {
+    use core::hash::{Hash as CoreHash, Hasher as CoreHasher};
+    struct Fold(u64);
+    impl CoreHasher for Fold {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+        fn write(&mut self, bytes: &[u8]) {
+            for &b in bytes {
+                self.0 = self.0.wrapping_mul(0x100000001b3) ^ u64::from(b);
+            }
+        }
+    }
+    let code = |h: &crate::Hash| {
+        let mut f = Fold(0xcbf29ce484222325);
+        h.hash(&mut f);
+        f.finish()
+    };
+    let a = crate::Hash::from_bytes([1u8; 32]);
+    let b = crate::Hash::from_bytes([2u8; 32]);
+    assert_eq!(code(&a), code(&crate::Hash::from_bytes([1u8; 32])));
+    assert_ne!(code(&a), code(&b), "core::hash::Hash for Hash must feed digest bytes");
+}
+
 /// The decisions between equally correct paths, exactly as their rules
 /// say (BLAKE3 #219: a mutant that moves one takes the other path, whose
 /// digest is the same, so only the decision itself can catch it). The

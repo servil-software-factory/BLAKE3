@@ -146,5 +146,16 @@ class Landable(unittest.TestCase):
         self.assertTrue(land.landable(base, []).endswith("*.md only"))
 
 
+class CountsRatchet(unittest.TestCase):
+    def test_missing_counts_script_fails_loudly(self):
+        orig_root = land.ROOT
+        try:
+            land.ROOT = "/nonexistent-land-root"
+            with self.assertRaises(SystemExit):
+                land.check_counts("HEAD~1", "HEAD")
+        finally:
+            land.ROOT = orig_root
+
+
 if __name__ == "__main__":
     unittest.main()

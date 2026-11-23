@@ -105,7 +105,7 @@ fn grow_descriptor_table(descriptors: usize) -> usize {
         } else {
             1024
         };
-        let target = want.min(cap).saturating_sub(1) as i32;
+        let target = i32::try_from(want.min(cap).saturating_sub(1).min(i32::MAX as libc::rlim_t)).expect("clamped to i32::MAX");
         if target >= 63 {
             // F_DUPFD takes the lowest free number from `target` up, so it
             // never lands on a descriptor the caller gave this process
@@ -200,11 +200,11 @@ fn stream_fd_into_rooms(
             && (next_issue_seq - next_commit_seq) < MAX_FILE_ROOMS
             && ring.sq_space_left() > 0
         {
-            let slot_idx = (next_issue_seq as usize) % LARGE_WINDOW;
+            let slot_idx = usize::try_from(next_issue_seq).expect("64-bit target") % LARGE_WINDOW;
             if window[slot_idx].is_some() {
                 break;
             }
-            let mut room = if in_flight_uring.get() == 0 && window[(next_commit_seq as usize) % LARGE_WINDOW].is_none() {
+            let mut room = if in_flight_uring.get() == 0 && window[usize::try_from(next_commit_seq).expect("64-bit target") % LARGE_WINDOW].is_none() {
                 block_on(pipe.room())
             } else {
                 match poll_once(pipe.room()) {
@@ -227,7 +227,8 @@ fn stream_fd_into_rooms(
             next_issue_seq += 1;
         }
 
-        let commit_ready = matches!(window[(next_commit_seq as usize) % LARGE_WINDOW], Some(WindowSlot::Ready(..) | WindowSlot::Eof));
+        let commit_ready =
+            matches!(window[usize::try_from(next_commit_seq).expect("64-bit target") % LARGE_WINDOW], Some(WindowSlot::Ready(..) | WindowSlot::Eof));
         if ring.unsubmitted() > 0 || (!commit_ready && in_flight_uring.get() > 0) {
             let min_wait = if commit_ready || in_flight_uring.get() == 0 { 0 } else { 1 };
             ring.submit_and_wait(min_wait);
@@ -305,7 +306,7 @@ fn stream_fd_into_rooms(
 
         let mut finished = false;
         loop {
-            let idx = (next_commit_seq as usize) % LARGE_WINDOW;
+            let idx = usize::try_from(next_commit_seq).expect("64-bit target") % LARGE_WINDOW;
             match window[idx].take() {
                 Some(WindowSlot::Eof) => {
                     finished = true;
@@ -715,7 +716,7 @@ impl ColdRingState {
                     None => break,
                 },
             };
-            let slot_id = cqe.user_data as usize;
+            let slot_id = usize::try_from(cqe.user_data).expect("64-bit target");
             let mut st = self.slots[slot_id].take().expect("active SmallSlot");
             self.ring_in_flight -= 1;
 
@@ -1029,13 +1030,13 @@ fn run_hybrid_worker(
         if let Some(ref mut c) = cold
             && size < COLD_RING_MAX_FILE
         {
-            c.queue_file(i, file, size as usize, None, args, &mut warm_batch, &mut sink);
+            c.queue_file(i, file, usize::try_from(size).expect("size < COLD_RING_MAX_FILE"), None, args, &mut warm_batch, &mut sink);
             continue;
         }
 
         // 1. Small files `<= 16 KiB` before `cold` is active:
         if size <= WARM_BATCH_MAX_FILE as u64 {
-            let hint = size as usize;
+            let hint = usize::try_from(size).expect("size <= WARM_BATCH_MAX_FILE");
             let in_arena = warm_batch.has_arena();
             let dst = if in_arena {
                 let s = warm_batch.len;
@@ -1093,7 +1094,7 @@ fn run_hybrid_worker(
 
         // 2. Medium files `16 KiB < size < 512 KiB` before `cold` is active:
         if size < SMALL {
-            let hint = size as usize;
+            let hint = usize::try_from(size).expect("size < SMALL");
             ensure_spare_cap(&mut medium_buf, hint + 1);
             match try_pread_cached(file.as_raw_fd(), medium_buf.spare_capacity_mut(), 0) {
                 Ok(CacheRead::Eof(n)) => {
@@ -1162,7 +1163,7 @@ fn run_hybrid_worker(
                     }
                 }
                 if let Some(ref mut c) = cold {
-                    c.queue_file(i, file, size as usize, None, args, &mut warm_batch, &mut sink);
+                    c.queue_file(i, file, usize::try_from(size).expect("size < COLD_RING_MAX_FILE"), None, args, &mut warm_batch, &mut sink);
                     continue;
                 }
             } else {

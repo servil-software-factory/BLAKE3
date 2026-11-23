@@ -275,8 +275,8 @@ fn is_verified_darwin_fd0(path: &Path, stdin: FdMeta) -> bool {
 pub(crate) fn path_matches_fd_meta(path: &Path, target: FdMeta) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|meta| {
-        let mode_type = (meta.mode() as libc::mode_t) & libc::S_IFMT;
-        mode_type == target.mode_type && StreamId { dev: meta.dev(), ino: meta.ino() } == target.id
+        let mode_type = meta.mode() & u32::from(libc::S_IFMT);
+        mode_type == u32::from(target.mode_type) && StreamId { dev: meta.dev(), ino: meta.ino() } == target.id
     })
 }
 
@@ -285,8 +285,9 @@ pub(crate) fn path_matches_fd_meta(path: &Path, target: FdMeta) -> bool {
 pub(crate) fn path_matches_stream(path: &Path, stream: StreamId) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|meta| {
-        let mode_type = (meta.mode() as libc::mode_t) & libc::S_IFMT;
-        matches!(mode_type, libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFCHR) && StreamId { dev: meta.dev(), ino: meta.ino() } == stream
+        let mode_type = meta.mode() & u32::from(libc::S_IFMT);
+        (mode_type == u32::from(libc::S_IFIFO) || mode_type == u32::from(libc::S_IFSOCK) || mode_type == u32::from(libc::S_IFCHR))
+            && StreamId { dev: meta.dev(), ino: meta.ino() } == stream
     })
 }
 
