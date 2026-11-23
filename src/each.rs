@@ -70,34 +70,24 @@ pub fn update_each(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
     update_turn(hashers, pieces);
 }
 
-/// Mark each hasher `which` names, and panic on one named twice. In every
-/// build: the second naming would find the hasher reset and give the
-/// empty message's hash for a message that had bytes, a wrong digest with
-/// no sign of it (BLAKE3 #420). One byte read and written per message, in
-/// the hasher the call reads next; the reset that ends each finish clears
-/// the mark.
-#[inline]
-fn name_each(hashers: &mut [Hasher], which: &[usize]) {
-    for (k, &i) in which.iter().enumerate() {
-        if i >= hashers.len() || hashers[i].mark_finishing() {
-            refuse_names(hashers, &which[..k], i);
-        }
-    }
+/// RAII guard for `finalize_each`: records how many hashers in `which[..count]`
+/// have been marked `finishing`, and clears those marks on unwind (whether a
+/// bad/duplicate index fails preflight or an internal panic occurs mid-finish).
+struct Marked<'a> {
+    hashers: &'a mut [Hasher],
+    which: &'a [usize],
+    count: usize,
+    active: bool,
 }
 
-/// Refuse a `finalize_each` whose index `i` names no hasher, or one that
-/// `named` (the indices before it) names already. The marks come off
-/// first: the call hashes nothing, and a program that catches the panic
-/// finds every hasher as it was, where a mark left on would refuse each
-/// later call that named the hasher, and its clones'.
-#[cold]
-#[inline(never)]
-fn refuse_names(hashers: &mut [Hasher], named: &[usize], i: usize) -> ! {
-    for &j in named {
-        hashers[j].clear_finishing();
+impl Drop for Marked<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            for &i in &self.which[..self.count] {
+                self.hashers[i].clear_finishing();
+            }
+        }
     }
-    assert!(i < hashers.len(), "finalize_each names hasher {i} of {}", hashers.len());
-    panic!("each finalized index is distinct");
 }
 
 /// The hash of each message `which` names: `out[k]` is what
@@ -117,7 +107,13 @@ fn refuse_names(hashers: &mut [Hasher], named: &[usize], i: usize) -> ! {
 /// See the [key-independence contract](crate#key-dependent-timing).
 pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     assert_eq!(which.len(), out.len(), "one digest per message named");
-    name_each(hashers, which);
+    let mut marked = Marked { hashers, which, count: 0, active: true };
+    for &i in which {
+        assert!(i < marked.hashers.len(), "finalize_each names hasher {i} of {}", marked.hashers.len());
+        assert!(!marked.hashers[i].mark_finishing(), "each finalized index is distinct");
+        marked.count += 1;
+    }
+    let hashers = &mut *marked.hashers;
     #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     if which.len() >= 16 && matches!(Platform::detect(), Platform::AVX512) {
         #[cfg(all(test, feature = "std"))]
@@ -145,6 +141,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
             }
             finish_each(hashers, which, out);
         }
+        marked.active = false;
         return;
     }
     // AArch64: the messages of up to a chunk that a turn left whole in
@@ -177,10 +174,12 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
                 }
                 hashers[i].reset();
             }
+            marked.active = false;
             return;
         }
     }
     finish_each(hashers, which, out);
+    marked.active = false;
 }
 
 /// Each hasher `which` names finished in place and reset, its digest into
@@ -210,19 +209,16 @@ fn update_turn(hashers: &mut [Hasher], pieces: &[(usize, &[u8])]) {
     /// panics part-way (an index that names no hasher) unwinds through
     /// here: a full stage that no list named
     /// any more would have no room for its hasher's next update, and its
-    /// next turn would wait for ever for a pass to hash it. (A panic out
-    /// of the hashing itself, which runs none of the caller's code and so
-    /// would be this crate's own bug, meets its stages here a second
-    /// time: that second panic ends the process.)
+    /// next turn would wait for ever for a pass to hash it. `flush_held`
+    /// detaches the list before hashing so an unwind out of `hash_held`
+    /// itself cannot make `Drop` retry the failing call.
     struct Held<'h> {
         hashers: &'h mut [Hasher],
         held: crate::stack_vec::StackVec<usize, TABLE>,
     }
     impl Drop for Held<'_> {
         fn drop(&mut self) {
-            if !self.held.is_empty() {
-                flush_held(self.hashers, &mut self.held);
-            }
+            flush_held(self.hashers, &mut self.held);
         }
     }
     let mut turn = Held { hashers, held: crate::stack_vec::StackVec::new() };
@@ -293,10 +289,14 @@ fn drain<'a>(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usize
 #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
 const INDEPENDENT_MIN: usize = 3;
 
-/// Hash every queued stage, then return the bounded table to its caller.
+/// Hash every queued stage after detaching the table so an unwind inside
+/// `hash_held` cannot make `Held::drop` retry the same failing call.
 fn flush_held(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usize, TABLE>) {
-    hash_held(hashers, held);
-    held.clear();
+    if held.is_empty() {
+        return;
+    }
+    let list = core::mem::take(held);
+    hash_held(hashers, &list);
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -336,11 +336,16 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     if independent_lanes(hashers, held) {
         return;
     }
-    // Plain's key is the IV, the same for every plain hasher.
+    // Plain's key is the IV, the same for every plain hasher. Choose the
+    // smallest workspace tier that holds the cohort so small turns (such as
+    // a single plain stage) do not reserve the full 128-stage stack frame.
     let mut plain = crate::stack_vec::StackVec::<usize, TABLE>::new();
     plain.extend(held.iter().copied().filter(|&i| hashers[i].is_plain()));
-    if !plain.is_empty() {
-        hash_cohort::<TABLE>(hashers, &plain);
+    match plain.len() {
+        0 => {}
+        1 => hash_cohort::<1>(hashers, &plain),
+        2..=16 => hash_cohort::<16>(hashers, &plain),
+        _ => hash_cohort::<TABLE>(hashers, &plain),
     }
     for &i in held {
         if !hashers[i].is_plain() {
@@ -373,7 +378,7 @@ impl<const N: usize> HeldWorkspace<N> {
     /// Call once, with 1 <= count <= N: initialize through a borrow of the
     /// workspace's final place, then borrow its two CV levels.
     pub(crate) fn buffers(&mut self, count: usize) -> (&mut [CVBytes], &mut [CVBytes]) {
-        debug_assert!(count > 0 && count <= N && self.level.is_empty() && self.next.is_empty());
+        assert!(count > 0 && count <= N && self.level.is_empty() && self.next.is_empty(), "one fresh HeldWorkspace per cohort");
         self.level.extend(core::iter::repeat_n([Block::ZERO; STAGE_PARENTS], count));
         self.next.extend(core::iter::repeat_n([Block::ZERO; STAGE_PARENTS / 2], count));
         let (level, _) = Block::bytes_mut(self.level.as_mut_slice().as_flattened_mut()).as_chunks_mut::<OUT_LEN>();
@@ -862,13 +867,16 @@ std::thread_local! {
     static SHARED: core::cell::RefCell<Shared> = const { core::cell::RefCell::new(Shared { messages: Vec::new(), cvs: Vec::new() }) };
 }
 
-/// The messages and chunk values a pool thread's storage holds from its
-/// start: a range of a pooled collection is cut at about
-/// `lanes::MAX_PIECE_LEN` (128 KiB) of items, so it holds under 64
-/// messages of 2 chunks or more plus one, and under 144 + 65 of their
-/// chunks. A pooled collection then allocates nothing on any thread.
-const PREPARED_MESSAGES: usize = 128;
-const PREPARED_CVS: usize = 256;
+/// The messages and chunk values a pool thread's middle-message scratch
+/// holds from its start: one cut range of a pooled collection is cut at
+/// `lanes::MAX_PIECE_LEN` (128 KiB) of items, so in the worst ratio it can
+/// take up to 127 two-chunk items of 1,025 bytes (130,175 bytes, 254 CVs)
+/// plus one 15-chunk overshooting item (128 messages, 269 CVs). Rounding
+/// up to 144 messages and 288 CVs keeps every pooled cut range's
+/// middle-message scratch allocation-free on a prepared thread (separate
+/// from caller piece scratch in `lanes` and the no-spare-pool fallback).
+const PREPARED_MESSAGES: usize = 144;
+const PREPARED_CVS: usize = 288;
 
 /// This thread's storage for the collections it hashes, made now: the
 /// pool's threads at their start, and the thread that initializes the pool.
@@ -1906,5 +1914,39 @@ mod test {
         .expect("thread teardown with hash_each must not panic");
         assert!(ran.load(Ordering::SeqCst), "TLS destructor must have run");
         assert!(ok.load(Ordering::SeqCst), "TLS destructor digests must match");
+    }
+
+    /// Feeding small plain (1..=16) or mixed keyed+plain (3..=16) cohorts of
+    /// boxed hashers through a 16 KiB stage in `update_each` must take the
+    /// small `hash_cohort::<1>` / `<16>` and `held_groups_in::<16>` workspaces
+    /// (~1.2–14.5 KiB) rather than the 128-stage workspace (~112 KiB), so all
+    /// succeed on a 64 KiB worker thread stack.
+    #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
+    #[test]
+    fn small_held_cohorts_fit_in_64kib_stack() {
+        crate::initialize();
+        let data = std::vec![0x42u8; crate::STAGE_LEN + 97];
+        let expected_plain = *blake3::hash(&data).as_bytes();
+        let key = [0x5Au8; 32];
+        let expected_keyed = *blake3::keyed_hash(&key, &data).as_bytes();
+        for (count, keyed_first) in [(1usize, false), (2, false), (3, true), (16, true)] {
+            let data_c = data.clone();
+            let mut hashers: std::vec::Vec<Hasher> =
+                (0..count).map(|i| if keyed_first && i == 0 { Hasher::new(Mode::Keyed(&key), None) } else { Hasher::new(Mode::Plain, None) }).collect();
+            let (first, last) = std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    for piece in data_c.chunks(4096) {
+                        let pieces: std::vec::Vec<(usize, &[u8])> = (0..count).map(|i| (i, piece)).collect();
+                        update_each(&mut hashers[..], &pieces);
+                    }
+                    (*hashers[0].finalize().as_bytes(), *hashers[count - 1].finalize().as_bytes())
+                })
+                .expect("spawn 64 KiB thread")
+                .join()
+                .expect("small held cohort must fit in 64 KiB stack");
+            assert_eq!(first, if keyed_first { expected_keyed } else { expected_plain }, "cohort of {count} (keyed={keyed_first}) first");
+            assert_eq!(last, expected_plain, "cohort of {count} (keyed={keyed_first}) last");
+        }
     }
 }

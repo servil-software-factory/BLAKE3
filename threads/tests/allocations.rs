@@ -445,6 +445,28 @@ fn prepared_pool_calls_allocate_nothing() {
     for (item, digest) in items.iter().zip(&out).step_by(97) {
         assert_eq!(*digest, *blake3::hash(&Block::bytes(item.0)[..item.1]).as_bytes());
     }
+    // Worst-case CV-per-byte ratio: 127 items of 1,025 bytes (two chunks each)
+    // followed by a 15-chunk item (15,360 bytes) = 269 CVs in one 128 KiB piece.
+    let mut dense_items: Vec<(&[Block], usize)> = Vec::new();
+    let mut off = 0;
+    for _ in 0..8 {
+        for _ in 0..127 {
+            let blks = 1025usize.div_ceil(64);
+            dense_items.push((&message[off..off + blks], 1025));
+            off += blks;
+        }
+        let blks = (15 * 1024) / 64;
+        dense_items.push((&message[off..off + blks], 15 * 1024));
+        off += blks;
+    }
+    let mut dense_out = vec![[0u8; 32]; dense_items.len()];
+    let dense = counts_with_workers(|| throughput::hash_each_multithreaded(Mode::Plain, &dense_items, &mut dense_out));
+    assert_eq!(dense, Counts::default(), "worst-case 1,025 B + 15 KiB pooled collection allocates nothing");
+    for (idx, (item, digest)) in dense_items.iter().zip(&dense_out).enumerate() {
+        if idx % 64 == 0 || idx % 128 == 127 {
+            assert_eq!(*digest, *blake3::hash(&Block::bytes(item.0)[..item.1]).as_bytes(), "dense item {idx}");
+        }
+    }
 }
 
 fn blocks(len: usize, seed: u8) -> Vec<Block> {
@@ -609,4 +631,16 @@ fn prepare_after_large_and_empty_collection_allocates_nothing() {
     throughput::hash_each(Mode::Plain, &[], &mut empty);
     let prep = counts(|| blake3_servil::initialize_multithreaded(std::num::NonZeroUsize::new(1)));
     assert_eq!(prep, Counts::default(), "already-sufficient TLS scratch must not reallocate: {prep:?}");
+}
+
+/// Repeated `initialize_multithreaded` after a real nonempty pooled job must
+/// not reallocate or grow already-sufficient pool-piece scratch buffers.
+#[test]
+fn prepare_after_pooled_job_allocates_nothing() {
+    pool_ready(4);
+    let data = blocks(1 << 20, 13);
+    let got = throughput::hash_multithreaded(Mode::Plain, &data, 1 << 20);
+    assert_eq!(got, convenience::hash(Block::bytes(&data)));
+    let prep = counts(|| blake3_servil::initialize_multithreaded(std::num::NonZeroUsize::new(4)));
+    assert_eq!(prep, Counts::default(), "already-sufficient pool scratch must not reallocate after pooled job: {prep:?}");
 }

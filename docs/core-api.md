@@ -174,6 +174,7 @@ fn is_empty(&self) -> bool
 fn blocks(&self) -> &[Block]
 fn message_mut(&mut self, i: usize) -> &mut [u8]
 fn set(&mut self, i: usize, message: &[u8])
+fn messages_mut(&mut self) -> impl ExactSizeIterator<Item = &mut [u8]>
 fn blocks_mut(&mut self) -> &mut [Block]
 fn digests_mut(&mut self) -> &mut [[u8; 32]]
 ```

@@ -701,7 +701,10 @@ impl Shared {
             // `count`).
             let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(first * slot_len), count * slot_len) };
             let digests = unsafe { core::slice::from_raw_parts_mut(desc.digests.add(first), count) };
-            self.tree().hash_slots_on(platform, bytes, message_len, slot_len, digests);
+            // Sound: `desc.batch` came from a validated `Batch<'static>` held
+            // alive in `Pipeline::batches[slot]` until `slot_done`.
+            let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot_len) };
+            self.tree().hash_many_on(platform, &part, digests);
             let storage = self.storage;
             if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {
                 finished(storage, || {
@@ -1644,10 +1647,8 @@ impl<T, B> Pipeline<T, B> {
     /// # Panics
     ///
     /// If `message` is another Pipeline's, or has had a commit from a
-    /// Room already (even one of no bytes); if `digests` has not one place
-    /// for each message of
-    /// `batch`, or `batch`'s bytes are not that many whole slots (blocks
-    /// borrowed by `Batch::from_blocks` that end in a part of a slot).
+    /// Room already (even one of no bytes); or if `digests` has not one place
+    /// for each message of `batch`.
     pub fn batch(&mut self, message: Message, batch: Batch<'static>, digests: Box<[[u8; OUT_LEN]]>) {
         let (pid, s) = message.take();
         assert_eq!(pid, self.id, "Message belongs to a different Pipeline");

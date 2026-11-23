@@ -570,10 +570,9 @@ pub mod throughput {
         if out.len() < 2 || batch.bytes().len() < crate::lanes::MIN_SPLIT_LEN {
             return hash_many(mode, batch, out);
         }
-        // The whole batch as a part, its length checked against the
-        // digests first, as hash_many checks it: a division here would
-        // drop a ragged end (blocks borrowed that hold no whole number of
-        // messages) where hash_many refuses it.
+        // Check the output count against the whole batch before taking
+        // `batch.part(0..out.len())`, which would otherwise silently hash a
+        // prefix when `out` is too short.
         assert_eq!(Some(batch.bytes().len()), batch.slot().checked_mul(out.len()), "input holds one slot per output");
         let (kind, key, context) = crate::lanes::parts(mode);
         crate::lanes::hash_many_in(kind, key, context, batch.part(0..out.len()), out);
@@ -654,7 +653,8 @@ pub mod throughput {
         let alone = |len: usize| len >= crate::lanes::MIN_SPLIT_LEN;
         // The items that hash alone are set aside in the collection's
         // call and hashed after, each over the whole pool.
-        if items.iter().map(|i| i.1).filter(|&len| !alone(len)).sum::<usize>() < crate::lanes::MIN_SPLIT_LEN {
+        let small_bytes = items.iter().map(|i| i.1).filter(|&len| !alone(len)).fold(0usize, usize::saturating_add);
+        if small_bytes < crate::lanes::MIN_SPLIT_LEN {
             crate::lanes::hash_each_small(&tree, items, out);
         } else {
             crate::lanes::hash_each(&tree, items, out);

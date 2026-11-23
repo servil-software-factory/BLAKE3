@@ -30,8 +30,7 @@ mode's key words and flags.
 The scheduler uses the accelerator turn to choose a pool's SME2 prefix
 and to keep a Pipeline job on the kernels it was assigned. `TreeHasher`'s
 worker calls use that kernel choice without taking a second turn, while
-keeping the tree checks and all input checks save `hash_slots_on`'s
-trust that its caller zero-padded the blocks (#458). Normal callers use the documented methods; a
+keeping the tree checks and all input checks. Normal callers use the documented methods; a
 caller that already distributes its own work can use `on_this_core`.
 
 The remaining question is whether the scheduler can leave more of the

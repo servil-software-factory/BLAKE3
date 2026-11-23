@@ -68,7 +68,7 @@ pub struct Hasher {
     core: HasherCore,
     stage: stage::Stage,
     /// Set while one `finalize_each` call finishes this hasher, so that
-    /// the call sees an index it is given twice (`each::name_each`).
+    /// the call sees an index it is given twice (`each::finalize_each`).
     finishing: bool,
 }
 

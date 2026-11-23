@@ -341,6 +341,8 @@ std::thread_local! {
 pub(crate) fn prepare_thread() {
     SCRATCH.with(|s| {
         let mut s = s.borrow_mut();
+        s.pieces.clear();
+        s.cvs.clear();
         s.pieces.reserve(PREPARED_PIECES);
         s.cvs.reserve(PREPARED_PIECES);
     });
@@ -433,9 +435,14 @@ pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block]
     let Some((pool, _caller)) = spare_pool() else {
         return hash_each_small(tree, items, out);
     };
-    let plan = pool.plan(places::Kind::Each, items.iter().map(|i| i.1).sum());
+    let plan = pool.plan(places::Kind::Each, items.iter().fold(0usize, |acc, i| acc.saturating_add(i.1)));
     with_scratch(
-        |pieces| cut_items(pieces, items, plan.threads, |item| crate::throughput::Block::bytes(item.0)[..item.1].len()),
+        |pieces| {
+            cut_items(pieces, items, plan.threads, |item| {
+                let n = crate::throughput::Block::bytes(item.0)[..item.1].len();
+                if n >= MIN_SPLIT_LEN { 0 } else { n }
+            })
+        },
         |(), pieces, _| {
             let work = Work::Each { items, tree: tree.clone().on_this_core(), pieces, outputs: out.as_mut_ptr() };
             pool.run_job(work, pieces.len(), 0, plan.threads, plan.near());
@@ -460,20 +467,16 @@ pub(crate) fn hash_each_small(tree: &TreeHasher, items: &[(&[crate::throughput::
 /// Cut `items` into consecutive ranges for `threads` threads, in order:
 /// each range takes items until it holds [`next_piece_len`] of the bytes
 /// that remain (one item at least, however long), so ranges shrink toward
-/// the end as subtree pieces do. An item of MIN_SPLIT_LEN or more weighs
-/// nothing here: it is hashed after, over the pool.
-fn cut_items<I>(pieces: &mut Vec<Piece>, items: &[I], threads: usize, len: impl Fn(&I) -> usize) {
-    let weight = |item: &I| {
-        let n = len(item);
-        if n >= MIN_SPLIT_LEN { 0 } else { n }
-    };
-    let mut remaining: usize = items.iter().map(&weight).sum();
+/// the end as subtree pieces do. Callers pass 0 weight for items of
+/// MIN_SPLIT_LEN or more, which are hashed after over the pool.
+fn cut_items<I>(pieces: &mut Vec<Piece>, items: &[I], threads: usize, weight: impl Fn(&I) -> usize) {
+    let mut remaining: u128 = items.iter().map(|item| weight(item) as u128).sum();
     let mut start = 0;
     while start < items.len() {
-        let want = next_piece_len(remaining, threads);
-        let (mut end, mut bytes) = (start, 0);
+        let want = next_piece_len(remaining.min(usize::MAX as u128) as usize, threads) as u128;
+        let (mut end, mut bytes) = (start, 0u128);
         while end < items.len() && (bytes < want || end == start) {
-            bytes += weight(&items[end]);
+            bytes += weight(&items[end]) as u128;
             end += 1;
         }
         remaining -= bytes;
@@ -903,7 +906,7 @@ fn cut_messages_vec(count: usize, message_len: usize, threads: usize) -> Vec<Pie
 #[cfg(test)]
 fn cut_items_vec(items: &[&[u8]], threads: usize) -> Vec<Piece> {
     let mut pieces = Vec::new();
-    cut_items(&mut pieces, items, threads, |item| item.len());
+    cut_items(&mut pieces, items, threads, |item| if item.len() >= MIN_SPLIT_LEN { 0 } else { item.len() });
     pieces
 }
 
@@ -3571,13 +3574,16 @@ impl Task {
         let members = &self.member[..self.members];
         if let Some(message_len) = self.batch {
             for m in members {
-                // Sound: the stream keeps each batch's bytes and digest
-                // space in place until the task's `left` is zero.
+                // Sound: the Pipeline keeps each batch's bytes and digest
+                // space in place until the group publishes `completed_epoch`.
                 let bytes = unsafe { core::slice::from_raw_parts(m.input, m.len) };
                 let slot = crate::slot_len(message_len);
                 let count = m.len / slot;
                 let digests = unsafe { core::slice::from_raw_parts_mut(m.out as *mut [u8; crate::OUT_LEN], count) };
-                tree.hash_slots_on(platform, bytes, message_len, slot, digests);
+                // Sound: the Pipeline keeps a validated `Batch`'s slots alive
+                // until the group publishes `completed_epoch`.
+                let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot) };
+                tree.hash_many_on(platform, &part, digests);
             }
             return;
         }
@@ -4035,6 +4041,24 @@ mod test {
         let refs: Vec<&[u8]> = eights.iter().map(|v| v.as_slice()).collect();
         assert_eq!(cut_items_vec(&refs, 2), tiling(&[(1, 8), (1, 4), (1, 2), (2, 1)]));
         assert_eq!(cut_items_vec(&[], 4), Vec::<Piece>::new());
+        // Weighted totals exceeding `usize::MAX` accumulate in `u128` and
+        // subtract cleanly back below the word boundary into exact cuts.
+        let mut pieces = Vec::new();
+        let huge = [usize::MAX / 2, usize::MAX / 2, usize::MAX / 2, 1024, 1024];
+        cut_items(&mut pieces, &huge, 4, |&w| w);
+        assert_eq!(pieces, tiling(&[(3, 1), (1, 2)]));
+        // Large items (>= MIN_SPLIT_LEN) weigh zero when filtered by the caller
+        // and are covered alongside smaller items without overflowing.
+        pieces.clear();
+        cut_items(&mut pieces, &huge, 4, |&n| if n >= MIN_SPLIT_LEN { 0 } else { n });
+        assert_eq!(pieces, vec![Piece { offset: 0, len: huge.len() }]);
+        // The planner's all-items saturating byte sum handles aliased totals
+        // past `usize::MAX`.
+        let saturated = huge.iter().fold(0usize, |acc, &n| acc.saturating_add(n));
+        assert_eq!(saturated, usize::MAX);
+        let plan = pool().plan(places::Kind::Each, saturated);
+        assert!(plan.threads >= 1);
+        plan.done();
     }
 
     /// Where the pool begins (BLAKE3 #219: a threshold between two correct

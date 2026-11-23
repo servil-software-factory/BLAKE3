@@ -26,16 +26,19 @@ pub(crate) const TABLE: usize = 128;
 
 /// The bytes each message of `len` bytes takes in a batch: `len` rounded up
 /// to whole blocks, one block for an empty message.
+///
+/// Panics if `len` cannot be rounded up to a multiple of [`BLOCK_LEN`] without
+/// overflowing `usize`.
 #[inline(always)]
 pub fn slot_len(len: usize) -> usize {
-    len.next_multiple_of(BLOCK_LEN).max(BLOCK_LEN)
+    len.checked_next_multiple_of(BLOCK_LEN).expect("batch slot length overflow").max(BLOCK_LEN)
 }
 
 /// hash_many's contract on its input: `count` slots of `slot` bytes for
 /// messages of `len` bytes (checked in every build: the kernels read
 /// them), each slot's bytes past its message zero (checked in debug
 /// builds: a Batch keeps them so). A slot is whole blocks ([`slot_len`]),
-/// or the message itself, packed (`packed`).
+/// or the message itself, packed (`packed`: 16 or 32 bytes).
 #[inline]
 pub fn assert_slots(input: &[u8], len: usize, slot: usize, count: usize) {
     // In every build, both: the kernels take a slot's size from `len` and
@@ -56,11 +59,11 @@ pub fn assert_slots(input: &[u8], len: usize, slot: usize, count: usize) {
 }
 
 /// Whether messages of `len` bytes at a stride of `slot` are packed: the
-/// stride is the message, a divisor of a block (16 or 32 bytes), so the
-/// block's remaining bytes are not in memory ([`Packed`](crate::throughput::Packed)).
+/// stride is the message, one of the two supported packed widths (16 or 32
+/// bytes), so the block's remaining bytes are not in memory (`Packed`).
 #[inline]
 pub(crate) fn packed(len: usize, slot: usize) -> bool {
-    slot == len && len < BLOCK_LEN
+    matches!(len, 16 | 32) && slot == len
 }
 
 /// `outputs[i] = hash(input[i * slot..][..len])` for every message, with
@@ -293,22 +296,21 @@ fn hash_two_chunks(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: 
     const GROUP: usize = 16;
     for (messages, digests) in input.chunks(slot * GROUP).zip(outputs.chunks_mut(GROUP)) {
         let count = digests.len();
-        let mut firsts: [core::mem::MaybeUninit<&[u8; CHUNK_LEN]>; GROUP] = [core::mem::MaybeUninit::uninit(); GROUP];
-        let mut seconds: [core::mem::MaybeUninit<*const u8>; GROUP] = [core::mem::MaybeUninit::uninit(); GROUP];
-        for (i, message) in messages.chunks_exact(slot).enumerate() {
-            firsts[i].write(message[..CHUNK_LEN].try_into().expect("a whole first chunk"));
-            seconds[i].write(message[CHUNK_LEN..].as_ptr());
-        }
+        let mut firsts = crate::stack_vec::StackVec::<&[u8; CHUNK_LEN], GROUP>::new();
+        let mut seconds = crate::stack_vec::StackVec::<*const u8, GROUP>::new();
+        firsts.extend(messages.chunks_exact(slot).map(|m| m[..CHUNK_LEN].try_into().expect("a whole first chunk")));
+        seconds.extend(messages.chunks_exact(slot).map(|m| m[CHUNK_LEN..].as_ptr()));
+        assert_eq!(firsts.len(), count, "one two-chunk slot per output");
+        assert_eq!(seconds.len(), count, "one second chunk per output");
         let mut cvs = [[0u8; OUT_LEN]; 2 * GROUP];
         let mut pairs = [[0u8; BLOCK_LEN]; GROUP];
-        // Sound: the first `count` entries of both tables were written just
-        // above; each second-chunk pointer reaches `second_blocks` whole
+        // Sound: `firsts` and `seconds` hold exactly `count` initialized
+        // entries; each second-chunk pointer reaches `second_blocks` whole
         // blocks inside its slot, zero past the message; NEON is every
         // AArch64 CPU's (neon_plans).
         unsafe {
-            let firsts = core::slice::from_raw_parts(firsts.as_ptr() as *const &[u8; CHUNK_LEN], count);
             crate::neon_hybrid::hash_many_last_len(
-                firsts,
+                &firsts,
                 key,
                 0,
                 IncrementCounter::No,
@@ -319,8 +321,8 @@ fn hash_two_chunks(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: 
                 cvs[..count].as_flattened_mut(),
             );
             crate::neon_hybrid::hash_messages_raw(
-                seconds.as_ptr() as *const *const u8,
-                count,
+                seconds.as_ptr(),
+                seconds.len(),
                 second_blocks,
                 key,
                 1,
@@ -532,13 +534,10 @@ fn hash_run<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: 
         // Sound: the caller found SME2 (platform_is_sme2).
         return unsafe { crate::sme2::hash_block_run(run, key, flags | CHUNK_START | CHUNK_END | ROOT, outputs.as_flattened_mut()) };
     }
-    let mut table: [core::mem::MaybeUninit<&[u8; N]>; TABLE] = [core::mem::MaybeUninit::uninit(); TABLE];
-    for (slot, message) in table[..outputs.len()].iter_mut().zip(messages.chunks_exact(N)) {
-        slot.write(message.try_into().expect("messages of N bytes"));
-    }
-    // Sound: the first outputs.len() slots were written just above.
-    let filled: &[&[u8; N]] = unsafe { core::slice::from_raw_parts(table.as_ptr() as *const &[u8; N], outputs.len()) };
-    whole_messages(filled, key, flags, outputs, platform);
+    let mut table = crate::stack_vec::StackVec::<&[u8; N], TABLE>::new();
+    table.extend(messages.chunks_exact(N).map(|message| message.try_into().expect("messages of N bytes")));
+    assert_eq!(table.len(), outputs.len(), "one message per output");
+    whole_messages(&table, key, flags, outputs, platform);
 }
 
 /// The kernel call for one message of whole blocks in each lane. Both a
@@ -1350,5 +1349,21 @@ mod test {
             &crate::throughput::Batch::from_blocks(&[crate::throughput::Block::ZERO], 64),
             &mut [[0u8; OUT_LEN]; 2],
         );
+    }
+
+    #[test]
+    fn test_assert_slots_and_slot_len_reject_invalid_shapes() {
+        // Packed widths are strictly 16 and 32 bytes.
+        assert_slots(&[0u8; 16], 16, 16, 1);
+        assert_slots(&[0u8; 32], 32, 32, 1);
+        assert_slots(&[0u8; 64], 0, 64, 1);
+        for (len, slot, count) in [(0, 0, 1), (0, 0, 0), (17, 17, 1), (3, 3, 0), (63, 63, 1)] {
+            assert!(
+                std::panic::catch_unwind(|| assert_slots(&[0u8; 64][..slot * count], len, slot, count)).is_err(),
+                "invalid packed shape ({len}, {slot}, {count}) must panic"
+            );
+        }
+        assert!(std::panic::catch_unwind(|| slot_len(usize::MAX)).is_err(), "slot_len(usize::MAX) must panic instead of wrapping");
+        assert!(std::panic::catch_unwind(|| slot_len(usize::MAX - 62)).is_err(), "slot_len near usize::MAX must panic");
     }
 }

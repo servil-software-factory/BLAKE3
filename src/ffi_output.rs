@@ -108,15 +108,24 @@ pub(crate) unsafe fn hash_group<const W: usize>(inputs: &[Input<'_>; W], out: &m
 /// already fill their chunk lanes; parents borrow each message's own key
 /// and flags in the existing independent-compression descriptors. The
 /// caller supplies 1..=TABLE stages and a detected AVX2/AVX512 platform.
-/// Keep this workspace frame out of empty and unsupported callers.
-#[inline(never)]
+/// Dispatches to a 16-stage workspace for small turns so they do not
+/// reserve the full 128-stage stack frame.
 pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
+    if held.len() <= 16 {
+        held_groups_in::<16>(hashers, held, platform);
+    } else {
+        held_groups_in::<{ crate::many::TABLE }>(hashers, held, platform);
+    }
+}
+
+#[inline(never)]
+fn held_groups_in<const N: usize>(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
     let width = lanes(platform);
     debug_assert!(!held.is_empty() && width != 0);
     const PER: usize = crate::STAGE_LEN / CHUNK_LEN;
     const { assert!(PER == 16) };
     let n = held.len();
-    let mut work = crate::each::HeldWorkspace::<{ crate::many::TABLE }>::new();
+    let mut work = crate::each::HeldWorkspace::<N>::new();
     let (mut level, mut next) = work.buffers(n);
     for (k, &i) in held.iter().enumerate() {
         let h = &hashers[i];

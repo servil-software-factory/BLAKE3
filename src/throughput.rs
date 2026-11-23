@@ -627,21 +627,15 @@ impl TreeHasher {
     /// Requires one output a message.
     pub fn hash_many<P: Prepared>(&self, batch: &P, out: &mut [[u8; OUT_LEN]]) {
         let turn = self.turn_if(crate::many::sme2_sized(batch.message_len(), out.len()));
-        self.hash_slots_on(turn.platform(), batch.bytes(), batch.message_len(), batch.slot(), out);
+        self.hash_many_on(turn.platform(), batch, out);
     }
 
-    /// A worker's slice of a batch. Slot shape and output count are
-    /// checked by the same code as `hash_many`.
-    ///
-    /// Requires each slot's bytes past its message to be zero, as a
-    /// `Batch` and a `Packed` keep them (checked in debug builds only: a
-    /// kernel that takes whole blocks hashes those bytes too). Outside the
-    /// documented API: the thread library passes its batches' slices here,
-    /// until it passes a checked view (BLAKE3 #458).
+    /// A worker's checked slice of a [`Prepared`] batch, on `platform`'s
+    /// kernels (the worker already holds its turn; BLAKE3 #458).
     #[doc(hidden)]
     #[inline]
-    pub fn hash_slots_on(&self, platform: crate::platform::Platform, bytes: &[u8], len: usize, slot: usize, out: &mut [[u8; OUT_LEN]]) {
-        crate::many::hash_many_on(bytes, len, slot, self.domain.key(), self.domain.flags(), out, platform);
+    pub fn hash_many_on<P: Prepared>(&self, platform: crate::platform::Platform, batch: &P, out: &mut [[u8; OUT_LEN]]) {
+        crate::many::hash_many_on(batch.bytes(), batch.message_len(), batch.slot(), self.domain.key(), self.domain.flags(), out, platform);
     }
 
     /// Try the whole-block lanes with separate readable inputs. Returns

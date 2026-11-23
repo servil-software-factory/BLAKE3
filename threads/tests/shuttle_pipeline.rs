@@ -180,7 +180,8 @@ mod lanes {
                 if let Some(message_len) = self.batch {
                     let slot = crate::slot_len(message_len);
                     let digests = unsafe { core::slice::from_raw_parts_mut(m.out as *mut [u8; crate::OUT_LEN], m.len / slot) };
-                    tree.hash_slots_on(platform, bytes, message_len, slot, digests);
+                    let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot) };
+                    tree.hash_many_on(platform, &part, digests);
                 } else {
                     let hash = tree.hash_on(platform, bytes);
                     unsafe { core::ptr::copy_nonoverlapping(hash.as_bytes().as_ptr(), m.out, crate::OUT_LEN) };
