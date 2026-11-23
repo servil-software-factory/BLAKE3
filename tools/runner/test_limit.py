@@ -9,7 +9,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -115,6 +114,16 @@ class Limit(unittest.TestCase):
         self.started.append(pid)
         return pid
 
+    def no_signal_reaches_the_worker(self):
+        """The runner's `os.kill`, patched to spare the worker (another account's process, say). The worker's
+        PID file decides at each signal, so the PID has no other thread to be noted by in time."""
+        real = os.kill
+
+        def kill(pid, signum):
+            if str(pid) != (self.pid_file.read_text() if self.pid_file.exists() else ""):
+                real(pid, signum)
+        return patch.object(runner.os, "kill", kill)
+
     def test_killing_the_commands_group_leaves_each_shape_running(self):
         """The control: what the runner did before. Then `end_job`, from the command's PID and start time
         alone, ends the worker, also where the command's first process is gone by then."""
@@ -203,20 +212,12 @@ class Limit(unittest.TestCase):
 
     def test_what_could_not_be_ended_is_said(self):
         """A process that no signal ends (another account's, say) is named in the verdict's text."""
-        real, spared = os.kill, []
-
-        def kill(pid, signum):
-            if pid not in spared:                                           # as if no signal reached the spared one
-                real(pid, signum)
-
-        with open(self.dir / "runner.log", "w") as log, patch.object(runner.os, "kill", kill):
-            # the worker's PID is known a moment after the command starts: noted from another thread
-            threading.Thread(target=lambda: spared.append(self.worker()), daemon=True).start()
+        with open(self.dir / "runner.log", "w") as log, self.no_signal_reaches_the_worker():
             with self.assertRaises(runner.TimedOut) as e:
                 runner.Job(log, 2).run([sys.executable, "-c", PARENT, OWN_GROUP, str(self.pid_file)], cwd=self.dir)
-        self.assertEqual(len(spared), 1)
-        self.assertIn(f"; 1 of its processes could not be ended and may still be running: PID {spared[0]}", str(e.exception))
-        self.assertTrue(running(spared[0]))
+        worker = self.worker(within=0.1)
+        self.assertIn(f"; 1 of its processes could not be ended and may still be running: PID {worker}", str(e.exception))
+        self.assertTrue(running(worker))
 
     def test_a_command_that_ends_and_leaves_a_process_running(self):
         """The command ends by itself, with success or with failure, and a process it started is still
@@ -353,15 +354,9 @@ class Limit(unittest.TestCase):
     def test_known_survivor_after_clean_exit_stops_job_with_error(self):
         """Finding #6: a survivor after a command exits must raise an error (not let the next command run)
         and must not falsely claim 'the runner ended them'."""
-        real, spared = os.kill, []
-
-        def kill(pid, signum):
-            if pid not in spared:
-                real(pid, signum)
-
+        # The command ends once the worker has said its PID, so the file is there before the runner signals.
         cmd = [sys.executable, "-c", LEAVES, OWN_GROUP, str(self.pid_file), "0"]
-        with open(self.dir / "runner.log", "w") as log, patch.object(runner.os, "kill", kill):
-            threading.Thread(target=lambda: spared.append(self.worker()), daemon=True).start()
+        with open(self.dir / "runner.log", "w") as log, self.no_signal_reaches_the_worker():
             job = runner.Job(log, 15)
             with self.assertRaises(RuntimeError) as e:
                 job.run(cmd, cwd=self.dir)
@@ -369,7 +364,7 @@ class Limit(unittest.TestCase):
             self.assertEqual(len(job.left_running), 1)
             self.assertNotIn("the runner ended them", job.left_running[0])
             self.assertIn("ended 0", job.left_running[0])
-        self.assertTrue(running(spared[0]))
+        self.assertTrue(running(self.worker(within=0.1)))
 
     def test_child_in_new_session_of_in_session_parent_is_killed_when_leader_exits(self):
         """Finding #4: a worker in a new session whose parent is in the job's session is still found and
