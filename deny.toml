@@ -1,0 +1,31 @@
+# What a dependency of the four crates must be (CONTRIBUTING.md, "The
+# dependency policy"): free of advisories in RustSec's database, not
+# yanked, from crates.io, and under a licence listed here. CI holds
+# b3sum/Cargo.lock to it:
+#
+#     cargo deny --manifest-path b3sum/Cargo.toml --locked check
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+]
+confidence-threshold = 0.8

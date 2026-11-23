@@ -464,6 +464,28 @@ where the two differ. To change a dependency: change it in `b3sum/`
 `sh tools/crates-release.sh --relock`, read the lock's change, and commit
 it.
 
+### The dependency policy
+
+Every package in `b3sum/Cargo.lock` (the four crates and all they bring)
+passes two checks in CI (`dependency policy`), each tool fetched by its
+hash:
+
+- `cargo deny --manifest-path b3sum/Cargo.toml --locked check`, against
+  `deny.toml`: no advisory in RustSec's database, no yanked version,
+  crates.io as the one source, and a licence of MIT or Apache-2.0.
+- `cargo vet --manifest-path b3sum/Cargo.toml --locked`, against
+  `b3sum/supply-chain/`: every version has an audit published by Mozilla,
+  Google, the Bytecode Alliance, Zcash, Embark or ISRG, or an exemption
+  recorded in `config.toml`. The exemptions are the versions that were in
+  the lock when the check began (November 2026): a list to shorten, one
+  audit at a time.
+
+A commit that changes a dependency runs both. For a new version without
+a published audit, read what changed (`cargo vet diff NAME OLD NEW`, in
+`b3sum/`) and record the audit with `cargo vet certify`, or add an
+exemption and give the reason in the commit. The libraries' test
+dependencies, which the release lock adds to these, are not yet checked.
+
 ### Every artifact is a clean build of the version commit
 
 Before anything is published, the release's artifacts are gathered in the

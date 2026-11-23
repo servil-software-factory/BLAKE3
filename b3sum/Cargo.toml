@@ -9,6 +9,9 @@ repository = "https://github.com/servil-software-factory/BLAKE3"
 license = "MIT OR Apache-2.0 OR TGPPL-1.0" # OR BOSL-1.0, see LICENSE-BOSL.txt
 readme = "README.md"
 edition = "2024"
+# The dependencies' audits (CONTRIBUTING.md, "The dependency policy") stay
+# in the repository: the crate's archive holds what builds the program.
+exclude = ["/supply-chain"]
 
 [[bin]]
 name = "b3sum"
