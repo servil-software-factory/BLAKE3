@@ -636,7 +636,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
                 for ((&i, block), len) in group.iter().zip(&mut last_blocks).zip(&mut lengths) {
                     let tail = &items[i][k * crate::BLOCK_LEN..];
                     block[..tail.len()].copy_from_slice(tail);
-                    *len = tail.len() as u32;
+                    *len = u32::from(tail.len().to_le_bytes()[0]);
                 }
                 let lasts: crate::stack_vec::StackVec<*const u8, GROUP> = last_blocks[..group.len()].iter().map(|b| b.as_ptr()).collect();
                 let mut digests = [0u8; GROUP * OUT_LEN];
@@ -705,7 +705,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
         let last = item.len() - k * crate::BLOCK_LEN;
         block[..last].copy_from_slice(&item[k * crate::BLOCK_LEN..]);
         let start = if k == 0 { CHUNK_START } else { 0 };
-        platform.compress_in_place(&mut cv, &block, last as u8, 0, flags | start | CHUNK_END | crate::ROOT);
+        platform.compress_in_place(&mut cv, &block, last.to_le_bytes()[0], 0, flags | start | CHUNK_END | crate::ROOT);
         out[i] = crate::hasher::le_bytes(&cv);
     }
 }
@@ -858,7 +858,7 @@ fn hash_each_middle<I: Item>(
 }
 
 /// The lanes of one call to the kernels within a round of [`hash_each_on`].
-const LANES_AT_ONCE: usize = TABLE;
+pub(crate) const LANES_AT_ONCE: usize = TABLE;
 
 /// What [`hash_each_on`] keeps on a thread between calls, for a
 /// collection's messages of 2 to ALONE_CHUNKS - 1 chunks: each one's index

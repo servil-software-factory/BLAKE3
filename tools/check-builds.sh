@@ -19,7 +19,8 @@ step() { echo "== $*"; "$@"; }
 # the release commit alone, X.Y.Z+dev after it).
 step python3 tools/gen-ver.py --check
 step python3 tools/unsafe_reasons.py
-step cargo nextest run --cargo-quiet --release --no-default-features
+step sh -c 'base=$(git rev-parse --verify -q origin/next || git rev-parse --verify -q HEAD~1); [ -n "$base" ] || { echo "counts: cannot resolve base revision" >&2; exit 1; }; python3 tools/counts.py --check "$base"'
+RUSTFLAGS="-D warnings" step cargo nextest run --cargo-quiet --release --no-default-features
 # nextest skips doc tests: the examples without std too, where Batch is absent.
 step cargo test -q --release --doc --no-default-features
 # An example that must not compile names the compiler's reason
@@ -29,7 +30,9 @@ step cargo test -q --release --doc --no-default-features
 step sh -c 'RUSTC_BOOTSTRAP=1 cargo test -q --doc --features serde && cd threads && RUSTC_BOOTSTRAP=1 cargo test -q --doc'
 RUSTFLAGS="-D warnings" step cargo check -q --lib --no-default-features
 RUSTFLAGS="-D warnings" step cargo check -q --lib --no-default-features --features serde
+RUSTFLAGS="-D warnings" step cargo check -q --tests --no-default-features --features serde
 RUSTFLAGS="-D warnings" step cargo check -q --release --tests --examples
+RUSTFLAGS="-D warnings" step cargo check -q --release --all-features --tests --examples
 # The crate with the pool (threads/). One CPU, as in a one-CPU container:
 # the pool has no worker thread, and the caller hashes everything (the
 # suites run on many CPUs and never reach that path). The CPU is the
@@ -46,9 +49,20 @@ step sh -c 'cd threads && RUSTFLAGS="--cfg shuttle" cargo test -q --release --te
 step python3 tools/pipeline_model_controls.py
 # Shuttle's SC model cannot check the RCpc wake-publication barrier.
 step python3 tools/check-waker-order.py
+RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo nextest run --cargo-quiet --release --no-default-features'
+RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --lib --no-default-features --features serde'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --tests'
+RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --all-features --tests'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --tests --target x86_64-unknown-linux-gnu'
 RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path b3sum/Cargo.toml
+RUSTFLAGS="-D warnings" step cargo check -q --release --tests --manifest-path b3sum/Cargo.toml
+RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path version/Cargo.toml
+# Cross-check macOS b3sum compilation under -D warnings on Linux build hosts.
+CC_aarch64_apple_darwin=clang RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path b3sum/Cargo.toml --target aarch64-apple-darwin
+# Crate [lints.clippy] enforcement (no silent narrowing `as`, no b3sum stdout/stderr print macros).
+for manifest in Cargo.toml threads/Cargo.toml b3sum/Cargo.toml capi/Cargo.toml version/Cargo.toml; do
+    step cargo clippy -q --manifest-path "$manifest" --no-deps -- -D warnings
+done
 # The C API (capi/): its Rust tests, and b3.h compiled as C11 and run.
 RUSTFLAGS="-D warnings" step cargo nextest run --cargo-quiet --release --manifest-path capi/Cargo.toml
 RUSTFLAGS="-D warnings" step cargo check -q --tests --examples --target x86_64-unknown-linux-gnu

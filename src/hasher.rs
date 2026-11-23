@@ -128,7 +128,7 @@ impl CvStack {
         // byte here to be unwritten. clone_from may write a fresh slot.
         let rows = unsafe { &mut *self.rows.as_mut_ptr().cast::<[[core::mem::MaybeUninit<Cv>; ROW]; ROWS]>() };
         rows[slot][..row.len()].write_copy_of_slice(row);
-        self.widths[slot] = row.len() as u8;
+        self.widths[slot] = row.len().to_le_bytes()[0];
         self.wide |= 1 << i;
     }
 
@@ -248,7 +248,8 @@ impl CvStack {
             len /= 2;
             // The rows that were two wide are one value each now: the
             // narrowest, so the run's last.
-            for _ in 0..rows {
+            let limit = rows;
+            for _ in 0..limit {
                 if self.row(order[rows - 1]).len() == 1 << layer {
                     rows -= 1;
                     len -= 1;
@@ -307,6 +308,7 @@ impl CvStack {
             }
         }
         let slot = self.len % ROWS;
+        // Sound: `slot < ROWS`, so `place` stays within `self.rows`'s `ROWS` elements.
         let place = unsafe { (self.rows.as_mut_ptr() as *mut [Cv; ROW]).add(slot) };
         if self.ready >> slot & 1 == 0 {
             // Sound: the slot's own storage.
@@ -316,7 +318,7 @@ impl CvStack {
         // Sound: the slot's storage, every byte of it written (now or before).
         let width = fill(unsafe { &mut *place });
         assert!((4..=ROW).contains(&width) && width.is_power_of_two(), "a row of 4 to ROW values, a power of two");
-        self.widths[slot] = width as u8;
+        self.widths[slot] = width.to_le_bytes()[0];
         self.wide |= 1 << self.len;
         self.len += 1;
     }
@@ -466,7 +468,7 @@ pub fn subtree_len(counter: u64, remaining: usize) -> usize {
     } else {
         // The lowest 1-bit as a mask, compared in u64: no shift to bound,
         // and the result is at most `len`, so it fits a usize.
-        (len as u64).min(so_far & so_far.wrapping_neg()) as usize
+        usize::try_from((len as u64).min(so_far & so_far.wrapping_neg())).expect("bounded by len: usize")
     }
 }
 
@@ -778,7 +780,7 @@ impl<P: Blocks> ChunkState<P> {
         let take = if want < input.len() { want } else { input.len() };
         let start = self.buf_len as usize;
         self.buf[start..start + take].copy_from_slice(&input[..take]);
-        self.buf_len += take as u8;
+        self.buf_len += take.to_le_bytes()[0];
         take
     }
 
@@ -795,7 +797,7 @@ impl<P: Blocks> ChunkState<P> {
             input = &input[take..];
             if !input.is_empty() {
                 let block_flags = self.flags | self.start_flag();
-                self.platform.compress_in_place(&mut self.cv, &self.buf, BLOCK_LEN as u8, self.chunk_counter, block_flags);
+                self.platform.compress_in_place(&mut self.cv, &self.buf, u8::try_from(BLOCK_LEN).unwrap(), self.chunk_counter, block_flags);
                 self.buf_len = 0;
                 self.buf = [0; BLOCK_LEN];
                 self.blocks_compressed += 1;
@@ -805,7 +807,7 @@ impl<P: Blocks> ChunkState<P> {
             let count = (input.len() - 1) / BLOCK_LEN;
             let start_flag = self.start_flag();
             self.platform.compress_blocks(&mut self.cv, input, count, self.chunk_counter, self.flags, start_flag);
-            self.blocks_compressed += count as u8;
+            self.blocks_compressed += count.to_le_bytes()[0];
             input = &input[count * BLOCK_LEN..];
         }
         self.fill_buf(input);
@@ -874,7 +876,7 @@ pub fn parent_output<P>(left: &[u8; 32], right: &[u8; 32], key: &[u32; 8], flags
     let mut block = [0u8; BLOCK_LEN];
     block[..32].copy_from_slice(left);
     block[32..].copy_from_slice(right);
-    Output { block, input_chaining_value: *key, block_len: BLOCK_LEN as u8, counter: 0, flags: flags | PARENT, platform }
+    Output { block, input_chaining_value: *key, block_len: u8::try_from(BLOCK_LEN).unwrap(), counter: 0, flags: flags | PARENT, platform }
 }
 
 /// The chunk state the Hasher's loop (above) works with.

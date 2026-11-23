@@ -62,7 +62,7 @@ pub(crate) fn parent(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8,
         let last = &partial[paired * BLOCK_LEN..];
         let mut block = [0u8; BLOCK_LEN];
         block[..last.len()].copy_from_slice(last);
-        platform.compress_in_place(&mut cv, &block, last.len() as u8, chunk_counter + 1, flags | CHUNK_END);
+        platform.compress_in_place(&mut cv, &block, last.len().to_le_bytes()[0], chunk_counter + 1, flags | CHUNK_END);
         out[OUT_LEN..].copy_from_slice(&crate::hasher::le_bytes(&cv));
     }
     out
@@ -104,7 +104,7 @@ pub(crate) unsafe fn hash_many_blocks(
                 // Sound: `p` reaches `blocks` blocks.
                 let block: &[u8; BLOCK_LEN] = unsafe { &*(p.add(b * BLOCK_LEN) as *const [u8; BLOCK_LEN]) };
                 let f = flags | if b == 0 { flags_start } else { 0 } | if b + 1 == blocks { flags_end } else { 0 };
-                platform.compress_in_place(&mut cv, block, BLOCK_LEN as u8, counter + if increment { i as u64 } else { 0 }, f);
+                platform.compress_in_place(&mut cv, block, u8::try_from(BLOCK_LEN).unwrap(), counter + if increment { i as u64 } else { 0 }, f);
             }
             out[i * OUT_LEN..][..OUT_LEN].copy_from_slice(&crate::hasher::le_bytes(&cv));
         }
@@ -113,10 +113,12 @@ pub(crate) unsafe fn hash_many_blocks(
     let (n, input, key, out) = (inputs.len(), inputs.as_ptr(), key.as_ptr(), out.as_mut_ptr());
     match platform {
         #[cfg(blake3_avx2_ffi)]
+        // Sound: `Platform::AVX2` proves AVX2 support; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
         Platform::AVX2 => unsafe {
             crate::avx2::ffi::blake3_servil_hash_many_avx2(input, n, blocks, key, counter, increment, flags, flags_start, flags_end, out)
         },
         #[cfg(blake3_avx512_ffi)]
+        // Sound: `Platform::AVX512` proves AVX-512F+VL support; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
         Platform::AVX512 => unsafe {
             crate::avx512::ffi::blake3_servil_hash_many_avx512(input, n, blocks, key, counter, increment, flags, flags_start, flags_end, out)
         },

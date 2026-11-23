@@ -669,6 +669,7 @@ pub unsafe fn compress_blocks(cv: &mut CVWords, blocks: *const u8, count: usize,
     // at its end, so `cv` serves as both: the output words land in place,
     // in the little-endian layout CVWords has on this target.
     let cv_ptr = cv.as_mut_ptr();
+    // Sound: caller guarantees `count` in 1..=16 and `count * BLOCK_LEN` readable bytes at `blocks`; `cv` is valid for in-place read/write.
     unsafe {
         let last = blocks.add((count - 1) * BLOCK_LEN);
         crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
@@ -694,7 +695,7 @@ pub fn compress_in_place(cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u
     let packed = flags as u64 | (block_len as u64) << 24;
     // `cv` is key and output at once; see compress_blocks.
     let cv_ptr = cv.as_mut_ptr();
-    // Safe: the block is 64 readable bytes and the count is 1.
+    // Sound: `block` is 64 readable bytes, count is 1, and `cv` is valid for in-place read/write.
     unsafe {
         let block = block.as_ptr();
         crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
@@ -729,6 +730,7 @@ pub unsafe fn hash_chunk(
     debug_assert!((1..=16).contains(&blocks));
     debug_assert!(last_len as usize <= BLOCK_LEN);
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (last_len as u64) << 24;
+    // Sound: caller guarantees `(blocks - 1) * 64` readable bytes at `input` and `blocks` in 1..=16; `last`, `key`, and `out` are valid references.
     unsafe {
         crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
         asm::blake3_servil_hybrid_c1(input, blocks as u64, key.as_ptr(), counter, packed, out.as_mut_ptr(), last.as_ptr());
@@ -834,6 +836,7 @@ pub unsafe fn hash_chunks_with_partial(
     let lead = chunks.len().saturating_sub(9);
     if lead > 0 {
         let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (BLOCK_LEN as u64) << 24;
+        // Sound: `lead <= chunks.len()`, each chunk is 1024 readable bytes, and `out` was asserted large enough for `chunks.len() + 1` digests.
         unsafe {
             run_plan(CHUNK_PLANS[lead], &CHUNK_KERNELS, chunks.as_ptr() as *const *const u8, CHUNK_LEN / BLOCK_LEN, key, counter, 1, packed, out);
         }
@@ -852,6 +855,7 @@ pub unsafe fn hash_chunks_with_partial(
         let table = [chunks[0].as_ptr(), padded.as_ptr(), chunks[0].as_ptr()];
         let mut cvs = [0u8; 3 * OUT_LEN];
         let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (BLOCK_LEN as u64) << 24;
+        // Sound: `table` points to 3 valid 1024-byte buffers, `cvs` holds 3 digests, and `q1` was selected after SHA-3 detection.
         unsafe {
             kernel(table.as_ptr(), (CHUNK_LEN / BLOCK_LEN) as u64, key.as_ptr(), counter, packed, cvs.as_mut_ptr(), blocks as u64 | (last_len as u64) << 8);
         }
@@ -870,6 +874,7 @@ pub unsafe fn hash_chunks_with_partial(
     }
     table[n] = padded.as_ptr();
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (BLOCK_LEN as u64) << 24;
+    // Sound: `table[..=n]` holds valid 1024-byte buffers (`n` whole chunks + padded partial) and `out` has room for `n + 1` digests.
     unsafe {
         kernel(table.as_ptr(), (CHUNK_LEN / BLOCK_LEN) as u64, key.as_ptr(), counter, packed, out.as_mut_ptr(), blocks as u64 | (last_len as u64) << 8);
     }
@@ -891,6 +896,7 @@ unsafe fn run_plan(
     for &size in plan {
         let kernel = kernels[size].expect("plan names an existing kernel");
         crate::ran_kernel(kernel as *const ());
+        // Sound: caller guarantees `inputs` has `plan.sum()` valid `blocks`-block pointers and `out` has matching `OUT_LEN` room.
         unsafe {
             kernel(inputs.add(done), blocks as u64, key.as_ptr(), counter + done as u64 * counter_step, packed_flags, out[done * OUT_LEN..].as_mut_ptr());
         }
@@ -915,6 +921,7 @@ pub unsafe fn hash_many<const N: usize>(
     flags_end: u8,
     out: &mut [u8],
 ) {
+    // Sound: caller verified NEON support; forwarding valid slices with full-block `last_len = BLOCK_LEN`.
     unsafe { hash_many_last_len(inputs, key, counter, increment_counter, flags, flags_start, flags_end, BLOCK_LEN, out) }
 }
 
@@ -933,6 +940,7 @@ pub unsafe fn hash_many_last_len<const N: usize>(
     last_len: usize,
     out: &mut [u8],
 ) {
+    // Sound: caller verified NEON support; `family()` selects only kernels supported by this CPU.
     unsafe { hash_many_in(family(), inputs, key, counter, increment_counter, flags, flags_start, flags_end, last_len, out) }
 }
 
@@ -967,6 +975,7 @@ unsafe fn hash_many_in<const N: usize>(
     let mut done = 0;
     while done < inputs.len() {
         let count = core::cmp::min(GROUP, inputs.len() - done);
+        // Sound: `done + count <= inputs.len()`, `inputs` holds valid `N`-byte references, and `out` was asserted to hold `inputs.len() * OUT_LEN` bytes.
         unsafe {
             run_plan(
                 plans[count],
@@ -1008,6 +1017,7 @@ pub unsafe fn hash_messages_raw(
     assert!((1..=16).contains(&blocks) && (1..=BLOCK_LEN).contains(&last_len), "1 to 16 blocks, the last of 1 to 64 bytes");
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (last_len as u64) << 24;
     let family = family();
+    // Sound: caller verified NEON and `count` valid `blocks`-block pointers in `table`; `out` was asserted to hold `count * OUT_LEN` bytes.
     unsafe { run_plan(family.parent_plans[count], family.parent_kernels, table, blocks, key, counter, 0, packed, out) };
 }
 
@@ -1037,7 +1047,7 @@ pub unsafe fn hash_last_lanes(
 ) {
     let count = inputs.len();
     assert!(count >= 1 && count <= GROUP && lasts.len() == count && lens.len() == count, "1 to GROUP items, a last block and a length each");
-    assert!((1..=16).contains(&blocks) && lens.iter().all(|&l| l <= BLOCK_LEN as u32), "1 to 16 blocks, the last of 0 to 64 bytes");
+    assert!((1..=16).contains(&blocks) && lens.iter().all(|&l| l <= u32::try_from(BLOCK_LEN).unwrap()), "1 to 16 blocks, the last of 0 to 64 bytes");
     assert!(out.len() >= count * OUT_LEN, "room for every digest");
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16;
     if count == 1 {

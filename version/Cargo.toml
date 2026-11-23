@@ -8,3 +8,16 @@ repository = "https://github.com/servil-software-factory/BLAKE3"
 license = "MIT OR Apache-2.0 OR TGPPL-1.0" # OR BOSL-1.0, see LICENSE-BOSL.txt
 edition = "2024"
 include = ["/src", "/build.rs", "/build_version.rs", "/LICENSE-*"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+unreachable_patterns = "deny"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+style = { level = "allow", priority = -1 }
+perf = { level = "allow", priority = -1 }
+cast_possible_truncation = "deny"

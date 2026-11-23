@@ -1,10 +1,10 @@
 use crate::{BLOCK_LEN, CHUNK_LEN, CVWords, IncrementCounter};
 
-// The most chunks one call hashes: AVX-512's 32 (16 off Linux), SME2's,
-// NEON's 16. Every platform hashes at least four, so the walk's arrays
-// (src/tree.rs) hold two values or more.
+// The most chunks one call hashes: AVX-512's 32 on x86-64 (build.rs allows
+// x86-64 only on Linux), SME2's, NEON's 16. Every platform hashes at least
+// four, so the walk's arrays (src/tree.rs) hold two values or more.
 #[cfg(target_arch = "x86_64")]
-pub const MAX_SIMD_DEGREE: usize = if cfg!(target_os = "linux") { 32 } else { 16 };
+pub const MAX_SIMD_DEGREE: usize = 32;
 #[cfg(all(not(target_arch = "x86_64"), blake3_sme2))]
 // See sme2::DEGREE.
 pub const MAX_SIMD_DEGREE: usize = crate::sme2::DEGREE;
@@ -164,7 +164,7 @@ const fn with_platform(detected: u16, platform: u8) -> u16 {
 #[cfg(any(all(blake3_sme2, feature = "std"), blake3_neon, feature = "std", test))]
 #[inline]
 pub(crate) fn is_initialized() -> bool {
-    DETECTED.load(core::sync::atomic::Ordering::Relaxed) as u8 != 0
+    DETECTED.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes()[0] != 0
 }
 
 /// A call before `initialize`: the caller broke the contract. The crate's
@@ -212,7 +212,7 @@ impl Platform {
     /// which every call makes anyway.
     #[inline]
     pub fn detect() -> Self {
-        let mut code = DETECTED.load(core::sync::atomic::Ordering::Relaxed) as u8;
+        let mut code = DETECTED.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes()[0];
         if code == 0 {
             code = not_initialized();
         }
@@ -304,13 +304,7 @@ impl Platform {
             Platform::AVX2 => 8,
             #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
-            Platform::AVX512 => {
-                if cfg!(target_os = "linux") {
-                    32
-                } else {
-                    16
-                }
-            }
+            Platform::AVX512 => 32,
             // Sixteen chunks per call reach the k10 kernel (see
             // neon_hybrid), in both its families.
             #[cfg(blake3_neon)]
@@ -324,10 +318,10 @@ impl Platform {
 
     pub(crate) fn compress_in_place(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
         match self {
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID or compile-time target-feature verification.
             #[cfg(blake3_sse41_ffi)]
             Platform::SSE41 | Platform::AVX2 => unsafe { crate::sse41::compress_in_place(cv, block, block_len, counter, flags) },
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::compress_in_place(cv, block, block_len, counter, flags) },
@@ -349,6 +343,7 @@ impl Platform {
         // The integer-only kernel runs on every AArch64 core.
         #[cfg(blake3_neon)]
         {
+            // Sound: `count` is asserted in `1..=16` and `blocks` holds at least `count * BLOCK_LEN` readable bytes.
             unsafe {
                 crate::neon_hybrid::compress_blocks(cv, blocks.as_ptr(), count, counter, flags, flags_start);
             }
@@ -358,7 +353,7 @@ impl Platform {
         {
             let mut block_flags = flags | flags_start;
             for block in blocks[..count * BLOCK_LEN].chunks_exact(BLOCK_LEN) {
-                self.compress_in_place(cv, block.try_into().unwrap(), BLOCK_LEN as u8, counter, block_flags);
+                self.compress_in_place(cv, block.try_into().unwrap(), u8::try_from(BLOCK_LEN).unwrap(), counter, block_flags);
                 block_flags = flags;
             }
         }
@@ -366,10 +361,10 @@ impl Platform {
 
     pub(crate) fn compress_xof(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) -> [u8; 64] {
         match self {
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID or compile-time target-feature verification.
             #[cfg(blake3_sse41_ffi)]
             Platform::SSE41 | Platform::AVX2 => unsafe { crate::sse41::compress_xof(cv, block, block_len, counter, flags) },
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::compress_xof(cv, block, block_len, counter, flags) },
@@ -411,21 +406,23 @@ impl Platform {
             if increment_counter.yes() { N == CHUNK_LEN } else { N <= CHUNK_LEN },
             "hash_many takes whole chunks at incrementing counters, or 1 to 16 blocks at one counter"
         );
+        #[cfg(all(test, feature = "std"))]
+        crate::counted(crate::Counted::HashManyCall);
         match self {
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::SSE41` is constructed only after CPUID or compile-time target-feature verification.
             #[cfg(blake3_sse41_ffi)]
             Platform::SSE41 => unsafe { crate::sse41::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::AVX2` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
             #[cfg(blake3_avx2_ffi)]
             Platform::AVX2 => unsafe { crate::avx2::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
-            // Assumed to be safe if the "neon" feature is on.
+            // Sound: `Platform::NEON` is built only on AArch64 where NEON is baseline.
             #[cfg(blake3_neon)]
             Platform::NEON => unsafe { crate::neon_hybrid::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
-            // Safe because detect() checked for SME2 with a 512-bit vector length.
+            // Sound: startup verified FEAT_SME2; SME2 assembly checks the calling thread's SVL at entry and falls back to NEON if != 512 bits.
             #[cfg(blake3_sme2)]
             Platform::SME2 => unsafe { crate::sme2::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
         }
@@ -439,7 +436,7 @@ impl Platform {
             return;
         }
         match self {
-            // Safe because detect() checked for platform support.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(unix)]
             #[cfg(target_arch = "x86_64")]
@@ -451,7 +448,7 @@ impl Platform {
                 let out = {
                     let turn = Sme2Turn::take(*self, out.len() >= 16 * BLOCK_LEN);
                     let done = if matches!(turn.platform(), Platform::SME2) {
-                        // Safe: the turn's platform is SME2 only where detect() found it.
+                        // Sound: startup verified FEAT_SME2; SME2 xof_many checks the calling thread's SVL at entry and declines if != 512 bits.
                         unsafe { crate::sme2::xof_many(cv, block, block_len, counter, flags, out) }
                     } else {
                         0
@@ -618,7 +615,7 @@ fn read_cpu_words() -> CpuWords {
     let mut words = CpuWords { leaf1_eax: leaf1.eax, leaf1_ecx: leaf1.ecx, ..CpuWords::default() };
     if os_saves_avx(leaf1.ecx) {
         // Sound: OSXSAVE (bit 27) says the OS enabled XGETBV.
-        words.xcr0 = unsafe { arch::_xgetbv(0) } as u32;
+        words.xcr0 = u32::from_le_bytes(unsafe { arch::_xgetbv(0) }.to_le_bytes()[..4].try_into().unwrap());
         // Sound: as leaf 1; leaf 7 exists where AVX does, and leaf 0 names
         // the vendor.
         #[allow(unused_unsafe)]
@@ -839,6 +836,7 @@ pub fn sme2_detected() -> bool {
             detected
         }
     };
+    // Sound: `cached` is true only after `sme2_reported()` confirmed HWCAP2_SME2, so `rdsvl` is legal.
     #[cfg(target_os = "linux")]
     return if cached { sme2_svl_ok(unsafe { crate::sme2::svl_lanes() }) } else { false };
     #[cfg(not(target_os = "linux"))]
@@ -855,7 +853,7 @@ fn sme2_detect_uncached() -> bool {
     return true;
     #[cfg(not(target_os = "linux"))]
     {
-        // Side-effect-free `rdsvl` check: never enters streaming mode or touches ZA.
+        // Sound: `sme2_reported()` confirmed FEAT_SME2 above; side-effect-free `rdsvl` never enters streaming mode or touches ZA.
         sme2_svl_ok(unsafe { crate::sme2::svl_lanes() })
     }
 }
@@ -864,6 +862,7 @@ fn sme2_detect_uncached() -> bool {
 fn sme2_reported() -> bool {
     let mut value: u32 = 0;
     let mut size = core::mem::size_of::<u32>();
+    // Sound: `value` and `size` are live writable stack storage for a 4-byte sysctl query.
     let rc =
         unsafe { libc::sysctlbyname(c"hw.optional.arm.FEAT_SME2".as_ptr(), &mut value as *mut u32 as *mut libc::c_void, &mut size, core::ptr::null_mut(), 0) };
     rc == 0 && value != 0
@@ -875,6 +874,7 @@ fn sme2_reported() -> bool {
     // The libc crate doesn't expose either for glibc targets yet.
     const AT_HWCAP2: libc::c_ulong = 26;
     const HWCAP2_SME2: libc::c_ulong = 1 << 37;
+    // Sound: `getauxval` reads the immutable auxiliary vector without dereferencing caller pointers.
     let hwcap2 = unsafe { libc::getauxval(AT_HWCAP2) };
     hwcap2 & HWCAP2_SME2 != 0
 }
@@ -952,7 +952,7 @@ mod x86_degree_test {
         let has_avx2 = has_sse41 && std::is_x86_feature_detected!("avx2");
         let has_avx512 = has_avx2 && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl");
         let expected = if has_avx512 {
-            if cfg!(target_os = "linux") { 32 } else { 16 }
+            32
         } else if has_avx2 {
             8
         } else {

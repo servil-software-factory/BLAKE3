@@ -36,7 +36,7 @@ unsafe extern "C" {
 /// shuffles within itself, so the pattern repeats every four words.
 fn rotation<const W: usize>(r: u32) -> [u32; W] {
     core::array::from_fn(|k| {
-        let base = 4 * (k as u32 % 4);
+        let base = 4 * u32::from((k % 4).to_le_bytes()[0]);
         (0..4).map(|i| (base + (i + r) % 4) << (8 * i)).fold(0, |a, b| a | b)
     })
 }
@@ -61,7 +61,7 @@ fn hash_chunks_with_partial<const W: usize>(
     let mut padded = [0u8; CHUNK_LEN];
     padded[..partial.len()].copy_from_slice(partial);
     let last = partial.len().div_ceil(64) - 1;
-    let last_len = (partial.len() - 64 * last) as u32;
+    let last_len = u32::from((partial.len() - 64 * last).to_le_bytes()[0]);
     let flags = flags as u32;
     let mut p = Params::<W> {
         msg: [padded.as_ptr(); W],
@@ -69,10 +69,13 @@ fn hash_chunks_with_partial<const W: usize>(
         iv: core::array::from_fn(|i| [IV[i]; W]),
         rot16: rotation(2),
         rot8: rotation(1),
-        ctr: [core::array::from_fn(|j| (counter + j as u64) as u32), core::array::from_fn(|j| ((counter + j as u64) >> 32) as u32)],
+        ctr: [
+            core::array::from_fn(|j| u32::from_le_bytes((counter + j as u64).to_le_bytes()[..4].try_into().unwrap())),
+            core::array::from_fn(|j| u32::from_le_bytes((counter + j as u64).to_le_bytes()[4..].try_into().unwrap())),
+        ],
         lens: [[64; W]; 16],
         flags: [[flags; W]; 16],
-        last: core::array::from_fn(|i| if i == 0 { 64 * last as u32 } else { 0 }),
+        last: core::array::from_fn(|i| if i == 0 { 64 * u32::from(last.to_le_bytes()[0]) } else { 0 }),
         h: [[0; W]; 8],
         snap: [[0; W]; 8],
     };

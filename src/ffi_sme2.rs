@@ -84,6 +84,7 @@ type Kernel = unsafe extern "C" fn(*const u8, *const u32, u64, u32, *mut u8, u64
 /// The CPU must implement SME2 (`sme2_reported()`).
 #[inline]
 pub(crate) unsafe fn svl_lanes() -> u64 {
+    // Sound: caller verified `sme2_reported()`; `rdsvl` reads SVL without entering streaming mode or touching ZA.
     unsafe { ffi::blake3_servil_sme2_svl_lanes() }
 }
 
@@ -128,6 +129,7 @@ pub unsafe fn hash_many<const N: usize>(
     // count and one counter for every lane).
     let blocks = N / BLOCK_LEN;
     if kernel.is_none() && N % BLOCK_LEN == 0 && (2..=16).contains(&blocks) && !increment_counter.yes() && full_groups > 0 {
+        // Sound: caller verified SME2 support; `inputs` holds `full_groups * GROUP` valid `N`-byte pointers and `out` was asserted large enough above.
         let lanes = unsafe {
             ffi::blake3_servil_sme2_hash16_messages_512(
                 inputs.as_ptr() as *const *const u8,
@@ -169,6 +171,7 @@ pub unsafe fn hash_many<const N: usize>(
                 for (i, input) in inputs[group * GROUP..][..groups * GROUP].iter().enumerate() {
                     buf[i * BLOCK_LEN..][..BLOCK_LEN].copy_from_slice(&input[..]);
                 }
+                // Sound: caller verified SME2 support; `buf` holds `groups * GROUP` contiguous 64-byte blocks and `out` has room for all groups.
                 let lanes = unsafe { kernel(buf.as_ptr(), key.as_ptr(), counter, packed_flags, out[group * GROUP * OUT_LEN..].as_mut_ptr(), groups as u64) };
                 if !svl_ok(lanes) {
                     break;
@@ -178,6 +181,7 @@ pub unsafe fn hash_many<const N: usize>(
             }
             done = group * GROUP;
         } else {
+            // Sound: caller verified SME2 support; `inputs` holds `full_groups * GROUP` valid chunk pointers and `out` has matching room.
             let lanes = unsafe { kernel(inputs.as_ptr() as *const u8, key.as_ptr(), counter, packed_flags, out.as_mut_ptr(), full_groups as u64) };
             if svl_ok(lanes) {
                 crate::ran_kernel(kernel as *const ());
@@ -196,6 +200,7 @@ pub unsafe fn hash_many<const N: usize>(
     let rest = inputs.len() - done;
     if N == BLOCK_LEN && !increment_counter.yes() && done > 0 && rest >= OVERLAP_MIN && rest < GROUP {
         let mut last = [0u8; GROUP * OUT_LEN];
+        // Sound: caller verified SME2 support; `inputs.len() >= done >= GROUP` and `last` holds `GROUP * OUT_LEN` writable bytes.
         unsafe {
             hash_many(&inputs[inputs.len() - GROUP..], key, counter, increment_counter, flags, flags_start, flags_end, &mut last);
         }
@@ -205,8 +210,7 @@ pub unsafe fn hash_many<const N: usize>(
 
     if done < inputs.len() {
         let rest_counter = if increment_counter.yes() { counter + done as u64 } else { counter };
-        // Remainder (or all inputs if SME2 declined on a non-512-bit SVL):
-        // the NEON hybrid kernels handle any count.
+        // Sound: NEON is baseline on AArch64; `inputs[done..]` and `out[done * OUT_LEN..]` match remaining count.
         unsafe {
             crate::neon_hybrid::hash_many(&inputs[done..], key, rest_counter, increment_counter, flags, flags_start, flags_end, &mut out[done * OUT_LEN..]);
         }
@@ -295,6 +299,7 @@ pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, f
         return;
     }
     let stored = (count % GROUP) as u64;
+    // Sound: caller verified SME2 support; `lanes` holds whole groups of `N`-byte pointers and `out` holds `count * OUT_LEN` writable bytes.
     let lanes_returned = unsafe {
         ffi::blake3_servil_sme2_hash16_messages_512(
             lanes.as_ptr() as *const *const u8,
@@ -310,7 +315,7 @@ pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, f
         crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
         return;
     }
-    // Calling thread's SVL is not 512 bits (per-thread on Linux): fall back to NEON.
+    // Sound: NEON is baseline on AArch64; `lanes[..count]` and `out` hold `count` valid inputs/outputs.
     unsafe { crate::neon_hybrid::hash_many_last_len(&lanes[..count], key, 0, IncrementCounter::No, flags, flags_start, flags_end, last_len, out) };
 }
 
@@ -324,6 +329,7 @@ pub unsafe fn hash_groups_at(chunks: &[&[u8; CHUNK_LEN]], counters: &[u64], key:
     if counters.is_empty() {
         return;
     }
+    // Sound: caller verified SME2 support; `chunks`, `counters`, and `out` lengths were asserted to match `GROUP * counters.len()`.
     let lanes = unsafe {
         ffi::blake3_servil_sme2_hash16_chunks_at_512(
             chunks.as_ptr() as *const *const u8,
@@ -339,6 +345,7 @@ pub unsafe fn hash_groups_at(chunks: &[&[u8; CHUNK_LEN]], counters: &[u64], key:
         return;
     }
     for (g, (&counter, group)) in counters.iter().zip(chunks.chunks_exact(GROUP)).enumerate() {
+        // Sound: NEON is baseline on AArch64; each `group` has `GROUP` chunks and matching output slice.
         unsafe { crate::neon_hybrid::hash_many(group, key, counter, IncrementCounter::Yes, flags, flags_start, flags_end, &mut out[g * GROUP * OUT_LEN..]) };
     }
 }
@@ -380,10 +387,10 @@ pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key:
             core::ptr::addr_of_mut!((*base).table) as *mut *const u8,
         )
     };
-    // cvs holds node k of every lane at cvs + (16 k + lane) * 32, as the
-    // kernels write sixteen lanes contiguous per call and group.
+    // Sound: `cvs` holds `15 * GROUP` 32-byte slots and callers pass `k < chunks <= 15` and `lane < GROUP`.
     let cv = |k: usize, lane: usize| unsafe { cvs.add((GROUP * k + lane) * OUT_LEN) };
     let chunk_flags = flags as u64 | (CHUNK_START as u64) << 8 | (CHUNK_END as u64) << 16;
+    // Sound: caller verified SME2 support and readable block-padded lane buffers; `ChunkedScratch` holds 15 chunk levels, 7 parent groups, and 15*16 pointers.
     unsafe {
         for k in 0..chunks {
             for (i, lane) in lanes.iter().enumerate() {
@@ -451,6 +458,7 @@ pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key:
 unsafe fn hash_chunked_messages_neon(lanes: &[*const u8; GROUP], len: usize, key: &CVWords, flags: u8, out: &mut [u8]) {
     let count = out.len() / OUT_LEN;
     for (i, &ptr) in lanes.iter().take(count).enumerate() {
+        // Sound: caller's contract guarantees `ptr` points to at least `len` readable bytes.
         let message = unsafe { core::slice::from_raw_parts(ptr, len) };
         let digest = crate::hash_serial_on(message, key, flags, crate::platform::Platform::NEON);
         out[i * OUT_LEN..][..OUT_LEN].copy_from_slice(digest.as_bytes());
@@ -519,6 +527,7 @@ pub fn flat_subtree_takes(len: usize) -> bool {
 #[inline(never)]
 pub unsafe fn compress_subtree_flat(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8, out: &mut [u8]) -> usize {
     assert!(flat_subtree_takes(input.len()), "a whole subtree of 256 to 1024 chunks");
+    // Sound: caller verified SME2 support and `out` room for `DEGREE` CVs.
     unsafe { flat_walk(input, ahead, key, chunk_counter, flags, DEGREE, out) }
 }
 
@@ -537,6 +546,7 @@ pub unsafe fn compress_subtree_flat(input: &[u8], ahead: usize, key: &CVWords, c
 #[inline(never)]
 pub unsafe fn compress_subtree_flat_to_parent(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8) -> [u8; crate::BLOCK_LEN] {
     let mut out = [0u8; crate::BLOCK_LEN];
+    // Sound: caller verified SME2 support; `out` holds 2 CVs (`BLOCK_LEN` bytes).
     unsafe { flat_walk(input, ahead, key, chunk_counter, flags, 2, &mut out) };
     out
 }
@@ -551,6 +561,7 @@ pub unsafe fn compress_subtree_flat_to_parent(input: &[u8], ahead: usize, key: &
 #[inline(never)]
 pub unsafe fn compress_subtree_flat_to_cv(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8) -> crate::CVBytes {
     let mut out = [0u8; OUT_LEN];
+    // Sound: caller verified SME2 support; `out` holds 1 CV (`OUT_LEN` bytes).
     unsafe { flat_walk(input, ahead, key, chunk_counter, flags, 1, &mut out) };
     out
 }
@@ -596,6 +607,7 @@ unsafe fn flat_walk(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u6
 #[inline(never)]
 unsafe fn walk_on_stack(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize) -> usize {
     let mut block = Scratch([core::mem::MaybeUninit::<u8>::uninit(); SCRATCH]);
+    // Sound: `block` is a live 4 KiB-aligned `SCRATCH`-byte buffer exclusively owned by this frame.
     unsafe { walk_in(input, key, chunk_counter, flags, keep, out, n, block.0.as_mut_ptr() as *mut u8) }
 }
 
@@ -646,15 +658,18 @@ unsafe fn walk_in(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, ke
     let (cvs_at, half_at) = scratch_layout(n);
     let table = base as *mut *const u8;
     for i in 0..n {
+        // Sound: `scratch_layout` reserves `8 * n` bytes at `base` for the pointer table and `input` holds `n * CHUNK_LEN` bytes.
         unsafe { table.add(i).write(input.as_ptr().add(i * CHUNK_LEN)) };
     }
     let table = table as *const *const u8;
+    // Sound: `scratch_layout` asserted `cvs_at` and `half_at` and their working buffers fit inside `SCRATCH`.
     let (mut src, mut dst) = unsafe { (base.add(cvs_at), base.add(half_at)) };
 
     let chunk_flags = flags as u32 | (crate::CHUNK_START as u32) << 8 | (crate::CHUNK_END as u32) << 16;
     let lane_groups = 8 * (n / 144);
     let plain_groups = (n - HYBRID_GROUP * lane_groups) / GROUP;
     debug_assert_eq!(HYBRID_GROUP * lane_groups + GROUP * plain_groups, n);
+    // Sound: caller verified SME2 support; `table`, `src`, `dst`, and `out` all satisfy `scratch_layout` bounds and non-overlap.
     unsafe {
         if lane_groups > 0 {
             let lanes = ffi::blake3_servil_sme2x2_hash_chunks_512(table, key.as_ptr(), chunk_counter, chunk_flags, src, lane_groups as u64);
@@ -710,17 +725,20 @@ unsafe fn walk_in(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, ke
 #[allow(clippy::too_many_arguments)]
 unsafe fn walk_in_neon(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize, base: *mut u8) -> usize {
     let (cvs_at, half_at) = scratch_layout(n);
+    // Sound: `scratch_layout` verified `cvs_at` and `half_at` fit in `base[..SCRATCH]`.
     let (mut src, mut dst) = unsafe { (base.add(cvs_at), base.add(half_at)) };
-    // `base` backs `MaybeUninit<u8>` scratch: initialize both working ranges
+    // Sound: `base` backs `MaybeUninit<u8>` scratch; initialize both working ranges
     // through raw pointers before forming `&mut [u8]` slices.
     unsafe {
         core::ptr::write_bytes(src, 0, n * OUT_LEN);
         core::ptr::write_bytes(dst, 0, (n / 2) * OUT_LEN);
     }
     let chunks = input.as_chunks::<CHUNK_LEN>().0;
+    // Sound: `src[..n * OUT_LEN]` was just zero-initialized above and is exclusively owned.
     let src_bytes = unsafe { core::slice::from_raw_parts_mut(src, n * OUT_LEN) };
     for (g, group) in chunks.chunks(GROUP).enumerate() {
         let table: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], GROUP> = group.iter().collect();
+        // Sound: NEON is baseline on AArch64; `table` and `src_bytes` slice have matching `group.len()` entries.
         unsafe {
             crate::neon_hybrid::hash_many(
                 &table,
@@ -737,10 +755,12 @@ unsafe fn walk_in_neon(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u
     let mut count = n;
     while count > keep {
         let parents = count / 2;
+        // Sound: `src[..count * OUT_LEN]` and `dst[..parents * OUT_LEN]` are disjoint initialized slices inside `base[..SCRATCH]`.
         let pairs = unsafe { core::slice::from_raw_parts(src, count * OUT_LEN) }.as_chunks::<BLOCK_LEN>().0;
         let dst_bytes = unsafe { core::slice::from_raw_parts_mut(dst, parents * OUT_LEN) };
         for (g, group) in pairs.chunks(GROUP).enumerate() {
             let table: crate::stack_vec::StackVec<&[u8; BLOCK_LEN], GROUP> = group.iter().collect();
+            // Sound: NEON is baseline on AArch64; `table` and `dst_bytes` slice have matching `group.len()` entries.
             unsafe {
                 crate::neon_hybrid::hash_many(
                     &table,
@@ -757,6 +777,7 @@ unsafe fn walk_in_neon(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u
         count = parents;
         core::mem::swap(&mut src, &mut dst);
     }
+    // Sound: `src` holds `keep * OUT_LEN` initialized bytes disjoint from `out`.
     unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), keep * OUT_LEN) };
     keep
 }

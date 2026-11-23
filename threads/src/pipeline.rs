@@ -151,7 +151,7 @@ impl<T> RawSlots<T> {
 
     #[inline(always)]
     fn slot(&self, index: usize) -> *mut MaybeUninit<T> {
-        debug_assert!(index < self.len);
+        assert!(index < self.len);
         // Sound: `index < self.len`, within the owned allocation.
         unsafe { (*self.ptr.add(index)).get() }
     }
@@ -179,8 +179,8 @@ fn pack_arg(kind: u64, a: u32, b: u32, sme2: bool) -> u64 {
 fn unpack_arg(arg: u64) -> (u64, usize, usize) {
     let clean = arg & !ACTION_SME2;
     let kind = clean >> 61;
-    let a = ((clean >> 32) & 0x1fff_ffff) as usize;
-    let b = (clean as u32) as usize;
+    let a = usize::try_from((clean >> 32) & 0x1fff_ffff).expect("29-bit field fits usize");
+    let b = u32::from_le_bytes(clean.to_le_bytes()[..4].try_into().unwrap()) as usize;
     (kind, a, b)
 }
 
@@ -824,7 +824,8 @@ impl Shared {
 /// Settle the lazy merges of `count` equal-size pieces. The 1-bits of
 /// `count` name the whole subtrees left on the stack, largest first.
 fn merge_pieces(tree: &TreeHasher, stack: &mut [Cv], mut used: usize, count: u64) -> usize {
-    for _ in count.count_ones() as usize..used {
+    let merges = used.saturating_sub(count.count_ones() as usize);
+    for _ in 0..merges {
         stack[used - 2] = tree.parent_cv(&stack[used - 2], &stack[used - 1]);
         used -= 1;
     }
@@ -1172,7 +1173,7 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
         let (ptr, len) = (bytes.as_ptr(), bytes.len());
         core::mem::forget(unrecorded);
         self.submit_slice(s, ptr, len, true);
-        self.end_queue.push_back(s as u32);
+        self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
     }
 }
 
@@ -1222,7 +1223,7 @@ impl<T, B> Pipeline<T, B> {
 
         let mut local_free_rooms = Ring::new(limits.rooms.max(1));
         for i in 0..limits.rooms {
-            local_free_rooms.push_back(i as u32);
+            local_free_rooms.push_back(u32::try_from(i).expect("room index fits u32"));
         }
         // The storage's `Shared`, where it has one of this size: every task
         // of the Pipeline before is done (its drop saw to that), and only
@@ -1284,11 +1285,11 @@ impl<T, B> Pipeline<T, B> {
 
         let mut free_slots = Ring::new(m);
         for i in 0..m {
-            free_slots.push_back(i as u32);
+            free_slots.push_back(u32::try_from(i).expect("slot index fits u32"));
         }
         let mut free_pieces = Ring::new(p_cap);
         for i in 0..p_cap {
-            free_pieces.push_back(i as u32);
+            free_pieces.push_back(u32::try_from(i).expect("piece index fits u32"));
         }
 
         Pipeline {
@@ -1417,7 +1418,7 @@ impl<T, B> Pipeline<T, B> {
             for step in 0..count {
                 let i = (start + step) % count;
                 if shared.storage.rooms.refs[i].load(Ordering::Acquire) == 0 {
-                    self.local_free_rooms.push_back(i as u32);
+                    self.local_free_rooms.push_back(u32::try_from(i).expect("room index fits u32"));
                 }
             }
         }
@@ -1487,9 +1488,9 @@ impl<T, B> Pipeline<T, B> {
         let s = message.slot as usize;
         if matches!(self.slots[s].kind, SlotKind::OpenEmpty) && written < ROOM_LEN {
             let start_offset = room.offset;
-            room.offset = ((start_offset as usize + written).div_ceil(64) * 64).min(ROOM_LEN) as u32;
+            room.offset = u32::try_from(((start_offset as usize + written).div_ceil(64) * 64).min(ROOM_LEN)).expect("bounded by ROOM_LEN");
             room.take_credit();
-            self.slots[s].kind = SlotKind::OpenShort { room: room.index, offset: start_offset, len: written as u32 };
+            self.slots[s].kind = SlotKind::OpenShort { room: room.index, offset: start_offset, len: u32::try_from(written).expect("written < ROOM_LEN") };
             return;
         }
         self.commit_multi(s, room, written);
@@ -1504,7 +1505,7 @@ impl<T, B> Pipeline<T, B> {
             SlotKind::OpenEmpty => {
                 debug_assert_eq!(written, ROOM_LEN);
                 debug_assert_eq!(start_offset, 0);
-                room.offset = ROOM_LEN as u32;
+                room.offset = u32::try_from(ROOM_LEN).unwrap();
                 self.room_streams[s] = RoomStream::EMPTY;
                 self.slots[s].kind = SlotKind::OpenRooms { sealed: false };
             }
@@ -1514,10 +1515,10 @@ impl<T, B> Pipeline<T, B> {
             SlotKind::OpenRooms { ref mut sealed } => {
                 if written == ROOM_LEN {
                     debug_assert_eq!(start_offset, 0);
-                    room.offset = ROOM_LEN as u32;
+                    room.offset = u32::try_from(ROOM_LEN).unwrap();
                 } else {
                     *sealed = true;
-                    room.offset = ((start_offset as usize + written).div_ceil(64) * 64).min(ROOM_LEN) as u32;
+                    room.offset = u32::try_from(((start_offset as usize + written).div_ceil(64) * 64).min(ROOM_LEN)).expect("bounded by ROOM_LEN");
                     if written == 0 {
                         return;
                     }
@@ -1543,7 +1544,7 @@ impl<T, B> Pipeline<T, B> {
         unsafe {
             *node.room.get() = room_idx;
             *node.offset.get() = start_offset;
-            *node.len.get() = written as u32;
+            *node.len.get() = u32::try_from(written).expect("written <= ROOM_LEN");
             *node.index.get() = index;
             *node.next.get() = NONE;
         }
@@ -1609,7 +1610,7 @@ impl<T, B> Pipeline<T, B> {
                 let out = self.shared().hashes[s].get() as *mut u8;
                 let (group, epoch) = self.push_member(ptr, len as usize, out, room_idx, None);
                 self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group, epoch };
-                self.end_queue.push_back(s as u32);
+                self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
             }
             _ => self.end_slow(s),
         }
@@ -1635,7 +1636,7 @@ impl<T, B> Pipeline<T, B> {
             }
             _ => unreachable!(),
         }
-        self.end_queue.push_back(s as u32);
+        self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
     }
 
     /// Abort `message` and queue its [`Event::Aborted`] in end order.
@@ -1660,7 +1661,7 @@ impl<T, B> Pipeline<T, B> {
                 // that still said it held the room's credit, to be given
                 // back a second time.)
                 self.slots[s].kind = SlotKind::WaitAborted { group: NONE, epoch: 0 };
-                self.end_queue.push_back(s as u32);
+                self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
                 if self.shared().storage.rooms.release_n(room_idx, 1) {
                     self.shared().storage.waker.notify_after_seqcst();
                 }
@@ -1675,7 +1676,7 @@ impl<T, B> Pipeline<T, B> {
             }
             _ => unreachable!(),
         }
-        self.end_queue.push_back(s as u32);
+        self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
     }
 
     /// Hash `bytes` in place on loan, returning a [`Lent`] guard.
@@ -1707,7 +1708,7 @@ impl<T, B> Pipeline<T, B> {
             self.submit_multi_slice(s, bytes.as_ptr(), bytes.len(), false, epoch);
             (&self.shared().storage.loan_completed[s].0, epoch)
         };
-        self.end_queue.push_back(s as u32);
+        self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
         Lent { completed, epoch, _bytes: PhantomData }
     }
 
@@ -1762,12 +1763,13 @@ impl<T, B> Pipeline<T, B> {
                 }
             };
             let sme2 = per_part * slot_len >= SME2_MIN_LEN;
+            let s32 = u32::try_from(s).expect("slot fits u32");
             for p in 0..pieces {
-                self.action_buf[p] = pack_arg(KIND_MULTI, s as u32, p as u32, sme2);
+                self.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32"), sme2);
             }
             self.dispatch_many(pieces);
         }
-        self.end_queue.push_back(s as u32);
+        self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
     }
 
     /// Pull the next finished [`Event`], if one is ready.
@@ -1874,8 +1876,9 @@ impl<T, B> Pipeline<T, B> {
             }
         };
         self.slots[s].kind = SlotKind::WaitMulti { has_owner };
+        let s32 = u32::try_from(s).expect("slot fits u32");
         for p in 0..pieces {
-            self.action_buf[p] = pack_arg(KIND_MULTI, s as u32, p as u32, true);
+            self.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32"), true);
         }
         self.dispatch_many(pieces);
     }
@@ -1902,14 +1905,14 @@ impl<T, B> Pipeline<T, B> {
                 self.group_cursor = (g + 1) % count;
                 let assigned = self.assigned_group_epoch[g];
                 if assigned == 0 {
-                    return g as u32;
+                    return u32::try_from(g).expect("group fits u32");
                 }
                 if self.seen_group_epoch[g] < assigned {
                     self.seen_group_epoch[g] = self.shared().storage.groups[g].completed_epoch.load(Ordering::Acquire);
                 }
                 if self.seen_group_epoch[g] >= assigned {
                     self.assigned_group_epoch[g] = 0;
-                    return g as u32;
+                    return u32::try_from(g).expect("group fits u32");
                 }
             }
             if !self.shared().storage.source.run_waiting_action() {
@@ -2145,7 +2148,7 @@ impl<T, B> Pipeline<T, B> {
             }
             _ => unreachable!(),
         };
-        self.free_slots.push_back(s as u32);
+        self.free_slots.push_back(u32::try_from(s).expect("slot fits u32"));
         return Some(event);
     }
 
@@ -3511,9 +3514,14 @@ mod test {
     fn composed_wait_under_block_on_receives_room_wake() {
         let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
         let room = block_on(p.room());
+        let first_poll = Arc::new(AtomicBool::new(false));
+        let first_poll_p = Arc::clone(&first_poll);
         let flag = Arc::new(AtomicBool::new(false));
         let flag_p = Arc::clone(&flag);
         let producer = std::thread::spawn(move || {
+            while !first_poll_p.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
             std::thread::sleep(5 * crate::lanes::SPIN_BEFORE_SLEEP);
             flag_p.store(true, Ordering::Release);
             drop(room);
@@ -3523,6 +3531,7 @@ mod test {
             if !polled_child {
                 polled_child = true;
                 assert!(p.poll_room(cx).is_pending());
+                first_poll.store(true, Ordering::Release);
                 return Poll::Pending;
             }
             if !flag.load(Ordering::Acquire) {
@@ -3532,6 +3541,17 @@ mod test {
         }));
         producer.join().unwrap();
         drop(got);
+    }
+
+    #[test]
+    fn pack_unpack_arg_roundtrips_every_field() {
+        for sme2 in [false, true] {
+            for (kind, a, b) in [(0u64, 0u32, 0u32), (1, 7, 13), (2, 12345, 67890), (3, (1 << 29) - 1, u32::MAX)] {
+                let arg = pack_arg(kind, a, b, sme2);
+                assert_eq!((arg & ACTION_SME2 != 0), sme2);
+                assert_eq!(unpack_arg(arg), (kind, usize::try_from(a).unwrap(), usize::try_from(b).unwrap()));
+            }
+        }
     }
 
     /// Dropping a cancelled `room()`, `message()`, or `ready()` future must

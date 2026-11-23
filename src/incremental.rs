@@ -277,7 +277,7 @@ impl hasher::Hooks for HasherHooks<'_> {
         #[cfg(blake3_sme2)]
         if self.pooled.is_none() && matches!(self.platform, Platform::SME2) && sme2::flat_takes(input.len()) {
             crate::counted(crate::Counted::Flat);
-            // Safe: the SME2 platform is selected only where the CPU has it.
+            // Sound: startup verified FEAT_SME2; SME2 assembly checks the calling thread's SVL at entry and falls back to NEON if != 512 bits.
             return Some(unsafe { sme2::compress_subtree_flat_to_cv(input, ahead, self.domain.key(), counter, self.domain.flags()) });
         }
         None
@@ -475,7 +475,7 @@ impl Hasher {
                 input = &input[groups..];
                 continue;
             }
-            let to_boundary = STAGE_LEN - at as usize;
+            let to_boundary = STAGE_LEN - usize::try_from(at).expect("at < STAGE_LEN");
             let take = cmp::min(to_boundary, input.len());
             // The loop's variant: every pass stages at least one byte of
             // the input, which is not empty (`at` is below STAGE_LEN).

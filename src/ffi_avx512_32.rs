@@ -107,6 +107,7 @@ pub(crate) unsafe fn self_test(previous: &[u8; 32]) -> usize {
     let mut checked = 0;
     self_test_chain(
         previous,
+        // Sound: caller verified AVX-512F+VL support; `self_test_chain` supplies valid 16- or 32-element input slices and matching output buffers.
         |inputs, key, counter, increment, out| unsafe {
             if inputs.len() == 16 {
                 assert!(!increment.yes(), "the p16 self-test uses a fixed counter");

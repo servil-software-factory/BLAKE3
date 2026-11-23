@@ -230,6 +230,8 @@
 #[macro_use]
 extern crate std;
 
+#[cfg(all(test, feature = "std"))]
+mod lifecycle_counts;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
@@ -367,12 +369,14 @@ pub(crate) enum Counted {
     /// One whole subtree a Hasher's update hashed on SME2's flat walk, to
     /// its one chaining value (the Hasher's hook `subtree_cv`).
     Flat = 9,
+    /// One multi-lane SIMD `Platform::hash_many` dispatch call (#497).
+    HashManyCall = 10,
 }
 
 #[cfg(all(test, feature = "std"))]
 std::thread_local! {
     /// This thread's counts since the test last cleared them, by Counted.
-    pub(crate) static COUNTED: [core::cell::Cell<u64>; 10] = const { [const { core::cell::Cell::new(0) }; 10] };
+    pub(crate) static COUNTED: [core::cell::Cell<u64>; 11] = const { [const { core::cell::Cell::new(0) }; 11] };
 }
 
 /// Count one of `what`: in the tests' record, and nothing in any other
@@ -501,7 +505,7 @@ pub(crate) const DERIVE_KEY_MATERIAL: u8 = 1 << 6;
 /// - `Serialize` (with `serde`) writes the digest as a sequence of 32 bytes
 ///   (in JSON an array of 32 numbers, not a hex string).
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-#[derive(Clone, Copy, Hash, Eq)]
+#[derive(Clone, Copy, Eq)]
 #[repr(transparent)]
 pub struct Hash([u8; OUT_LEN]);
 
@@ -733,6 +737,13 @@ impl PartialEq for Hash {
     #[inline]
     fn eq(&self, other: &Hash) -> bool {
         constant_time_eq::constant_time_eq_32(&self.0, &other.0)
+    }
+}
+
+impl core::hash::Hash for Hash {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }
 
@@ -1060,7 +1071,7 @@ fn compress_chunks_parallel(input: &[u8], key: &CVWords, chunk_counter: u64, fla
         && neon_hybrid::partial_pays(chunks_array.len(), chunks_exact.remainder().len())
         && neon_hybrid::sha3_detected()
     {
-        // Safe: the kernel exists for this count and the CPU has SHA-3.
+        // Sound: `partial_pays` verified the chunk count and `sha3_detected()` verified SHA-3 support; `out` holds enough room for `chunks_array.len() + 1` CVs.
         unsafe {
             neon_hybrid::hash_chunks_with_partial(&chunks_array, chunks_exact.remainder(), key, chunk_counter, flags, CHUNK_START, CHUNK_END, out);
         }
@@ -1189,9 +1200,9 @@ fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
         }
     };
     let mut out = [0u8; OUT_LEN];
-    // Safe: `input` holds `whole` bytes before `tail`, and blocks is 1..=16.
+    // Sound: `input` holds `(blocks - 1) * BLOCK_LEN` readable bytes before `tail`, `blocks` is in 1..=16, and `last` is 64 readable bytes.
     unsafe {
-        neon_hybrid::hash_chunk(input.as_ptr(), blocks, last, tail.len() as u8, key, 0, flags, CHUNK_START, CHUNK_END | ROOT, &mut out);
+        neon_hybrid::hash_chunk(input.as_ptr(), blocks, last, tail.len().to_le_bytes()[0], key, 0, flags, CHUNK_START, CHUNK_END | ROOT, &mut out);
     }
     Hash(out)
 }
@@ -1549,8 +1560,8 @@ impl OutputReader {
         let output_bytes = &self.cached_block[self.position_within_block as usize..];
         let take = cmp::min(buf.len(), output_bytes.len());
         buf[..take].copy_from_slice(&output_bytes[..take]);
-        self.position_within_block += take as u8;
-        if self.position_within_block == BLOCK_LEN as u8 {
+        self.position_within_block += u8::try_from(take).expect("take <= BLOCK_LEN");
+        if usize::from(self.position_within_block) == BLOCK_LEN {
             self.inner.counter += 1;
             self.position_within_block = 0;
             self.cache_valid = false;
@@ -1646,7 +1657,7 @@ impl OutputReader {
     /// [`Seek::seek`]: #method.seek
     /// [`SeekFrom::Start`]: https://doc.rust-lang.org/std/io/enum.SeekFrom.html
     pub fn set_position(&mut self, position: u64) {
-        self.position_within_block = (position % BLOCK_LEN as u64) as u8;
+        self.position_within_block = u8::try_from(position % BLOCK_LEN as u64).expect("remainder < 64");
         self.inner.counter = position / BLOCK_LEN as u64;
         self.cache_valid = false;
     }
@@ -1665,7 +1676,7 @@ impl std::io::Read for OutputReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // Up to the output's end, where a read gives 0 bytes as a file's
         // does.
-        let len = cmp::min(buf.len() as u64, self.remaining()) as usize;
+        let len = usize::try_from(cmp::min(buf.len() as u64, self.remaining())).expect("bounded by buf.len()");
         self.fill(&mut buf[..len]);
         Ok(len)
     }
@@ -1685,7 +1696,7 @@ impl std::io::Seek for OutputReader {
         if target_position < 0 {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start"));
         }
-        self.set_position(cmp::min(target_position, max_position) as u64);
+        self.set_position(u64::try_from(cmp::min(target_position, max_position)).expect("non-negative and <= u64::MAX"));
         Ok(self.position())
     }
 }

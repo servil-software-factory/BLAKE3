@@ -292,6 +292,7 @@ mod waker_sync {
     }
     #[inline(always)]
     pub unsafe fn with_mut<T, R>(cell: &UnsafeCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
+        // Sound: caller's safety contract guarantees exclusive access to `cell`.
         f(unsafe { &mut *cell.get() })
     }
 }

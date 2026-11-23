@@ -400,7 +400,7 @@ pub(crate) fn stdin_named_twice(paths: &[PathBuf], stdin_ctx: &StdinContext) -> 
 fn hash_darwin_regular_fd0_hash(args: &Args) -> anyhow::Result<blake3::Hash> {
     let meta = file_end::fstat_fd(0)?;
     if meta.len < MAP_LEN as u64 {
-        let mut buf = Vec::with_capacity((meta.len as usize + 1).max(4096).min(SMALL_MEM_CAP + 1));
+        let mut buf = Vec::with_capacity((usize::try_from(meta.len).expect("len < MAP_LEN") + 1).max(4096).min(SMALL_MEM_CAP + 1));
         let mut reader = file_end::PreadReader::new(0, 0);
         let mut chunk = [0u8; 64 * 1024];
         loop {
@@ -536,7 +536,7 @@ pub(crate) fn hash_open_file_ex(args: &Args, mut file: File) -> anyhow::Result<H
     {
         let size = meta.len();
         if size < MAP_LEN as u64 {
-            let cap = (size as usize + 1).max(4096).min(SMALL_MEM_CAP + 1);
+            let cap = (usize::try_from(size).expect("size < MAP_LEN") + 1).max(4096).min(SMALL_MEM_CAP + 1);
             let mut buf = Vec::with_capacity(cap);
             let reached_eof = file_end::read_sequential_capped(&mut file, &mut buf, SMALL_MEM_CAP)?;
             if reached_eof {
@@ -968,7 +968,7 @@ pub(crate) fn update_from_counted(hasher: &mut blake3::convenience::Hasher, mut 
 }
 
 fn write_hash_text(hash: &blake3::Hash, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
-    let take = args.len() as usize;
+    let take = usize::try_from(args.len()).expect("standard 32-byte mode len <= 32");
     if args.sigilcode() {
         let s = sigilcode::encode(&hash.as_bytes()[..take]);
         out.write_bytes(s.as_bytes())?;
@@ -981,7 +981,7 @@ fn write_hash_text(hash: &blake3::Hash, args: &Args, out: &mut OutBuf) -> anyhow
 }
 
 pub(crate) fn print_hash_output(hash: blake3::Hash, path: &Path, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
-    let take = args.len() as usize;
+    let take = usize::try_from(args.len()).expect("standard 32-byte mode len <= 32");
     if args.raw() {
         out.write_bytes(&hash.as_bytes()[..take])?;
         return Ok(());
@@ -1037,7 +1037,7 @@ fn write_hex_output(mut output: blake3::OutputReader, args: &Args, out: &mut Out
     while len > 0 {
         // Only the bytes asked for: the output's last bytes are no whole
         // block, and filling one past its end is a panic.
-        let take_bytes = cmp::min(len, block.len() as u64) as usize;
+        let take_bytes = usize::try_from(cmp::min(len, block.len() as u64)).expect("bounded by block.len()");
         output.fill(&mut block[..take_bytes]);
         encode_hex_stack(&block[..take_bytes], &mut hex_buf[..2 * take_bytes]);
         out.write_bytes(&hex_buf[..2 * take_bytes])?;
@@ -1047,7 +1047,7 @@ fn write_hex_output(mut output: blake3::OutputReader, args: &Args, out: &mut Out
 }
 
 fn write_sigil_output(mut output: blake3::OutputReader, args: &Args, out: &mut OutBuf) -> anyhow::Result<()> {
-    let mut bytes = vec![0; args.len() as usize];
+    let mut bytes = vec![0; usize::try_from(args.len()).expect("sigilcode length <= SIGIL_MAX_LEN")];
     output.fill(&mut bytes);
     let encoded = sigilcode::encode(&bytes);
     out.write_bytes(encoded.as_bytes())?;
@@ -1514,7 +1514,7 @@ fn outboard_of(
     let meta = file.metadata()?;
     #[cfg(unix)]
     if meta.is_file() && meta.len() < MAP_LEN as u64 {
-        read_to_its_end(&mut file, meta.len() as usize, bytes)?;
+        read_to_its_end(&mut file, usize::try_from(meta.len()).expect("len < MAP_LEN"), bytes)?;
         return Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes));
     }
     #[cfg(target_os = "linux")]

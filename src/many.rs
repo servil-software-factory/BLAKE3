@@ -174,7 +174,7 @@ fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key
     // Check the descriptor length once, before narrowing it or filling
     // any lanes. Both short batches and expanded Packed messages come here.
     assert!(len <= BLOCK_LEN, "an independent short message fits in one block");
-    let len = len as u8;
+    let len = len.to_le_bytes()[0];
     let lanes = crate::ffi_output::lanes(platform);
     if lanes == 0 {
         return 0;
@@ -454,7 +454,7 @@ pub(crate) fn hash_group_across(messages: &[&[u8]], len: usize, key: &CVWords, f
                 let mut block = [0u8; BLOCK_LEN];
                 block[..last.len()].copy_from_slice(last);
                 let start = if before_last == 0 { CHUNK_START } else { 0 };
-                platform.compress_in_place(&mut cv, &block, last.len() as u8, full as u64, flags | start | CHUNK_END);
+                platform.compress_in_place(&mut cv, &block, last.len().to_le_bytes()[0], full as u64, flags | start | CHUNK_END);
                 cvs[full][m] = crate::hasher::le_bytes(&cv);
             }
         }

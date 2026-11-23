@@ -165,8 +165,8 @@ impl Kernels for PlatformKernels<'_> {
         // sme2::compress_subtree_flat).
         #[cfg(blake3_sme2)]
         if matches!(self.platform, Platform::SME2) && crate::sme2::flat_subtree_takes(input.len()) {
-            // Safe: the SME2 platform is selected only where the CPU has it,
-            // and `out` holds simd_degree() values, which is sme2::DEGREE.
+            // Sound: startup verified FEAT_SME2 (assembly checks SVL at entry and falls back to NEON if != 512 bits),
+            // and `out` holds `simd_degree()` values (`sme2::DEGREE`).
             return Some(unsafe { crate::sme2::compress_subtree_flat(input, ahead, self.key, counter, self.flags, out.as_flattened_mut()) });
         }
         None
@@ -179,7 +179,7 @@ impl Kernels for PlatformKernels<'_> {
         // the two children, SME2 alone (see sme2::compress_subtree_flat_to_parent).
         #[cfg(blake3_sme2)]
         if matches!(self.platform, Platform::SME2) && crate::sme2::flat_takes(input.len()) {
-            // Safe: the SME2 platform is selected only where the CPU has it.
+            // Sound: startup verified FEAT_SME2; SME2 assembly checks the calling thread's SVL at entry and falls back to NEON if != 512 bits.
             let block = unsafe { crate::sme2::compress_subtree_flat_to_parent(input, ahead, self.key, counter, self.flags) };
             return Some([block[..OUT_LEN].try_into().unwrap(), block[OUT_LEN..].try_into().unwrap()]);
         }
