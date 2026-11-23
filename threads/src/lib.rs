@@ -150,8 +150,10 @@
 //! - **These single-threaded calls allocate nothing**: [`convenience::hash`],
 //!   [`throughput::hash`], [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
 //!   and [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
-//!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 1 MiB buffer while it reads past
-//!   64 KiB, freed when it returns. [`throughput::hash_each`] keeps, on the
+//!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 64 KiB
+//!   stack buffer for the first read (even on immediate EOF), and promotes to a
+//!   1 MiB heap buffer once 65,536 bytes or more are read before EOF, freed when
+//!   it returns. [`throughput::hash_each`] keeps, on the
 //!   thread that calls it, 32 bytes for each chunk of the collection's
 //!   messages of 2 to 15 chunks and 16 for each such message: its first
 //!   collection and a larger one grow that storage, and a repeated
@@ -223,9 +225,11 @@
 //! hashes, in well under a millisecond. It runs every assembly kernel built
 //! for this machine on fixed inputs and compares the outputs with fixed
 //! values official BLAKE3 generated. A mismatch stops the process, which no
-//! caller can catch: with `std` it names the code path on stderr and
-//! aborts; without it, the CPU's trap instruction stops it. Other threads
-//! that call `initialize` meanwhile wait for it.
+//! caller can catch: with `std` it writes a best-effort diagnostic directly to
+//! file descriptor 2 (bypassing Rust's stderr lock and skipping an
+//! already-full pipe) and aborts; without it, the CPU's trap instruction stops
+//! it. Other threads that call `initialize` meanwhile wait for it (parked via
+//! `std::sync::Once`).
 //!
 //! # Cargo Features
 //!

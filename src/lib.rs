@@ -138,8 +138,10 @@
 //! - **These single-threaded calls allocate nothing**: [`convenience::hash`],
 //!   [`throughput::hash`], [`throughput::hash_many`], [`Hasher::update`](convenience::Hasher::update)
 //!   and [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
-//!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 1 MiB buffer while it reads past
-//!   64 KiB, freed when it returns. [`throughput::hash_each`] keeps, on the
+//!   [`Hasher::update_reader`](convenience::Hasher::update_reader) uses a 64 KiB
+//!   stack buffer for the first read (even on immediate EOF), and promotes to a
+//!   1 MiB heap buffer once 65,536 bytes or more are read before EOF, freed when
+//!   it returns. [`throughput::hash_each`] keeps, on the
 //!   thread that calls it, 32 bytes for each chunk of the collection's
 //!   messages of 2 to 15 chunks and 16 for each such message: its first
 //!   collection and a larger one grow that storage, and a repeated
@@ -173,9 +175,14 @@
 //! for this machine on fixed inputs and compares the outputs with fixed
 //! values official BLAKE3 generated (on ARM64, all but the kernels for
 //! batches of short messages of unequal lengths). A mismatch stops the process, which no
-//! caller can catch: with `std` it names the code path on stderr and
-//! aborts; without it, the CPU's trap instruction stops it. Other threads
-//! that call `initialize` meanwhile wait for it.
+//! caller can catch: with `std` it writes a best-effort diagnostic directly to
+//! file descriptor 2 (bypassing Rust's stderr lock and skipping an
+//! already-full pipe) and aborts; without it, the CPU's trap instruction stops
+//! it. Other threads that call `initialize` meanwhile wait for it (parked via
+//! `std::sync::Once` under `std`; spinning without `std`, so `no_std` programs
+//! with strict fixed-priority scheduling should call `initialize` before
+//! starting higher-priority callers, and programs that `fork` should finish
+//! `initialize` before forking).
 //!
 //! # Cargo Features
 //!
@@ -418,10 +425,8 @@ pub(crate) type CVBytes = [u8; 32]; // little-endian
 
 pub(crate) const IV: &CVWords = &[0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];
 
-// These are the internal flags that we use to domain separate root/non-root,
-// chunk/parent, and chunk beginning/middle/end. These get set at the high end
-// of the block flags word in the compression function, so their values start
-// high and go down.
+// These are the internal domain-separation flags in the low bits (0 through 6)
+// of the block flags word in the compression function.
 pub(crate) const CHUNK_START: u8 = 1 << 0;
 pub(crate) const CHUNK_END: u8 = 1 << 1;
 const PARENT: u8 = 1 << 2;
@@ -838,20 +843,6 @@ impl hasher::Blocks for Platform {
     }
 }
 
-impl Clone for ChunkState {
-    fn clone(&self) -> Self {
-        hasher::ChunkState {
-            buf: self.buf,
-            cv: self.cv,
-            chunk_counter: self.chunk_counter,
-            buf_len: self.buf_len,
-            blocks_compressed: self.blocks_compressed,
-            flags: self.flags,
-            platform: self.platform,
-        }
-    }
-}
-
 impl ChunkState {
     // Try to avoid buffering as much as possible, by compressing directly from
     // the input slice when full blocks are available (src/hasher.rs).
@@ -885,21 +876,17 @@ impl IncrementCounter {
 
 /// The lanes of the one pass that hashes `whole` whole chunks with a
 /// partial one of `partial` bytes after them, where the pass costs less
-/// than the partial chunk's blocks after the whole ones: one whole chunk
-/// and a partial one of two blocks or more in four lanes (AVX2 and
-/// AVX-512: the chain falls from 25 blocks to 16 at 1536 bytes), three
-/// whole chunks in four lanes (SSE4.1 and AVX2), and in eight (AVX2) six or
-/// seven, or five with a partial chunk of six blocks or more (with fewer,
-/// an i7-12700K's efficiency core ran the eight lanes up to 7% slower; a
-/// pass of eight lanes costs 1.6 times one of four on its performance
-/// core). AVX-512 otherwise keeps its own widths (unmeasured).
+/// than the partial chunk's blocks after the whole ones: three whole chunks
+/// in four lanes (SSE4.1 and AVX2), and in eight (AVX2) six or seven, or
+/// five with a partial chunk of six blocks or more (with fewer, an
+/// i7-12700K's efficiency core ran the eight lanes up to 7% slower; a pass
+/// of eight lanes costs 1.6 times one of four on its performance core).
+/// One whole chunk plus a partial chunk of two blocks or more is handled
+/// earlier by `pair::takes`. AVX-512 otherwise keeps its own widths.
 #[cfg(blake3_sse41_ffi)]
 #[inline]
 fn spare_lane(platform: Platform, whole: usize, partial: usize) -> Option<usize> {
     match (platform, whole) {
-        (Platform::AVX2, 1) if partial > BLOCK_LEN => Some(4),
-        #[cfg(blake3_avx512_ffi)]
-        (Platform::AVX512, 1) if partial > BLOCK_LEN => Some(4),
         (Platform::SSE41 | Platform::AVX2, 3) => Some(4),
         (Platform::AVX2, 6..=7) => Some(8),
         (Platform::AVX2, 5) if partial > 5 * BLOCK_LEN => Some(8),
@@ -1226,20 +1213,53 @@ pub mod thread_support {
 /// key, and its `==` promises no constant time.
 pub type ContextKey = [u8; KEY_LEN];
 
-/// The most bytes a subtree starting at byte `input_offset` of a message
-/// can hold: `None` at offset zero (the whole message), else the largest
-/// power-of-two multiple of a chunk the offset is aligned to. Requires a
-/// whole-chunk offset.
-#[inline(always)]
-pub(crate) fn max_subtree_len(input_offset: u64) -> Option<u64> {
-    if input_offset == 0 {
-        return None;
+/// Prepared BLAKE3 mode (immutable key words + domain flags), private so
+/// nothing outside `domain` can mutate them independently or pair non-IV
+/// words with plain-mode flags.
+pub(crate) mod domain {
+    use super::{CVWords, DERIVE_KEY_MATERIAL, IV, KEYED_HASH, Mode, platform, throughput};
+
+    #[derive(Clone, Copy)]
+    pub(crate) struct Domain {
+        key: CVWords,
+        flags: u8,
     }
-    assert_eq!(input_offset % CHUNK_LEN as u64, 0);
-    let counter = input_offset / CHUNK_LEN as u64;
-    let max_chunks = 1 << counter.trailing_zeros();
-    Some(max_chunks * CHUNK_LEN as u64)
+
+    impl Domain {
+        #[inline(always)]
+        pub(crate) const fn plain() -> Self {
+            Self { key: *IV, flags: 0 }
+        }
+
+        #[inline]
+        pub(crate) fn from_mode(mode: Mode<'_>) -> Self {
+            match mode {
+                Mode::Plain => Self::plain(),
+                Mode::Keyed(key) => Self { key: platform::words_from_le_bytes_32(key), flags: KEYED_HASH },
+                Mode::DeriveKey(context) => Self { key: platform::words_from_le_bytes_32(&throughput::context_key(context)), flags: DERIVE_KEY_MATERIAL },
+                Mode::DeriveKeyWith(context_key) => Self { key: platform::words_from_le_bytes_32(context_key), flags: DERIVE_KEY_MATERIAL },
+            }
+        }
+
+        #[inline(always)]
+        pub(crate) const fn key(&self) -> &CVWords {
+            &self.key
+        }
+
+        #[inline(always)]
+        pub(crate) const fn flags(&self) -> u8 {
+            self.flags
+        }
+
+        #[cfg(feature = "std")]
+        #[inline(always)]
+        pub(crate) const fn is_plain(&self) -> bool {
+            self.flags == 0
+        }
+    }
 }
+
+pub(crate) use domain::Domain;
 
 /// Which of BLAKE3's three functions a call computes: the plain hash
 /// ([`hash`](convenience::hash)), the keyed hash, or key derivation. Every call that takes a mode runs each one at the same
@@ -1286,12 +1306,8 @@ impl Mode<'_> {
     /// The key words and flags this mode hashes with.
     #[inline]
     pub(crate) fn key_and_flags(self) -> (CVWords, u8) {
-        match self {
-            Mode::Plain => (*IV, 0),
-            Mode::Keyed(key) => (platform::words_from_le_bytes_32(key), KEYED_HASH),
-            Mode::DeriveKey(context) => (platform::words_from_le_bytes_32(&throughput::context_key(context)), DERIVE_KEY_MATERIAL),
-            Mode::DeriveKeyWith(context_key) => (platform::words_from_le_bytes_32(context_key), DERIVE_KEY_MATERIAL),
-        }
+        let domain = Domain::from_mode(self);
+        (*domain.key(), domain.flags())
     }
 }
 

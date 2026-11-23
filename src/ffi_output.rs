@@ -57,24 +57,26 @@ pub(crate) fn lanes(platform: Platform) -> usize {
 /// A whole message whose root is one compression away: still in its first
 /// chunk, with no staged suffix or stacked subtree, its final block already
 /// padded by ChunkState (a turn's messages, `update_each`); or a block or
-/// less waiting in the stage, padded there (`update`'s, `Hasher::first_block`).
+/// less waiting in the stage, padded there (`update`'s, `Stage::first_block`).
 /// Other states keep Hasher's existing finalization path.
 pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
-    let c = &hasher.core.chunk_state;
-    // Its first chunk, from the message's start: the counter starts at a
-    // subtree's offset and counts every chunk finished since.
-    if c.chunk_counter != 0 {
+    let c = hasher.chunk_state();
+    // Its first chunk, from the message's start: the counter counts every
+    // chunk finished since chunk zero.
+    if c.chunk_counter() != 0 {
         return None;
     }
-    if hasher.staged == 0 {
-        return Some(Input { block: &c.buf, cv: &c.cv, len: c.buf_len, flags: c.flags | c.start_flag() | CHUNK_END | ROOT });
+    let staged = hasher.staged_len();
+    if staged == 0 {
+        let (block, cv, len, flags) = c.output_parts();
+        return Some(Input { block, cv, len, flags: flags | ROOT });
     }
     // Staged bytes behind a chunk state that holds none: the whole message.
-    (hasher.staged <= BLOCK_LEN && hasher.core.count() == 0).then(|| Input {
-        block: hasher.first_block(),
-        cv: &c.cv,
-        len: hasher.staged as u8,
-        flags: c.flags | CHUNK_START | CHUNK_END | ROOT,
+    (staged <= BLOCK_LEN && c.count() == 0).then(|| Input {
+        block: hasher.stage_first_block(),
+        cv: c.cv(),
+        len: staged as u8,
+        flags: hasher.domain().flags() | CHUNK_START | CHUNK_END | ROOT,
     })
 }
 
@@ -120,12 +122,13 @@ pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Plat
         let h = &hashers[i];
         let (counter, bytes) = h.held_group().expect("a held group");
         let refs: [&[u8; CHUNK_LEN]; PER] = core::array::from_fn(|j| bytes[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap());
+        let domain = h.domain();
         platform.hash_many(
             &refs,
-            &h.core.key,
+            domain.key(),
             counter,
             crate::IncrementCounter::Yes,
-            h.core.chunk_state.flags,
+            domain.flags(),
             CHUNK_START,
             CHUNK_END,
             level[k * PER..(k + 1) * PER].as_flattened_mut(),
@@ -136,11 +139,12 @@ pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Plat
         let count = n * per_message;
         let input = |j: usize| {
             let h = &hashers[held[j / per_message]];
+            let domain = h.domain();
             Input {
                 block: level.as_flattened()[j * BLOCK_LEN..(j + 1) * BLOCK_LEN].try_into().unwrap(),
-                cv: &h.core.key,
+                cv: domain.key(),
                 len: BLOCK_LEN as u8,
-                flags: h.core.chunk_state.flags | crate::PARENT,
+                flags: domain.flags() | crate::PARENT,
             }
         };
         let mut full = count / width * width;
@@ -202,8 +206,14 @@ fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; OUT_LEN]]))
     hash(&inputs, &mut out);
     crate::self_test::fold(out.as_flattened())
 }
-fn check_self_test(answer: u64) {
-    assert_eq!(answer, SELF_TEST_EXPECTED, "blake3-servil startup self-test failed: independent counter-zero compressions");
+fn check_self_test_value(answer: u64) -> bool {
+    answer == SELF_TEST_EXPECTED
+}
+
+pub(crate) fn check_self_test(answer: u64) {
+    if !check_self_test_value(answer) {
+        crate::self_test::fail(format_args!("blake3-servil startup self-test failed: independent counter-zero compressions"));
+    }
 }
 unsafe fn hash_eight_groups(inputs: &[Input<'_>; 16], out: &mut [[u8; OUT_LEN]]) {
     for (inputs, out) in inputs.chunks_exact(8).zip(out.chunks_mut(8)) {
@@ -218,6 +228,12 @@ unsafe fn hash_on_platform(platform: Platform, inputs: &[Input<'_>; 16], out: &m
         unsafe { hash_eight_groups(inputs, out) };
     }
 }
+/// Planted corruption selector for subprocess fail-stop tests:
+/// 1 = corrupt last output byte after 16-lane pass (before 8-lane overwrite),
+/// 2 = corrupt last output byte of the final pass.
+#[cfg(test)]
+pub(crate) static PLANTED_WRONG_OUTPUT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 pub(crate) fn self_test(platform: Platform) -> usize {
     if lanes(platform) == 0 {
         return 0;
@@ -227,10 +243,18 @@ pub(crate) fn self_test(platform: Platform) -> usize {
         // Sound: initialize detected this platform before testing its kernels.
         unsafe { hash_on_platform(platform, inputs, out) };
         if lanes(platform) == 16 && crate::platform::avx2_detected() {
+            #[cfg(test)]
+            if PLANTED_WRONG_OUTPUT.load(core::sync::atomic::Ordering::Relaxed) == 1 {
+                out[15][OUT_LEN - 1] = !out[15][OUT_LEN - 1];
+            }
             // Check the wide output before the remainder kernel reuses it.
             check_self_test(crate::self_test::fold(out.as_flattened()));
             unsafe { hash_eight_groups(inputs, out) };
             checked = 2;
+        }
+        #[cfg(test)]
+        if PLANTED_WRONG_OUTPUT.load(core::sync::atomic::Ordering::Relaxed) == 2 {
+            out[15][OUT_LEN - 1] = !out[15][OUT_LEN - 1];
         }
     });
     check_self_test(answer);
@@ -368,7 +392,7 @@ mod tests {
 
     #[test]
     fn startup_rejects_corrupted_answer() {
-        assert!(std::panic::catch_unwind(|| check_self_test(SELF_TEST_EXPECTED ^ 1)).is_err());
+        assert!(!check_self_test_value(SELF_TEST_EXPECTED ^ 1));
     }
 
     #[test]
