@@ -93,7 +93,11 @@ jobs:
     # feature).
     - run: cargo nextest run --features=serde
     - run: cargo test --doc --features=serde
-    # no_std tests.
+    # no_std library checks (with and without optional features; --lib
+    # leaves #[cfg(test)] off so dead-code warnings surface under -D warnings)
+    # and no_std tests.
+    - run: cargo check --lib --no-default-features
+    - run: cargo check --lib --no-default-features --features=serde
     - run: cargo nextest run --no-default-features
     - name: Make sure enabling LTO via CFLAGS doesn't break the build.
       run: cargo build --tests
@@ -170,6 +174,9 @@ jobs:
     - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
       with:
         tool: cargo-c@0.10.26
+    - run: cargo check --lib --no-default-features
+    - run: cargo check --lib --no-default-features --features=serde
+    - run: cargo nextest run --no-default-features
     - run: cargo nextest run --lib --tests --features=serde
     - name: threads
       run: cargo nextest run --lib --tests --no-fail-fast
@@ -190,7 +197,8 @@ jobs:
         chmod +x "$RUNNER_TEMP/cc-refuses-armv9"
         export CC="$RUNNER_TEMP/cc-refuses-armv9" CARGO_TARGET_DIR="$PWD/target/sixteen"
         unset BLAKE3_CI
-        cargo nextest run --lib --tests --features=serde > sixteen.log 2>&1 || { cat sixteen.log; exit 1; }
+        cargo check --lib --no-default-features > sixteen.log 2>&1 || { cat sixteen.log; exit 1; }
+        cargo nextest run --lib --tests --features=serde >> sixteen.log 2>&1 || { cat sixteen.log; exit 1; }
         cat sixteen.log
         grep -q "leaves out the SME2 kernel" sixteen.log
         cd threads && cargo nextest run --lib --tests --no-fail-fast
@@ -231,6 +239,9 @@ jobs:
     - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
       with:
         tool: cargo-c@0.10.26
+    # no_std checks on Apple Silicon under -D warnings (without #[cfg(test)]).
+    - run: cargo check --lib --no-default-features
+    - run: cargo check --lib --no-default-features --features=serde
     # The same installed-consumer test as on Linux: shared and static
     # installations, pkg-config flags, C11 and C++11 callers.
     - name: C API

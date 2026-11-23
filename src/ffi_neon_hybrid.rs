@@ -100,9 +100,15 @@ mod asm {
         pub fn blake3_servil_hybrid_p5(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
         pub fn blake3_servil_hybrid_p7(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
         pub fn blake3_servil_hybrid_p9(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
-        /// l<n>: p<n> with each lane's last block read from `lasts[i]` and
-        /// recording `lens[i]` bytes (0..=64), in place of its input's last
-        /// block and the packed length (#247).
+        pub fn blake3_servil_hybrid_p4(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
+        pub fn blake3_servil_hybrid_p8(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
+    }
+    // l<n>: p<n> with each lane's last block read from `lasts[i]` and
+    // recording `lens[i]` bytes (0..=64), in place of its input's last
+    // block and the packed length (#247). Only `src/each.rs` calls them,
+    // which compiles under `std`.
+    #[cfg(feature = "std")]
+    unsafe extern "C" {
         pub fn blake3_servil_hybrid_l2(
             inputs: *const *const u8,
             blocks: u64,
@@ -173,8 +179,6 @@ mod asm {
             lens: *const u32,
             lasts: *const *const u8,
         );
-        pub fn blake3_servil_hybrid_p4(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
-        pub fn blake3_servil_hybrid_p8(inputs: *const *const u8, blocks: u64, key: *const u32, counter: u64, packed_flags: u64, out: *mut u8);
     }
     /// The kernels on scalars and quads alone, which need no SHA-3.
     macro_rules! plain {
@@ -292,7 +296,9 @@ const PARENT_KERNELS: [Option<Kernel>; 10] = [
 
 /// The l kernels (#247), per exact input count, beside the parent plans
 /// they share: a lone item runs c1, which takes its last block apart too.
+#[cfg(feature = "std")]
 type LastKernel = unsafe extern "C" fn(*const *const u8, u64, *const u32, u64, u64, *mut u8, *const u32, *const *const u8);
+#[cfg(feature = "std")]
 const LAST_KERNELS: [Option<LastKernel>; 10] = [
     None,
     None,
@@ -1015,6 +1021,7 @@ pub unsafe fn hash_messages_raw(
 /// Unsafe because the CPU must have NEON and SHA-3 (`sha3_detected`), each
 /// input must reach `blocks - 1` whole blocks, and each last block 64 bytes.
 /// The output must be separate from every input prefix and last block.
+#[cfg(feature = "std")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn hash_last_lanes(
     inputs: &[*const u8],

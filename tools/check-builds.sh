@@ -27,6 +27,8 @@ step cargo test -q --release --doc --no-default-features
 # rustdoc takes any failure for it; with
 # this switch it holds each such example to its reason, in both crates.
 step sh -c 'RUSTC_BOOTSTRAP=1 cargo test -q --doc --features serde && cd threads && RUSTC_BOOTSTRAP=1 cargo test -q --doc'
+RUSTFLAGS="-D warnings" step cargo check -q --lib --no-default-features
+RUSTFLAGS="-D warnings" step cargo check -q --lib --no-default-features --features serde
 RUSTFLAGS="-D warnings" step cargo check -q --release --tests --examples
 # The crate with the pool (threads/). One CPU, as in a one-CPU container:
 # the pool has no worker thread, and the caller hashes everything (the
