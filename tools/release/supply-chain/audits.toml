@@ -1,4 +1,50 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.anyhow]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.103 -> 1.0.104"
+notes = "Version bump and dev-dependency syn=3 update only; zero runtime code changes."
+
+[[audits.arrayvec]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-run"
+delta = "0.7.6 -> 0.7.8"
+notes = "Fixes ZST double-free in extend via mem::forget, adds safe spare_capacity_mut, 16-bit LenUint, and lifetime annotations."
+
+[[audits.proc-macro2]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.106 -> 1.0.107"
+notes = "MSRV 1.68->1.71, is_some_and cleanup, removes redundant else after panic, docs/CI updates."
+
+[[audits.rand]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-run"
+delta = "0.8.6 -> 0.8.8"
+notes = "Fixes UniformChar deserialization soundness by validating sampler.max() <= char::MAX - CHAR_SURROGATE_LEN plus tests."
+
+[[audits.rustversion]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-run"
+delta = "1.0.22 -> 1.0.23"
+notes = "Sets RUSTVERSION=1 when running rustc --version in build.rs plus docs/CI updates."
+
+[[audits.serde]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.228 -> 1.0.229"
+notes = "Mirrors serde_core 1.0.229 changes plus docsrs gate on unstable feature(never_type)."
+
+[[audits.serde_core]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.228 -> 1.0.229"
+notes = "MSRV check 1.61->1.71, &mut *self.0 reborrow, clippy lint name fix, and version pin."
+
+[[audits.serde_derive]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+delta = "1.0.228 -> 1.0.229"
+notes = "Migrates syn 2->3 API (FnPtr, PredicateType.attrs, TraitBound modifiers), loop refactors, let-else, and explicit Ok/Err matching; zero unsafe or I/O."
