@@ -260,10 +260,10 @@ fn test_counts_past_the_widest_kernel_split_into_groups_and_a_rounded_rest() {
 fn test_the_paths_chosen_exactly() {
     use crate::platform::Platform;
     // spare_lane(platform, whole chunks, partial bytes): the lane for the
-    // partial chunk. AVX2: one whole chunk with a partial past a block,
-    // four lanes; three whole, four (SSE4.1 too); six or seven, eight;
-    // five with a partial past five blocks, eight; else none.
-    assert_eq!(crate::spare_lane(Platform::AVX2, 1, BLOCK_LEN + 1), Some(4));
+    // partial chunk. Three whole chunks in four lanes (SSE4.1 and AVX2);
+    // six or seven, or five with a partial past five blocks, in eight
+    // (AVX2); else none (one whole chunk is handled earlier by `pair`).
+    assert_eq!(crate::spare_lane(Platform::AVX2, 1, BLOCK_LEN + 1), None);
     assert_eq!(crate::spare_lane(Platform::AVX2, 1, BLOCK_LEN), None);
     assert_eq!(crate::spare_lane(Platform::AVX2, 1, 0), None);
     assert_eq!(crate::spare_lane(Platform::AVX2, 3, 0), Some(4));
@@ -279,7 +279,7 @@ fn test_the_paths_chosen_exactly() {
     }
     #[cfg(blake3_avx512_ffi)]
     {
-        assert_eq!(crate::spare_lane(Platform::AVX512, 1, BLOCK_LEN + 1), Some(4));
+        assert_eq!(crate::spare_lane(Platform::AVX512, 1, BLOCK_LEN + 1), None);
         assert_eq!(crate::spare_lane(Platform::AVX512, 1, BLOCK_LEN), None);
         assert_eq!(crate::spare_lane(Platform::AVX512, 3, 0), None);
     }
@@ -571,7 +571,8 @@ fn test_xof_partial_block_cache_seeks_and_clones() {
         let key = [0x42u8; 32];
         for mode in [crate::Mode::Plain, crate::Mode::Keyed(&key), crate::Mode::DeriveKey("partial XOF block cache")] {
             let mut hasher = crate::Hasher::new(mode, None);
-            hasher.core.chunk_state.platform = platform;
+            hasher.set_platform_for_test(platform);
+            assert_eq!(hasher.platform(), platform);
             hasher.update(b"the cached output belongs to its counter and mode");
             let expected = official::xof(mode, b"the cached output belongs to its counter and mode", 0, 256);
             let mut reader = hasher.finalize_xof();
@@ -910,7 +911,7 @@ fn test_block_buffer_alignment() {
     assert_eq!(64, core::mem::align_of::<crate::Output>());
     assert_eq!(0, core::mem::offset_of!(crate::Output, block));
     assert_eq!(64, core::mem::align_of::<crate::ChunkState>());
-    assert_eq!(0, core::mem::offset_of!(crate::ChunkState, buf));
+    // ChunkState.buf offset == 0 is asserted at compile time in src/hasher.rs.
 }
 
 #[test]
@@ -1498,16 +1499,6 @@ fn test_hasher_gathers() {
         }
         assert_eq!(hasher.finalize(), crate::convenience::hash(&input), "pieces from {start}");
     }
-    // A subtree of 64 chunks at offset 64 KiB, in small pieces, against one update.
-    let sub = &input[..64 * CHUNK_LEN];
-    let mut whole = crate::Hasher::new(crate::Mode::Plain, None);
-    whole.set_input_offset(64 * CHUNK_LEN as u64).update(sub);
-    let mut pieced = crate::Hasher::new(crate::Mode::Plain, None);
-    pieced.set_input_offset(64 * CHUNK_LEN as u64);
-    for piece in sub.chunks(1448) {
-        pieced.update(piece);
-    }
-    assert_eq!(pieced.finalize_non_root(), whole.finalize_non_root());
 }
 
 /// Hash's comparisons (constant time) and formats: equal and unequal
@@ -1947,79 +1938,17 @@ mod dispatch {
 }
 
 /// Subtrees hashed apart and merged, the independent computation the
-/// pool's and the Hasher's tests check themselves against: a Hasher
-/// positioned at a subtree's offset, its chaining value, and the parent of
-/// two chaining values (`hasher::parent_output` under a mode).
-pub(crate) trait SubtreeHasher {
-    /// Position the hasher at `offset` bytes into the whole input, before
-    /// any input (a subtree's offset bounds its length: `max_subtree_len`).
-    fn set_input_offset(&mut self, offset: u64) -> &mut Self;
-    /// The chaining value of the chunk or subtree hashed so far.
-    fn finalize_non_root(&self) -> CVBytes;
-}
-
-impl SubtreeHasher for crate::Hasher {
-    fn set_input_offset(&mut self, offset: u64) -> &mut Self {
-        assert_eq!(self.count(), 0, "hasher has already accepted input");
-        self.core.set_input_offset(offset);
-        self
-    }
-
-    fn finalize_non_root(&self) -> CVBytes {
-        assert_ne!(self.count(), 0, "empty subtrees are never valid");
-        self.clone().take_output().chaining_value()
-    }
-}
-
-#[test]
-#[should_panic]
-fn test_empty_subtree_should_panic() {
-    crate::Hasher::new(crate::Mode::Plain, None).finalize_non_root();
-}
-
-#[test]
-#[should_panic]
-fn test_unaligned_offset_should_panic() {
-    crate::Hasher::new(crate::Mode::Plain, None).set_input_offset(1);
-}
-
-#[test]
-#[should_panic]
-fn test_hasher_already_accepted_input_should_panic() {
-    crate::Hasher::new(crate::Mode::Plain, None).update(b"x").set_input_offset(0);
-}
-
-#[test]
-#[should_panic]
-fn test_too_much_input_should_panic() {
-    crate::Hasher::new(crate::Mode::Plain, None).set_input_offset(CHUNK_LEN as u64).update(&[0; CHUNK_LEN + 1]);
-}
-
-#[test]
-#[should_panic]
-fn test_set_input_offset_cant_finalize() {
-    let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
-    hasher.set_input_offset(CHUNK_LEN as u64);
-    hasher.finalize();
-}
-
-#[test]
-#[should_panic]
-fn test_set_input_offset_cant_finalize_xof() {
-    let mut hasher = crate::Hasher::new(crate::Mode::Plain, None);
-    hasher.set_input_offset(CHUNK_LEN as u64);
-    hasher.finalize_xof();
-}
-
-/// Every test case hashed as subtrees of 1 to 32 chunks, merged layer by
-/// layer, against the one-shot hash.
+/// Every test case hashed as subtrees of 1 to 32 chunks via `TreeHasher`,
+/// merged layer by layer, against the one-shot hash.
 #[test]
 fn test_grouped_hash() {
+    let tree = crate::throughput::TreeHasher::new(crate::Mode::Plain);
     let parent = |left: &CVBytes, right: &CVBytes| crate::hasher::parent_output(left, right, crate::IV, 0, crate::Platform::detect());
     const MAX_CHUNKS: usize = (TEST_CASES_MAX + 1) / CHUNK_LEN;
     let mut input_buf = [0; TEST_CASES_MAX];
     paint_test_input(&mut input_buf);
-    for subtree_chunks in [1, 2, 4, 8, 16, 32] {
+    for subtree_chunks in [1usize, 2, 4, 8, 16, 32] {
+        let level = subtree_chunks.trailing_zeros();
         let subtree_len = subtree_chunks * CHUNK_LEN;
         for &case in TEST_CASES {
             if case <= subtree_len {
@@ -2031,15 +1960,19 @@ fn test_grouped_hash() {
             let mut chaining_values: [CVBytes; MAX_CHUNKS] = [[0; 32]; MAX_CHUNKS];
             let mut n = 0;
             let mut subtree_offset = 0;
+            let mut index = 0u64;
             while subtree_offset < input.len() {
                 let take = core::cmp::min(subtree_len, input.len() - subtree_offset);
-                let subtree_cv = crate::Hasher::new(crate::Mode::Plain, None)
-                    .set_input_offset(subtree_offset as u64)
-                    .update(&input[subtree_offset..][..take])
-                    .finalize_non_root();
+                let slice = &input[subtree_offset..][..take];
+                let subtree_cv = if take == subtree_len {
+                    *tree.subtree_cv(level, index, slice).as_bytes()
+                } else {
+                    *tree.last_cv((subtree_offset / CHUNK_LEN) as u64, slice).as_bytes()
+                };
                 chaining_values[n] = subtree_cv;
                 n += 1;
                 subtree_offset += take;
+                index += 1;
             }
             assert!(n >= 2);
             while n > 2 {
@@ -2196,7 +2129,7 @@ mod prefetch_counts {
         // machine a Hasher::new would take SME2, and the test once returned
         // there, leaving the family's mutants uncaught on SME2 (the VM's
         // whole run, BLAKE3 #219, November 4).
-        let neon = || crate::Hasher::from_core(crate::incremental::HasherCore::new_from(IV, 0, Platform::NEON));
+        let neon = || crate::Hasher::from_core(crate::incremental::HasherCore::new_from(crate::Domain::plain(), Platform::NEON));
         let input = painted(crate::PREFETCH_BELOW + CHUNK_LEN);
         for len in (CHUNK_LEN - 7..=crate::PREFETCH_BELOW + 7).step_by(97).chain([
             CHUNK_LEN,

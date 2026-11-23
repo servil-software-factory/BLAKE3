@@ -19,9 +19,10 @@
 //! AmpereOne VM 0.11 to 0.17 ms, b3sum of a small file 8% slower, for
 //! kernels few programs call (Zooko, November 12, 2026). The proofs and
 //! test_hash_last_lanes_against_hash cover them.
-//! Elsewhere nine cases reach every x86 kernel: about 28 µs in a fresh
-//! process on an i7-12700K's performance core, 16 µs warm (47 on an
-//! efficiency core), from 109 and 90 (210) with the AArch64 list.
+//! Elsewhere a common table of eight cases (plus up to five platform-specific
+//! wide/output checks on Linux AVX-512/AVX2) reaches every x86 kernel: about
+//! 28 µs in a fresh process on an i7-12700K's performance core, 16 µs warm
+//! (47 on an efficiency core), from 109 and 90 (210) with the AArch64 list.
 //!
 //! As Niels Ferguson suggested, the cases chain: each writes the first 32
 //! bytes of its output over the start of the next case's input (and keys
@@ -32,7 +33,8 @@
 //!
 //! `initialize()`, which every program calls before any other call, runs
 //! it through `ensure`, in every build (std or not); other threads calling
-//! it wait, spinning (once per process, for 0.1 to 0.2 ms). The cases call
+//! it wait (parked under `std`, spinning without `std`, once per process,
+//! for 0.1 to 0.2 ms). The cases call
 //! the entry points' bodies from the undetected platform
 //! (`hash_serial_from` and its like), just past Platform::detect(), which
 //! panics until `initialize` has recorded the platform. It allocates nothing: its buffers (about 44 KiB) live on the
@@ -144,10 +146,7 @@ pub(crate) const CASES: &[(Case, &str)] = &[
 #[cfg(not(target_arch = "aarch64"))]
 pub(crate) const CASES: &[(Case, &str)] = &[
     (Hash { offset: 1, len: 65 }, "a block and a byte, unaligned: the one-block kernel"),
-    (
-        Keyed { len: KIB + 65 },
-        "keyed, a chunk and a block and a byte (the shortest the one-chunk pass takes): the four-lane pass with a partial chunk (AVX2, AVX-512)",
-    ),
+    (Keyed { len: KIB + 65 }, "keyed, a chunk and a block and a byte: the paired-chunk path (AVX2, AVX-512) or chunk-plus-tail (SSE4.1)"),
     (Hash { offset: 3, len: 4 * KIB + 65 }, "four chunks and a block, unaligned: the chunk kernel over chunks, their parents, the tree"),
     (Hash { offset: 0, len: 3 * KIB + 100 }, "three chunks and a partial one: the four-lane pass with a partial chunk"),
     (
@@ -319,7 +318,7 @@ pub(crate) fn outputs(platform: Platform, case: Case, input: &[u8], previous: &[
 /// line, as `xof` and `many`: their buffers take the stack only in turn).
 #[inline(never)]
 fn incremental(platform: Platform, input: &[u8], piece: usize) -> crate::Hash {
-    let mut hasher = crate::Hasher::from_core(crate::HasherCore::new_from(crate::IV, 0, platform));
+    let mut hasher = crate::Hasher::from_core(crate::HasherCore::new_from(crate::Domain::plain(), platform));
     for part in input.chunks(piece) {
         hasher.update(part);
     }
@@ -329,7 +328,7 @@ fn incremental(platform: Platform, input: &[u8], piece: usize) -> crate::Hash {
 /// Extended output of `input` from position `skip`, into `out`.
 #[inline(never)]
 fn xof(platform: Platform, input: &[u8], skip: u64, out: &mut [u8]) -> usize {
-    let mut hasher = crate::Hasher::from_core(crate::HasherCore::new_from(crate::IV, 0, platform));
+    let mut hasher = crate::Hasher::from_core(crate::HasherCore::new_from(crate::Domain::plain(), platform));
     hasher.update(input);
     let mut reader = hasher.finalize_xof();
     reader.set_position(skip);
@@ -407,6 +406,13 @@ fn run() -> usize {
     #[cfg(test)]
     if PLANTED_FAILURE.load(core::sync::atomic::Ordering::Relaxed) {
         panic!("a kernel's panic, planted by a test");
+    }
+    #[cfg(all(test, feature = "std"))]
+    if HOLD_RUN.load(core::sync::atomic::Ordering::Relaxed) {
+        IN_RUN.store(true, core::sync::atomic::Ordering::Release);
+        while HOLD_RUN.load(core::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
     }
     compiled_features_present();
     let platform = Platform::detect_unchecked();
@@ -497,11 +503,69 @@ pub(crate) fn unsupported(why: core::fmt::Arguments) -> ! {
     stop(why)
 }
 
+/// Direct non-unwinding fail-stop for self-test mismatches in helper modules
+/// (`avx512_32`, `ffi_output`) so every startup mismatch terminates even in
+/// `no_std` non-unwinding builds.
+#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+#[cold]
+pub(crate) fn fail(why: core::fmt::Arguments) -> ! {
+    stop(why)
+}
+
 #[cold]
 fn stop(why: core::fmt::Arguments) -> ! {
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", unix))]
     {
-        std::eprintln!("{why}");
+        use core::fmt::Write as _;
+
+        struct StackBuf {
+            bytes: [u8; 320],
+            len: usize,
+        }
+        impl core::fmt::Write for StackBuf {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                for &b in s.as_bytes() {
+                    if let Some(slot) = self.bytes.get_mut(self.len) {
+                        *slot = b;
+                        self.len += 1;
+                    }
+                }
+                Ok(())
+            }
+        }
+        #[repr(C)]
+        struct PollFd {
+            fd: i32,
+            events: i16,
+            revents: i16,
+        }
+        const POLLOUT: i16 = 0x0004;
+        #[cfg(target_os = "macos")]
+        type Nfds = u32;
+        #[cfg(not(target_os = "macos"))]
+        type Nfds = usize;
+        unsafe extern "C" {
+            fn poll(fds: *mut PollFd, nfds: Nfds, timeout: i32) -> i32;
+            fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
+        }
+        // Best-effort nonblocking diagnostic directly to fd 2, bypassing
+        // Rust's stderr mutex and skipping the write if stderr is full.
+        let mut buf = StackBuf { bytes: [0; 320], len: 0 };
+        let _ = buf.write_fmt(why);
+        let _ = buf.write_str("\n");
+        let mut pfd = PollFd { fd: 2, events: POLLOUT, revents: 0 };
+        // Sound: valid PollFd pointer and initialized stack slice of length `buf.len <= 320 <= PIPE_BUF`.
+        unsafe {
+            let _ = poll(&mut pfd, 1, 0);
+            if pfd.revents & POLLOUT != 0 {
+                let _ = write(2, buf.bytes.as_ptr().cast(), buf.len);
+            }
+        }
+        std::process::abort()
+    }
+    #[cfg(all(feature = "std", not(unix)))]
+    {
+        let _ = why;
         std::process::abort()
     }
     #[cfg(not(feature = "std"))]
@@ -529,16 +593,22 @@ fn trap() -> ! {
 
 /// The self-test's progress in this process. A failed one stops the
 /// process (stop), so no state says so.
+#[cfg(not(feature = "std"))]
 const UNTESTED: u8 = 0;
+#[cfg(not(feature = "std"))]
 const RUNNING: u8 = 1;
 const PASSED: u8 = 2;
-static STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(UNTESTED);
+static STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
-/// The threads that have reached the wait for another's verdict (test
-/// builds only): the test of that wait waits for one to arrive, not for a
-/// time, before it gives the verdict.
+#[cfg(feature = "std")]
+static INIT: std::sync::Once = std::sync::Once::new();
+
+/// Test-only rendezvous hooks so a subprocess test can hold the real winner
+/// inside `run()` while real contending callers park in `INIT.call_once`.
 #[cfg(all(test, feature = "std"))]
-static WAITING: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static HOLD_RUN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(all(test, feature = "std"))]
+static IN_RUN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// A failure a test plants in the self-test's run (test builds only), as
 /// a CPU or build that computes wrong digests would fail it.
@@ -560,37 +630,45 @@ pub(crate) fn ensure() {
     }
 }
 
+/// Drop guard that turns any panic during `run()` into an uncatchable stop.
+struct Failed;
+impl Drop for Failed {
+    fn drop(&mut self) {
+        stop(format_args!("blake3-servil startup self-test failed: a kernel panicked on this build or this CPU"));
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn ensure_slow() {
-    use core::sync::atomic::Ordering::Relaxed;
-    if STATE.compare_exchange(UNTESTED, RUNNING, Relaxed, Relaxed).is_ok() {
-        /// A kernel that panics during the test stops the process too:
-        /// its unwind passes here.
-        struct Failed;
-        impl Drop for Failed {
-            fn drop(&mut self) {
-                stop(format_args!("blake3-servil startup self-test failed: a kernel panicked on this build or this CPU"));
-            }
+    #[cfg(feature = "std")]
+    {
+        // `std::sync::Once` allocates nothing on macOS or Linux (its waiter
+        // nodes live on contending threads' stacks) and parks waiters in the
+        // OS kernel rather than spinning.
+        INIT.call_once(|| {
+            let failed = Failed;
+            run();
+            core::mem::forget(failed);
+            STATE.store(PASSED, core::sync::atomic::Ordering::Release);
+        });
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+        if STATE.compare_exchange(UNTESTED, RUNNING, Relaxed, Relaxed).is_ok() {
+            let failed = Failed;
+            run();
+            core::mem::forget(failed);
+            STATE.store(PASSED, Release);
+            return;
         }
-        let failed = Failed;
-        run();
-        core::mem::forget(failed);
-        STATE.store(PASSED, Relaxed);
-        return;
+        while STATE.load(Acquire) == RUNNING {
+            core::hint::spin_loop();
+        }
+        let state = STATE.load(Acquire);
+        assert!(state == PASSED, "the self-test's state is {state} after it ran");
     }
-    #[cfg(all(test, feature = "std"))]
-    WAITING.fetch_add(1, Relaxed);
-    // Wait for the verdict: a test that fails stops the process, so the
-    // one a thread sees leave RUNNING is PASSED. The loop spins while the
-    // test runs and leaves on any other state, so no change below can
-    // make a thread spin forever (the mutation check's clock was the only
-    // thing stopping two such changes).
-    while STATE.load(Relaxed) == RUNNING {
-        core::hint::spin_loop();
-    }
-    let state = STATE.load(Relaxed);
-    assert!(state == PASSED, "the self-test's state is {state} after it ran");
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -632,29 +710,65 @@ mod test {
         assert_eq!(checked, expected);
     }
 
-    /// The first call runs the self-test, which passes (each test runs in
-    /// a fresh process, so it has not run yet). Then a thread that arrives
-    /// while another runs the self-test waits for its verdict: it returns
-    /// once the self-test has passed, and stops once it has failed. The
-    /// test stands in for the running thread by setting the state itself,
-    /// so the arrival always finds the self-test running, and gives the
-    /// verdict once the thread is waiting (WAITING), not after a sleep that a
-    /// loaded machine could outlast. A waiting thread that missed the
-    /// verdict would spin, and nextest's one clock would end it: a time-out
-    /// (tools/mutants/timeouts-<arch>.txt), not a failure.
+    /// Contending threads calling `initialize()` while the winner is inside
+    /// `run()` park in `std::sync::Once` until the real winner finishes, then
+    /// all wake and observe `PASSED`. Run in a fresh subprocess so `INIT` is
+    /// uninitialized.
     #[test]
     fn test_a_waiting_thread_takes_the_verdict() {
-        use core::sync::atomic::Ordering::Relaxed;
-        crate::initialize();
-        assert_eq!(STATE.load(Relaxed), PASSED, "initialize runs the self-test");
-        STATE.store(RUNNING, Relaxed);
-        let arrived = WAITING.load(Relaxed);
-        let waiter = std::thread::spawn(ensure_slow);
-        while WAITING.load(Relaxed) == arrived {
-            std::thread::yield_now();
+        use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+        const CHILD: &str = "BLAKE3_SERVIL_TEST_WAITERS";
+        if std::env::var_os(CHILD).is_some() {
+            HOLD_RUN.store(true, Release);
+            let winner = std::thread::spawn(crate::initialize);
+            while !IN_RUN.load(Acquire) {
+                std::thread::yield_now();
+            }
+            let started = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
+            let done = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
+            let waiters: std::vec::Vec<_> = (0..3)
+                .map(|_| {
+                    let started = std::sync::Arc::clone(&started);
+                    let done = std::sync::Arc::clone(&done);
+                    std::thread::spawn(move || {
+                        started.fetch_add(1, Release);
+                        crate::initialize();
+                        done.fetch_add(1, Release);
+                    })
+                })
+                .collect();
+            while started.load(Acquire) < 3 {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert_eq!(done.load(Acquire), 0, "waiters must block until the self-test finishes");
+            HOLD_RUN.store(false, Release);
+            winner.join().expect("winner completed");
+            for waiter in waiters {
+                waiter.join().expect("waiter woke after verdict");
+            }
+            assert_eq!(done.load(Acquire), 3);
+            assert_eq!(STATE.load(Relaxed), PASSED);
+            std::process::exit(0);
         }
-        STATE.store(PASSED, Relaxed);
-        assert!(waiter.join().is_ok(), "the waiting thread returns after the verdict");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "self_test::test::test_a_waiting_thread_takes_the_verdict", "--nocapture", "--test-threads", "1"])
+            .env(CHILD, "1")
+            .spawn()
+            .expect("spawn child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("waiter subprocess timed out");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(status.success(), "waiter subprocess failed: {status:?}");
     }
 
     /// The self-test runs every assembly entry point this machine has but
@@ -766,6 +880,7 @@ mod test {
         let previous = chain(ours, |i, folded| assert_eq!(folded, EXPECTED[i]));
         for bad in 0..crate::avx512_32::SELF_TEST_EXPECTED.len() {
             let mut calls = 0;
+            let mut failed_entry = None;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::avx512_32::self_test_chain(
                     &previous,
@@ -777,16 +892,16 @@ mod test {
                             *out.last_mut().expect("a nonempty self-test output") ^= 1;
                         }
                     },
-                    crate::avx512_32::check_self_test,
+                    |index, folded| {
+                        if let Err(entry) = crate::avx512_32::check_self_test_entry(index, folded) {
+                            failed_entry = Some(entry);
+                            panic!("wide self-test mismatch");
+                        }
+                    },
                 );
             }));
-            let failure = result.expect_err("corruption went unnoticed");
-            let message = failure
-                .downcast_ref::<std::string::String>()
-                .map(std::string::String::as_str)
-                .or_else(|| failure.downcast_ref::<&str>().copied())
-                .unwrap_or("");
-            assert!(message.contains("blake3-servil startup self-test failed"), "wrong failure for case {bad}: {message}");
+            assert!(result.is_err(), "corruption went unnoticed for case {bad}");
+            assert!(failed_entry.is_some(), "missing failing entry name for case {bad}");
             assert_eq!(calls, bad + 1, "a case ran after the failed one");
         }
     }
@@ -862,7 +977,7 @@ mod stops {
         use core::sync::atomic::Ordering::Relaxed;
         const CHILD: &str = "BLAKE3_SERVIL_TEST_PLANTED_FAILURE";
         if std::env::var_os(CHILD).is_some() {
-            STATE.store(UNTESTED, Relaxed);
+            STATE.store(0, Relaxed);
             PLANTED_FAILURE.store(true, Relaxed);
             let _ = std::panic::catch_unwind(ensure_slow);
             std::process::exit(0);
@@ -879,6 +994,189 @@ mod stops {
             assert!(stderr.contains("startup self-test failed"), "it says why: {stderr}");
         } else {
             assert_eq!(out.status.signal(), Some(4), "the child traps (SIGILL): {:?}\n{stderr}", out.status);
+        }
+    }
+
+    /// A failed self-test must still abort promptly even when stderr is a
+    /// full, undrained blocking pipe (where `eprintln!` or a blocking write
+    /// would deadlock instead of terminating).
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_stop_does_not_block_on_full_stderr_pipe() {
+        use std::os::unix::io::FromRawFd as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        const CHILD: &str = "BLAKE3_SERVIL_TEST_FULL_STDERR";
+        if std::env::var_os(CHILD).is_some() {
+            PLANTED_WRONG_CASE.store(0, core::sync::atomic::Ordering::Relaxed);
+            run();
+            std::process::exit(0);
+        }
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+        // Set write end nonblocking temporarily, fill the pipe completely,
+        // then restore blocking mode so a blocking stderr write would hang.
+        let flags = unsafe { libc::fcntl(fds[1], libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL");
+        assert_eq!(unsafe { libc::fcntl(fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0, "set O_NONBLOCK");
+        let chunk = [b'x'; 4096];
+        loop {
+            let n = unsafe { libc::write(fds[1], chunk.as_ptr().cast(), chunk.len()) };
+            if n <= 0 {
+                break;
+            }
+        }
+        assert_eq!(unsafe { libc::fcntl(fds[1], libc::F_SETFL, flags) }, 0, "restore blocking");
+        // Keep the read end open and undrained while the child runs.
+        let _read_end = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let write_end = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "self_test::stops::test_stop_does_not_block_on_full_stderr_pipe", "--nocapture", "--test-threads", "1"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(write_end))
+            .spawn()
+            .expect("spawn child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child blocked on full stderr pipe instead of aborting");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(6), "child must abort (SIGABRT) on full stderr pipe: {status:?}");
+    }
+
+    /// A failed self-test must bypass Rust's stderr mutex even when a *different*
+    /// thread holds `std::io::stderr().lock()` on a writable stderr pipe, printing
+    /// its diagnostic and aborting promptly instead of deadlocking.
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_stop_bypasses_stderr_lock_held_by_another_thread() {
+        use std::os::unix::process::ExitStatusExt as _;
+        const CHILD: &str = "BLAKE3_SERVIL_TEST_LOCKED_STDERR";
+        if std::env::var_os(CHILD).is_some() {
+            let locked = std::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+            let locked2 = std::sync::Arc::clone(&locked);
+            std::thread::spawn(move || {
+                let _guard = std::io::stderr().lock();
+                locked2.store(true, core::sync::atomic::Ordering::Release);
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                }
+            });
+            while !locked.load(core::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            PLANTED_WRONG_CASE.store(0, core::sync::atomic::Ordering::Relaxed);
+            run();
+            std::process::exit(0);
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "self_test::stops::test_stop_bypasses_stderr_lock_held_by_another_thread", "--nocapture", "--test-threads", "1"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if child.try_wait().expect("try_wait").is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child deadlocked on stderr lock held by another thread");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let out = child.wait_with_output().expect("wait_with_output");
+        let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.signal(), Some(6), "child must abort (SIGABRT): {:?}\n{stderr}", out.status);
+        assert!(stderr.contains("startup self-test failed"), "diagnostic missing on stderr: {stderr}");
+    }
+
+    /// Mismatches in every wide AVX-512 case (`0`, `1`, `2`) and every
+    /// independent-output self-test pass (16-lane before 8-lane overwrite, and
+    /// the final pass) go directly to the non-unwinding fatal stop, even inside
+    /// `catch_unwind` and without `std`.
+    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[test]
+    fn test_wide_and_output_self_test_mismatch_stops_the_process() {
+        use std::os::unix::process::ExitStatusExt as _;
+        const CHILD: &str = "BLAKE3_SERVIL_TEST_WIDE_FAIL";
+        if let Some(which) = std::env::var_os(CHILD) {
+            let which = which.to_str().unwrap();
+            let _ = std::panic::catch_unwind(|| match which {
+                "wide-0" | "wide-1" | "wide-2" => {
+                    let bad: usize = which.strip_prefix("wide-").unwrap().parse().unwrap();
+                    let platform = Platform::detect_unchecked();
+                    let previous = chain(|case, input, previous, out| outputs(platform, case, input, previous, out), |_, _| {});
+                    crate::avx512_32::PLANTED_WRONG_WIDE.store(bad, core::sync::atomic::Ordering::Relaxed);
+                    crate::avx512_32::self_test_chain(
+                        &previous,
+                        |inputs, key, counter, increment, out| {
+                            for (i, &input) in inputs.iter().enumerate() {
+                                let c = counter.wrapping_add(if increment.yes() { i as u64 } else { 0 });
+                                Platform::SSE41.hash_many(
+                                    &[input],
+                                    key,
+                                    c,
+                                    crate::IncrementCounter::No,
+                                    crate::KEYED_HASH,
+                                    crate::CHUNK_START,
+                                    crate::CHUNK_END,
+                                    &mut out[i * crate::OUT_LEN..][..crate::OUT_LEN],
+                                );
+                            }
+                        },
+                        crate::avx512_32::check_self_test,
+                    );
+                }
+                #[cfg(feature = "std")]
+                "output-16" => {
+                    crate::ffi_output::PLANTED_WRONG_OUTPUT.store(1, core::sync::atomic::Ordering::Relaxed);
+                    crate::ffi_output::self_test(Platform::detect_unchecked());
+                }
+                #[cfg(feature = "std")]
+                "output-final" => {
+                    crate::ffi_output::PLANTED_WRONG_OUTPUT.store(2, core::sync::atomic::Ordering::Relaxed);
+                    crate::ffi_output::self_test(Platform::detect_unchecked());
+                }
+                _ => unreachable!(),
+            });
+            std::process::exit(0);
+        }
+        #[cfg_attr(not(feature = "std"), allow(unused_mut))]
+        let mut cases: std::vec::Vec<(&str, &str)> = std::vec![("wide-0", "AVX-512 k32"), ("wide-1", "AVX-512 p32"), ("wide-2", "AVX-512 p16")];
+        #[cfg(feature = "std")]
+        {
+            let platform = Platform::detect_unchecked();
+            let width = crate::ffi_output::lanes(platform);
+            if width == 16 && crate::platform::avx2_detected() {
+                cases.push(("output-16", "independent counter-zero compressions"));
+            }
+            if width != 0 {
+                cases.push(("output-final", "independent counter-zero compressions"));
+            }
+        }
+        let signal = if cfg!(feature = "std") { 6 } else { 4 };
+        for (which, needle) in cases {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "self_test::stops::test_wide_and_output_self_test_mismatch_stops_the_process", "--nocapture", "--test-threads", "1"])
+                .env(CHILD, which)
+                .output()
+                .expect("spawn child");
+            let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.signal(), Some(signal), "{which}: child must stop: {:?}\n{stderr}", out.status);
+            if cfg!(feature = "std") {
+                assert!(stderr.contains(needle), "{which}: stderr missing {needle:?}: {stderr}");
+            }
         }
     }
 }

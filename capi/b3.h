@@ -107,7 +107,9 @@ typedef struct {
 
 void b3_hasher_new(b3_hasher *hasher, const b3_mode *mode, int has_length_hint, uint64_t length_hint);
 
-/* Add the message's next `len` bytes. */
+/* Add the message's next `len` bytes. BLAKE3 messages hold at most
+ * 2^64 - 1 bytes in total; an update that would exceed that limit stops
+ * the process. */
 void b3_hasher_update(b3_hasher *hasher, const void *input, size_t len);
 
 /* The digest of the message so far. The hasher is left as it was: more
