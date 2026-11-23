@@ -113,7 +113,7 @@ def files_under(folder):
 
 class Controls(unittest.TestCase):
     def setUp(self):
-        self.base = tempfile.mkdtemp(prefix="model-controls-")
+        self.base = os.path.realpath(tempfile.mkdtemp(prefix="model-controls-"))
         self.addCleanup(shutil.rmtree, self.base, True)
         # The tree: a checkout, with a build directory that Git ignores.
         self.root = os.path.join(self.base, "tree")

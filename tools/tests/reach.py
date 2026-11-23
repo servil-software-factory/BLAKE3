@@ -105,19 +105,21 @@ def base_with_map():
 
 def read_map(tree):
     tests, instrumented = {}, {}
-    for line in open(map_path(tree)):
-        test, path, lines = line.rstrip("\n").split("\t")
-        lines = {int(n) for n in lines.split(",") if n}
-        if test == "#instrumented":
-            instrumented[path] = lines
-        else:
-            tests.setdefault(test, {})[path] = lines
+    with open(map_path(tree)) as f:
+        for line in f:
+            test, path, lines = line.rstrip("\n").split("\t")
+            lines = {int(n) for n in lines.split(",") if n}
+            if test == "#instrumented":
+                instrumented[path] = lines
+            else:
+                tests.setdefault(test, {})[path] = lines
     return tests, instrumented
 
 
 def write_map(tree, tests, instrumented):
     os.makedirs(MAPS, exist_ok=True)
-    open(os.path.join(MAPS, "latest"), "w").write(tree + "\n")
+    with open(os.path.join(MAPS, "latest"), "w") as f:
+        f.write(tree + "\n")
     with open(map_path(tree), "w") as f:
         for path in sorted(instrumented):
             f.write(f"#instrumented\t{path}\t{','.join(map(str, sorted(instrumented[path])))}\n")

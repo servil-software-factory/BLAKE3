@@ -943,12 +943,13 @@ def elsewhere(name, lists=None):
         kind, arch = base[:-4].split("-", 1)
         if arch == here:
             continue
-        for line in open(path):
-            if line.startswith("#") or line.startswith(("files:", "model files:")) or not line.strip():
-                continue
-            file, mutant, _, reason = line.rstrip("\n").split("\t", 3)
-            if f"{file}\t{mutant}" == name and not reason.startswith("UNCLASSIFIED"):
-                out.append(f"on {arch}: {'survives' if kind == 'known' else 'times out'} ({base}): {reason}")
+        with open(path) as f:
+            for line in f:
+                if line.startswith("#") or line.startswith(("files:", "model files:")) or not line.strip():
+                    continue
+                file, mutant, _, reason = line.rstrip("\n").split("\t", 3)
+                if f"{file}\t{mutant}" == name and not reason.startswith("UNCLASSIFIED"):
+                    out.append(f"on {arch}: {'survives' if kind == 'known' else 'times out'} ({base}): {reason}")
     return out
 
 

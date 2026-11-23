@@ -27,13 +27,9 @@ jobs:
     timeout-minutes: 30
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - name: Long-proof cache identity
-      run: python3 -m unittest discover -s tools/verify -p test_long_proof_inputs.py -v
     - run: sh tools/ci-rust.sh stable rustfmt
     - name: cargo fmt --check, in each crate
       run: for d in $(git ls-files '*Cargo.toml' | xargs -n1 dirname); do (cd "$d" && cargo fmt --all -- --check) || exit 1; done
-    - name: Release-tool controls
-      run: python3 tools/test_one_assignee.py && python3 tools/test_release_check.py && python3 tools/test_release_artifacts.py && python3 tools/test_gen_ver.py && python3 tools/test_land.py && python3 tools/test_unsafe_reasons.py && python3 tools/unsafe_reasons.py && python3 tools/test_pipeline_model_controls.py && python3 tools/test_api.py && python3 tools/test_dependency_policy.py
 
   # Both locked resolutions — the release workspace
   # (tools/release/Cargo.lock) and standalone b3sum (b3sum/Cargo.lock) —
@@ -396,8 +392,8 @@ jobs:
         name: b3sum-${{ runner.arch }}
         path: dist/
 
-  runner_tests:
-    name: runner tests (${{ matrix.os }}, ${{ matrix.python }})
+  python_tools:
+    name: python tools (${{ matrix.os }}, ${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
@@ -406,9 +402,10 @@ jobs:
         # left unclosed stays unwritten, and it lacks some of CPython's os calls.
         python: [python3, pypy3]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+    - run: sh tools/ci-rust.sh stable
     - name: PyPy 8.0.1 (Python 3.12), by the SHA-256 pypy.org publishes
       if: matrix.python == 'pypy3'
       run: |
@@ -421,4 +418,32 @@ jobs:
         echo "$sha  $RUNNER_TEMP/pypy.tar.gz" | shasum -a 256 -c
         tar -xzf "$RUNNER_TEMP/pypy.tar.gz" -C "$RUNNER_TEMP"
         echo "$RUNNER_TEMP/$name/bin" >> "$GITHUB_PATH"
-    - run: ${{ matrix.python }} --version && ${{ matrix.python }} -W default -m unittest discover -s tools/runner -p 'test_*.py' -v
+    - name: z3-solver 5.4.1.0 wheel, by SHA-256 (unpacked directly, no pip)
+      run: |
+        case "$(uname -sm)" in
+          "Linux x86_64")
+            # BLAKE3: 17da9aa2b71726d8805fe4dba2c98d74a7e8f61d3db7b7bf829dd7f6a8f6acde
+            url="https://files.pythonhosted.org/packages/04/bd/0f7c575074092d7606751245a1e3577cf5ab922c2a59389f39c4f037c749/z3_solver-5.4.1.0-py3-none-manylinux_2_27_x86_64.whl"
+            sha="e680ce083683abca5d07c3e55c2f620ff9a29cb91c548eeeea27ae29e8060522"
+            ;;
+          "Darwin arm64")
+            # BLAKE3: fd5f797bcd67c690b7e3a5553c4c1d3bb4204fafa6d08459d4a13885c5263b94
+            url="https://files.pythonhosted.org/packages/9f/08/914c3cc898098af6b2d4af02e6b332c71c495be21d0519f57d15b142ad01/z3_solver-5.4.1.0-py3-none-macosx_13_0_arm64.whl"
+            sha="9518a4cb03f49a38d4b1895b80910a12e0b0d144300472b95562426657396e01"
+            ;;
+          *) echo "no z3-solver wheel named for $(uname -sm)"; exit 1 ;;
+        esac
+        curl -sSfL -o "$RUNNER_TEMP/z3.whl" "$url"
+        echo "$sha  $RUNNER_TEMP/z3.whl" | shasum -a 256 -c
+        ${{ matrix.python }} -m zipfile -e "$RUNNER_TEMP/z3.whl" "$RUNNER_TEMP/z3"
+    - name: Python tool test suites and unsafe-reasons check
+      run: |
+        set -eu
+        ${{ matrix.python }} --version
+        for d in tools tools/runner tools/mutants tools/tests; do
+          echo "=== $d ==="
+          ${{ matrix.python }} -W default -m unittest discover -s "$d" -t "$d" -p 'test_*.py' -v
+        done
+        echo "=== tools/verify ==="
+        PYTHONPATH="$RUNNER_TEMP/z3" ${{ matrix.python }} -W default -m unittest discover -s tools/verify -t tools/verify -p 'test_*.py' -v
+        ${{ matrix.python }} -W default tools/unsafe_reasons.py

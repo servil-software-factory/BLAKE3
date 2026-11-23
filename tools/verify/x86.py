@@ -34,6 +34,7 @@ import random
 import terms
 from aarch64 import Ptr, Region, Unproved, decide, as_bv, concrete
 
+@functools.cache
 def tool(name):
     """LLVM's `name`, the newest version installed (17 or later)."""
     import shutil
@@ -43,9 +44,6 @@ def tool(name):
                 return path
     raise AssertionError(f"no {name}: install LLVM 17 or later")
 
-
-LLVM_OBJDUMP = tool("llvm-objdump")
-LLD = tool("ld.lld")
 
 GPR = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp"] + [f"r{i}" for i in range(8, 16)]
 SUB = {}
@@ -61,14 +59,14 @@ SIZES = {"byte": 1, "word": 2, "dword": 4, "qword": 8, "xmmword": 16, "ymmword":
 def link(obj):
     """A shared object of `obj`, so its rip-relative constants resolve."""
     so = obj + ".so"
-    subprocess.run([LLD, "-shared", obj, "-o", so], check=True)
+    subprocess.run([tool("ld.lld"), "-shared", obj, "-o", so], check=True)
     return so
 
 
 @functools.lru_cache(None)
 def disassemble(so, start, stop):
     """{address: (mnemonic, [operands], next address)} for [start, stop)."""
-    out = subprocess.run([LLVM_OBJDUMP, "-d", "--no-show-raw-insn", "-M", "intel", f"--start-address={start}",
+    out = subprocess.run([tool("llvm-objdump"), "-d", "--no-show-raw-insn", "-M", "intel", f"--start-address={start}",
                           f"--stop-address={stop}", so], capture_output=True, text=True, check=True).stdout
     rows = []
     for line in out.splitlines():
@@ -117,7 +115,7 @@ def split(ops):
 @functools.lru_cache(None)
 def sections(so):
     """{name: (address, size)} of the image's sections."""
-    out = subprocess.run([LLVM_OBJDUMP, "-h", so], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run([tool("llvm-objdump"), "-h", so], capture_output=True, text=True, check=True).stdout
     secs = {}
     for line in out.splitlines():
         p = line.split()
@@ -129,7 +127,7 @@ def sections(so):
 @functools.lru_cache(None)
 def symbols(so):
     """{name: address}: the ELF image's symbol values."""
-    out = subprocess.run([LLVM_OBJDUMP, "-t", so], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run([tool("llvm-objdump"), "-t", so], capture_output=True, text=True, check=True).stdout
     syms = {}
     for line in out.splitlines():
         parts = line.split()
@@ -148,7 +146,7 @@ def text_end(so):
 def image(so):
     """The image's loaded bytes, {address: int}: code and constants."""
     names = [n for n in sections(so) if n in (".text", ".rodata", ".data")]
-    out = subprocess.run([LLVM_OBJDUMP, "-s"] + [f"--section={n}" for n in names] + [so],
+    out = subprocess.run([tool("llvm-objdump"), "-s"] + [f"--section={n}" for n in names] + [so],
                          capture_output=True, text=True, check=True).stdout
     data = {}
     for line in out.splitlines():
