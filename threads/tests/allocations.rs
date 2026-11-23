@@ -479,17 +479,28 @@ fn blocks(len: usize, seed: u8) -> Vec<Block> {
 
 #[test]
 fn single_threaded_calls_allocate_as_the_memory_section_says() {
-    blake3_servil::initialize();
+    assert_eq!(allocated(blake3_servil::initialize), 0, "startup initialize() allocates nothing");
     let input = blocks(64 * 1024, 1);
     let bytes = Block::bytes(&input);
     let mut out = [0u8; 100];
     for len in [0, 1, 64, 1024, 1025, 16 * 1024, 64 * 1024] {
+        // On SME2, the very first flat walk (>= 32 KiB) on a thread allocates
+        // its one-time 64 KiB aligned scratch box; every call thereafter
+        // allocates nothing.
+        let first = allocated(|| {
+            std::hint::black_box(convenience::hash(&bytes[..len]));
+        });
+        if len >= 32 * 1024 && blake3_servil_core::thread_support::Platform::detect().name() == "SME2" {
+            assert!(first <= 64 * 1024 + 4096, "first SME2 flat walk allocated {first} B");
+        } else {
+            assert_eq!(first, 0, "convenience::hash of {len} B");
+        }
         assert_eq!(
             allocated(|| {
                 std::hint::black_box(convenience::hash(&bytes[..len]));
             }),
             0,
-            "convenience::hash of {len} B"
+            "repeated convenience::hash of {len} B"
         );
         assert_eq!(
             allocated(|| {

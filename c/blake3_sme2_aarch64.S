@@ -11,13 +11,15 @@
  * Both kernels enter streaming mode (smstart sm, smstart za), use ZA tiles
  * for the message transpose, and leave streaming mode before returning.
  * ZA and the streaming-mode registers are clobbered; the low 64 bits of
- * v8-v15 are preserved per AAPCS64. Callers hold no SME state across
- * these calls.
+ * v8-v15 are preserved per AAPCS64. Before enabling ZA, each kernel commits
+ * any dormant caller ZA state per the AAPCS64 SME private-ZA lazy-saving
+ * protocol (saving slices described by TPIDR2_EL0 and clearing TPIDR2_EL0).
  *
- * Both kernels read the streaming vector length and return it in 32-bit
- * lanes. They perform work only when it equals 16; a caller that sees any
- * other value falls back to another implementation. This keeps the code
- * correct on SME implementations with other vector lengths.
+ * Both kernels read the streaming vector length via rdsvl before touching
+ * ZA or streaming mode and return it in 32-bit lanes. They perform work
+ * only when it equals 16 (and groups > 0); a caller that sees any other
+ * value falls back to NEON. This keeps the code correct on SME
+ * implementations with other or per-thread streaming vector lengths.
  *
  * Chunk kernel:
  *
@@ -109,6 +111,8 @@
 .global blake3_servil_sme2_hash16_parents_512
 .global _blake3_servil_sme2_xof16_512
 .global blake3_servil_sme2_xof16_512
+.global _blake3_servil_sme2_svl_lanes
+.global blake3_servil_sme2_svl_lanes
 // Where this file's code ends, for a caller that prefetches it.
 .global _blake3_servil_sme2_text_end
 .global blake3_servil_sme2_text_end
@@ -455,6 +459,56 @@
 .endm
 
 /*
+ * Check SVL == 16 lanes, groups > 0, and AAPCS64 TPIDR2_EL0 reserved bytes
+ * [10..15] == 0 BEFORE modifying stack, ZA, or streaming mode.
+ * If SVL != 16 or groups == 0, return SVL lanes; if any reserved byte in
+ * TPIDR2_EL0 is nonzero (a future ABI extension), return 0 leaving TPIDR2_EL0
+ * and dormant ZA untouched so the caller falls back to NEON.
+ */
+.macro CHECK_SME2_ENTRY early_lbl
+    rdsvl   x8, #1
+    lsr     x8, x8, #2
+    cmp     x8, #16
+    b.ne    \early_lbl
+    cbz     x5, \early_lbl
+    mrs     x16, tpidr2_el0
+    cbz     x16, 90f
+    ldrh    w15, [x16, #10]
+    ldr     w14, [x16, #12]
+    orr     w15, w15, w14
+    cbz     w15, 90f
+    mov     x8, #0
+    b       \early_lbl
+90:
+.endm
+
+/*
+ * AAPCS64 SME private-ZA lazy-save commit: if the caller left a dormant ZA
+ * descriptor in TPIDR2_EL0 (with reserved bytes [10..15] already verified
+ * zero by CHECK_SME2_ENTRY), save the requested ZA slices into za_save_buffer
+ * and clear TPIDR2_EL0 before enabling our own ZA state. Uses only caller-
+ * saved scratch registers x12, x14, x15, x16 (leaving x0-x6 and x17 intact).
+ */
+.macro SAVE_DORMANT_ZA
+    mrs     x16, tpidr2_el0
+    cbz     x16, 91f
+    ldr     x14, [x16]
+    cbz     x14, 92f
+    ldrh    w15, [x16, #8]
+    cbz     w15, 92f
+    mov     w12, #0
+93:
+    str     za[w12, 0], [x14]
+    addsvl  x14, x14, #1
+    add     w12, w12, #1
+    cmp     w12, w15
+    b.lo    93b
+92:
+    msr     tpidr2_el0, xzr
+91:
+.endm
+
+/*
  * Two entry points share one body. The chunk kernel: sixteen blocks per
  * input, counters counter+lane per group, advanced by sixteen. The message
  * kernel (blake3_servil_sme2_hash16_messages_512, a seventh argument `blocks`, 2
@@ -486,6 +540,8 @@ blake3_servil_sme2_hash16_messages_512:
     mov     x17, #0
 
 .Lchunks_body:
+    CHECK_SME2_ENTRY .Lchunks_early_return
+
     /*
      * AAPCS64 preserves the low 64 bits of v8-v15. [sp, #64]: the counter
      * table's next entry (bit 48 of the flags).
@@ -497,19 +553,9 @@ blake3_servil_sme2_hash16_messages_512:
     stp     d14, d15, [sp, #48]
     str     x2, [sp, #64]
 
+    SAVE_DORMANT_ZA
     smstart sm
     smstart za
-
-    /*
-     * This implementation is deliberately M4-specific: 512-bit
-     * streaming vectors, or sixteen 32-bit lanes.
-     */
-    cntw    x8
-    cmp     x8, #16
-    b.eq    .Lvector_length_ok
-
-    mov     x0, x8
-    b       .Lreturn
 
 .Lvector_length_ok:
     ptrue   p0.s
@@ -564,8 +610,6 @@ blake3_servil_sme2_hash16_messages_512:
     cbnz    x6, .Lflags_ready
     orr     w16, w16, w11
 .Lflags_ready:
-
-    cbz     x5, .Lsuccess
 
 .Lgroup_loop:
     /*
@@ -749,6 +793,10 @@ blake3_servil_sme2_hash16_messages_512:
     add     sp, sp, #80
     ret
 
+.Lchunks_early_return:
+    mov     x0, x8
+    ret
+
 /*
  * Parent-node kernel: sixteen parent compressions per group.
  *
@@ -778,21 +826,17 @@ blake3_servil_sme2_hash16_messages_512:
 .p2align 4
 _blake3_servil_sme2_hash16_parents_512:
 blake3_servil_sme2_hash16_parents_512:
+    CHECK_SME2_ENTRY .Lparents_early_return
+
     sub     sp, sp, #64
     stp     d8,  d9,  [sp, #0]
     stp     d10, d11, [sp, #16]
     stp     d12, d13, [sp, #32]
     stp     d14, d15, [sp, #48]
 
+    SAVE_DORMANT_ZA
     smstart sm
     smstart za
-
-    cntw    x8
-    cmp     x8, #16
-    b.eq    .Lparents_vector_length_ok
-
-    mov     x0, x8
-    b       .Lparents_return
 
 .Lparents_vector_length_ok:
     ptrue   p0.s
@@ -817,8 +861,6 @@ blake3_servil_sme2_hash16_parents_512:
     movk    w8, #0xa54f, lsl #16
     dup     z19.s, w8
     mov     za2h.s[w12, 0:3], { z16.s - z19.s }
-
-    cbz     x5, .Lparents_success
 
     /*
      * Lane pointer table: entry i = pairs + 64 * i.
@@ -946,21 +988,17 @@ blake3_servil_sme2_hash16_parents_512:
 .p2align 4
 _blake3_servil_sme2_xof16_512:
 blake3_servil_sme2_xof16_512:
+    CHECK_SME2_ENTRY .Lxof_early_return
+
     sub     sp, sp, #64
     stp     d8,  d9,  [sp, #0]
     stp     d10, d11, [sp, #16]
     stp     d12, d13, [sp, #32]
     stp     d14, d15, [sp, #48]
 
+    SAVE_DORMANT_ZA
     smstart sm
     smstart za
-
-    cntw    x8
-    cmp     x8, #16
-    b.eq    .Lxof_vector_length_ok
-
-    mov     x0, x8
-    b       .Lxof_return
 
 .Lxof_vector_length_ok:
     ptrue   p0.s
@@ -987,8 +1025,6 @@ blake3_servil_sme2_xof16_512:
     /* Flags in w10, the block length in w11. */
     and     w10, w3, #0xff
     ubfx    w11, w3, #8, #8
-
-    cbz     x5, .Lxof_success
 
 .Lxof_group_loop:
     /* The chaining value, broadcast. */
@@ -1125,6 +1161,22 @@ blake3_servil_sme2_xof16_512:
     ldp     d12, d13, [sp, #32]
     ldp     d14, d15, [sp, #48]
     add     sp, sp, #64
+    ret
+
+.Lparents_early_return:
+.Lxof_early_return:
+    mov     x0, x8
+    ret
+
+/*
+ * Return the calling thread's streaming vector length in 32-bit lanes
+ * without entering streaming mode or touching ZA / TPIDR2_EL0.
+ */
+.p2align 4
+_blake3_servil_sme2_svl_lanes:
+blake3_servil_sme2_svl_lanes:
+    rdsvl   x0, #1
+    lsr     x0, x0, #2
     ret
 _blake3_servil_sme2_text_end:
 blake3_servil_sme2_text_end:

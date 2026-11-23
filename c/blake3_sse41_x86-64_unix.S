@@ -37,6 +37,7 @@ blake3_servil_hash_many_sse41:
         mov     rbp, rsp
         sub     rsp, 360
         and     rsp, 0xFFFFFFFFFFFFFFC0
+        movzx   r9d, r9b
         neg     r9d
         movd    xmm0, r9d
         pshufd  xmm0, xmm0, 0x00
@@ -1793,6 +1794,8 @@ _blake3_servil_compress_in_place_sse41:
         movups  xmm0, xmmword ptr [rdi]
         movups  xmm1, xmmword ptr [rdi+0x10]
         movaps  xmm2, xmmword ptr [BLAKE3_IV+rip]
+        movzx   r8d, r8b
+        movzx   edx, dl
         shl     r8, 32
         add     rdx, r8
         movq    xmm3, rcx

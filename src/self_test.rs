@@ -398,8 +398,9 @@ fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]
     out.len()
 }
 
-/// Run every case and panic on the first that differs from the reference;
-/// how many cases ran (CASES and the selected platform's extra entries).
+/// Run every case and stop on the first that differs from the reference;
+/// records the tested platform once on first initialization and returns how
+/// many cases ran (CASES and the selected platform's extra entries).
 fn run() -> usize {
     // A kernel's panic, as a test plants it: the guard in ensure_slow
     // stops the process for it.
@@ -457,6 +458,7 @@ fn run() -> usize {
         checked += crate::ffi_output::self_test(platform);
     }
     let _ = previous;
+    platform.record();
     checked
 }
 
@@ -645,7 +647,10 @@ fn ensure_slow() {
     {
         // `std::sync::Once` allocates nothing on macOS or Linux (its waiter
         // nodes live on contending threads' stacks) and parks waiters in the
-        // OS kernel rather than spinning.
+        // OS kernel rather than spinning. `run()` records the exact tested
+        // platform once inside this winning run so later `initialize()` calls
+        // on other threads never promote an untested backend or overwrite the
+        // verified process selection.
         INIT.call_once(|| {
             let failed = Failed;
             run();

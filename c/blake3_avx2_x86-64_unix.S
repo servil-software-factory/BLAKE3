@@ -33,6 +33,7 @@ blake3_servil_hash_many_avx2:
         mov     rbp, rsp
         sub     rsp, 680
         and     rsp, 0xFFFFFFFFFFFFFFC0
+        movzx   r9d, r9b
         neg     r9d
         vmovd   xmm0, r9d
         vpbroadcastd ymm0, xmm0

@@ -160,6 +160,13 @@ const fn with_platform(detected: u16, platform: u8) -> u16 {
     (detected & 0xff00) + platform as u16
 }
 
+/// Whether [`crate::initialize`] has finished recording the process platform.
+#[cfg(any(all(blake3_sme2, feature = "std"), blake3_neon, feature = "std", test))]
+#[inline]
+pub(crate) fn is_initialized() -> bool {
+    DETECTED.load(core::sync::atomic::Ordering::Relaxed) as u8 != 0
+}
+
 /// A call before `initialize`: the caller broke the contract. The crate's
 /// own unit tests, many small programs in one, initialize here instead.
 #[cold]
@@ -174,13 +181,14 @@ fn not_initialized() -> u8 {
     panic!("blake3-servil: call blake3_servil_core::initialize() once, before any other call: it runs the startup self-test and detects the CPU")
 }
 
-/// x86-64's kernels for a CPU with the given features: the widest it
-/// runs, or None for a CPU without SSE4.1, which is not supported.
+/// x86-64's kernels for a CPU with the given features: the widest whose full
+/// prerequisite chain is present (`SSSE3+SSE4.1` <= `AVX2` <= `AVX-512`), or
+/// None for a CPU without SSSE3 + SSE4.1, which is not supported.
 #[cfg(all(target_arch = "x86_64", blake3_sse41_ffi, blake3_avx2_ffi, blake3_avx512_ffi))]
 const fn x86_platform(avx512: bool, avx2: bool, sse41: bool) -> Option<Platform> {
-    if avx512 {
+    if sse41 && avx2 && avx512 {
         Some(Platform::AVX512)
-    } else if avx2 {
+    } else if sse41 && avx2 {
         Some(Platform::AVX2)
     } else if sse41 {
         Some(Platform::SSE41)
@@ -190,6 +198,13 @@ const fn x86_platform(avx512: bool, avx2: bool, sse41: bool) -> Option<Platform>
 }
 
 impl Platform {
+    #[cfg(any(feature = "std", blake3_neon))]
+    #[inline]
+    fn require_initialized() {
+        if !is_initialized() {
+            let _ = not_initialized();
+        }
+    }
     /// The platform [`initialize`](crate::initialize) detected for this
     /// process. The caller must have called `initialize` (or
     /// `initialize_multithreaded`) before: a call before it panics, in every
@@ -241,7 +256,7 @@ impl Platform {
         match x86_platform(avx512_detected(), avx2_detected(), sse41_detected()) {
             Some(platform) => return platform,
             None => crate::self_test::unsupported(format_args!(
-                "blake3-servil runs on x86-64 CPUs with SSE4.1 (Intel since 2008, AMD since 2011); this CPU lacks it: use official BLAKE3 (https://github.com/BLAKE3-team/BLAKE3)"
+                "blake3-servil runs on x86-64 CPUs with SSSE3 and SSE4.1 (Intel since 2008, AMD since 2011); this CPU lacks them: use official BLAKE3 (https://github.com/BLAKE3-team/BLAKE3)"
             )),
         }
         // SME2 is detected at runtime; the kernels also require a 512-bit
@@ -418,7 +433,7 @@ impl Platform {
 
     #[allow(unused_mut)]
     pub(crate) fn xof_many(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, mut counter: u64, flags: u8, out: &mut [u8]) {
-        debug_assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
+        assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
         if out.is_empty() {
             // The current assembly implementation always outputs at least 1 block.
             return;
@@ -466,12 +481,14 @@ impl Platform {
         }
     }
 
-    // Explicit platform constructors, for the tests (std).
+    // Explicit platform constructors, for the tests (std). Each enforces
+    // `initialize()` in production builds just like `Platform::detect()`.
 
     /// The SSE41 platform where this build has its kernels and the CPU its
     /// instructions.
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     pub fn sse41() -> Option<Self> {
+        Self::require_initialized();
         #[cfg(blake3_sse41_ffi)]
         if sse41_detected() {
             return Some(Self::SSE41);
@@ -483,6 +500,7 @@ impl Platform {
     /// instructions.
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     pub fn avx2() -> Option<Self> {
+        Self::require_initialized();
         #[cfg(blake3_avx2_ffi)]
         if avx2_detected() {
             return Some(Self::AVX2);
@@ -494,11 +512,13 @@ impl Platform {
     #[cfg(target_arch = "x86_64")]
     #[cfg(feature = "std")]
     pub fn avx512() -> Option<Self> {
+        Self::require_initialized();
         if avx512_detected() { Some(Self::AVX512) } else { None }
     }
 
     #[cfg(blake3_neon)]
     pub fn neon() -> Option<Self> {
+        Self::require_initialized();
         // Assumed to be safe if the "neon" feature is on.
         Some(Self::NEON)
     }
@@ -506,7 +526,9 @@ impl Platform {
     #[cfg(blake3_sme2)]
     #[cfg(feature = "std")]
     pub fn sme2() -> Option<Self> {
-        if sme2_detected() { Some(Self::SME2) } else { None }
+        // Issue Platform::SME2 only when the startup self-test actually tested
+        // SME2 (recorded as the process platform) and this thread's SVL is 512 bits.
+        if matches!(Self::detect(), Self::SME2) && sme2_detected() { Some(Self::SME2) } else { None }
     }
 }
 
@@ -595,30 +617,34 @@ fn read_cpu_words() -> CpuWords {
     words
 }
 
-/// [`x86_features`] of a CPU, from its words: SSE4.1 by leaf 1; AVX2 and
-/// AVX-512 (F and VL) by leaf 7 where the CPU has AVX and the OS saves
-/// the registers each needs (XSAVE, OSXSAVE, AVX, then XCR0's YMM bits,
-/// and for AVX-512 its opmask and ZMM bits too); the wide kernels' bit
-/// with AVX-512 on the CPUs [`wide_cpu`] names. No reading, no state: its
-/// test runs it on every combination of the bits it looks at.
+/// [`x86_features`] of a CPU, from its words: SSSE3 + SSE4.1 by leaf 1;
+/// AVX2 (requiring SSSE3 + SSE4.1) and AVX-512 F+VL (requiring AVX2) by
+/// leaf 7 where the CPU has AVX and the OS saves the registers each needs
+/// (XSAVE, OSXSAVE, AVX, then XCR0's YMM bits, and for AVX-512 its opmask
+/// and ZMM bits too); the wide kernels' bit with AVX-512 on the CPUs
+/// [`wide_cpu`] names. No reading, no state: its test runs it on every
+/// combination of the bits it looks at.
 #[cfg(target_arch = "x86_64")]
 #[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 const fn features_of(words: CpuWords) -> u8 {
     use x86_bits::*;
     let mut features = READ;
-    if words.leaf1_ecx & (1 << 19) != 0 {
+    let sse41_bits = (1 << 9) | (1 << 19);
+    let has_sse41 = words.leaf1_ecx & sse41_bits == sse41_bits;
+    if has_sse41 {
         features |= SSE41;
     }
-    if os_saves_avx(words.leaf1_ecx) {
+    if has_sse41 && os_saves_avx(words.leaf1_ecx) {
         let (ymm, zmm) = (0b110, 0b1110_0110);
-        if words.xcr0 & ymm == ymm && words.leaf7_ebx & (1 << 5) != 0 {
+        let has_avx2 = words.xcr0 & ymm == ymm && words.leaf7_ebx & (1 << 5) != 0;
+        if has_avx2 {
             features |= AVX2;
-        }
-        let f_vl = (1 << 16) | (1 << 31);
-        if words.xcr0 & zmm == zmm && words.leaf7_ebx & f_vl == f_vl {
-            features |= AVX512;
-            if wide_cpu(words.amd, family(words.leaf1_eax)) {
-                features |= WIDE;
+            let f_vl = (1 << 16) | (1 << 31);
+            if words.xcr0 & zmm == zmm && words.leaf7_ebx & f_vl == f_vl {
+                features |= AVX512;
+                if wide_cpu(words.amd, family(words.leaf1_eax)) {
+                    features |= WIDE;
+                }
             }
         }
     }
@@ -672,7 +698,7 @@ pub fn avx512_detected() -> bool {
     // A build for CPUs that have it (`-C target-cpu=...` or
     // `-C target-feature=...`) needs no check: run elsewhere, it stops
     // at its first such instruction (SIGILL), in the startup self-test.
-    if cfg!(all(target_feature = "avx512f", target_feature = "avx512vl")) {
+    if cfg!(all(target_feature = "ssse3", target_feature = "sse4.1", target_feature = "avx2", target_feature = "avx512f", target_feature = "avx512vl")) {
         return true;
     }
 
@@ -687,7 +713,7 @@ pub fn avx2_detected() -> bool {
     // A build for CPUs that have it (`-C target-cpu=...` or
     // `-C target-feature=...`) needs no check: run elsewhere, it stops
     // at its first such instruction (SIGILL), in the startup self-test.
-    if cfg!(target_feature = "avx2") {
+    if cfg!(all(target_feature = "ssse3", target_feature = "sse4.1", target_feature = "avx2")) {
         return true;
     }
 
@@ -702,7 +728,7 @@ pub fn sse41_detected() -> bool {
     // A build for CPUs that have it (`-C target-cpu=...` or
     // `-C target-feature=...`) needs no check: run elsewhere, it stops
     // at its first such instruction (SIGILL), in the startup self-test.
-    if cfg!(target_feature = "sse4.1") {
+    if cfg!(all(target_feature = "ssse3", target_feature = "sse4.1")) {
         return true;
     }
 
@@ -774,15 +800,16 @@ pub fn words_from_le_bytes_32(bytes: &[u8; 32]) -> [u32; 8] {
     out
 }
 
-/// True when the CPU reports SME2 and the streaming vector length is 512
-/// bits, the only length the SME2 kernels support. Detection is per
-/// platform: `hw.optional.arm.FEAT_SME2` on Apple systems and
+/// True when the CPU reports SME2 and the calling thread's streaming vector
+/// length is 512 bits, the only length the SME2 kernels support. Detection is
+/// per platform: `hw.optional.arm.FEAT_SME2` on Apple systems and
 /// `HWCAP2_SME2` on Linux.
 ///
-/// The answer is a property of the machine, so it is computed once and
-/// cached. The vector-length check enters and leaves streaming mode, which
-/// costs about as much as hashing 64 bytes; doing it on every call would
-/// slow small hashes by a third.
+/// The hardware check is cached once per process. On Apple silicon the
+/// streaming vector length is fixed hardware-wide and cached with it; on
+/// Linux SVL is per-thread (`prctl(PR_SME_SET_VL)`), so the calling thread's
+/// SVL is queried via side-effect-free `rdsvl` (without entering streaming
+/// mode or touching ZA).
 #[cfg(blake3_sme2)]
 #[inline(always)]
 pub fn sme2_detected() -> bool {
@@ -791,15 +818,19 @@ pub fn sme2_detected() -> bool {
     // 0 = unknown, 1 = no, 2 = yes.
     static CACHE: AtomicU8 = AtomicU8::new(0);
 
-    match CACHE.load(Ordering::Relaxed) {
-        2 => return true,
-        1 => return false,
-        _ => {}
-    }
-
-    let detected = sme2_detect_uncached();
-    CACHE.store(if detected { 2 } else { 1 }, Ordering::Relaxed);
-    detected
+    let cached = match CACHE.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            let detected = sme2_detect_uncached();
+            CACHE.store(if detected { 2 } else { 1 }, Ordering::Relaxed);
+            detected
+        }
+    };
+    #[cfg(target_os = "linux")]
+    return cached && unsafe { crate::sme2::svl_lanes() } == crate::sme2::GROUP as u64;
+    #[cfg(not(target_os = "linux"))]
+    cached
 }
 
 #[cfg(blake3_sme2)]
@@ -808,10 +839,13 @@ fn sme2_detect_uncached() -> bool {
         return false;
     }
 
-    // Vector length check: the kernel reports it without doing any work
-    // when asked for zero groups.
-    let lanes = unsafe { crate::sme2::ffi::blake3_servil_sme2_hash16_chunks_512(core::ptr::null(), core::ptr::null(), 0, 0, core::ptr::null_mut(), 0) };
-    lanes == crate::sme2::GROUP as u64
+    #[cfg(target_os = "linux")]
+    return true;
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Side-effect-free `rdsvl` check: never enters streaming mode or touches ZA.
+        unsafe { crate::sme2::svl_lanes() == crate::sme2::GROUP as u64 }
+    }
 }
 
 #[cfg(all(blake3_sme2, target_vendor = "apple"))]
@@ -840,10 +874,38 @@ mod detected_test {
     /// platform was there before.
     #[test]
     fn test_a_recorded_platform_keeps_the_words_other_bits() {
+        crate::initialize();
+        assert!(super::is_initialized());
         assert_eq!(super::with_platform(0, 3), 3);
         assert_eq!(super::with_platform(0x0300, 3), 0x0303);
         assert_eq!(super::with_platform(0x0305, 2), 0x0302, "the platform before goes");
         assert_eq!(super::with_platform(0x02ff, 0x41), 0x0241);
+    }
+
+    /// `Platform::xof_many` rejects non-block-multiple output slices in every
+    /// build, on both AVX-512 and non-AVX-512 paths.
+    #[test]
+    #[should_panic(expected = "whole blocks only")]
+    fn test_xof_many_rejects_partial_block_output() {
+        let mut out = [0u8; 63];
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        let platform = super::Platform::sse41().unwrap_or_else(super::Platform::detect);
+        #[cfg(not(all(feature = "std", target_arch = "x86_64")))]
+        let platform = super::Platform::detect();
+        platform.xof_many(crate::IV, &[0u8; 64], 0, 0, crate::ROOT, &mut out);
+    }
+
+    #[cfg(all(blake3_avx512_ffi, unix, target_arch = "x86_64", feature = "std"))]
+    #[test]
+    fn test_avx512_xof_many_rejects_partial_block_output() {
+        if !super::avx512_detected() {
+            return;
+        }
+        let err = std::panic::catch_unwind(|| {
+            let mut out = [0u8; 63];
+            unsafe { crate::avx512::xof_many(crate::IV, &[0u8; 64], 0, 0, crate::ROOT, &mut out) };
+        });
+        assert!(err.is_err(), "avx512::xof_many must reject partial-block output in release builds");
     }
 }
 
@@ -857,9 +919,12 @@ mod x86_degree_test {
     /// hash correctly, more slowly.
     #[test]
     fn test_detected_degree_is_the_widest_kernel() {
-        let expected = if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl") {
+        let has_sse41 = std::is_x86_feature_detected!("ssse3") && std::is_x86_feature_detected!("sse4.1");
+        let has_avx2 = has_sse41 && std::is_x86_feature_detected!("avx2");
+        let has_avx512 = has_avx2 && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl");
+        let expected = if has_avx512 {
             if cfg!(target_os = "linux") { 32 } else { 16 }
-        } else if std::is_x86_feature_detected!("avx2") {
+        } else if has_avx2 {
             8
         } else {
             4
@@ -871,15 +936,18 @@ mod x86_degree_test {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod x86_features_test {
     /// The CPUID read finds what the standard library's detection, an
-    /// independent reading, finds.
+    /// independent reading, finds (under the crate's prerequisite lattice).
     #[test]
     fn test_x86_features_match_std() {
         use super::x86_bits::*;
         let features = super::read_x86_features();
+        let has_sse41 = std::is_x86_feature_detected!("ssse3") && std::is_x86_feature_detected!("sse4.1");
+        let has_avx2 = has_sse41 && std::is_x86_feature_detected!("avx2");
+        let has_avx512 = has_avx2 && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl");
         assert_eq!(features & READ, READ);
-        assert_eq!(features & SSE41 != 0, std::is_x86_feature_detected!("sse4.1"));
-        assert_eq!(features & AVX2 != 0, std::is_x86_feature_detected!("avx2"));
-        assert_eq!(features & AVX512 != 0, std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl"));
+        assert_eq!(features & SSE41 != 0, has_sse41);
+        assert_eq!(features & AVX2 != 0, has_avx2);
+        assert_eq!(features & AVX512 != 0, has_avx512);
     }
 
     /// Every CPU the words can describe: each combination of the bits the
@@ -902,22 +970,22 @@ mod x86_features_test {
         let families = [(0x6u32, 0u32, 0x6u32), (0xF, 0x0A, 0x19), (0xF, 0x0B, 0x1A), (0xF, 0x0C, 0x1B)];
         let mut tried = 0;
         for rest in [false, true] {
-            for ecx_bits in 0..16 {
+            for ecx_bits in 0..32 {
                 for xcr0_bits in 0..32 {
                     for ebx_bits in 0..8 {
                         for amd in [false, true] {
                             for (base, ext, family) in families {
-                                let ecx = spread(ecx_bits, &[19, 26, 27, 28], rest);
+                                let ecx = spread(ecx_bits, &[9, 19, 26, 27, 28], rest);
                                 let xcr0 = spread(xcr0_bits, &[1, 2, 5, 6, 7], rest);
                                 let ebx = spread(ebx_bits, &[5, 16, 31], rest);
                                 // Everything of EAX but the two family fields follows `rest`.
                                 let eax = (if rest { !0u32 & !(0xFF << 20) & !(0xF << 8) } else { 0 }) | (ext << 20) | (base << 8);
                                 let got = features_of(CpuWords { leaf1_eax: eax, leaf1_ecx: ecx, xcr0, leaf7_ebx: ebx, amd });
-                                // The rule, one feature at a time.
-                                let sse41 = bit(ecx, 19);
+                                // The rule, enforcing the full prerequisite lattice.
+                                let sse41 = bit(ecx, 9) && bit(ecx, 19);
                                 let avx = bit(ecx, 26) && bit(ecx, 27) && bit(ecx, 28);
-                                let avx2 = avx && bit(xcr0, 1) && bit(xcr0, 2) && bit(ebx, 5);
-                                let avx512 = avx && [1, 2, 5, 6, 7].iter().all(|&n| bit(xcr0, n)) && bit(ebx, 16) && bit(ebx, 31);
+                                let avx2 = sse41 && avx && bit(xcr0, 1) && bit(xcr0, 2) && bit(ebx, 5);
+                                let avx512 = avx2 && [1, 2, 5, 6, 7].iter().all(|&n| bit(xcr0, n)) && bit(ebx, 16) && bit(ebx, 31);
                                 let wide = avx512 && amd && family >= 0x1A;
                                 let want = READ
                                     | if sse41 { SSE41 } else { 0 }
@@ -932,7 +1000,7 @@ mod x86_features_test {
                 }
             }
         }
-        assert_eq!(tried, 2 * 16 * 32 * 8 * 2 * 4);
+        assert_eq!(tried, 2 * 32 * 32 * 8 * 2 * 4);
     }
 
     /// The words are read where they may be: XCR0 and leaf 7 only where
@@ -1012,21 +1080,26 @@ mod x86_features_test {
     /// guard-page tests' platform lists come from these same functions.
     #[test]
     fn test_x86_detection_matches_std() {
-        assert_eq!(super::sse41_detected(), std::is_x86_feature_detected!("sse4.1"), "sse41_detected");
-        assert_eq!(super::avx2_detected(), std::is_x86_feature_detected!("avx2"), "avx2_detected");
+        let has_sse41 = std::is_x86_feature_detected!("ssse3") && std::is_x86_feature_detected!("sse4.1");
+        let has_avx2 = has_sse41 && std::is_x86_feature_detected!("avx2");
+        let has_avx512 = has_avx2 && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl");
+        assert_eq!(super::sse41_detected(), has_sse41, "sse41_detected");
+        assert_eq!(super::avx2_detected(), has_avx2, "avx2_detected");
         #[cfg(blake3_avx512_ffi)]
-        assert_eq!(super::avx512_detected(), std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl"), "avx512_detected");
+        assert_eq!(super::avx512_detected(), has_avx512, "avx512_detected");
     }
-    /// Each CPU runs the widest kernel it has; a CPU without SSE4.1 gets
-    /// none, and the process stops (the stop itself: unsupported).
+    /// Each CPU runs the widest kernel whose full prerequisite chain it has;
+    /// a CPU without SSSE3 + SSE4.1 gets none, and the process stops.
     #[test]
     fn test_a_cpu_runs_its_widest_kernel_and_one_without_sse41_none() {
         use super::{Platform, x86_platform};
         for (avx512, avx2, sse41, want) in [
             (true, true, true, Some(Platform::AVX512)),
-            (true, false, false, Some(Platform::AVX512)),
+            (true, false, true, Some(Platform::SSE41)),
+            (true, true, false, None),
+            (true, false, false, None),
             (false, true, true, Some(Platform::AVX2)),
-            (false, true, false, Some(Platform::AVX2)),
+            (false, true, false, None),
             (false, false, true, Some(Platform::SSE41)),
             (false, false, false, None),
         ] {

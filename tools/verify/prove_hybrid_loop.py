@@ -21,8 +21,20 @@ from aarch64 import Ptr, Region, Unproved
 from prove_hybrid import byte_symbols
 import lean_spec as spec
 
-HEAD = 0x208   # the block loop's head (blake3_servil_sme2x2_hash_chunks_512_block)
-EXIT = 0x2930  # after its last pass in the loop (pass 14): pass 15 follows
+def loop_bounds(obj):
+    """Resolve the hybrid kernel's block-loop head and exit from its symbol
+    table and disassembly (`b.lo <head>` jumps back to the loop head; the next
+    instruction is pass 15, the loop exit)."""
+    syms = aarch64.symbols(obj)
+    head = syms["blake3_servil_sme2x2_hash_chunks_512_block"]
+    code = aarch64.disassemble(obj, head, prove_sme2.text_end(obj), llvm=True)
+    for addr, (mnem, ops) in sorted(code.items()):
+        if mnem in ("b.lo", "b.cc") and int(ops[0].split()[0], 16) == head:
+            return head, addr + 4
+    raise Unproved("could not locate hybrid block loop exit")
+
+
+HEAD, EXIT = loop_bounds(prove_sme2.assemble_hybrid())
 INT = (1, 2, 3, 4, 5, 6, 11, 16)   # the integer chunk's state, words 0-7 (w1-w6, w11, w16)
 
 

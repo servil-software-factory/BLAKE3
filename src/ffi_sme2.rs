@@ -8,10 +8,11 @@
 //! remainder of fewer than sixteen inputs, chunk hashing with
 //! `IncrementCounter::No`, or parent hashing with `IncrementCounter::Yes`.
 //!
-//! The kernels return the streaming vector length in 32-bit lanes and do
-//! work only when it is 16. `Platform::detect()` checks that once and
-//! selects NEON otherwise, so a return value other than 16 here is a
-//! contract violation and stops the program.
+//! The kernels read the calling thread's streaming vector length via `rdsvl`
+//! before touching ZA or streaming mode and return it in 32-bit lanes, doing
+//! work only when it equals 16. On Linux SVL is per-thread (`PR_SME_SET_VL`),
+//! so any non-16 return cleanly falls back to the NEON backend without
+//! panicking or clobbering caller ZA state.
 //!
 //! # The SME unit's slow state
 //!
@@ -75,8 +76,27 @@ const OVERLAP_MIN: usize = 13;
 /// Chunk-group and parent-group entry points share one signature.
 type Kernel = unsafe extern "C" fn(*const u8, *const u32, u64, u32, *mut u8, u64) -> u64;
 
-// Unsafe because this may only be called on CPUs that report SME2 with a
-// 512-bit streaming vector length, and on which NEON is also available.
+/// Return the calling thread's streaming vector length in 32-bit lanes without
+/// entering streaming mode or touching ZA / `TPIDR2_EL0`.
+///
+/// # Safety
+///
+/// The CPU must implement SME2 (`sme2_reported()`).
+#[inline]
+pub(crate) unsafe fn svl_lanes() -> u64 {
+    unsafe { ffi::blake3_servil_sme2_svl_lanes() }
+}
+
+/// Whether a kernel's returned SVL lane count matches the 512-bit (16-lane)
+/// kernels.
+#[inline]
+fn svl_ok(lanes: u64) -> bool {
+    lanes == GROUP as u64
+}
+
+// Unsafe because this may only be called on CPUs that report SME2, and on
+// which NEON is also available. If the calling thread's SVL is not 512 bits
+// (possible per-thread on Linux), falls back cleanly to NEON.
 pub unsafe fn hash_many<const N: usize>(
     inputs: &[&[u8; N]],
     key: &CVWords,
@@ -87,7 +107,8 @@ pub unsafe fn hash_many<const N: usize>(
     flags_end: u8,
     out: &mut [u8],
 ) {
-    assert!(out.len() >= inputs.len() * OUT_LEN);
+    const { assert!(N > 0 && N % BLOCK_LEN == 0, "hash_many inputs are whole blocks") };
+    assert!(inputs.len() <= out.len() / OUT_LEN);
 
     let full_groups = inputs.len() / GROUP;
     // The chunk kernel takes flags, flags_start, and flags_end packed into
@@ -108,7 +129,6 @@ pub unsafe fn hash_many<const N: usize>(
     let blocks = N / BLOCK_LEN;
     if kernel.is_none() && N % BLOCK_LEN == 0 && (2..=16).contains(&blocks) && !increment_counter.yes() && full_groups > 0 {
         let lanes = unsafe {
-            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
             ffi::blake3_servil_sme2_hash16_messages_512(
                 inputs.as_ptr() as *const *const u8,
                 key.as_ptr(),
@@ -119,13 +139,14 @@ pub unsafe fn hash_many<const N: usize>(
                 blocks as u64,
             )
         };
-        assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
-        done = full_groups * GROUP;
+        if svl_ok(lanes) {
+            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
+            done = full_groups * GROUP;
+        }
     }
     if let (Some(kernel), true) = (kernel, full_groups > 0) {
-        crate::ran_kernel(kernel as *const ());
         let count = full_groups * GROUP;
-        let lanes = if N == BLOCK_LEN {
+        if N == BLOCK_LEN {
             // The parent kernel reads a group's sixteen 64-byte blocks
             // through one pointer, and a table's inputs are sixteen
             // borrows of 64 bytes each: no pointer of theirs may read a
@@ -149,15 +170,20 @@ pub unsafe fn hash_many<const N: usize>(
                     buf[i * BLOCK_LEN..][..BLOCK_LEN].copy_from_slice(&input[..]);
                 }
                 let lanes = unsafe { kernel(buf.as_ptr(), key.as_ptr(), counter, packed_flags, out[group * GROUP * OUT_LEN..].as_mut_ptr(), groups as u64) };
-                assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+                if !svl_ok(lanes) {
+                    break;
+                }
+                crate::ran_kernel(kernel as *const ());
                 group += groups;
             }
-            16
+            done = group * GROUP;
         } else {
-            unsafe { kernel(inputs.as_ptr() as *const u8, key.as_ptr(), counter, packed_flags, out.as_mut_ptr(), full_groups as u64) }
-        };
-        assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
-        done = count;
+            let lanes = unsafe { kernel(inputs.as_ptr() as *const u8, key.as_ptr(), counter, packed_flags, out.as_mut_ptr(), full_groups as u64) };
+            if svl_ok(lanes) {
+                crate::ran_kernel(kernel as *const ());
+                done = count;
+            }
+        }
     }
 
     // One-block inputs after SME2 groups, with OVERLAP_MIN or more left over:
@@ -168,7 +194,7 @@ pub unsafe fn hash_many<const N: usize>(
     // microseconds, so the next SME2 work, this call's or the next one's,
     // runs slow (the slow state, in this module's documentation).
     let rest = inputs.len() - done;
-    if N == BLOCK_LEN && !increment_counter.yes() && done > 0 && rest >= OVERLAP_MIN {
+    if N == BLOCK_LEN && !increment_counter.yes() && done > 0 && rest >= OVERLAP_MIN && rest < GROUP {
         let mut last = [0u8; GROUP * OUT_LEN];
         unsafe {
             hash_many(&inputs[inputs.len() - GROUP..], key, counter, increment_counter, flags, flags_start, flags_end, &mut last);
@@ -179,9 +205,8 @@ pub unsafe fn hash_many<const N: usize>(
 
     if done < inputs.len() {
         let rest_counter = if increment_counter.yes() { counter + done as u64 } else { counter };
-        // The remainder is fewer than sixteen inputs: the NEON kernels
-        // (integer + vector hybrids, see neon_hybrid.rs) are the fastest
-        // path there.
+        // Remainder (or all inputs if SME2 declined on a non-512-bit SVL):
+        // the NEON hybrid kernels handle any count.
         unsafe {
             crate::neon_hybrid::hash_many(&inputs[done..], key, rest_counter, increment_counter, flags, flags_start, flags_end, &mut out[done * OUT_LEN..]);
         }
@@ -209,20 +234,23 @@ pub unsafe fn hash_many<const N: usize>(
 /// `hash_many`: with OVERLAP_MIN or more blocks after a group, the run's
 /// last sixteen as one more group; otherwise on the NEON kernels.
 ///
-/// Unsafe because this may only be called on CPUs that report SME2 with a
-/// 512-bit streaming vector length, and on which NEON is also available.
+/// Unsafe because this may only be called on CPUs that report SME2, and on
+/// which NEON is also available (falls back to NEON if the calling thread's
+/// SVL is not 512 bits).
 pub unsafe fn hash_block_run(run: &[u8], key: &CVWords, flags: u8, out: &mut [u8]) {
     let (blocks, beyond) = run.as_chunks::<BLOCK_LEN>();
-    assert!(beyond.is_empty() && out.len() >= blocks.len() * OUT_LEN, "whole blocks, and room for the value of each");
+    assert!(beyond.is_empty() && blocks.len() <= out.len() / OUT_LEN, "whole blocks, and room for the value of each");
     let full_groups = blocks.len() / GROUP;
-    let done = full_groups * GROUP;
+    let mut done = 0;
     if full_groups > 0 {
-        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
-        // Sound: the kernel reads `done` blocks from the run's first byte,
-        // through the run's own pointer, and writes `done` values from
-        // `out`'s first byte; the assertion above found both that long.
+        // Sound: the kernel reads `full_groups * GROUP` blocks from the run's
+        // first byte, through the run's own pointer, and writes as many values
+        // from `out`'s first byte; the assertion above found both that long.
         let lanes = unsafe { ffi::blake3_servil_sme2_hash16_parents_512(run.as_ptr(), key.as_ptr(), 0, flags as u32, out.as_mut_ptr(), full_groups as u64) };
-        assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+        if svl_ok(lanes) {
+            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
+            done = full_groups * GROUP;
+        }
     }
     let left = blocks.len() - done;
     // The overlapping last group, for the reason `hash_many` gives.
@@ -234,10 +262,14 @@ pub unsafe fn hash_block_run(run: &[u8], key: &CVWords, flags: u8, out: &mut [u8
         return;
     }
     if left > 0 {
-        let table: crate::stack_vec::StackVec<&[u8; BLOCK_LEN], GROUP> = blocks[done..].iter().collect();
-        // Sound: NEON is available wherever SME2 is, as this function
-        // requires; the outputs reach `left` values past `done`.
-        unsafe { crate::neon_hybrid::hash_many(&table, key, 0, IncrementCounter::No, flags, 0, 0, &mut out[done * OUT_LEN..]) };
+        for (chunk_idx, group) in blocks[done..].chunks(GROUP).enumerate() {
+            let table: crate::stack_vec::StackVec<&[u8; BLOCK_LEN], GROUP> = group.iter().collect();
+            // Sound: NEON is available wherever SME2 is, as this function
+            // requires; the outputs reach `left` values past `done`.
+            unsafe {
+                crate::neon_hybrid::hash_many(&table, key, 0, IncrementCounter::No, flags, 0, 0, &mut out[(done + chunk_idx * GROUP) * OUT_LEN..]);
+            }
+        }
     }
 }
 
@@ -249,7 +281,7 @@ pub unsafe fn hash_block_run(run: &[u8], key: &CVWords, flags: u8, out: &mut [u8
 /// to `out` and the rest (fewer than sixteen, all in the last group) spare
 /// lanes whose values the kernel computes and never stores. One kernel
 /// call, so one entry into streaming mode. Unsafe because the CPU must
-/// have SME2 with 512-bit streaming vectors.
+/// report SME2 (falls back to NEON if the calling thread's SVL is not 512 bits).
 pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, flags_start: u8, flags_end: u8, last_len: usize, out: &mut [u8]) {
     let blocks = N / BLOCK_LEN;
     assert!(N % BLOCK_LEN == 0 && (1..=16).contains(&blocks), "slots of 1 to 16 whole blocks");
@@ -264,7 +296,6 @@ pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, f
     }
     let stored = (count % GROUP) as u64;
     let lanes_returned = unsafe {
-        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
         ffi::blake3_servil_sme2_hash16_messages_512(
             lanes.as_ptr() as *const *const u8,
             key.as_ptr(),
@@ -275,22 +306,25 @@ pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, f
             blocks as u64,
         )
     };
-    assert_eq!(lanes_returned, 16, "SME2 streaming vector length changed under us");
+    if svl_ok(lanes_returned) {
+        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
+        return;
+    }
+    // Calling thread's SVL is not 512 bits (per-thread on Linux): fall back to NEON.
+    unsafe { crate::neon_hybrid::hash_many_last_len(&lanes[..count], key, 0, IncrementCounter::No, flags, flags_start, flags_end, last_len, out) };
 }
 
 #[cfg(feature = "std")]
 /// Groups of sixteen whole chunks, each at its own first counter: group g
 /// is `chunks[16 g..16 g + 16]`, chunk i of it at `counters[g] + i`, its
 /// sixteen chaining values to `out[512 g..]`. One kernel call, so one
-/// entry into streaming mode. Unsafe because the CPU must have SME2 with
-/// 512-bit streaming vectors.
+/// entry into streaming mode. Unsafe because the CPU must have SME2.
 pub unsafe fn hash_groups_at(chunks: &[&[u8; CHUNK_LEN]], counters: &[u64], key: &CVWords, flags: u8, flags_start: u8, flags_end: u8, out: &mut [u8]) {
     assert!(chunks.len() == GROUP * counters.len() && out.len() == chunks.len() * OUT_LEN, "sixteen chunks and their values for each counter");
     if counters.is_empty() {
         return;
     }
     let lanes = unsafe {
-        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_chunks_at_512 as *const ());
         ffi::blake3_servil_sme2_hash16_chunks_at_512(
             chunks.as_ptr() as *const *const u8,
             key.as_ptr(),
@@ -300,7 +334,13 @@ pub unsafe fn hash_groups_at(chunks: &[&[u8; CHUNK_LEN]], counters: &[u64], key:
             counters.len() as u64,
         )
     };
-    assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+    if svl_ok(lanes) {
+        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_chunks_at_512 as *const ());
+        return;
+    }
+    for (g, (&counter, group)) in counters.iter().zip(chunks.chunks_exact(GROUP)).enumerate() {
+        unsafe { crate::neon_hybrid::hash_many(group, key, counter, IncrementCounter::Yes, flags, flags_start, flags_end, &mut out[g * GROUP * OUT_LEN..]) };
+    }
 }
 
 /// Chunks per message that [`hash_chunked_messages`] takes: 2 to 15. From
@@ -315,9 +355,9 @@ pub const MESSAGE_CHUNKS: core::ops::RangeInclusive<usize> = 2..=15;
 /// whole chunks in one call, the last chunk in a second); then each parent
 /// level across the lanes, pairs gathered into sixteen contiguous blocks
 /// per group, until the root, which takes ROOT. `key` and `flags` give
-/// the mode (IV and 0 for plain hashing). Unsafe because the CPU
-/// must have SME2 with 512-bit streaming vectors and every pointer must
-/// reach `len` rounded up to whole blocks.
+/// the mode (IV and 0 for plain hashing). Unsafe because the CPU must
+/// report SME2 (falls back to NEON if the calling thread's SVL is not 512 bits)
+/// and every pointer must reach `len` rounded up to whole blocks.
 pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key: &CVWords, flags: u8, out: &mut [u8]) {
     use crate::{CHUNK_END, CHUNK_START, PARENT, ROOT};
     let chunks = len.div_ceil(CHUNK_LEN);
@@ -352,11 +392,12 @@ pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key:
         }
         // The whole chunks, one group per chunk index, the counter stepping
         // by one from group to group; then the last chunk.
-        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
         let n = ffi::blake3_servil_sme2_hash16_messages_512(table, key.as_ptr(), 0, chunk_flags | 1 << 32, cvs, (chunks - 1) as u64, 16);
-        assert_eq!(n, 16, "SME2 streaming vector length changed under us");
-        let last_flags = chunk_flags | ((last_len % BLOCK_LEN) as u64) << 40;
+        if !svl_ok(n) {
+            return hash_chunked_messages_neon(lanes, len, key, flags, out);
+        }
         crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
+        let last_flags = chunk_flags | ((last_len % BLOCK_LEN) as u64) << 40;
         let n = ffi::blake3_servil_sme2_hash16_messages_512(
             table.add((chunks - 1) * GROUP),
             key.as_ptr(),
@@ -366,7 +407,10 @@ pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key:
             1,
             last_blocks as u64,
         );
-        assert_eq!(n, 16, "SME2 streaming vector length changed under us");
+        if !svl_ok(n) {
+            return hash_chunked_messages_neon(lanes, len, key, flags, out);
+        }
+        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
         // Parent levels: node j of the next level joins nodes 2j and 2j + 1
         // (gathered into one 64-byte block per lane, sixteen per group); an
         // odd last node carries up. Down to two nodes, then the root.
@@ -386,15 +430,30 @@ pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key:
             if nodes % 2 == 1 {
                 core::ptr::copy_nonoverlapping(cv(nodes - 1, 0), cv(parents, 0), GROUP * OUT_LEN);
             }
-            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
             let n = ffi::blake3_servil_sme2_hash16_parents_512(pairs, key.as_ptr(), 0, (flags | PARENT) as u32, cvs, parents as u64);
-            assert_eq!(n, 16, "SME2 streaming vector length changed under us");
+            if !svl_ok(n) {
+                return hash_chunked_messages_neon(lanes, len, key, flags, out);
+            }
+            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
             nodes = parents + nodes % 2;
         }
-        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
         let n = ffi::blake3_servil_sme2_hash16_parents_512(pairs, key.as_ptr(), 0, (flags | PARENT | ROOT) as u32, cvs, 1);
-        assert_eq!(n, 16, "SME2 streaming vector length changed under us");
+        if !svl_ok(n) {
+            return hash_chunked_messages_neon(lanes, len, key, flags, out);
+        }
+        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
         core::ptr::copy_nonoverlapping(cvs, out.as_mut_ptr(), count * OUT_LEN);
+    }
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn hash_chunked_messages_neon(lanes: &[*const u8; GROUP], len: usize, key: &CVWords, flags: u8, out: &mut [u8]) {
+    let count = out.len() / OUT_LEN;
+    for (i, &ptr) in lanes.iter().take(count).enumerate() {
+        let message = unsafe { core::slice::from_raw_parts(ptr, len) };
+        let digest = crate::hash_serial_on(message, key, flags, crate::platform::Platform::NEON);
+        out[i * OUT_LEN..][..OUT_LEN].copy_from_slice(digest.as_bytes());
     }
 }
 
@@ -520,12 +579,15 @@ unsafe fn flat_walk(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u6
         line += 128;
     }
     #[cfg(feature = "std")]
-    if let Ok(base) = SCRATCH_BLOCK.try_with(|block| block.get() as *mut u8) {
-        // Sound: this thread's block outlives the call, and the walk calls
-        // nothing that re-enters it, so the block has one user at a time.
-        return unsafe { walk_in(input, key, chunk_counter, flags, keep, out, n, base) };
+    if crate::platform::is_initialized() {
+        if let Ok(base) = SCRATCH_BLOCK.try_with(|block| block.get() as *mut u8) {
+            // Sound: this thread's block outlives the call, and the walk calls
+            // nothing that re-enters it, so the block has one user at a time.
+            return unsafe { walk_in(input, key, chunk_counter, flags, keep, out, n, base) };
+        }
     }
-    // Without std, or in a thread's teardown after its block is gone.
+    // During startup self-test (avoiding heap allocation under Once::call_once),
+    // without std, or in a thread's teardown after its block is gone.
     unsafe { walk_on_stack(input, key, chunk_counter, flags, keep, out, n) }
 }
 
@@ -593,12 +655,13 @@ unsafe fn walk_in(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, ke
     debug_assert_eq!(HYBRID_GROUP * lane_groups + GROUP * plain_groups, n);
     unsafe {
         if lane_groups > 0 {
-            crate::ran_kernel(ffi::blake3_servil_sme2x2_hash_chunks_512 as *const ());
             let lanes = ffi::blake3_servil_sme2x2_hash_chunks_512(table, key.as_ptr(), chunk_counter, chunk_flags, src, lane_groups as u64);
-            assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+            if !svl_ok(lanes) {
+                return walk_in_neon(input, key, chunk_counter, flags, keep, out, n, base);
+            }
+            crate::ran_kernel(ffi::blake3_servil_sme2x2_hash_chunks_512 as *const ());
         }
         let done = HYBRID_GROUP * lane_groups;
-        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_chunks_512 as *const ());
         let lanes = ffi::blake3_servil_sme2_hash16_chunks_512(
             table.add(done) as *const u8,
             key.as_ptr(),
@@ -607,7 +670,10 @@ unsafe fn walk_in(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, ke
             src.add(done * OUT_LEN),
             plain_groups as u64,
         );
-        assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+        if !svl_ok(lanes) {
+            return walk_in_neon(input, key, chunk_counter, flags, keep, out, n, base);
+        }
+        crate::ran_kernel(ffi::blake3_servil_sme2_hash16_chunks_512 as *const ());
         // Parent levels: pairs of adjacent chaining values, contiguous, from
         // `src` into `dst`, until `keep` values remain. A level of fewer than
         // sixteen parents reads 32 values from `src` and writes 16 into
@@ -621,14 +687,75 @@ unsafe fn walk_in(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, ke
         while count > keep {
             let parents = count / 2;
             let groups = parents.div_ceil(GROUP);
-            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
             let lanes = ffi::blake3_servil_sme2_hash16_parents_512(src, key.as_ptr(), 0, (flags | crate::PARENT) as u32, dst, groups as u64);
-            assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
+            if !svl_ok(lanes) {
+                return walk_in_neon(input, key, chunk_counter, flags, keep, out, n, base);
+            }
+            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
             count = parents;
             core::mem::swap(&mut src, &mut dst);
         }
         core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), keep * OUT_LEN);
     }
+    keep
+}
+
+/// Cold NEON fallback for [`walk_in`] when the calling thread's SVL is not
+/// 512 bits (possible per-thread on Linux). Reuses `base` (`SCRATCH`) with
+/// zero additional heap or large stack allocation.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn walk_in_neon(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize, base: *mut u8) -> usize {
+    let (cvs_at, half_at) = scratch_layout(n);
+    let (mut src, mut dst) = unsafe { (base.add(cvs_at), base.add(half_at)) };
+    // `base` backs `MaybeUninit<u8>` scratch: initialize both working ranges
+    // through raw pointers before forming `&mut [u8]` slices.
+    unsafe {
+        core::ptr::write_bytes(src, 0, n * OUT_LEN);
+        core::ptr::write_bytes(dst, 0, (n / 2) * OUT_LEN);
+    }
+    let chunks = input.as_chunks::<CHUNK_LEN>().0;
+    let src_bytes = unsafe { core::slice::from_raw_parts_mut(src, n * OUT_LEN) };
+    for (g, group) in chunks.chunks(GROUP).enumerate() {
+        let table: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], GROUP> = group.iter().collect();
+        unsafe {
+            crate::neon_hybrid::hash_many(
+                &table,
+                key,
+                chunk_counter + (g * GROUP) as u64,
+                IncrementCounter::Yes,
+                flags,
+                crate::CHUNK_START,
+                crate::CHUNK_END,
+                &mut src_bytes[g * GROUP * OUT_LEN..][..group.len() * OUT_LEN],
+            );
+        }
+    }
+    let mut count = n;
+    while count > keep {
+        let parents = count / 2;
+        let pairs = unsafe { core::slice::from_raw_parts(src, count * OUT_LEN) }.as_chunks::<BLOCK_LEN>().0;
+        let dst_bytes = unsafe { core::slice::from_raw_parts_mut(dst, parents * OUT_LEN) };
+        for (g, group) in pairs.chunks(GROUP).enumerate() {
+            let table: crate::stack_vec::StackVec<&[u8; BLOCK_LEN], GROUP> = group.iter().collect();
+            unsafe {
+                crate::neon_hybrid::hash_many(
+                    &table,
+                    key,
+                    0,
+                    IncrementCounter::No,
+                    flags | crate::PARENT,
+                    0,
+                    0,
+                    &mut dst_bytes[g * GROUP * OUT_LEN..][..group.len() * OUT_LEN],
+                );
+            }
+        }
+        count = parents;
+        core::mem::swap(&mut src, &mut dst);
+    }
+    unsafe { core::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), keep * OUT_LEN) };
     keep
 }
 
@@ -658,7 +785,9 @@ mod scratch_layout_tests {
     #[cfg(feature = "std")]
     #[test]
     fn startup_allocates_the_scratch_before_any_walk() {
-        // The test needs no accelerator. It runs on the Arm VM too.
+        // Startup self-test must use stack scratch rather than allocating TLS
+        // `SCRATCH_BLOCK` under `Once::call_once`.
+        crate::initialize();
         assert!(!SCRATCH_INITIALIZED.with(|flag| flag.get()));
         prepare_thread_scratch();
         assert!(SCRATCH_INITIALIZED.with(|flag| flag.get()));
@@ -707,8 +836,8 @@ pub fn prefetch_code() {
 /// output: block i the compression of `block` under `cv` at `counter + i`
 /// with `flags` (ROOT among them) and `block_len`, both halves of the
 /// state. Returns the bytes filled (a multiple of 1024; the rest is the
-/// caller's). Unsafe because the CPU must have SME2 with 512-bit streaming
-/// vectors (the platform's detect()).
+/// caller's). Unsafe because the CPU must report SME2 (returns 0 for NEON
+/// fallback if the calling thread's SVL is not 512 bits).
 pub unsafe fn xof_many(cv: &CVWords, block: &[u8; crate::BLOCK_LEN], block_len: u8, counter: u64, flags: u8, out: &mut [u8]) -> usize {
     let groups = out.len() / (GROUP * crate::BLOCK_LEN);
     if groups == 0 {
@@ -716,12 +845,15 @@ pub unsafe fn xof_many(cv: &CVWords, block: &[u8; crate::BLOCK_LEN], block_len: 
     }
     // Sound: `out` holds `groups` groups of sixteen blocks, and the caller
     // found SME2.
-    crate::ran_kernel(ffi::blake3_servil_sme2_xof16_512 as *const ());
     let lanes = unsafe {
         ffi::blake3_servil_sme2_xof16_512(cv.as_ptr(), block.as_ptr(), counter, flags as u64 | (block_len as u64) << 8, out.as_mut_ptr(), groups as u64)
     };
-    assert_eq!(lanes, 16, "SME2 streaming vector length changed under us");
-    groups * GROUP * crate::BLOCK_LEN
+    if svl_ok(lanes) {
+        crate::ran_kernel(ffi::blake3_servil_sme2_xof16_512 as *const ());
+        groups * GROUP * crate::BLOCK_LEN
+    } else {
+        0
+    }
 }
 
 /// Every SME2 assembly entry point, named (for the self-test's test).
@@ -739,6 +871,9 @@ pub(crate) fn entries() -> std::vec::Vec<(&'static str, *const ())> {
 
 pub mod ffi {
     unsafe extern "C" {
+        /// Return the calling thread's streaming vector length in 32-bit lanes
+        /// without entering streaming mode or touching ZA / `TPIDR2_EL0`.
+        pub fn blake3_servil_sme2_svl_lanes() -> u64;
         #[cfg(feature = "std")]
         /// `blake3_servil_sme2_hash16_chunks_512` with group g's first counter
         /// `counters[g]`: separate messages' groups of sixteen chunks.
@@ -810,5 +945,267 @@ mod test {
         for chunks in [256usize, 512, 1024] {
             assert!(flat_subtree_takes(chunks * CHUNK_LEN), "{chunks} chunks must be admitted");
         }
+    }
+
+    #[test]
+    fn svl_ok_accepts_only_sixteen_lanes() {
+        assert!(svl_ok(16));
+        for lanes in [0, 4, 8, 15, 17, 32, 64] {
+            assert!(!svl_ok(lanes), "lanes={lanes}");
+        }
+    }
+
+    /// The cold NEON fallback helpers used when a Linux thread's SVL is not
+    /// 512 bits produce exact BLAKE3 chaining values and digests on every
+    /// AArch64 host.
+    #[cfg(feature = "std")]
+    #[test]
+    fn neon_fallbacks_match_blake3_reference() {
+        crate::initialize();
+        let mut scratch = Scratch([core::mem::MaybeUninit::uninit(); SCRATCH]);
+        let base = scratch.0.as_mut_ptr() as *mut u8;
+        let mut data = std::vec![0u8; 256 * CHUNK_LEN];
+        crate::test::paint_test_input(&mut data);
+        for &(chunks, keep) in &[(32usize, 1usize), (32, 2), (64, 2), (256, DEGREE)] {
+            let input = &data[..chunks * CHUNK_LEN];
+            let mut out = std::vec![0u8; keep * OUT_LEN];
+            let got_keep = unsafe { walk_in_neon(input, crate::IV, 0, 0, keep, &mut out, chunks, base) };
+            assert_eq!(got_keep, keep);
+            let sub_len = (chunks / keep) * CHUNK_LEN;
+            for i in 0..keep {
+                let tree = crate::throughput::TreeHasher::new(crate::Mode::Plain).on_this_core();
+                let level = (sub_len / CHUNK_LEN).trailing_zeros();
+                let cv = tree.subtree_cv(level, i as u64, &input[i * sub_len..][..sub_len]);
+                assert_eq!(&out[i * OUT_LEN..][..OUT_LEN], cv.as_bytes(), "chunks={chunks} keep={keep} idx={i}");
+            }
+        }
+        // Chunked-messages NEON fallback across 2, 3, and 15 chunks.
+        for len in [2 * CHUNK_LEN, 2 * CHUNK_LEN + 137, 15 * CHUNK_LEN - 19] {
+            let slot = len.next_multiple_of(BLOCK_LEN);
+            let mut msgs = std::vec![0u8; GROUP * slot];
+            for i in 0..GROUP {
+                crate::test::paint_test_input(&mut msgs[i * slot..][..len]);
+                msgs[i * slot] ^= i as u8;
+            }
+            let mut ptrs = [core::ptr::null::<u8>(); GROUP];
+            for i in 0..GROUP {
+                ptrs[i] = msgs[i * slot..].as_ptr();
+            }
+            let mut out = [[0u8; OUT_LEN]; GROUP];
+            unsafe { hash_chunked_messages_neon(&ptrs, len, crate::IV, 0, out.as_flattened_mut()) };
+            for i in 0..GROUP {
+                assert_eq!(out[i], *blake3::hash(&msgs[i * slot..][..len]).as_bytes(), "len={len} lane={i}");
+            }
+        }
+    }
+
+    /// On SME2 hardware (such as Apple M4/M6), verify the AAPCS64 private-ZA
+    /// lazy-save contract on real silicon:
+    /// 1. `svl_lanes()` leaves `TPIDR2_EL0` and live ZA untouched.
+    /// 2. Nonzero AAPCS64 reserved bytes `[10..15]` cause every working kernel
+    ///    to decline (returning 0) with `TPIDR2_EL0` and live ZA untouched.
+    /// 3. Every SME2 assembly entry point commits all 64 distinct slices of
+    ///    dormant caller ZA into `za_save_buffer` bit-for-bit, clears
+    ///    `TPIDR2_EL0`, and computes exact BLAKE3 digests.
+    #[cfg(feature = "std")]
+    #[test]
+    fn dormant_caller_za_is_lazily_saved_by_every_sme2_kernel() {
+        crate::initialize();
+        if !crate::platform::sme2_detected() {
+            return;
+        }
+        #[repr(C, align(16))]
+        struct Tpidr2Block {
+            za_save_buffer: *mut u8,
+            num_za_save_slices: u16,
+            reserved: [u8; 6],
+        }
+        #[repr(C, align(64))]
+        struct ZaBuf([u8; 64 * 64]);
+
+        // 64 distinct 64-byte rows (every row encodes its row index 0..64).
+        let mut expected = ZaBuf([0u8; 4096]);
+        for row in 0..64usize {
+            for col in 0..64usize {
+                expected.0[row * 64 + col] = (row as u8).wrapping_mul(17).wrapping_add(col as u8).wrapping_add(0x3D);
+            }
+        }
+
+        // Load `expected` into ZA slices 0..64, arm TPIDR2_EL0 (with `reserved`),
+        // run `op`, disarm TPIDR2_EL0 before any Rust assertion, and verify
+        // either lazy-save commit (`expect_saved == true`) or untouched live ZA
+        // (`expect_saved == false`).
+        let run_with_dormant_za = |reserved: [u8; 6], expect_saved: bool, op: &mut dyn FnMut() -> u64| -> u64 {
+            let mut saved = ZaBuf([0u8; 4096]);
+            let mut live_after = ZaBuf([0u8; 4096]);
+            let mut block = Tpidr2Block { za_save_buffer: saved.0.as_mut_ptr(), num_za_save_slices: 64, reserved };
+            let block_ptr = &mut block as *mut Tpidr2Block as u64;
+            let after_tpidr2: u64;
+            let ret: u64;
+            unsafe {
+                core::arch::asm!(
+                    ".arch_extension sme",
+                    "smstart za",
+                    "mov w12, #0",
+                    "1:",
+                    "ldr za[w12, 0], [{src}]",
+                    "addsvl {src}, {src}, #1",
+                    "add w12, w12, #1",
+                    "cmp w12, #64",
+                    "b.lo 1b",
+                    "msr tpidr2_el0, {blk}",
+                    src = inout(reg) expected.0.as_ptr() => _,
+                    blk = in(reg) block_ptr,
+                    out("w12") _,
+                    options(nostack),
+                );
+                ret = op();
+                core::arch::asm!(
+                    ".arch_extension sme",
+                    "mrs {out}, tpidr2_el0",
+                    "msr tpidr2_el0, xzr",
+                    out = out(reg) after_tpidr2,
+                    options(nostack),
+                );
+                if !expect_saved {
+                    core::arch::asm!(
+                        ".arch_extension sme",
+                        "mov w12, #0",
+                        "1:",
+                        "str za[w12, 0], [{dst}]",
+                        "addsvl {dst}, {dst}, #1",
+                        "add w12, w12, #1",
+                        "cmp w12, #64",
+                        "b.lo 1b",
+                        dst = inout(reg) live_after.0.as_mut_ptr() => _,
+                        out("w12") _,
+                        options(nostack),
+                    );
+                }
+                core::arch::asm!(".arch_extension sme", "smstop za", options(nostack));
+            }
+            if expect_saved {
+                assert_eq!(after_tpidr2, 0, "kernel must clear TPIDR2_EL0 after saving dormant ZA");
+                assert_eq!(saved.0, expected.0, "kernel must preserve every byte of all 64 dormant ZA slices");
+            } else {
+                assert_eq!(after_tpidr2, block_ptr, "declined/probe call must leave TPIDR2_EL0 intact");
+                assert!(saved.0.iter().all(|&b| b == 0), "declined/probe call must not touch za_save_buffer");
+                assert_eq!(live_after.0, expected.0, "declined/probe call must leave live ZA bytes intact");
+            }
+            ret
+        };
+
+        // 1. Side-effect-free SVL probe leaves TPIDR2_EL0 and live ZA untouched.
+        assert_eq!(run_with_dormant_za([0; 6], false, &mut || unsafe { svl_lanes() }), 16);
+
+        // 2. Every SME2 assembly kernel: first decline on nonzero reserved byte
+        //    leaving TPIDR2_EL0 and live ZA untouched; then commit dormant ZA
+        //    on a zero-reserved block and produce exact BLAKE3 digests.
+        let mut chunks_buf = std::vec![0u8; 18 * CHUNK_LEN];
+        crate::test::paint_test_input(&mut chunks_buf);
+        let chunk_ptrs: std::vec::Vec<*const u8> = (0..18).map(|i| chunks_buf[i * CHUNK_LEN..].as_ptr()).collect();
+        let mut out_18 = [[0u8; OUT_LEN]; 18];
+        let counters = [0u64];
+        let chunk_flags = (crate::CHUNK_START as u32) << 8 | (crate::CHUNK_END as u32) << 16;
+
+        // Nonzero reserved byte in TPIDR2 block -> return 0, ZA untouched.
+        assert_eq!(
+            run_with_dormant_za([1, 0, 0, 0, 0, 0], false, &mut || unsafe {
+                ffi::blake3_servil_sme2_hash16_chunks_512(
+                    chunk_ptrs.as_ptr() as *const u8,
+                    crate::IV.as_ptr(),
+                    0,
+                    chunk_flags,
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            0
+        );
+        assert_eq!(
+            run_with_dormant_za([0, 0, 0, 0, 0, 1], false, &mut || unsafe {
+                ffi::blake3_servil_sme2x2_hash_chunks_512(chunk_ptrs.as_ptr(), crate::IV.as_ptr(), 0, chunk_flags, out_18.as_flattened_mut().as_mut_ptr(), 1)
+            }),
+            0
+        );
+
+        let root_flags = crate::CHUNK_START as u64 | ((crate::CHUNK_END | crate::ROOT) as u64) << 16;
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                ffi::blake3_servil_sme2_hash16_chunks_512(
+                    chunk_ptrs.as_ptr() as *const u8,
+                    crate::IV.as_ptr(),
+                    0,
+                    chunk_flags,
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            16
+        );
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                ffi::blake3_servil_sme2_hash16_chunks_at_512(
+                    chunk_ptrs.as_ptr(),
+                    crate::IV.as_ptr(),
+                    counters.as_ptr(),
+                    chunk_flags,
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            16
+        );
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                ffi::blake3_servil_sme2_hash16_messages_512(
+                    chunk_ptrs.as_ptr(),
+                    crate::IV.as_ptr(),
+                    0,
+                    root_flags,
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                    1,
+                )
+            }),
+            16
+        );
+        assert_eq!(out_18[0], *blake3::hash(&chunks_buf[..BLOCK_LEN]).as_bytes());
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                ffi::blake3_servil_sme2_hash16_parents_512(
+                    chunks_buf.as_ptr(),
+                    crate::IV.as_ptr(),
+                    0,
+                    (crate::PARENT | crate::ROOT) as u32,
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            16
+        );
+        let mut xof_out = [0u8; 16 * BLOCK_LEN];
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                ffi::blake3_servil_sme2_xof16_512(
+                    crate::IV.as_ptr(),
+                    chunks_buf.as_ptr(),
+                    0,
+                    (crate::CHUNK_START | crate::CHUNK_END | crate::ROOT) as u64 | (64u64 << 8),
+                    xof_out.as_mut_ptr(),
+                    1,
+                )
+            }),
+            16
+        );
+        let mut xof_want = [0u8; 16 * BLOCK_LEN];
+        blake3::Hasher::new().update(&chunks_buf[..BLOCK_LEN]).finalize_xof().fill(&mut xof_want);
+        assert_eq!(xof_out, xof_want);
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                ffi::blake3_servil_sme2x2_hash_chunks_512(chunk_ptrs.as_ptr(), crate::IV.as_ptr(), 0, chunk_flags, out_18.as_flattened_mut().as_mut_ptr(), 1)
+            }),
+            16
+        );
     }
 }

@@ -18,8 +18,22 @@ from aarch64 import Ptr, Region, Unproved
 from prove_hybrid import byte_symbols
 import lean_spec as spec
 
-HEAD = 0x21c   # the block loop's head (cmp x5, #1)
-EXIT = 0xcc0   # its exit: the last block's compression
+def loop_bounds(obj):
+    """Resolve the message kernel's block-loop head (.Lpipelined_block_loop,
+    immediately after `cbz x6, .Llast_block`) and exit (.Llast_block, its
+    branch target) from the assembled object's disassembly."""
+    syms = aarch64.symbols(obj)
+    start = syms["blake3_servil_sme2_hash16_messages_512"]
+    end = syms["blake3_servil_sme2_hash16_parents_512"]
+    code = aarch64.disassemble(obj, start, end, llvm=True)
+    for addr, (mnem, ops) in sorted(code.items()):
+        if mnem == "cbz" and ops[0] == "x6":
+            target = int(ops[1].split()[0], 16)
+            return addr + 4, target
+    raise Unproved("could not locate block loop head/exit in SME2 object")
+
+
+HEAD, EXIT = loop_bounds(prove_sme2.assemble())
 
 
 def setup(obj, groups=1, chunks=False):

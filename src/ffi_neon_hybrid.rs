@@ -950,7 +950,7 @@ unsafe fn hash_many_in<const N: usize>(
     last_len: usize,
     out: &mut [u8],
 ) {
-    assert!(out.len() >= inputs.len() * OUT_LEN);
+    assert!(inputs.len() <= out.len() / OUT_LEN);
     assert!((1..=BLOCK_LEN).contains(&last_len), "a last block of 1 to 64 bytes");
     const { assert!(N > 0 && N % BLOCK_LEN == 0 && N <= CHUNK_LEN, "1 to 16 whole blocks") };
     let (plans, kernels, counter_step): (&[&[usize]; 17], &[Option<Kernel>], u64) = if increment_counter.yes() {
@@ -1004,7 +1004,7 @@ pub unsafe fn hash_messages_raw(
     last_len: usize,
     out: &mut [u8],
 ) {
-    assert!((1..=GROUP).contains(&count) && out.len() >= count * OUT_LEN, "1 to GROUP inputs, room for every digest");
+    assert!((1..=GROUP).contains(&count) && count <= out.len() / OUT_LEN, "1 to GROUP inputs, room for every digest");
     assert!((1..=16).contains(&blocks) && (1..=BLOCK_LEN).contains(&last_len), "1 to 16 blocks, the last of 1 to 64 bytes");
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (last_len as u64) << 24;
     let family = family();

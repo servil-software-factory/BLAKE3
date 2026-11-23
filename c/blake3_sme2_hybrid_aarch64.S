@@ -22,6 +22,20 @@
 .p2align 4
 _blake3_servil_sme2x2_hash_chunks_512:
 blake3_servil_sme2x2_hash_chunks_512:
+    rdsvl x8, #1
+    lsr x8, x8, #2
+    cmp x8, #16
+    b.ne blake3_servil_sme2x2_hash_chunks_512_early_return
+    cbz x5, blake3_servil_sme2x2_hash_chunks_512_early_return
+    mrs x16, tpidr2_el0
+    cbz x16, blake3_servil_sme2x2_hash_chunks_512_tpidr2_ok
+    ldrh w15, [x16, #10]
+    ldr w14, [x16, #12]
+    orr w15, w15, w14
+    cbz w15, blake3_servil_sme2x2_hash_chunks_512_tpidr2_ok
+    mov x8, #0
+    b blake3_servil_sme2x2_hash_chunks_512_early_return
+blake3_servil_sme2x2_hash_chunks_512_tpidr2_ok:
     sub sp, sp, #224
     stp d8, d9, [sp, #0]
     stp d10, d11, [sp, #16]
@@ -46,13 +60,24 @@ blake3_servil_sme2x2_hash_chunks_512:
     ubfx w9, w3, #16, #8
     orr w9, w9, w8
     str w9, [sp, #208]
+    mrs x16, tpidr2_el0
+    cbz x16, blake3_servil_sme2x2_hash_chunks_512_za_ready
+    ldr x14, [x16]
+    cbz x14, blake3_servil_sme2x2_hash_chunks_512_za_clear
+    ldrh w15, [x16, #8]
+    cbz w15, blake3_servil_sme2x2_hash_chunks_512_za_clear
+    mov w12, #0
+blake3_servil_sme2x2_hash_chunks_512_za_loop:
+    str za[w12, 0], [x14]
+    addsvl x14, x14, #1
+    add w12, w12, #1
+    cmp w12, w15
+    b.lo blake3_servil_sme2x2_hash_chunks_512_za_loop
+blake3_servil_sme2x2_hash_chunks_512_za_clear:
+    msr tpidr2_el0, xzr
+blake3_servil_sme2x2_hash_chunks_512_za_ready:
     smstart sm
     smstart za
-    cntw x8
-    cmp x8, #16
-    b.eq blake3_servil_sme2x2_hash_chunks_512_vl_ok
-    mov x0, x8
-    b blake3_servil_sme2x2_hash_chunks_512_return
 blake3_servil_sme2x2_hash_chunks_512_vl_ok:
     ptrue p0.s
     mov x8, #8
@@ -74,8 +99,6 @@ blake3_servil_sme2x2_hash_chunks_512_vl_ok:
     movk w8, #42319, lsl #16
     dup z19.s, w8
     mov za2h.s[w12, 0:3], { z16.s - z19.s }
-    ldr x8, [sp, #192]
-    cbz x8, blake3_servil_sme2x2_hash_chunks_512_success
 blake3_servil_sme2x2_hash_chunks_512_group:
     ldr x1, [sp, #160]
     ldr w8, [x1, #0]
@@ -5177,4 +5200,7 @@ blake3_servil_sme2x2_hash_chunks_512_return:
     ldp x27, x28, [sp, #128]
     ldp x29, x30, [sp, #144]
     add sp, sp, #224
+    ret
+blake3_servil_sme2x2_hash_chunks_512_early_return:
+    mov x0, x8
     ret

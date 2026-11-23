@@ -40,6 +40,7 @@ blake3_servil_hash_many_avx512:
         mov     rbp, rsp
         sub     rsp, 144
         and     rsp, 0xFFFFFFFFFFFFFFC0
+        movzx   r9d, r9b
         neg     r9
         kmovw   k1, r9d
         vmovd   xmm0, r8d

@@ -1014,6 +1014,11 @@ def step(m, pc, mnem, ops):
         # TLS block (Variant I: its variables from offset 16).
         if ops[1] == "tpidr_el0":
             m.set(ops[0], Ptr("tls", 0))
+        elif ops[1].lower() in ("tpidr2_el0", "s3_3_c13_c0_5"):
+            # Normal callers without dormant ZA enter with TPIDR2_EL0 == 0
+            # (the compression proofs assume a null descriptor and 512-bit SVL;
+            # the lazy-save loop and reserved-byte refusal are tested separately).
+            m.set(ops[0], BitVecVal(0, 64))
         elif ops[1] in getattr(m, "clock", {}):
             m.set(ops[0], BitVecVal(m.clock[ops[1]], 64))
         else:

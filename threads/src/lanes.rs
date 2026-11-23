@@ -348,6 +348,10 @@ pub(crate) fn prepare_thread() {
     });
     sources::job_source();
     crate::prepare_collection_thread();
+    #[cfg(blake3_sme2)]
+    if matches!(Platform::detect(), Platform::SME2 { .. }) {
+        blake3_servil_core::thread_support::prepare_sme2_scratch();
+    }
 }
 
 /// `cut` fills this thread's scratch with a job's pieces; `job` runs with

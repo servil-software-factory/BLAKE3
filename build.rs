@@ -19,17 +19,12 @@ fn warn(warning: &str) {
     }
 }
 
-fn target_components() -> Vec<String> {
-    let target = env::var("TARGET").unwrap();
-    target.split("-").map(|s| s.to_string()).collect()
-}
-
 fn is_x86_64() -> bool {
-    target_components()[0] == "x86_64"
+    env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
 }
 
 fn is_aarch64() -> bool {
-    target_components()[0] == "aarch64"
+    env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
 }
 
 fn new_build() -> cc::Build {
@@ -121,7 +116,11 @@ fn assembles(name: &str, flag: &str, source: &str) -> bool {
 // (Debian 12, Raspberry Pi OS) ship such compilers.
 fn c_compiler_supports_sme2() -> bool {
     let compiler = new_build().get_compiler().path().to_owned();
-    let supported = assembles("sme2", "-march=armv9-a+sme2", ".arch armv9-a+sme2\nsmstart sm\nsmstop sm\n");
+    let supported = assembles(
+        "sme2",
+        "-march=armv9-a+sme2",
+        ".arch armv9-a+sme2\nrdsvl x0, #1\nmrs x16, tpidr2_el0\nstr za[w12, 0], [x14]\naddsvl x14, x14, #1\nsmstart sm\nsmstop sm\n",
+    );
     if !supported {
         warn(&format!(
             "blake3-servil: {compiler:?} cannot assemble SME2 (-march=armv9-a+sme2), so this \
@@ -174,13 +173,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // anything is built: a build elsewhere would run code no machine of
     // ours tests, where official BLAKE3 supports it (#160, #180).
     let var = |name: &str| env::var(name).unwrap_or_default();
+    let target = var("TARGET");
     let (arch, os) = (var("CARGO_CFG_TARGET_ARCH"), var("CARGO_CFG_TARGET_OS"));
     // Pointers of 64 bits too: the 64-bit architectures have targets with
     // pointers of 32 (x86_64-unknown-linux-gnux32,
     // aarch64-unknown-linux-gnu_ilp32), where this library's sizes, which
-    // are checked for 64 bits, would wrap.
+    // are checked for 64 bits, would wrap. Reject arm64e (pointer-auth ABI,
+    // untested here) explicitly rather than letting arch == "aarch64" pass it.
     let supported = var("CARGO_CFG_TARGET_ENDIAN") == "little"
         && var("CARGO_CFG_TARGET_POINTER_WIDTH") == "64"
+        && !target.starts_with("arm64e-")
         && match arch.as_str() {
             "x86_64" => os == "linux",
             "aarch64" => os == "linux" || os == "macos",
@@ -188,18 +190,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
     assert!(
         supported,
-        "blake3-servil runs on x86-64 Linux and on 64-bit Arm Linux and macOS; for {}, use official BLAKE3 (https://github.com/BLAKE3-team/BLAKE3)",
-        var("TARGET")
+        "blake3-servil runs on x86-64 Linux and on 64-bit Arm Linux and macOS; for {target}, use official BLAKE3 (https://github.com/BLAKE3-team/BLAKE3)",
     );
-    // If CFLAGS is set, make sure LTO is disabled by appending -fno-lto. (We can't do this with
-    // .flag() later on, because CFLAGS takes precedence.) Any mismatch between the C compiler and
-    // the Rust linker can cause linker errors in our C intrinsics implementations if LTO is
-    // enabled. See https://github.com/BLAKE3-team/BLAKE3/issues/550.
-    if let Some(mut flags) = env::var_os("CFLAGS") {
-        flags.push(" -fno-lto");
-        // SAFETY: This build script is single-threaded.
-        unsafe {
-            env::set_var("CFLAGS", flags);
+    // If CFLAGS (or any cc-supported target/host-scoped CFLAGS variant) is set,
+    // make sure LTO is disabled by appending -fno-lto. (We can't do this with
+    // .flag() later on, because CFLAGS takes precedence.) Any mismatch between
+    // the C compiler and the Rust linker can cause linker errors in our C
+    // intrinsics implementations if LTO is enabled. See
+    // https://github.com/BLAKE3-team/BLAKE3/issues/550.
+    let target_u = target.replace(['-', '.'], "_");
+    for name in [String::from("CFLAGS"), String::from("HOST_CFLAGS"), String::from("TARGET_CFLAGS"), format!("CFLAGS_{target}"), format!("CFLAGS_{target_u}")] {
+        if let Some(mut flags) = env::var_os(&name) {
+            flags.push(" -fno-lto");
+            // SAFETY: This build script is single-threaded.
+            unsafe {
+                env::set_var(&name, flags);
+            }
         }
     }
 
@@ -239,12 +245,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // The `cc` crate doesn't automatically emit rerun-if directives for the
-    // environment variables it supports, in particular for $CC. We expect to
-    // do a lot of benchmarking across different compilers, so we explicitly
-    // add the variables that we're likely to need.
-    println!("cargo::rerun-if-env-changed=CC");
-    println!("cargo::rerun-if-env-changed=CFLAGS");
+    // Track compiler/flag/archiver variables matching cc's lookup order
+    // (plain, HOST_*, TARGET_*, *_<target>, *_<normalized target>) without
+    // triggering rebuilds on unrelated environment changes like $PATH.
+    for prefix in ["CC", "CFLAGS", "AR"] {
+        println!("cargo::rerun-if-env-changed={prefix}");
+        println!("cargo::rerun-if-env-changed=HOST_{prefix}");
+        println!("cargo::rerun-if-env-changed=TARGET_{prefix}");
+        println!("cargo::rerun-if-env-changed={prefix}_{target}");
+        println!("cargo::rerun-if-env-changed={prefix}_{target_u}");
+    }
+    println!("cargo::rerun-if-env-changed=CRATE_CC_NO_DEFAULTS");
 
     // Ditto for source files, though these shouldn't change as often.
     for file in std::fs::read_dir("c")? {

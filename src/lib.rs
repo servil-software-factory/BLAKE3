@@ -1210,7 +1210,6 @@ fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
 /// ```
 pub fn initialize() {
     self_test::ensure();
-    platform::Platform::detect_unchecked().record();
 }
 
 /// Scheduling and storage setup shared with `blake3-servil`'s workers.

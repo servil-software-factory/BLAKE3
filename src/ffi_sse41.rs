@@ -25,11 +25,12 @@ pub unsafe fn hash_many<const N: usize>(
     flags_end: u8,
     out: &mut [u8],
 ) {
+    const { assert!(N > 0 && N % BLOCK_LEN == 0, "hash_many inputs are whole blocks") };
     unsafe {
         // The Rust hash_many implementations do bounds checking on the `out`
-        // array, but the C implementations don't. Even though this is an unsafe
-        // function, assert the bounds here.
-        assert!(out.len() >= inputs.len() * OUT_LEN);
+        // array, but the assembly implementations don't. Even though this is
+        // an unsafe function, assert the bounds without multiplying `inputs.len()`.
+        assert!(inputs.len() <= out.len() / OUT_LEN);
         ffi::blake3_servil_hash_many_sse41(
             inputs.as_ptr() as *const *const u8,
             inputs.len(),

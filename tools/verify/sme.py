@@ -89,6 +89,9 @@ def step(m, pc, mnem, ops):
         if what in ("za", "both"):
             m.za = [[[ZERO] * LANES for _ in range(LANES)] for _ in range(4)] if mnem == "smstart" else None
         return True
+    if mnem == "rdsvl":
+        m.set(ops[0], BitVecVal(LANES * 4 * aarch64.imm(ops[1]), 64))
+        return True
     if mnem == "cntw":
         if not m.streaming:
             raise Unproved("cntw outside streaming mode")
