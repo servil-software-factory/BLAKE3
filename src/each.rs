@@ -594,17 +594,21 @@ const BY_BLOCKS_AT_ONCE: usize = 64;
 /// ROOT, CHUNK_START too where k is 0. Up to BY_BLOCKS_AT_ONCE items are
 /// sorted at once, on the stack. Requires AVX2 or AVX-512 on x86-64; NEON on AArch64.
 fn hash_by_blocks(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
+    hash_chunks_by_blocks(items, key, 0, flags, CHUNK_END | crate::ROOT, out, platform);
+}
+
+fn hash_chunks_by_blocks(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, flags_end: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     assert_eq!(items.len(), out.len(), "one digest per item");
     assert!(items.iter().all(|i| i.len() <= CHUNK_LEN), "items of up to a chunk");
     for (items, out) in items.chunks(BY_BLOCKS_AT_ONCE).zip(out.chunks_mut(BY_BLOCKS_AT_ONCE)) {
-        by_blocks_at_once(items, key, flags, out, platform);
+        by_blocks_at_once(items, key, counter, flags, flags_end, out, platform);
     }
 }
 
-fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
+fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, flags_end: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     const GROUP: usize = 16;
-    // On SME2, a table of messages of one length, whole blocks, with at
-    // least the work that pays for the SME2 turn: one call of the message
+    // On SME2, a table of messages of one length, whole blocks, at counter 0,
+    // with at least the work that pays for the SME2 turn: one call of the message
     // kernel for all of them (a turn's 1 KiB messages finishing together:
     // the NEON lanes took 30-64% longer on an Apple M4 Max, jobs 2016 and
     // 2019). A table of one-block messages never reaches the threshold
@@ -612,7 +616,8 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
     #[cfg(blake3_sme2)]
     {
         let len = items[0].len();
-        if matches!(platform, Platform::SME2)
+        if counter == 0
+            && matches!(platform, Platform::SME2)
             && items.len() * len >= crate::SME2_SIZED_LEN
             && len % crate::BLOCK_LEN == 0
             && items.iter().all(|item| item.len() == len)
@@ -630,9 +635,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
                         // Sound: detection and the turn provide SME2. Every
                         // typed lane holds its whole input; spare lanes
                         // repeat a valid input and write no output.
-                        unsafe {
-                            crate::sme2::hash_messages(&lanes, key, flags, CHUNK_START, CHUNK_END | crate::ROOT, crate::BLOCK_LEN, out.as_flattened_mut())
-                        };
+                        unsafe { crate::sme2::hash_messages(&lanes, key, flags, CHUNK_START, flags_end, crate::BLOCK_LEN, out.as_flattened_mut()) };
                     }};
                 }
                 match len {
@@ -694,9 +697,10 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
                         &lengths[..group.len()],
                         k + 1,
                         key,
+                        counter,
                         flags,
                         CHUNK_START,
-                        CHUNK_END | crate::ROOT,
+                        flags_end,
                         &mut digests[..group.len() * OUT_LEN],
                     );
                 }
@@ -715,7 +719,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
                 // caller selected this platform's block-group path.
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
-                    crate::pair::hash_many_blocks(platform, &inputs, k, key, 0, false, flags, CHUNK_START, 0, &mut lanes[..group.len() * OUT_LEN])
+                    crate::pair::hash_many_blocks(platform, &inputs, k, key, counter, false, flags, CHUNK_START, 0, &mut lanes[..group.len() * OUT_LEN])
                 };
                 #[cfg(blake3_neon)]
                 unsafe {
@@ -724,7 +728,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
                         group.len(),
                         k,
                         key,
-                        0,
+                        counter,
                         flags,
                         CHUNK_START,
                         0,
@@ -749,7 +753,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
         let last = item.len() - k * crate::BLOCK_LEN;
         block[..last].copy_from_slice(&item[k * crate::BLOCK_LEN..]);
         let start = if k == 0 { CHUNK_START } else { 0 };
-        platform.compress_in_place(&mut cv, &block, last.to_le_bytes()[0], 0, flags | start | CHUNK_END | crate::ROOT);
+        platform.compress_in_place(&mut cv, &block, last.to_le_bytes()[0], counter, flags | start | flags_end);
         out[i] = crate::hasher::le_bytes(&cv);
     }
 }
@@ -786,19 +790,25 @@ pub(crate) fn hash_each_on<I: Item>(key: &CVWords, flags: u8, items: &[I], out: 
     // selects SHA-3 or plain instructions itself.
     #[cfg(target_arch = "aarch64")]
     let platform_takes = true;
-    let by_blocks = platform_takes && items.iter().filter(|i| i.bytes().len() <= CHUNK_LEN).nth(1).is_some();
+    let by_blocks = platform_takes && items.iter().filter(|i| i.bytes().len() <= CHUNK_LEN).take(2).count() == 2;
     if by_blocks {
         // BY_BLOCKS_AT_ONCE of them at a time, their indices on the stack:
-        // a collection of small items allocates nothing.
+        // a collection of small items allocates nothing and returns before
+        // borrowing SHARED or scanning items again.
+        let mut small_done = 0usize;
         let mut small = (0..items.len()).filter(|&i| items[i].bytes().len() <= CHUNK_LEN).peekable();
         while small.peek().is_some() {
             let part: crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE> = small.by_ref().take(BY_BLOCKS_AT_ONCE).collect();
+            small_done += part.len();
             let bytes: crate::stack_vec::StackVec<&[u8], BY_BLOCKS_AT_ONCE> = part.iter().map(|&i| items[i].bytes()).collect();
             let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
             hash_by_blocks(&bytes, &key, flags, &mut digests[..part.len()], platform);
             for (&i, digest) in part.iter().zip(&digests) {
                 out[i] = *digest;
             }
+        }
+        if small_done == items.len() {
+            return;
         }
     }
     if items.is_empty() {
@@ -812,12 +822,12 @@ pub(crate) fn hash_each_on<I: Item>(key: &CVWords, flags: u8, items: &[I], out: 
     if SHARED
         .try_with(|shared| {
             let mut shared = shared.try_borrow_mut().expect("one collection at a time on a thread");
-            hash_each_middle(&mut shared, &key, flags, items, out, platform, by_blocks, &alone);
+            hash_each_middle(&mut shared, &key, flags, items, out, platform, by_blocks, platform_takes, &alone);
         })
         .is_err()
     {
         let mut local = Shared { messages: Vec::new(), cvs: Vec::new() };
-        hash_each_middle(&mut local, &key, flags, items, out, platform, by_blocks, &alone);
+        hash_each_middle(&mut local, &key, flags, items, out, platform, by_blocks, platform_takes, &alone);
     }
 }
 
@@ -832,12 +842,22 @@ fn hash_each_middle<I: Item>(
     out: &mut [[u8; OUT_LEN]],
     platform: Platform,
     by_blocks: bool,
+    platform_takes: bool,
     alone: &impl Fn(&[u8]) -> Hash,
 ) {
     let Shared { messages, cvs } = shared;
     messages.clear();
+    #[cfg(blake3_neon)]
+    let last_lanes = crate::neon_hybrid::sha3_detected();
+    #[cfg(not(blake3_neon))]
+    let last_lanes = false;
+    let min_k = usize::from(!last_lanes);
     let mut slots = 0;
     let mut most_full = 0;
+    let mut max_chunks = 0usize;
+    let mut partial_any = [false; ALONE_CHUNKS];
+    let mut partial_seen = [0u16; ALONE_CHUNKS];
+    let mut partial_shared = [false; ALONE_CHUNKS];
     for (i, item) in items.iter().map(Item::bytes).enumerate() {
         let chunks = item.len().div_ceil(CHUNK_LEN);
         if chunks <= 1 && by_blocks {
@@ -846,17 +866,87 @@ fn hash_each_middle<I: Item>(
         if chunks <= 1 || chunks >= ALONE_CHUNKS {
             out[i] = *alone(item).as_bytes();
         } else {
-            most_full = most_full.max(item.len() / CHUNK_LEN);
+            let full = item.len() / CHUNK_LEN;
+            most_full = most_full.max(full);
+            max_chunks = max_chunks.max(chunks);
+            if full != chunks {
+                partial_any[full] = true;
+                let tail = &item[full * CHUNK_LEN..];
+                let k = (tail.len() - 1) / crate::BLOCK_LEN;
+                if k >= min_k {
+                    let bit = 1u16 << k;
+                    if (partial_seen[full] & bit) != 0 {
+                        partial_shared[full] = true;
+                    }
+                    partial_seen[full] |= bit;
+                }
+            }
             messages.push((i, slots));
             slots += chunks;
         }
     }
+    if messages.is_empty() {
+        return;
+    }
     cvs.clear();
     cvs.resize(slots, [0u8; OUT_LEN]);
-    // Acquire one best-effort SME2 turn across the shared full-chunk rounds
-    // when at least one full SME2 group (16 messages) participates.
-    let turn = crate::platform::Sme2Turn::take(platform, messages.len() >= 16);
+    // Partial last chunks (1,025..=15,360 B middle messages) run before taking
+    // an SME2 turn (NEON `hash_last_lanes` and x86 `hash_many_blocks` do not
+    // use SME2, and each partial chunk writes only `cvs[at + c]`, disjoint from
+    // full chunks `cvs[at..at + c]`). Batch through `hash_chunks_by_blocks`
+    // only when at least two tails at counter `c` share a SIMD-eligible
+    // prefix-block length, avoiding sort/scatter overhead on incompatible pairs.
+    for c in 1..ALONE_CHUNKS {
+        if !partial_any[c] {
+            continue;
+        }
+        if platform_takes && partial_shared[c] {
+            let mut slices = crate::stack_vec::StackVec::<&[u8], BY_BLOCKS_AT_ONCE>::new();
+            let mut owners = crate::stack_vec::StackVec::<usize, BY_BLOCKS_AT_ONCE>::new();
+            let mut flush_partial = |slices: &mut crate::stack_vec::StackVec<&[u8], BY_BLOCKS_AT_ONCE>,
+                                     owners: &mut crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE>| {
+                let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
+                hash_chunks_by_blocks(slices, key, c as u64, flags, CHUNK_END, &mut digests[..slices.len()], platform);
+                for (&slot, digest) in owners.iter().zip(&digests) {
+                    cvs[slot] = *digest;
+                }
+                slices.clear();
+                owners.clear();
+            };
+            for &(i, at) in messages.iter() {
+                let item = items[i].bytes();
+                let full = item.len() / CHUNK_LEN;
+                if full == c && item.len() > c * CHUNK_LEN {
+                    slices.push(&item[c * CHUNK_LEN..]);
+                    owners.push(at + c);
+                    if slices.is_full() {
+                        flush_partial(&mut slices, &mut owners);
+                    }
+                }
+            }
+            if !slices.is_empty() {
+                flush_partial(&mut slices, &mut owners);
+            }
+        } else {
+            for &(i, at) in messages.iter() {
+                let item = items[i].bytes();
+                let full = item.len() / CHUNK_LEN;
+                if full == c && item.len() > c * CHUNK_LEN {
+                    cvs[at + c] = ChunkState::new(key, c as u64, flags, platform).update(&item[c * CHUNK_LEN..]).output().chaining_value();
+                }
+            }
+        }
+    }
+    // Acquire one best-effort SME2 turn across the shared full-chunk rounds and
+    // batched Merkle parent/root rounds whenever either the chunk/root rounds
+    // (`messages.len() >= 16`) or the first non-root parent round
+    // (`first_parent_pairs >= 16`) can reach an SME2 group of 16 lanes.
+    #[cfg(blake3_sme2)]
+    let turn = crate::sme2::turn_for_each_middle(platform, items, messages);
+    #[cfg(blake3_sme2)]
     let round_platform = turn.platform();
+    #[cfg(not(blake3_sme2))]
+    let round_platform = platform;
     for k in 0..most_full {
         crate::counted(crate::Counted::EachRound);
         // A round's lanes go to the kernels LANES_AT_ONCE at a time,
@@ -887,16 +977,82 @@ fn hash_each_middle<I: Item>(
             flush(&mut refs, &mut owners);
         }
     }
-    drop(turn);
-    for &(i, at) in messages.iter() {
-        let item = items[i].bytes();
-        let chunks = item.len().div_ceil(CHUNK_LEN);
-        let full = item.len() / CHUNK_LEN;
-        if full < chunks {
-            cvs[at + full] = ChunkState::new(key, full as u64, flags, platform).update(&item[full * CHUNK_LEN..]).output().chaining_value();
-        }
+    if messages.len() == 1 {
+        let (i, at) = messages[0];
+        let chunks = items[i].bytes().len().div_ceil(CHUNK_LEN);
         out[i] = *root(&cvs[at..at + chunks], key, flags, platform).as_bytes();
+    } else {
+        // Reduce every message's chunk CVs bottom-up in place with no pair
+        // assembly/copy in `each.rs`: left-to-right adjacent pairing never
+        // crosses BLAKE3's power-of-two left-subtree boundary, and each pair
+        // sits contiguously as a 64-byte parent block in `cvs`. For
+        // `max_chunks` in 2..=15, `parent_rounds` (0..=3) leaves every message
+        // with its 2 root-input CVs at `cvs[at..at + 2]`. After `round`
+        // reductions of `chunks` CVs, the live count is `((chunks - 1) >> round) + 1`.
+        let parent_flags = flags | crate::PARENT;
+        let parent_rounds = usize::BITS - (max_chunks - 1).leading_zeros() - 1;
+        for round in 0..parent_rounds {
+            let mut jobs = crate::stack_vec::StackVec::<(usize, usize), LANES_AT_ONCE>::new();
+            let mut flushed = false;
+            let mut flush_parents = |jobs: &mut crate::stack_vec::StackVec<(usize, usize), LANES_AT_ONCE>, cvs: &mut [CVBytes]| {
+                flushed = true;
+                let mut lane_out = [0u8; LANES_AT_ONCE * OUT_LEN];
+                {
+                    let mut refs = crate::stack_vec::StackVec::<&[u8; crate::BLOCK_LEN], LANES_AT_ONCE>::new();
+                    for &(src, _) in jobs.iter() {
+                        refs.push(cvs[src..src + 2].as_flattened().try_into().unwrap());
+                    }
+                    round_platform.hash_many(&refs, key, 0, IncrementCounter::No, parent_flags, 0, 0, &mut lane_out[..refs.len() * OUT_LEN]);
+                }
+                for (j, &(_, dst)) in jobs.iter().enumerate() {
+                    cvs[dst].copy_from_slice(&lane_out[j * OUT_LEN..(j + 1) * OUT_LEN]);
+                }
+                jobs.clear();
+            };
+            for &(i, at) in messages.iter() {
+                let chunks = items[i].bytes().len().div_ceil(CHUNK_LEN);
+                let n = ((chunks - 1) >> round) + 1;
+                if n <= 2 {
+                    continue;
+                }
+                for j in 0..(n / 2) {
+                    jobs.push((at + 2 * j, at + j));
+                    if jobs.is_full() {
+                        flush_parents(&mut jobs, cvs);
+                    }
+                }
+            }
+            if !jobs.is_empty() {
+                flush_parents(&mut jobs, cvs);
+            }
+            assert!(flushed, "each scheduled parent round reduces at least one pair");
+            for &(i, at) in messages.iter() {
+                let chunks = items[i].bytes().len().div_ceil(CHUNK_LEN);
+                let n = ((chunks - 1) >> round) + 1;
+                if n <= 2 {
+                    continue;
+                }
+                if (n & 1) == 1 {
+                    let pairs = n / 2;
+                    cvs[at + pairs] = cvs[at + 2 * pairs];
+                }
+            }
+        }
+        let root_flags = flags | crate::PARENT | crate::ROOT;
+        for chunk in messages.chunks(LANES_AT_ONCE) {
+            let mut refs = crate::stack_vec::StackVec::<&[u8; crate::BLOCK_LEN], LANES_AT_ONCE>::new();
+            for &(_, at) in chunk {
+                refs.push(cvs[at..at + 2].as_flattened().try_into().unwrap());
+            }
+            let mut lane_out = [0u8; LANES_AT_ONCE * OUT_LEN];
+            round_platform.hash_many(&refs, key, 0, IncrementCounter::No, root_flags, 0, 0, &mut lane_out[..refs.len() * OUT_LEN]);
+            for (j, &(i, _)) in chunk.iter().enumerate() {
+                out[i].copy_from_slice(&lane_out[j * OUT_LEN..(j + 1) * OUT_LEN]);
+            }
+        }
     }
+    #[cfg(blake3_sme2)]
+    drop(turn);
     messages.clear();
     cvs.clear();
 }
@@ -2035,5 +2191,161 @@ mod test {
             assert_eq!(first, if keyed_first { expected_keyed } else { expected_plain }, "cohort of {count} (keyed={keyed_first}) first");
             assert_eq!(last, expected_plain, "cohort of {count} (keyed={keyed_first}) last");
         }
+    }
+
+    /// Every middle chunk count (`2..=15`, exact and partial tails `1, 63, 64,
+    /// 65, 512, 1023 B`), collection counts spanning singleton (`1`), small
+    /// (`2`, `3`), and over-full (`LANES_AT_ONCE + 5`, exercising mid-round
+    /// parent flushes and odd-leaf compaction), and all three `Mode`s match the
+    /// reference implementation and exercise batched partial-chunk and
+    /// parent/root rounds.
+    #[cfg(feature = "std")]
+    #[test]
+    fn hash_each_middle_all_chunk_counts_partial_tails_and_modes() {
+        crate::initialize();
+        let key = [0x3cu8; crate::KEY_LEN];
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut fill = |n: usize| -> std::vec::Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                })
+                .collect()
+        };
+
+        // Mixed collection with every chunk count 2..=15 (both exact and ragged
+        // partial tails) plus empty, small (<= 1 KiB), and large (>= 16 KiB)
+        // items, repeated past LANES_AT_ONCE so both partial-chunk flushes and
+        // mid-round parent flushes with odd trailing leaves trigger.
+        let tails = [0usize, 1, 63, 64, 65, 512, 1023];
+        let mut raw: std::vec::Vec<std::vec::Vec<u8>> = std::vec![fill(0), fill(1), fill(64), fill(1024), fill(16 * CHUNK_LEN), fill(16 * CHUNK_LEN + 37)];
+        for chunks in 2..ALONE_CHUNKS {
+            for &tail in &tails {
+                let len = if tail == 0 { chunks * CHUNK_LEN } else { (chunks - 1) * CHUNK_LEN + tail };
+                raw.push(fill(len));
+            }
+        }
+        // Extra 5-chunk ragged items past LANES_AT_ONCE to stress flush + odd compaction.
+        while raw.len() < LANES_AT_ONCE + 20 {
+            raw.push(fill(4 * CHUNK_LEN + 333));
+        }
+        let slices: std::vec::Vec<&[u8]> = raw.iter().map(|v| v.as_slice()).collect();
+        let blocks = crate::test::messages(&slices);
+        let items = crate::test::items(&blocks, &slices);
+        for (m, mode) in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("each middle simd")].into_iter().enumerate() {
+            let mut out = std::vec![[0u8; OUT_LEN]; items.len()];
+            crate::throughput::hash_each(mode, &items, &mut out);
+            for (i, s) in slices.iter().enumerate() {
+                assert_eq!(out[i], crate::test::official::hash(mode, s), "mode={m} item {i} len={}", s.len());
+            }
+        }
+
+        // Singleton middle message (`messages.len() == 1`) and 15-chunk multi-round
+        // reduction (`15 -> 8 -> 4 -> 2 -> 1`, 3 non-root parent rounds + 1 root round).
+        #[cfg(target_arch = "x86_64")]
+        let block_lanes = crate::pair::takes_platform(Platform::detect());
+        #[cfg(target_arch = "aarch64")]
+        let block_lanes = true;
+        #[cfg(blake3_neon)]
+        let last_lanes = crate::neon_hybrid::sha3_detected();
+        #[cfg(not(blake3_neon))]
+        let last_lanes = false;
+
+        for count in [1usize, 2, 3, 17] {
+            let bufs: std::vec::Vec<std::vec::Vec<u8>> = (0..count).map(|k| fill(14 * CHUNK_LEN + 100 + k * 7)).collect();
+            let s: std::vec::Vec<&[u8]> = bufs.iter().map(|v| v.as_slice()).collect();
+            let b = crate::test::messages(&s);
+            let it = crate::test::items(&b, &s);
+            let mut out = std::vec![[0u8; OUT_LEN]; count];
+            crate::COUNTED.with(|c| {
+                c[crate::Counted::ByBlocksCall as usize].set(0);
+                c[crate::Counted::HashManyCall as usize].set(0);
+            });
+            crate::throughput::hash_each(Mode::Plain, &it, &mut out);
+            for (i, msg) in s.iter().enumerate() {
+                assert_eq!(out[i], crate::test::official::hash(Mode::Plain, msg), "15-chunk count={count} i={i}");
+            }
+            let by_blocks = crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].get());
+            let hash_many = crate::COUNTED.with(|c| c[crate::Counted::HashManyCall as usize].get());
+            if count == 1 {
+                assert_eq!(by_blocks, 0, "single partial tail skips hash_chunks_by_blocks");
+                assert_eq!(hash_many, 14, "single 15-chunk message runs 14 chunk rounds only");
+            } else {
+                // 14 full-chunk rounds + 3 parent rounds (15->8, 8->4, 4->2) + 1 root round.
+                assert_eq!(hash_many, 18, "count={count} 15-chunk messages batch all 3 parent + 1 root rounds");
+                if block_lanes {
+                    assert!(by_blocks > 0, "count={count} >= 2 shared-prefix partial tails batch via hash_chunks_by_blocks");
+                }
+            }
+        }
+
+        // Partial-tail boundary & exact group-width checks at counter 1 & 2:
+        // - incompatible prefix lengths (1,127 B = k=1, 1,191 B = k=2) skip SIMD
+        // - block-boundary pair (1024+511, 1024+512 -> both k=7) runs 1 SIMD call
+        // - adjacent-boundary pair (1024+512 -> k=7, 1024+513 -> k=8) skips SIMD
+        // - k=0 pair plus singleton k=1 (1024+32, 1024+32, 1024+103) skips SIMD on !last_lanes
+        //   (kills `k > 0 -> k >= 0`) and runs 2 calls (k=0 + k=1) on SHA-3 NEON
+        // - exact c-chunk message placed LAST alongside shared & single counter-c tails
+        //   (exercises `item.len() > c * CHUNK_LEN` in both branches; `>=` panics OOB)
+        // - BY_BLOCKS_AT_ONCE + 1 identical-k items at counter 1 exercises `slices.is_full()`
+        //   (64/16 = 4 calls in first flush + 1 call in trailing flush = 5 calls).
+        let partial_cases: &[(&str, &[usize], u64)] = &[
+            ("incompatible k=1,2", &[CHUNK_LEN + 103, CHUNK_LEN + 167], 0),
+            ("shared k=1 pair", &[CHUNK_LEN + 103, CHUNK_LEN + 103], if block_lanes { 1 } else { 0 }),
+            ("shared k=7 at 511/512 boundary", &[CHUNK_LEN + 511, CHUNK_LEN + 512], if block_lanes { 1 } else { 0 }),
+            ("split k=7/8 at 512/513 boundary", &[CHUNK_LEN + 512, CHUNK_LEN + 513], 0),
+            ("k=0 pair + singleton k=1", &[CHUNK_LEN + 32, CHUNK_LEN + 32, CHUNK_LEN + 103], if block_lanes && last_lanes { 2 } else { 0 }),
+            ("shared c=2 tails + trailing exact 2-chunk", &[2 * CHUNK_LEN + 512, 2 * CHUNK_LEN + 512, 2 * CHUNK_LEN], if block_lanes { 1 } else { 0 }),
+            ("single c=2 tail + trailing exact 2-chunk", &[2 * CHUNK_LEN + 512, 2 * CHUNK_LEN], 0),
+        ];
+        for &(label, lens, want_calls) in partial_cases {
+            let bufs: std::vec::Vec<std::vec::Vec<u8>> = lens.iter().map(|&n| fill(n)).collect();
+            let s: std::vec::Vec<&[u8]> = bufs.iter().map(|v| v.as_slice()).collect();
+            let b = crate::test::messages(&s);
+            let it = crate::test::items(&b, &s);
+            let mut out = std::vec![[0u8; OUT_LEN]; lens.len()];
+            crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].set(0));
+            crate::throughput::hash_each(Mode::Plain, &it, &mut out);
+            for (i, msg) in s.iter().enumerate() {
+                assert_eq!(out[i], crate::test::official::hash(Mode::Plain, msg), "{label} i={i}");
+            }
+            let got_calls = crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].get());
+            assert_eq!(got_calls, want_calls, "{label}: exact ByBlocksCall count");
+        }
+
+        // All-small collection returns before borrowing SHARED (catches `small_done` bugs).
+        if block_lanes {
+            let small_bufs = [fill(64), fill(128)];
+            let s: std::vec::Vec<&[u8]> = small_bufs.iter().map(|v| v.as_slice()).collect();
+            let b = crate::test::messages(&s);
+            let it = crate::test::items(&b, &s);
+            let mut out = [[0u8; OUT_LEN]; 2];
+            SHARED.with(|shared| {
+                let _held = shared.borrow_mut();
+                crate::throughput::hash_each(Mode::Plain, &it, &mut out);
+            });
+            for (i, msg) in s.iter().enumerate() {
+                assert_eq!(out[i], crate::test::official::hash(Mode::Plain, msg), "all-small fast exit i={i}");
+            }
+        }
+
+        // BY_BLOCKS_AT_ONCE + 1 items at the same counter (c = 1, k = 7 -> 64/16 + 1 = 5 calls).
+        let over_full = BY_BLOCKS_AT_ONCE + 1;
+        let bufs: std::vec::Vec<std::vec::Vec<u8>> = (0..over_full).map(|_| fill(CHUNK_LEN + 512)).collect();
+        let s: std::vec::Vec<&[u8]> = bufs.iter().map(|v| v.as_slice()).collect();
+        let b = crate::test::messages(&s);
+        let it = crate::test::items(&b, &s);
+        let mut out = std::vec![[0u8; OUT_LEN]; over_full];
+        crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].set(0));
+        crate::throughput::hash_each(Mode::Plain, &it, &mut out);
+        for (i, msg) in s.iter().enumerate() {
+            assert_eq!(out[i], crate::test::official::hash(Mode::Plain, msg), "over_full i={i}");
+        }
+        let got_calls = crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].get());
+        let want_over_full = if block_lanes { (BY_BLOCKS_AT_ONCE as u64 / 16) + 1 } else { 0 };
+        assert_eq!(got_calls, want_over_full, "BY_BLOCKS_AT_ONCE + 1 same-counter partial tails flush exactly");
     }
 }

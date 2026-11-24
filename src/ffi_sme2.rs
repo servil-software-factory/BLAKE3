@@ -453,6 +453,27 @@ pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key:
     }
 }
 
+/// Acquire a best-effort `Sme2Turn` for `each::hash_each_middle` whenever
+/// either the chunk/root rounds (`messages.len() >= 16`) or the first non-root
+/// parent round (`sum_{chunks > 2} (chunks / 2) >= 16`) can reach an SME2 group.
+/// Subsequent parent rounds strictly shrink pair counts, so no later round can
+/// enter SME2 without first consulting the turn.
+#[cfg(feature = "std")]
+pub(crate) fn turn_for_each_middle<I: crate::each::Item>(
+    platform: crate::platform::Platform,
+    items: &[I],
+    messages: &[(usize, usize)],
+) -> crate::platform::Sme2Turn {
+    let mut first_parent_pairs = 0usize;
+    for &(i, _) in messages {
+        let chunks = items[i].bytes().len().div_ceil(crate::CHUNK_LEN);
+        if chunks > 2 {
+            first_parent_pairs += chunks / 2;
+        }
+    }
+    crate::platform::Sme2Turn::take(platform, messages.len() >= 16 || first_parent_pairs >= 16)
+}
+
 #[cold]
 #[inline(never)]
 unsafe fn hash_chunked_messages_neon(lanes: &[*const u8; GROUP], len: usize, key: &CVWords, flags: u8, out: &mut [u8]) {

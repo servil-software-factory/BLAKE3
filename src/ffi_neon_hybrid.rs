@@ -1030,7 +1030,7 @@ pub unsafe fn hash_messages_raw(
     unsafe { run_plan(family.parent_plans[count], family.parent_kernels, table, blocks, key, counter, 0, packed, out) };
 }
 
-/// Up to GROUP items of `blocks` blocks each (1 to 16) at counter 0, side
+/// Up to GROUP items of `blocks` blocks each (1 to 16) at `counter`, side
 /// by side, each item's last block its own: read from `lasts[i]` (64
 /// bytes, zero past `lens[i]`, which is 0 to 64) in place of its input's,
 /// and recording `lens[i]` bytes. `flags` on every block, `flags_start` on
@@ -1049,6 +1049,7 @@ pub unsafe fn hash_last_lanes(
     lens: &[u32],
     blocks: usize,
     key: &CVWords,
+    counter: u64,
     flags: u8,
     flags_start: u8,
     flags_end: u8,
@@ -1063,7 +1064,7 @@ pub unsafe fn hash_last_lanes(
         // Sound: the caller's contract; c1 reads its last block from `last`.
         unsafe {
             crate::ran_kernel(asm::blake3_servil_hybrid_c1 as *const ());
-            asm::blake3_servil_hybrid_c1(inputs[0], blocks as u64, key.as_ptr(), 0, packed | (lens[0] as u64) << 24, out.as_mut_ptr(), lasts[0]);
+            asm::blake3_servil_hybrid_c1(inputs[0], blocks as u64, key.as_ptr(), counter, packed | (lens[0] as u64) << 24, out.as_mut_ptr(), lasts[0]);
         }
         return;
     }
@@ -1077,7 +1078,7 @@ pub unsafe fn hash_last_lanes(
                 inputs.as_ptr().add(done),
                 blocks as u64,
                 key.as_ptr(),
-                0,
+                counter,
                 packed,
                 out[done * OUT_LEN..].as_mut_ptr(),
                 lens.as_ptr().add(done),
@@ -1132,10 +1133,23 @@ mod test {
                     let end = crate::CHUNK_END | crate::ROOT;
                     // Sound: SHA-3 is present; each input holds blocks - 1 whole
                     // blocks before its last, and each last block 64 bytes.
-                    unsafe { hash_last_lanes(&inputs, &lasts, &last_lens, blocks, &key, flags, crate::CHUNK_START, end, &mut out) };
+                    unsafe { hash_last_lanes(&inputs, &lasts, &last_lens, blocks, &key, 0, flags, crate::CHUNK_START, end, &mut out) };
                     for (i, item) in items.iter().enumerate() {
                         let want = crate::convenience::hash_with(mode, item);
                         assert_eq!(&out[i * OUT_LEN..][..OUT_LEN], want.as_bytes(), "{count} items of {blocks} blocks, item {i} of {} bytes", item.len());
+                    }
+                    // Also check non-zero 64-bit counter with non-root CHUNK_END (partial last chunks in hash_each).
+                    let counter = if blocks % 2 == 0 { 0x0000_0001_ffff_fffeu64 + count as u64 } else { blocks as u64 };
+                    // Sound: SHA-3 is present; same validated inputs and outputs.
+                    unsafe { hash_last_lanes(&inputs, &lasts, &last_lens, blocks, &key, counter, flags, crate::CHUNK_START, crate::CHUNK_END, &mut out) };
+                    for (i, item) in items.iter().enumerate() {
+                        let want = crate::hasher::ChunkState::new(&key, counter, flags, crate::platform::Platform::NEON).update(item).output().chaining_value();
+                        assert_eq!(
+                            &out[i * OUT_LEN..][..OUT_LEN],
+                            &want,
+                            "counter={counter:#x} {count} items of {blocks} blocks, item {i} of {} bytes",
+                            item.len()
+                        );
                     }
                 }
             }

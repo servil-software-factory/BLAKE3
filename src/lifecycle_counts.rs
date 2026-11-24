@@ -167,7 +167,8 @@ fn streaming_hasher_work_counts_match_arithmetic() {
 
 /// Exact grouped dispatch work counts for `hash_each` over uniform multi-chunk
 /// messages: `M = 16` messages of `CHUNKS = 3` whole chunks run exactly
-/// `CHUNKS` shared rounds AND exactly `M.div_ceil(LANES_AT_ONCE) * CHUNKS`
+/// `CHUNKS` shared full-chunk rounds plus 1 batched Merkle parent round and 1
+/// batched Merkle root round, totaling `M.div_ceil(LANES_AT_ONCE) * (CHUNKS + 2)`
 /// `Platform::hash_many` calls (catches both missing rounds and ungrouped
 /// per-input dispatches on every CPU width!).
 #[test]
@@ -192,7 +193,8 @@ fn hash_each_shared_rounds_and_hash_many_calls_match_arithmetic() {
     throughput::hash_each(Mode::Plain, &items, &mut out);
     let rounds = count(Counted::EachRound);
     let hash_many_calls = count(Counted::HashManyCall);
-    let expected_calls = (M.div_ceil(crate::each::LANES_AT_ONCE) * CHUNKS) as u64;
+    // 3 full-chunk rounds + 1 non-root parent round (3 -> 2 CVs) + 1 root round (2 -> 1).
+    let expected_calls = (M.div_ceil(crate::each::LANES_AT_ONCE) * (CHUNKS + 2)) as u64;
     assert_eq!(rounds, CHUNKS as u64, "exact shared round count for {CHUNKS}-chunk messages");
     assert_eq!(
         hash_many_calls,
