@@ -1245,9 +1245,10 @@ impl<T, B: AsRef<[u8]> + 'static, P> Pipeline<T, B, P> {
         // nothing records that the slot holds an owner, so if `as_ref`
         // unwinds, drop the owner in place and abort slot `s` cleanly so
         // `open_messages` stays exact and the Pipeline remains usable (#465).
-        // Both fields are raw pointers: an owner may hold its bytes inside
-        // itself (`[u8; 8]`), and forgetting a guard holding `&mut` would
-        // retag it after the bytes' pointer was taken (Miri, November 20).
+        // The pointer fields (`pipe`, `slot`) are raw pointers: an owner may
+        // hold its bytes inside itself (`[u8; 8]`), and forgetting a guard
+        // holding `&mut` would retag it after the bytes' pointer was taken
+        // (Miri, November 20).
         struct Unrecorded<T, B, P> {
             pipe: *mut Pipeline<T, B, P>,
             slot: *mut B,
@@ -1793,8 +1794,8 @@ impl<T, B, P> Pipeline<T, B, P> {
             if let Some(p) = self.free_pieces.pop_front() {
                 return p;
             }
+            crate::lanes::require();
             if !self.shared().storage.source.run_waiting_action() {
-                crate::lanes::require();
                 core::hint::spin_loop();
             }
         }
@@ -2069,8 +2070,8 @@ impl<T, B, P> Pipeline<T, B, P> {
                     return u32::try_from(g).expect("group fits u32");
                 }
             }
+            crate::lanes::require();
             if !self.shared().storage.source.run_waiting_action() {
-                crate::lanes::require();
                 core::hint::spin_loop();
             }
         }
@@ -4033,9 +4034,8 @@ mod test {
         drop(room);
     }
 
-    /// An owner whose `as_ref` panics is dropped: nothing recorded it yet,
-    /// so the Pipeline's drop, which is all that may follow, would never
-    /// have found it.
+    /// An owner whose `as_ref` panics is dropped and its slot aborted, keeping
+    /// the Pipeline usable.
     #[test]
     fn an_owner_whose_as_ref_panics_is_dropped() {
         struct Owner {
@@ -5006,24 +5006,67 @@ mod test {
         block_on(p.ready());
         assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 2, owner: None })));
 
-        // 3. batch with mismatched digest count aborts slot cleanly.
-        let m3 = block_on(p.message(3, None));
-        let bad_batch = Batch::new(2, 64);
+        // 3. owned after whole-room OpenRooms commit releases room and aborts slot.
+        let mut m3 = block_on(p.message(3, None));
+        let mut r3 = block_on(p.room());
+        r3.bytes_mut().fill(0xab);
+        p.commit(&mut m3, &mut r3, ROOM_LEN);
+        drop(r3);
+        assert!(matches!(p.slots[m3.slot as usize].kind, SlotKind::OpenRooms { .. }));
         let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-            p.batch(m3, bad_batch, vec![[0u8; 32]; 1].into_boxed_slice());
+            p.owned(m3, vec![9, 8, 7]);
         }));
-        assert!(res.is_err(), "batch with wrong digest len must panic");
+        assert!(res.is_err(), "owned after OpenRooms commit must panic");
         block_on(p.ready());
         assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 3, owner: None })));
 
-        // 4. Both the single message slot and single room must now work end to end.
+        // 4. lent after OpenShortDispatched (flushed short room) aborts cleanly.
         let mut m4 = block_on(p.message(4, None));
         let mut r4 = block_on(p.room());
-        r4.bytes_mut()[..5].copy_from_slice(b"hello");
-        p.commit(&mut m4, &mut r4, 5);
+        r4.bytes_mut()[..12].copy_from_slice(b"short-in-flt");
+        p.commit(&mut m4, &mut r4, 12);
         drop(r4);
-        p.end(m4);
-        let Event::Hashed { tag: 4, hash, .. } = drain_all(&mut p, 1).pop().unwrap() else {
+        p.flush_sealed_short_rooms();
+        assert!(matches!(p.slots[m4.slot as usize].kind, SlotKind::OpenShortDispatched { .. }));
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            let _ = unsafe { p.lent(m4, b"extra") };
+        }));
+        assert!(res.is_err(), "lent after OpenShortDispatched must panic");
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 4, owner: None })));
+
+        // 5. batch with bytes given two ways (after Room commit) aborts cleanly.
+        let mut m5 = block_on(p.message(5, None));
+        let mut r5 = block_on(p.room());
+        r5.bytes_mut()[..4].copy_from_slice(b"room");
+        p.commit(&mut m5, &mut r5, 4);
+        drop(r5);
+        let batch_two_ways = Batch::new(1, 64);
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            p.batch(m5, batch_two_ways, vec![[0u8; 32]; 1].into_boxed_slice());
+        }));
+        assert!(res.is_err(), "batch after commit must panic");
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 5, owner: None })));
+
+        // 6. batch with mismatched digest count aborts slot cleanly.
+        let m6 = block_on(p.message(6, None));
+        let bad_batch = Batch::new(2, 64);
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            p.batch(m6, bad_batch, vec![[0u8; 32]; 1].into_boxed_slice());
+        }));
+        assert!(res.is_err(), "batch with wrong digest len must panic");
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 6, owner: None })));
+
+        // 7. Both the single message slot and single room must now work end to end.
+        let mut m7 = block_on(p.message(7, None));
+        let mut r7 = block_on(p.room());
+        r7.bytes_mut()[..5].copy_from_slice(b"hello");
+        p.commit(&mut m7, &mut r7, 5);
+        drop(r7);
+        p.end(m7);
+        let Event::Hashed { tag: 7, hash, .. } = drain_all(&mut p, 1).pop().unwrap() else {
             panic!("expected Event::Hashed");
         };
         assert_eq!(hash, blake3_servil_core::convenience::hash(b"hello"));
@@ -5037,6 +5080,7 @@ mod test {
     fn forked_child_stops_in_acquire_free_group_and_alloc_piece_node() {
         const ENV: &str = "BLAKE3_PIPELINE_FORK_WAIT_CASE";
         if let Ok(which) = std::env::var(ENV) {
+            crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
             let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
             // Mark every group / piece unavailable before simulating a forked child.
             if which == "group" {

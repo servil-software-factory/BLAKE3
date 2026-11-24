@@ -456,8 +456,9 @@ pub(crate) fn ran(kind: Ran) {
 /// every multithreaded call panics, saying so (the child has none of
 /// them), and so does a new [`Pipeline`](throughput::Pipeline). A
 /// Pipeline made before the fork is not to be used in the child: its
-/// calls panic the same way once one needs a worker, and one made while
-/// the parent's workers were hashing for it may wait for ever instead.
+/// calls panic the same way once one needs a worker, including while
+/// waiting for a free group or piece node when work was in flight at the
+/// fork.
 /// Nor is it to be dropped there with work in flight at the fork, which
 /// the child never sees finished: that drop, or the drop of a
 /// [`Lent`](throughput::Lent) guard for such work, stops the child (a
