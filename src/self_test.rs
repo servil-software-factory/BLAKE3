@@ -691,6 +691,29 @@ fn ensure_slow() {
 mod test {
     use super::*;
 
+    /// True when running under CI's emulated ISA runner (`BLAKE3_EMULATED=1`,
+    /// or Cargo's target runner executable for this target architecture is
+    /// Intel SDE or QEMU), where child startup and self-test execution are
+    /// slower than on native hardware.
+    pub(super) fn under_emulator() -> bool {
+        if std::env::var_os("BLAKE3_EMULATED").is_some() {
+            return true;
+        }
+        let var = if cfg!(target_arch = "x86_64") {
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER"
+        } else if cfg!(target_arch = "aarch64") {
+            "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER"
+        } else {
+            return false;
+        };
+        std::env::var_os(var).is_some_and(|v| {
+            let s = v.to_string_lossy();
+            let exe = s.split_whitespace().next().unwrap_or("");
+            let name = std::path::Path::new(exe).file_name().and_then(|n| n.to_str()).unwrap_or("");
+            matches!(name, "sde" | "sde64") || name.starts_with("qemu-")
+        })
+    }
+
     /// The startup run checks every case, on every platform (a run that
     /// skipped them would pass by doing nothing).
     #[test]
@@ -794,7 +817,7 @@ mod test {
             .env(CHILD, "1")
             .spawn()
             .expect("spawn child");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if under_emulator() { 30 } else { 10 });
         let status = loop {
             if let Some(status) = child.try_wait().expect("try_wait") {
                 break status;
@@ -1076,14 +1099,7 @@ mod stops {
             .stderr(std::process::Stdio::from(write_end))
             .spawn()
             .expect("spawn child");
-        let emulated = ["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER", "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER"]
-            .into_iter()
-            .filter_map(std::env::var_os)
-            .any(|v| {
-                let s = v.to_string_lossy();
-                s.contains("sde") || s.contains("qemu")
-            });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if emulated { 30 } else { 5 });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if super::test::under_emulator() { 30 } else { 5 });
         let status = loop {
             if let Some(status) = child.try_wait().expect("try_wait") {
                 break status;
@@ -1130,14 +1146,7 @@ mod stops {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("spawn child");
-        let emulated = ["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER", "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER"]
-            .into_iter()
-            .filter_map(std::env::var_os)
-            .any(|v| {
-                let s = v.to_string_lossy();
-                s.contains("sde") || s.contains("qemu")
-            });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if emulated { 30 } else { 5 });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if super::test::under_emulator() { 30 } else { 5 });
         loop {
             if child.try_wait().expect("try_wait").is_some() {
                 break;
