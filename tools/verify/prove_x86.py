@@ -38,6 +38,7 @@ STACK = 1 << 16
 # A 64-byte-aligned region origin; the ABI enters with rsp == 8 mod 16.
 ENTRY_STACKS = tuple(STACK + residue for residue in (8, 24, 40, 56))
 WIDTH = {"sse41": 4, "avx2": 8, "avx512": 16}
+PARTIAL_WIDTH = {"sse41": 4, "avx2": 8, "avx512_4": 4, "avx512_8": 8, "avx512_16": 16}
 SYSV_ARGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
 
 
@@ -313,10 +314,11 @@ def prove_chunk_root(so, isa, whole):
 
 
 def prove_partial(so, kisa, last):
-    """blake3_partial_{sse41,avx2}(params): for every lane j, from the
-    lane's chaining value and counter, the 16 blocks at its pointer, block
-    b with the lane's length and flags for b; H the lane's chaining value
-    after block 15, SNAP after block `last` (tools/gen_x86.py's layout)."""
+    """blake3_servil_partial_{sse41,avx2,avx512_4,avx512_8,avx512_16}(params):
+    for every lane j, from the lane's chaining value and counter, the 16 blocks
+    at its pointer, block b with the lane's length and flags for b; H the lane's
+    chaining value after block 15, SNAP after block `last` (tools/gen_x86.py's
+    layout)."""
     sys.path.insert(0, os.path.join(ROOT_DIR, "tools"))
     import gen_x86
     w = gen_x86.W_OF[kisa]
@@ -400,7 +402,7 @@ def cases(only):
         out.append(("avx512", "xof_many", n))
     out += [(isa, "chunk_root", whole) for isa in ("sse41", "avx512") for whole in range(16)]
     out += [("wide", "wide", (kernel, blocks)) for kernel in WIDE for blocks in range(1, 17)]
-    for kisa in ("sse41", "avx2"):
+    for kisa in ("sse41", "avx2", "avx512_4", "avx512_8", "avx512_16"):
         for last in range(16):
             out.append(("partial", "partial", (kisa, last)))
     return [c for c in out if not only or c[0] in only or c[1] in only]
@@ -479,7 +481,7 @@ def main():
         if kind == "hash_many":
             return arg[0] * arg[1]
         if kind == "partial":
-            return WIDTH[arg[0]] * 16
+            return PARTIAL_WIDTH[arg[0]] * 16
         if kind == "wide":
             return WIDE[arg[0]][0] * arg[1] * 2  # 16-lane vectors twice over: the heaviest cases
         return (arg or 0) + 1

@@ -912,26 +912,6 @@ impl IncrementCounter {
     }
 }
 
-/// The lanes of the one pass that hashes `whole` whole chunks with a
-/// partial one of `partial` bytes after them, where the pass costs less
-/// than the partial chunk's blocks after the whole ones: three whole chunks
-/// in four lanes (SSE4.1 and AVX2), and in eight (AVX2) six or seven, or
-/// five with a partial chunk of six blocks or more (with fewer, an
-/// i7-12700K's efficiency core ran the eight lanes up to 7% slower; a pass
-/// of eight lanes costs 1.6 times one of four on its performance core).
-/// One whole chunk plus a partial chunk of two blocks or more is handled
-/// earlier by `pair::takes`. AVX-512 otherwise keeps its own widths.
-#[cfg(blake3_sse41_ffi)]
-#[inline]
-fn spare_lane(platform: Platform, whole: usize, partial: usize) -> Option<usize> {
-    match (platform, whole) {
-        (Platform::SSE41 | Platform::AVX2, 3) => Some(4),
-        (Platform::AVX2, 6..=7) => Some(8),
-        (Platform::AVX2, 5) if partial > 5 * BLOCK_LEN => Some(8),
-        _ => None,
-    }
-}
-
 /// The widths the platform's many-lane kernels run at, in one pass each,
 /// rising: SSE4.1 four lanes; AVX2 eight (and four); AVX-512 sixteen (and
 /// eight, four), and thirty-two where the 32-input kernel runs
@@ -1057,16 +1037,8 @@ fn compress_chunks_parallel(input: &[u8], key: &CVWords, chunk_counter: u64, fla
     // Whole chunks that leave a lane spare, and a partial one: one pass,
     // the partial chunk in the spare lane.
     #[cfg(blake3_sse41_ffi)]
-    if let (false, Some(lanes)) = (chunks_exact.remainder().is_empty(), spare_lane(platform, chunks_array.len(), chunks_exact.remainder().len())) {
-        let (whole, partial) = (&chunks_array[..], chunks_exact.remainder());
-        // Sound: spare_lane admits each width only on a platform whose CPU
-        // has its instructions.
-        if lanes == 4 {
-            unsafe { ffi_partial::hash_chunks_with_partial_sse41(whole, partial, key, chunk_counter, flags, out) };
-        } else {
-            unsafe { ffi_partial::hash_chunks_with_partial_avx2(whole, partial, key, chunk_counter, flags, out) };
-        }
-        return whole.len() + 1;
+    if ffi_partial::try_hash_chunks_with_partial(platform, &chunks_array, chunks_exact.remainder(), key, chunk_counter, flags, out) {
+        return chunks_array.len() + 1;
     }
     // Whole chunks and a partial one, on the NEON hybrids: where a q kernel
     // covers the count, the partial chunk runs on the scalar units beside

@@ -19,10 +19,11 @@
 //! AmpereOne VM 0.11 to 0.17 ms, b3sum of a small file 8% slower, for
 //! kernels few programs call (Zooko, November 12, 2026). The proofs and
 //! test_hash_last_lanes_against_hash cover them.
-//! Elsewhere a common table of eight cases (plus up to five platform-specific
-//! wide/output checks on Linux AVX-512/AVX2) reaches every x86 kernel: about
-//! 28 µs in a fresh process on an i7-12700K's performance core, 16 µs warm
-//! (47 on an efficiency core), from 109 and 90 (210) with the AArch64 list.
+//! Elsewhere a common table of eight cases (plus platform-specific
+//! wide/output/partial/packed/counter checks on AVX-512/AVX2) reaches every
+//! x86 kernel: about 28 µs in a fresh process on an i7-12700K's performance
+//! core, 16 µs warm (47 on an efficiency core), from 109 and 90 (210) with
+//! the AArch64 list.
 //!
 //! As Niels Ferguson suggested, the cases chain: each writes the first 32
 //! bytes of its output over the start of the next case's input (and keys
@@ -141,7 +142,7 @@ pub(crate) const CASES: &[(Case, &str)] = &[
 /// (compress_in_place, compress_xof, hash_many, and on AVX-512 xof_many),
 /// which these reach on every x86 platform (AVX2: all 3 of its entries,
 /// counted with gdb in October 2026), with the generated passes of whole
-/// chunks and a partial one (ffi_partial: four lanes and eight), the tree,
+/// chunks and a partial one (ffi_partial: four, eight, and sixteen lanes), the tree,
 /// the Hasher, a batch and its tail, and the three modes. The logic around
 /// the kernels is the tests' and the proofs' to establish; this checks the
 /// build and the machine running it.
@@ -461,6 +462,10 @@ fn run() -> usize {
     {
         checked += crate::ffi_output::self_test(platform);
     }
+    #[cfg(blake3_avx512_ffi)]
+    {
+        checked += crate::ffi_partial::self_test(platform);
+    }
     checked += crate::ffi_packed::self_test(platform);
     checked += crate::ffi_counter::self_test(platform);
     let _ = previous;
@@ -751,14 +756,21 @@ mod test {
             expected
         };
         #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
-        if matches!(Platform::detect_unchecked(), Platform::AVX512 { .. }) {
+        let expected = if matches!(Platform::detect_unchecked(), Platform::AVX512 { .. }) {
+            for (name, entry) in crate::ffi_partial::entries_avx512() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+            }
             for (name, entry) in crate::ffi_packed::entries_avx512() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
             for (name, entry) in crate::ffi_counter::entries_avx512() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
-        }
+            assert_ne!(crate::ROUNDED_WIDTH.with(|w| w.get()) & 8, 0, "startup left out hash_many_avx512 8-lane loop");
+            expected + 2
+        } else {
+            expected
+        };
         #[cfg(blake3_avx2_ffi)]
         if matches!(Platform::detect_unchecked(), Platform::AVX2 { .. }) || {
             #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]

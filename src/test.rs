@@ -154,9 +154,9 @@ fn test_whole_chunks_round_up_to_the_lanes() {
     use crate::{CHUNK_LEN, Ran};
     // The startup self-test first: it runs inside a process's first call,
     // on the calling thread, and its own cases round up (to 4 lanes on
-    // AVX2, to 4 and 8 on AVX-512), which the counts below would take for
-    // the message's. The 2-chunk message is asked first, so a self-test
-    // counted again fails here on every machine.
+    // AVX2, to 8 lanes via `ffi_partial::self_test` on AVX-512), which the
+    // counts below would take for the message's. The 2-chunk message is
+    // asked first, so a self-test counted again fails here on every machine.
     crate::initialize();
     let input = std::vec![0x5au8; 8 * CHUNK_LEN];
     let ran = |len: usize| {
@@ -175,19 +175,9 @@ fn test_whole_chunks_round_up_to_the_lanes() {
         assert_eq!(ran(7 * CHUNK_LEN), (true, 8 | 4), "7 whole chunks on AVX2: 8 lanes, one pass; their 3 parents on 4");
         assert_eq!(ran(5 * CHUNK_LEN), (true, 8), "5 whole chunks on AVX2: 8 lanes, one pass");
     }
-    // 3 chunks and a partial: on SSE4.1 and AVX2 the partial chunk takes
-    // the spare lane and nothing rounds. AVX-512 has no spare-lane pass at
-    // this count (spare_lane), so its 3 whole chunks round up to 4 lanes
-    // and the partial chunk follows alone.
-    #[cfg(blake3_avx512_ffi)]
-    let avx512 = crate::platform::Platform::avx512().is_some();
-    #[cfg(not(blake3_avx512_ffi))]
-    let avx512 = false;
-    assert_eq!(
-        ran(3 * CHUNK_LEN + 500),
-        if avx512 { (true, 4) } else { (false, 0) },
-        "3 whole and a partial: the spare lane's pass, or on AVX-512 the rounding"
-    );
+    // 3 chunks and a partial: on SSE4.1, AVX2, and AVX-512 the partial chunk
+    // takes the spare lane and nothing rounds.
+    assert_eq!(ran(3 * CHUNK_LEN + 500), (false, 0), "3 whole and a partial: the spare lane's pass, never rounding");
     // AVX-512: 9 to 15 on 16 lanes; past 16, the whole group of 16 and the
     // rest rounded (19 = 16 + 3 on 4), or 32 lanes where that kernel runs.
     #[cfg(blake3_avx512_ffi)]
@@ -288,25 +278,66 @@ fn test_the_paths_chosen_exactly() {
     // partial chunk. Three whole chunks in four lanes (SSE4.1 and AVX2);
     // six or seven, or five with a partial past five blocks, in eight
     // (AVX2); else none (one whole chunk is handled earlier by `pair`).
-    assert_eq!(crate::spare_lane(Platform::AVX2, 1, BLOCK_LEN + 1), None);
-    assert_eq!(crate::spare_lane(Platform::AVX2, 1, BLOCK_LEN), None);
-    assert_eq!(crate::spare_lane(Platform::AVX2, 1, 0), None);
-    assert_eq!(crate::spare_lane(Platform::AVX2, 3, 0), Some(4));
-    assert_eq!(crate::spare_lane(Platform::SSE41, 3, 500), Some(4));
-    assert_eq!(crate::spare_lane(Platform::SSE41, 1, 500), None);
-    assert_eq!(crate::spare_lane(Platform::AVX2, 6, 0), Some(8));
-    assert_eq!(crate::spare_lane(Platform::AVX2, 7, 1000), Some(8));
-    assert_eq!(crate::spare_lane(Platform::AVX2, 5, 5 * BLOCK_LEN + 1), Some(8));
-    assert_eq!(crate::spare_lane(Platform::AVX2, 5, 5 * BLOCK_LEN), None);
-    assert_eq!(crate::spare_lane(Platform::AVX2, 5, 0), None);
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 1, BLOCK_LEN + 1), None);
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 1, BLOCK_LEN), None);
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 1, 0), None);
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 3, 0), Some(4));
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::SSE41, 3, 500), Some(4));
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::SSE41, 1, 500), None);
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 6, 0), Some(8));
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 7, 1000), Some(8));
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 5, 5 * BLOCK_LEN + 1), Some(8));
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 5, 5 * BLOCK_LEN), None);
+    assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, 5, 0), None);
     for whole in [0, 2, 4, 8] {
-        assert_eq!(crate::spare_lane(Platform::AVX2, whole, 1000), None, "{whole} whole chunks");
+        assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, whole, 1000), None, "{whole} whole chunks");
     }
     #[cfg(blake3_avx512_ffi)]
     {
-        assert_eq!(crate::spare_lane(Platform::AVX512, 1, BLOCK_LEN + 1), None);
-        assert_eq!(crate::spare_lane(Platform::AVX512, 1, BLOCK_LEN), None);
-        assert_eq!(crate::spare_lane(Platform::AVX512, 3, 0), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 1, BLOCK_LEN + 1), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 1, BLOCK_LEN + 1), None);
+        // 2 whole chunks -> 4-lane horizontal zmm (all partials on wide Zen 5; > 2 blocks on Ice Lake).
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 2, 1), Some(4));
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 2, 4 * BLOCK_LEN), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 2, 4 * BLOCK_LEN + 1), Some(4));
+        // 3 whole chunks -> 4-lane horizontal zmm (all partials on wide Zen 5; > 1 block on Ice Lake).
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 3, 1), Some(4));
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 3, BLOCK_LEN), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 3, BLOCK_LEN + 1), Some(4));
+        // 4 whole chunks -> 8-lane ymm (> 2 blocks on wide Zen 5; > 13 blocks on Ice Lake).
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 4, 2 * BLOCK_LEN), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 4, 2 * BLOCK_LEN + 1), Some(8));
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 4, 13 * BLOCK_LEN), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 4, 13 * BLOCK_LEN + 1), Some(8));
+        // 5..=7 whole chunks -> 8-lane ymm unconditionally.
+        for whole in 5..=7 {
+            assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, whole, 1), Some(8));
+            assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, whole, 1), Some(8));
+        }
+        // 8 whole chunks -> 16-lane zmm (> 2 blocks on wide Zen 5 only).
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 8, 1023), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 8, 2 * BLOCK_LEN), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 8, 2 * BLOCK_LEN + 1), Some(16));
+        // 9..=15 whole chunks -> 16-lane zmm (all partials on wide Zen 5; > 9 blocks on Ice Lake).
+        for whole in [9, 12, 15] {
+            assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, whole, 1), Some(16));
+            assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, whole, 9 * BLOCK_LEN), None);
+            assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, whole, 9 * BLOCK_LEN + 1), Some(16));
+        }
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 16, 1000), None);
+    }
+    // Verify `compress_chunks_parallel` dispatches `(Platform::SSE41, 4)` to
+    // the 4-lane SSE4.1 partial kernel rather than falling through to 8-lane
+    // AVX2 (tested directly so AVX-512 hosts exercise the SSE4.1 arm too).
+    #[cfg(feature = "std")]
+    if crate::platform::sse41_detected() {
+        let input = std::vec![0x3du8; 3 * CHUNK_LEN + 500];
+        let mut out = [0u8; 4 * crate::OUT_LEN];
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        let n = crate::compress_chunks_parallel(&input, crate::IV, 0, 0, Platform::SSE41, &mut out);
+        assert_eq!(n, 4);
+        let sse41_entry = crate::ffi_partial::entry_sse41() as usize;
+        assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&sse41_entry)), "SSE4.1 3+partial must run partial_sse41");
     }
     // rounded_lanes(platform, whole inputs): the width that takes the count
     // in one pass where the kernels' cascade would take two or three. 3
