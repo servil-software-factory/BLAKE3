@@ -114,35 +114,31 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         marked.count += 1;
     }
     let hashers = &mut *marked.hashers;
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-    if which.len() >= 16 && matches!(Platform::detect(), Platform::AVX512) {
-        #[cfg(all(test, feature = "std"))]
-        crate::counted(crate::Counted::OutputGroupTurn);
-        for (which, out) in which.chunks(16).zip(out.chunks_mut(16)) {
-            if which.len() == 16 {
-                let hashed = {
-                    let inputs: Option<crate::stack_vec::StackVec<_, 16>> = which.iter().map(|&i| crate::ffi_output::input(&hashers[i])).collect();
-                    match inputs {
-                        Some(inputs) => {
-                            // Sound: the detected platform supplies AVX-512F+VL;
-                            // borrowed descriptors keep every block/CV readable.
-                            unsafe { crate::ffi_output::hash_group::<16>(inputs.as_slice().try_into().unwrap(), out) };
-                            true
-                        }
-                        None => false,
+    #[cfg(all(blake3_avx512_ffi, target_os = "linux", feature = "std"))]
+    {
+        let width = crate::ffi_output::lanes(Platform::detect());
+        if width != 0 && which.len() >= width {
+            #[cfg(all(test, feature = "std"))]
+            crate::counted(crate::Counted::OutputGroupTurn);
+            let mut pos = 0usize;
+            if width == 16 {
+                while which.len() - pos >= 16 {
+                    if !finalize_output_group::<16>(hashers, &which[pos..pos + 16], &mut out[pos..pos + 16]) {
+                        finish_each(hashers, &which[pos..pos + 16], &mut out[pos..pos + 16]);
                     }
-                };
-                if hashed {
-                    for &i in which {
-                        hashers[i].reset();
-                    }
-                    continue;
+                    pos += 16;
                 }
             }
-            finish_each(hashers, which, out);
+            while which.len() - pos >= 8 {
+                if !finalize_output_group::<8>(hashers, &which[pos..pos + 8], &mut out[pos..pos + 8]) {
+                    finish_each(hashers, &which[pos..pos + 8], &mut out[pos..pos + 8]);
+                }
+                pos += 8;
+            }
+            finish_each(hashers, &which[pos..], &mut out[pos..]);
+            marked.active = false;
+            return;
         }
-        marked.active = false;
-        return;
     }
     // AArch64: the messages of up to a chunk that a turn left whole in
     // their stages (`Hasher::gather_part`) hash side by side by their
@@ -182,8 +178,23 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
     marked.active = false;
 }
 
+#[cfg(all(blake3_avx512_ffi, target_os = "linux", feature = "std"))]
+fn finalize_output_group<const W: usize>(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) -> bool {
+    let inputs: Option<crate::stack_vec::StackVec<_, W>> = which.iter().map(|&i| crate::ffi_output::input(&hashers[i])).collect();
+    let Some(inputs) = inputs else {
+        return false;
+    };
+    // Sound: the caller verified the platform supports W-lane output16/output8;
+    // borrowed descriptors keep every block/CV readable for the call.
+    unsafe { crate::ffi_output::hash_group::<W>(inputs.as_slice().try_into().unwrap(), out) };
+    for &i in which {
+        hashers[i].reset();
+    }
+    true
+}
+
 /// Each hasher `which` names finished in place and reset, its digest into
-/// `out`: the path every message takes but a sixteen-lane group.
+/// `out`: the path every message takes but a SIMD output group.
 fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     for (&i, out) in which.iter().zip(out) {
         *out = *hashers[i].take_root_hash().as_bytes();
@@ -664,14 +675,26 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
         }
         if k > 0 {
             for group in same_blocks.chunks(GROUP) {
-                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                #[cfg_attr(not(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux")), allow(unused_mut))]
+                let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                #[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+                let padded = {
+                    let w = crate::ffi_output::lanes(platform);
+                    let n = group.len();
+                    let target = by_blocks_prefix_padded(n, w);
+                    let last = *inputs.last().unwrap();
+                    inputs.extend(core::iter::repeat_n(last, target - n));
+                    target
+                };
+                #[cfg(all(target_arch = "x86_64", not(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))))]
+                let padded = group.len();
                 let mut lanes = [0u8; GROUP * OUT_LEN];
                 crate::counted(crate::Counted::ByBlocksCall);
                 // Sound: each item holds more than k whole blocks; the
                 // caller selected this platform's block-group path.
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
-                    crate::pair::hash_many_blocks(platform, &inputs, k, key, 0, false, flags, CHUNK_START, 0, &mut lanes[..group.len() * OUT_LEN])
+                    crate::pair::hash_many_blocks(platform, &inputs, k, key, 0, false, flags, CHUNK_START, 0, &mut lanes[..padded * OUT_LEN])
                 };
                 #[cfg(blake3_neon)]
                 unsafe {
@@ -697,9 +720,31 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
     if last_lanes {
         return;
     }
-    for &i in &order {
+    #[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    {
+        let width = crate::ffi_output::lanes(platform);
+        if width > 0 {
+            for chunk in order.chunks(width) {
+                let count = chunk.len();
+                if count < 4 {
+                    finish_last_blocks_serial(chunk, items, &cvs, flags, out, platform);
+                } else if count <= 8 {
+                    finish_last_blocks_simd::<8>(chunk, items, &cvs, flags, out);
+                } else {
+                    finish_last_blocks_simd::<16>(chunk, items, &cvs, flags, out);
+                }
+            }
+            return;
+        }
+    }
+    finish_last_blocks_serial(&order, items, &cvs, flags, out, platform);
+}
+
+#[inline(always)]
+fn finish_last_blocks_serial(order: &[usize], items: &[&[u8]], cvs: &[CVWords], flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
+    for &i in order {
         let item = items[i];
-        let k = whole(item);
+        let k = item.len().saturating_sub(1) / crate::BLOCK_LEN;
         let mut cv = cvs[i];
         let mut block = [0u8; crate::BLOCK_LEN];
         let last = item.len() - k * crate::BLOCK_LEN;
@@ -707,6 +752,46 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; 
         let start = if k == 0 { CHUNK_START } else { 0 };
         platform.compress_in_place(&mut cv, &block, last.to_le_bytes()[0], 0, flags | start | CHUNK_END | crate::ROOT);
         out[i] = crate::hasher::le_bytes(&cv);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+fn by_blocks_prefix_padded(n: usize, width: usize) -> usize {
+    if width == 16 && n >= 9 {
+        16
+    } else if width != 0 && (5..8).contains(&n) {
+        8
+    } else {
+        n
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+#[inline(never)]
+fn finish_last_blocks_simd<const W: usize>(chunk: &[usize], items: &[&[u8]], cvs: &[CVWords], flags: u8, out: &mut [[u8; OUT_LEN]]) {
+    let count = chunk.len();
+    let mut blocks = [[0u8; crate::BLOCK_LEN]; W];
+    let mut lens = [0u8; W];
+    let mut item_flags = [0u8; W];
+    for (j, &i) in chunk.iter().enumerate() {
+        let item = items[i];
+        let k = item.len().saturating_sub(1) / crate::BLOCK_LEN;
+        let last = item.len() - k * crate::BLOCK_LEN;
+        blocks[j][..last].copy_from_slice(&item[k * crate::BLOCK_LEN..]);
+        lens[j] = last.to_le_bytes()[0];
+        let start = if k == 0 { CHUNK_START } else { 0 };
+        item_flags[j] = flags | start | CHUNK_END | crate::ROOT;
+    }
+    let inputs: [crate::ffi_output::Input<'_>; W] = core::array::from_fn(|j| {
+        let idx = j.min(count - 1);
+        crate::ffi_output::item_last(&blocks[idx], &cvs[chunk[idx]], lens[idx], item_flags[idx])
+    });
+    let mut scratch = [[0u8; OUT_LEN]; W];
+    // Sound: caller verified platform supports W-lane output16/output8;
+    // every block/CV reference stays live across the call.
+    unsafe { crate::ffi_output::hash_group::<W>(&inputs, &mut scratch) };
+    for (j, &i) in chunk.iter().enumerate() {
+        out[i] = scratch[j];
     }
 }
 
@@ -1009,10 +1094,98 @@ mod test {
             crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].set(0));
             finalize_each(&mut hashers, &which, &mut out);
             let turns = crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].get());
-            let expected_turns = u64::from(n >= 16 && matches!(Platform::detect(), Platform::AVX512));
+            let width = crate::ffi_output::lanes(Platform::detect());
+            let expected_turns = u64::from(width > 0 && n >= width);
             assert_eq!(turns, expected_turns, "full output group dispatch n={n}");
             assert!(out.iter().all(|digest| *digest == expected));
             assert!(hashers.iter().all(|h| h.count() == 0));
+        }
+        // Pin by_blocks_prefix_padded boundaries and mixed-length hash_by_blocks
+        // SIMD finalization across every supported platform (including AVX2 on
+        // AVX-512 hosts, empty items, and 1..=3 trailing remainders).
+        for (n, w, want) in
+            [(4, 0, 4), (5, 0, 5), (4, 8, 4), (5, 8, 8), (7, 8, 8), (8, 8, 8), (4, 16, 4), (5, 16, 8), (8, 16, 8), (9, 16, 16), (15, 16, 16), (16, 16, 16)]
+        {
+            assert_eq!(by_blocks_prefix_padded(n, w), want, "by_blocks_prefix_padded({n}, {w})");
+        }
+        let e16 = crate::ffi_output::entry() as usize;
+        let e8 = crate::ffi_output::entry8() as usize;
+        let lens = [0usize, 1, 24, 48, 63, 64, 65, 96, 128, 192, 255, 384, 512, 768, 1000, 1024];
+        for plat in crate::test::every_platform() {
+            let pw = crate::ffi_output::lanes(plat);
+            for count in [3usize, 4, 7, 8, 9, 15, 16, 19, 24, 33] {
+                let bufs: Vec<Vec<u8>> = (0..count)
+                    .map(|i| {
+                        let len = lens[i % lens.len()];
+                        (0..len).map(|j| ((i * 37 + j * 13 + len) & 0xff) as u8).collect()
+                    })
+                    .collect();
+                let slices: Vec<&[u8]> = bufs.iter().map(Vec::as_slice).collect();
+                let mut out = vec![[0u8; OUT_LEN]; count];
+                crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                hash_by_blocks(&slices, crate::IV, 0, &mut out, plat);
+                let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                if pw == 0 || count < 4 {
+                    assert!(!ran.contains(&e16) && !ran.contains(&e8), "{plat:?} count={count} serial");
+                } else if pw == 16 {
+                    let need16 = count >= 9;
+                    let need8 = count < 9 || (4..=8).contains(&(count % 16));
+                    assert_eq!(ran.contains(&e16), need16, "{plat:?} count={count} output16");
+                    assert_eq!(ran.contains(&e8), need8, "{plat:?} count={count} output8");
+                } else {
+                    assert!(ran.contains(&e8), "{plat:?} count={count} output8");
+                    assert!(!ran.contains(&e16), "{plat:?} count={count} no output16");
+                }
+                for (i, buf) in bufs.iter().enumerate() {
+                    assert_eq!(out[i], *blake3::hash(buf).as_bytes(), "{plat:?} count={count} item {i}");
+                }
+            }
+        }
+        // Exercise finalize_each with both 16-lane and 8-lane groups (24 hashers
+        // -> 16 + 8 on AVX-512, 8 + 8 + 8 on AVX2; 17 -> 16 + 1 / 8 + 8 + 1)
+        // plus mixed multi-chunk fallback inside an 8-lane group.
+        for n in [7usize, 8, 9, 15, 16, 24, 25] {
+            let mut hashers: Vec<_> = (0..n)
+                .map(|i| {
+                    let mut h = Hasher::new(Mode::Plain, None);
+                    h.update(&vec![i as u8; 32 + (i % 40)]);
+                    h
+                })
+                .collect();
+            let which: Vec<_> = (0..n).collect();
+            let mut out = vec![[0u8; OUT_LEN]; n];
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            finalize_each(&mut hashers, &which, &mut out);
+            let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+            let w = crate::ffi_output::lanes(Platform::detect());
+            if w == 16 {
+                assert_eq!(ran.contains(&e16), n >= 16, "finalize_each n={n} output16");
+                assert_eq!(ran.contains(&e8), n >= 16 && (n % 16) >= 8, "finalize_each n={n} output8");
+            } else if w == 8 {
+                assert_eq!(ran.contains(&e8), n >= 8, "finalize_each AVX2 n={n} output8");
+            }
+            for i in 0..n {
+                assert_eq!(out[i], *blake3::hash(&vec![i as u8; 32 + (i % 40)]).as_bytes(), "finalize_each n={n} item {i}");
+            }
+        }
+        // Mixed multi-chunk hasher inside an 8-lane tail falls back cleanly.
+        let mut mixed: Vec<_> = (0..24)
+            .map(|i| {
+                let mut h = Hasher::new(Mode::Plain, None);
+                if i == 20 {
+                    h.update(&vec![0x77u8; 2048]);
+                } else {
+                    h.update(&vec![i as u8; 50]);
+                }
+                h
+            })
+            .collect();
+        let which: Vec<_> = (0..24).collect();
+        let mut out = vec![[0u8; OUT_LEN]; 24];
+        finalize_each(&mut mixed, &which, &mut out);
+        for i in 0..24 {
+            let msg = if i == 20 { vec![0x77u8; 2048] } else { vec![i as u8; 50] };
+            assert_eq!(out[i], *blake3::hash(&msg).as_bytes(), "mixed finalize_each item {i}");
         }
     }
 

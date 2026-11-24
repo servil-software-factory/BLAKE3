@@ -46,6 +46,12 @@ pub(crate) fn packed<'a>(block: &'a [u8; BLOCK_LEN], key: &'a [u32; 8], len: u8,
     Input { block, cv: key, len, flags: flags | CHUNK_START | CHUNK_END | ROOT }
 }
 
+/// Arbitrary counter-zero final block descriptor (for variable-length items in
+/// `hash_each`, where `k == 0` includes `CHUNK_START` and `k > 0` does not).
+pub(crate) fn item_last<'a>(block: &'a [u8; BLOCK_LEN], cv: &'a [u32; 8], len: u8, flags: u8) -> Input<'a> {
+    Input { block, cv, len, flags }
+}
+
 pub(crate) fn lanes(platform: Platform) -> usize {
     match platform {
         Platform::AVX512 => 16,
