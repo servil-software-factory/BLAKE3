@@ -28,7 +28,7 @@ from z3 import BitVecVal
 import x86
 import aarch64
 
-FILES = ("sse41", "avx2", "avx512", "wide", "output", "output8", "packed")  # wide/output/packed: generated x86 kernels
+FILES = ("sse41", "avx2", "avx512", "wide", "output", "output8", "packed", "counter")  # wide/output/packed/counter: generated x86 kernels
 
 
 def forms(code):
@@ -65,8 +65,21 @@ def forms(code):
     return list(seen)
 
 
-def wide(text):
-    return "zmm" in text or "k1" in text
+EVEX_MNEMS = frozenset({
+    "vmovdqa32", "vmovdqu32", "vpxord", "vprold", "vprord", "vpternlogd",
+    "vpermt2d", "vpermi2d", "vextracti32x4", "vinserti32x4",
+    "vbroadcasti32x4", "vextracti64x4", "vinserti64x4", "vshufi32x4",
+})
+
+
+def wide(mnem, text):
+    return (
+        "zmm" in text
+        or "k1" in text
+        or "{1to" in text
+        or mnem in EVEX_MNEMS
+        or (mnem == "vpbroadcastd" and ", r" in text)
+    )
 
 
 def build(form_list, avx512):
@@ -166,9 +179,12 @@ def main():
         import prove_x86
         so = prove_x86.assemble(isa)
         fl = list(dict.fromkeys(forms(x86.disassemble(so, x86.sections(so)[".text"][0], x86.text_end(so)))))
-        if any(wide(t) for _, t in fl) and not avx512:
-            skipped += len(fl)
-            continue
+        if not avx512:
+            keep = [f for f in fl if not wide(f[0], f[1])]
+            skipped += len(fl) - len(keep)
+            fl = keep
+            if not fl:
+                continue
         lib = build(fl, avx512)
         for i, (mnem, text) in enumerate(fl):
             f = getattr(lib, f"f{i}")

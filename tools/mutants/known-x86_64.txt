@@ -2,7 +2,7 @@
 # AVX2 without AVX-512), each with its reason; tools/mutants/check.py
 # fails on any other survivor and on any listed one now caught.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/block.rs src/convenience.rs src/each.rs src/ffi_avx2.rs src/ffi_partial.rs src/ffi_sse41.rs src/hasher.rs src/incremental.rs src/io.rs src/lib.rs src/many.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/ffi_output.rs src/ffi_avx512_32.rs src/ffi_chunk_root.rs src/stack_vec.rs
+files: src/block.rs src/convenience.rs src/each.rs src/ffi_avx2.rs src/ffi_partial.rs src/ffi_sse41.rs src/hasher.rs src/incremental.rs src/io.rs src/lib.rs src/many.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/ffi_output.rs src/ffi_avx512_32.rs src/ffi_chunk_root.rs src/stack_vec.rs src/ffi_counter.rs
 src/each.rs	delete ! in finalize_each	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	delete match arm 1024 in by_blocks_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	delete match arm 128 in by_blocks_at_once	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -38,6 +38,23 @@ src/ffi_avx512_32.rs	replace entries -> [(&'static str, *const()); 3] with [("",
 src/ffi_avx512_32.rs	replace entries -> [(&'static str, *const()); 3] with [("xyzzy", Default::default()); 3]	1	[cpu lacks avx512f avx512vl amd_family_ge_1a] code for another machine: test-only accessors of the 32-lane kernels' entry points, read by the wide dispatch's tests and the self-test's count, which run only on AMD Zen 5 and later with AVX-512; those machines catch it (a Ryzen 9700X and an EPYC 9255, November 10, 2026)
 src/ffi_avx512_32.rs	replace parent_entry -> *const() with Default::default()	1	[cpu lacks avx512f avx512vl amd_family_ge_1a] code for another machine: test-only accessors of the 32-lane kernels' entry points, read by the wide dispatch's tests and the self-test's count, which run only on AMD Zen 5 and later with AVX-512; those machines catch it (a Ryzen 9700X and an EPYC 9255, November 10, 2026)
 src/ffi_chunk_root.rs	replace test::variants -> Vec<bool> with vec![false]	1	[cpu lacks avx512f avx512vl] equivalent: without AVX-512 the tests' list of kernels is SSE4.1 alone already (with AVX-512 the list's own check catches it)
+src/ffi_counter.rs	replace * with + in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace * with / in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace += with *= in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace += with -= in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace - with + in hash_counter_groups	1	AArch64 only: NEON arm is compiled out on x86-64
+src/ffi_counter.rs	replace - with / in hash_counter_groups	1	AArch64 only: NEON arm is compiled out on x86-64
+src/ffi_counter.rs	replace / with % in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace / with * in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace == with != in hash_counter_groups	1	AArch64 only: SME2 arm is compiled out on x86-64
+src/ffi_counter.rs	replace > with < in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace > with == in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace > with >= in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
+src/ffi_counter.rs	replace entries_neon -> [(&'static str, *const()); 1] with [("", Default::default()); 1]	1	AArch64 only: compiled out on x86-64
+src/ffi_counter.rs	replace entries_neon -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	AArch64 only: compiled out on x86-64
+src/ffi_counter.rs	replace entries_sme2 -> [(&'static str, *const()); 1] with [("", Default::default()); 1]	1	AArch64 only: compiled out on x86-64
+src/ffi_counter.rs	replace entries_sme2 -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	AArch64 only: compiled out on x86-64
+src/ffi_counter.rs	replace || with && in hash_counter_groups	1	AArch64 only: NEON arm is compiled out on x86-64
 src/ffi_output.rs	delete match arm Platform::AVX512 in lanes	1	[cpu lacks avx512f avx512vl] code for another machine: this CPU is never the AVX512 platform, so the arm is never taken. AVX-512 machines catch it
 src/ffi_output.rs	replace != with == in input	1	[cpu lacks avx512f avx512vl] code for another machine: `input` describes a message for the sixteen-lane finish of finalize_each, which only an AVX-512 CPU takes; this CPU never calls it. AVX-512 machines catch it (incremental_roots_batch_all_modes_and_selected_indices, a_turn_then_an_update_finishes_outside_the_group)
 src/ffi_output.rs	replace && with || in held_groups_in	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
@@ -307,7 +324,9 @@ src/self_test.rs	replace compiled_features_present with ()	1	same code: every te
 src/self_test.rs	replace | with & in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace < with <= in last_max	1	equivalent: `whole` is a multiple of 1024 and `room` (2^64 - 1 less a multiple of 1024) never is, so the two are never equal and either branch gives the smaller
+src/throughput.rs	replace >= with < in TreeHasher::hash_counter_range	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace >= with < in TreeHasher::turn	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/throughput.rs	replace >= with < in hash_counter_range	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace && with || in <impl Kernels for PlatformKernels<'_>>::children	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace && with || in <impl Kernels for PlatformKernels<'_>>::subtree	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace + with * in wide	1	SME2 only: the argument is `ahead`, consumed by the SME2 subtree path; on x86 subtree() returns None and serial calls pass 0

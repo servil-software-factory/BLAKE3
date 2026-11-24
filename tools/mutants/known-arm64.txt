@@ -17,7 +17,7 @@
 # code, as each says, and they are not all that such a Mac would show. Its
 # first whole run settles them.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/hasher.rs src/incremental.rs src/io.rs src/lib.rs src/many.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stack_vec.rs
+files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_sme2.rs src/hasher.rs src/incremental.rs src/io.rs src/lib.rs src/many.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stack_vec.rs src/ffi_counter.rs
 src/each.rs	delete ! in independent_lanes	1	x86-64 only: independent_lanes is compiled for x86-64 Linux alone (its cfg), so here the mutant builds the code the unmutated source builds; the x86-64 machines catch it (BLAKE3 #344)
 src/each.rs	replace && with || in finalize_each	1	x86-64-only selector: this AVX-512 branch is compiled out on ARM; the VM confirmed identical test code
 src/each.rs	replace * with + in by_blocks_at_once	6	[cpu has FEAT_SHA3] equivalent here: changes only the SHA-3-free prefix/scalar path; this CPU hashes the whole group through the last-lane kernels instead. Cortex-A72 CI exercises the prefix/scalar path
@@ -40,6 +40,22 @@ src/each.rs	replace | with & in by_blocks_at_once	3	[cpu has FEAT_SHA3] equivale
 src/each.rs	replace | with ^ in by_blocks_at_once	4	equivalent: the mode flags have none of CHUNK_START, CHUNK_END or ROOT, so OR and XOR join disjoint bits
 src/each.rs	replace | with ^ in hash_cohort	1	as on aarch64: survives (known-aarch64.txt): equivalent: | and ^ agree on flag bits that never overlap; on x86_64: survives (known-x86_64.txt): equivalent: | and ^ agree on flag bits that never overlap
 src/each.rs	replace || with && in independent_lanes	2	x86-64 only: independent_lanes is compiled for x86-64 Linux alone (its cfg), so here the mutant builds the code the unmutated source builds; the x86-64 machines catch it (BLAKE3 #344)
+src/ffi_counter.rs	replace * with + in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace * with / in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace += with *= in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace += with -= in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace - with + in hash_counter_groups	1	x86-64 only: AVX2 arm is compiled out on arm64
+src/ffi_counter.rs	replace - with / in hash_counter_groups	1	x86-64 only: AVX2 arm is compiled out on arm64
+src/ffi_counter.rs	replace / with % in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace / with * in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace > with < in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace > with == in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace > with >= in hash_counter_groups	2	x86-64 only: AVX-512 and AVX2 arms are compiled out on arm64
+src/ffi_counter.rs	replace entries_avx2 -> [(&'static str, *const()); 1] with [("", Default::default()); 1]	1	x86-64 only: compiled out on arm64
+src/ffi_counter.rs	replace entries_avx2 -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	x86-64 only: compiled out on arm64
+src/ffi_counter.rs	replace entries_avx512 -> [(&'static str, *const()); 1] with [("", Default::default()); 1]	1	x86-64 only: compiled out on arm64
+src/ffi_counter.rs	replace entries_avx512 -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	x86-64 only: compiled out on arm64
+src/ffi_counter.rs	replace || with && in hash_counter_groups	1	x86-64 only: AVX2 arm is compiled out on arm64
 src/ffi_neon_hybrid.rs	delete ! in chunk_code	1	speed: whether and what to prefetch after a pause (no effect on results)
 src/ffi_neon_hybrid.rs	replace != with == in apple_cores	1	not built on macOS: on a Mac apple_cores is true when the crate is compiled, and the code that asks the system is other targets' (the Arm VM's list judges it)
 src/ffi_neon_hybrid.rs	replace & with ^ in apple_cores	2	not built on macOS: on a Mac apple_cores is true when the crate is compiled, and the code that asks the system is other targets' (the Arm VM's list judges it)

@@ -133,8 +133,22 @@ def main():
         print("cross_check_sme: this CPU has no SME2; nothing checked")
         return
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 100
-    obj = prove_sme2.assemble()
-    fl = forms(obj)
+    objs = [prove_sme2.assemble()]
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    for extra in ("blake3_packed_sme2_aarch64.S", "blake3_counter_sme2_aarch64.S"):
+        src = os.path.join(root, "c", extra)
+        if os.path.exists(src):
+            obj = os.path.join(tempfile.mkdtemp(), extra + ".o")
+            subprocess.run([prove_sme2.CLANG, "-c", "--target=aarch64-linux-gnu", "-march=armv9-a+sme2", src, "-o", obj], check=True)
+            objs.append(obj)
+    seen = {}
+    for obj in objs:
+        for f in forms(obj):
+            seen.setdefault(f, None)
+            if f[0] == "mov" and f[1].startswith("za") and "p0/m" in f[1]:
+                # Also cross-check merging semantics under the random partial predicate p1.
+                seen.setdefault((f[0], f[1].replace("p0/m", "p1/m")), None)
+    fl = list(seen)
     lib = build(fl)
     mem = (ctypes.c_uint8 * 64)()
     bad = 0

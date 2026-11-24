@@ -6,7 +6,7 @@ timing proof's leak detector (aarch64.py).
 """
 
 import unittest
-from z3 import BitVec, BitVecs, Concat, Extract
+from z3 import BitVec, BitVecVal, BitVecs, Concat, Extract
 import canon
 import induction
 
@@ -247,4 +247,42 @@ class LeakTests(unittest.TestCase):
     def test_message_data_without_steering_runs(self):
         code = {0: ("ldrb", ["w8", "[x0, #3]"]), 4: ("eor", ["w8", "w8", "#0x5a"]), 8: ("ret", [])}
         self.run_code(code)
+
+
+class SmePredicatedZaMoveTests(unittest.TestCase):
+    """Predicated single-slice ZA move model checks (#511)."""
+
+    def make_machine(self, streaming=True, with_za=True):
+        import aarch64, sme
+        m = aarch64.Machine({}, {})
+        for i in range(31):
+            m.x[i] = BitVecVal(0, 64)
+        m.x[15] = BitVecVal(3, 64)
+        m.v = {i: [BitVecVal(0x100 + l, 32) for l in range(sme.LANES)] for i in range(32)}
+        m.za = [[[BitVecVal(0x200 + 16 * r + c, 32) for c in range(sme.LANES)] for r in range(sme.LANES)] for _ in range(4)] if with_za else None
+        m.streaming = streaming
+        m.p = {0: [True] * sme.LANES, 1: [i % 2 == 0 for i in range(sme.LANES)]}
+        return m
+
+    def test_rejects_outside_streaming_mode(self):
+        import sme
+        from aarch64 import Unproved
+        m = self.make_machine(streaming=False, with_za=True)
+        with self.assertRaisesRegex(Unproved, "streaming"):
+            sme.step(m, 0, "mov", ["za0h.s[w15, 0]", "p0/m", "z0.s"])
+
+    def test_rejects_vertical_slice_explicitly(self):
+        import sme
+        from aarch64 import Unproved
+        m = self.make_machine(streaming=True, with_za=True)
+        with self.assertRaisesRegex(Unproved, "unsupported predicated ZA move"):
+            sme.step(m, 0, "mov", ["za0v.s[w15, 0]", "p0/m", "z0.s"])
+
+    def test_partial_predicate_merges_only_active_lanes(self):
+        import aarch64, sme
+        m = self.make_machine(streaming=True, with_za=True)
+        sme.step(m, 0, "mov", ["za0h.s[w15, 0]", "p1/m", "z0.s"])
+        for i in range(sme.LANES):
+            want = 0x100 + i if i % 2 == 0 else 0x200 + 16 * 3 + i
+            self.assertEqual(aarch64.concrete(m.za[0][3][i]), want)
 

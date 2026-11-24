@@ -1246,5 +1246,38 @@ mod test {
             );
             assert_eq!(out_18[0], *blake3::hash(&chunks_buf[..len]).as_bytes());
         }
+        let mut tmpl_bytes = [0u8; BLOCK_LEN];
+        tmpl_bytes[..52].copy_from_slice(&chunks_buf[..52]);
+        let tmpl_words = crate::ffi_counter::words_from_block(&tmpl_bytes);
+        let counter_flags_len = u64::from(packed_flags) | (52u64 << 8);
+        let base_and_word = u64::from(7u32) | (12u64 << 32);
+        assert_eq!(
+            run_with_dormant_za([0, 0, 1, 0, 0, 0], false, &mut || unsafe {
+                crate::ffi_counter::call_sme2_counter(
+                    tmpl_words.as_ptr(),
+                    crate::IV.as_ptr(),
+                    base_and_word,
+                    counter_flags_len,
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            0
+        );
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                crate::ffi_counter::call_sme2_counter(
+                    tmpl_words.as_ptr(),
+                    crate::IV.as_ptr(),
+                    base_and_word,
+                    counter_flags_len,
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            16
+        );
+        tmpl_bytes[48..52].copy_from_slice(&7u32.to_le_bytes());
+        assert_eq!(out_18[0], *blake3::hash(&tmpl_bytes[..52]).as_bytes());
     }
 }

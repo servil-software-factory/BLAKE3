@@ -30,17 +30,26 @@ global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_output8.s")), options
 #[cfg(blake3_avx2_ffi)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_packed_x86.s")), options(raw));
 
+#[cfg(blake3_avx2_ffi)]
+global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_counter_x86.s")), options(raw));
+
 #[cfg(blake3_neon)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_neon_hybrid.s")), options(raw));
 
 #[cfg(blake3_neon)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_packed_neon.s")), options(raw));
 
+#[cfg(blake3_neon)]
+global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_counter_neon.s")), options(raw));
+
 #[cfg(blake3_sme2)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_sme2.s")), options(raw));
 
 #[cfg(blake3_sme2)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_packed_sme2.s")), options(raw));
+
+#[cfg(blake3_sme2)]
+global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_counter_sme2.s")), options(raw));
 
 #[cfg(blake3_sme2)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_sme2_hybrid.s")), options(raw));
