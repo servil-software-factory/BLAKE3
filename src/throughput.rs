@@ -124,9 +124,11 @@ pub fn hash_many<P: Prepared + ?Sized>(mode: Mode, batch: &P, out: &mut [[u8; OU
 /// `counter_word * 4` with `start.wrapping_add(i)` (modulo 2^32) for
 /// `i in 0..out.len()`.
 ///
-/// The template is broadcast once and only the counter word advances in
-/// registers, avoiding caller-side buffer stamping and input memory traffic
-/// in proof-of-work, counter-grinding, and similar loops.
+/// On AVX-512, AVX2, Apple/AArch64 SME2, and AArch64 NEON, full SIMD groups
+/// broadcast the template once into registers or L1 stack storage and advance
+/// only the counter word between groups, avoiding caller-side buffer stamping
+/// and input memory traffic in proof-of-work and counter-grinding loops; any
+/// remaining tail hashes serially.
 ///
 /// Panics if `template.len() > BLOCK_LEN`, `counter_word >= 16`, or
 /// `counter_word * 4 + 4 > template.len()` (checked in every build, even

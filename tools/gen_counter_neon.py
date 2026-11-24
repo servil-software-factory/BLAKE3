@@ -41,6 +41,7 @@ F_MSG1 = 512    # unit 1 broadcast template words (256 B)
 F_TMPL = 768    # scalar 16-word template copy (64 B)
 F_GROUPS = 832  # u64 remaining groups
 F_BASE = 840    # u32 current base
+F_BLEN = 844    # u32 block_len (kept off x29 to preserve Apple arm64 FP ABI)
 F_CW = 848      # u64 counter_word (0..15)
 F_OFF0 = 864    # [0, 1, 2, 3] (16 B, 16-byte aligned)
 F_OFF1 = 880    # [4, 5, 6, 7] (16 B, 16-byte aligned)
@@ -82,7 +83,7 @@ def scalar_one(slot):
     e(f"ldp {s[10]}, {s[11]}, [sp, #{F_IVT + 8}]")
     e(f"mov {s[12]}, wzr")
     e(f"mov {s[13]}, wzr")
-    e(f"mov {s[14]}, w29")
+    e(f"ldr {s[14]}, [sp, #{F_BLEN}]")
     e(f"mov {s[15]}, w28")
 
     for r in range(7):
@@ -228,17 +229,21 @@ def emit_kernel(name):
     e(f"sub sp, sp, #{FRAME}")
     for i, r in enumerate(range(19, 31, 2)):
         e(f"stp x{r}, x{r + 1}, [sp, #{F_X19 + 16 * i}]")
+    # Keep x29 pointing at the saved (FP, LR) frame record throughout the kernel
+    # (Apple arm64 ABI requirement).
+    e(f"add x29, sp, #{F_X19 + 16 * 5}")
     for i, r in enumerate(range(8, 16, 2)):
         e(f"stp d{r}, d{r + 1}, [sp, #{F_D8 + 16 * i}]")
 
     # Persistent registers:
-    #   x26 = key, x25 = out, w28 = flags, w29 = block_len,
-    #   x24 = sp + F_TMPL, x30 = counter_word * 4
+    #   x26 = key, x25 = out, w28 = flags, x24 = sp + F_TMPL, x30 = counter_word * 4
+    #   (block_len lives at [sp, #F_BLEN] so x29 stays untouched).
     e("mov x26, x1")
     e("mov x25, x4")
     e("and w28, w3, #0xff")
-    e("lsr w29, w3, #8")
-    e("and w29, w29, #0xff")
+    e("lsr w6, w3, #8")
+    e("and w6, w6, #0xff")
+    e(f"str w6, [sp, #{F_BLEN}]")
     e(f"str x5, [sp, #{F_GROUPS}]")
     e(f"str w2, [sp, #{F_BASE}]")
     e("lsr x6, x2, #32")
@@ -300,7 +305,8 @@ def emit_kernel(name):
         e(f"mov v{24 + i}.16b, v{8 + i}.16b")
     e("movi v12.4s, #0")
     e("movi v13.4s, #0")
-    e("dup v14.4s, w29")
+    e(f"ldr w6, [sp, #{F_BLEN}]")
+    e("dup v14.4s, w6")
     e("dup v15.4s, w28")
     e(f"stp q12, q13, [sp, #{F_DSPILL}]")
     e(f"stp q14, q15, [sp, #{F_DSPILL + 32}]")

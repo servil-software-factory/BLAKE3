@@ -51,7 +51,7 @@ fn wrapping_add_usize(start: u32, delta: usize) -> u32 {
 #[inline]
 #[cfg(any(blake3_sme2, blake3_neon, blake3_avx2_ffi, all(blake3_avx512_ffi, target_arch = "x86_64")))]
 fn base_and_word(base: u32, counter_word: usize) -> u64 {
-    u64::from(base) | ((counter_word as u64) << 32)
+    u64::from(base) + ((counter_word as u64) << 32)
 }
 
 /// Hash every full SIMD group of counter-range single-block messages on
@@ -67,7 +67,7 @@ fn hash_counter_groups(
     platform: Platform,
 ) -> usize {
     #[cfg(any(blake3_sme2, blake3_neon, blake3_avx2_ffi, all(blake3_avx512_ffi, target_arch = "x86_64")))]
-    let flags_and_len = u64::from(root_flags) | (u64::from(blen_u8) << 8);
+    let flags_and_len = u64::from(root_flags) + (u64::from(blen_u8) << 8);
     let mut done = 0usize;
 
     #[cfg(blake3_sme2)]
@@ -183,7 +183,8 @@ pub(crate) fn hash_counter_range_on(template: &[u8], counter_word: usize, start:
     block[..template.len()].copy_from_slice(template);
     let tmpl_words = words_from_block(&block);
 
-    let root_flags = flags | CHUNK_START | CHUNK_END | ROOT;
+    const ROOT_BLOCK_FLAGS: u8 = CHUNK_START + CHUNK_END + ROOT;
+    let root_flags = flags + ROOT_BLOCK_FLAGS;
     let blen_u8 = u8::try_from(template.len()).expect("validated <= BLOCK_LEN");
     let done = hash_counter_groups(&tmpl_words, blen_u8, counter_word, start, key, root_flags, out, platform);
 
@@ -373,10 +374,17 @@ mod tests {
         }
         for cw in 0..16 {
             let start = u32::MAX - 9;
-            let mut got = [[0u8; OUT_LEN]; 43];
+            let mut got = [[0u8; OUT_LEN]; 49];
             hash_counter_range(Mode::Plain, &tmpl, cw, start, &mut got);
-            let want = official_counter_range(Mode::Plain, &tmpl, cw, start, 43);
+            let want = official_counter_range(Mode::Plain, &tmpl, cw, start, 49);
             assert_eq!(&got[..], &want[..], "cw={cw}");
+        }
+        // Grinding-size multi-group counts (3+ groups across every ISA width).
+        for count in [48usize, 49, 256] {
+            let mut got = std::vec![[0u8; OUT_LEN]; count];
+            TreeHasher::new(Mode::Plain).hash_counter_range(&tmpl[..52], 12, u32::MAX - 30, &mut got);
+            let want = official_counter_range(Mode::Plain, &tmpl[..52], 12, u32::MAX - 30, count);
+            assert_eq!(got, want, "multi-group count={count}");
         }
     }
 
@@ -402,7 +410,7 @@ mod tests {
         block[..52].copy_from_slice(&tmpl);
         let tmpl_words = words_from_block(&block);
         let root_flags = CHUNK_START | CHUNK_END | ROOT;
-        for (count, reached) in [(group_len, true), (2 * group_len, true), (group_len - 1, false)] {
+        for (count, reached) in [(group_len, true), (2 * group_len, true), (3 * group_len, true), (group_len - 1, false)] {
             let mut out = std::vec![[0u8; OUT_LEN]; count];
             crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
             let done = hash_counter_groups(&tmpl_words, 52, 12, 100, &crate::IV, root_flags, &mut out, platform);
@@ -412,6 +420,28 @@ mod tests {
                 assert_eq!(done, count, "exact group count handled wholly by SIMD");
                 assert_eq!(ran.len(), 1, "exact groups run direct counter kernel alone: {ran:?}");
             }
+        }
+        // Verify public API dispatch (both `hash_counter_range` and `TreeHasher::hash_counter_range`),
+        // including `TreeHasher::on_this_core()` routing away from SME2 to NEON 8+3.
+        for count in [group_len, 3 * group_len, 256] {
+            let mut out = std::vec![[0u8; OUT_LEN]; count];
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            hash_counter_range(Mode::Plain, &tmpl, 12, 100, &mut out);
+            assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry)), "public fn count={count}");
+
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            TreeHasher::new(Mode::Plain).hash_counter_range(&tmpl, 12, 100, &mut out);
+            assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry)), "TreeHasher count={count}");
+        }
+        #[cfg(blake3_sme2)]
+        if matches!(platform, Platform::SME2 { .. }) {
+            let neon_entry = ffi_neon::blake3_servil_neon_p11_counter as *const () as usize;
+            let mut out = std::vec![[0u8; OUT_LEN]; 33];
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            TreeHasher::new(Mode::Plain).on_this_core().hash_counter_range(&tmpl, 12, 100, &mut out);
+            let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+            assert!(ran.contains(&neon_entry), "on_this_core must dispatch to NEON 8+3");
+            assert!(!ran.contains(&entry), "on_this_core must not enter SME2");
         }
         let (mixed, want_done) = match platform {
             #[cfg(blake3_sme2)]

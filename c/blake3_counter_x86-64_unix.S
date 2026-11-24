@@ -8,6 +8,7 @@
 .p2align 6
 blake3_servil_avx512_counter:
 .cfi_startproc
+    endbr64
     test rsi, rsi
     jz .L_blake3_servil_avx512_counter_done
     sub rsp, 64
@@ -1082,6 +1083,7 @@ blake3_servil_avx512_counter:
 .p2align 6
 blake3_servil_avx2_counter:
 .cfi_startproc
+    endbr64
     test rsi, rsi
     jz .L_blake3_servil_avx2_counter_done
     push rbp

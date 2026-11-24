@@ -106,7 +106,7 @@ def main():
     neon_obj = assemble("blake3_counter_neon_aarch64.S")
     cases = 0
 
-    for cw, groups in [(0, 0), (0, 1), (8, 1), (12, 1), (15, 1), (0, 2), (12, 2), (15, 2)]:
+    for cw, groups in [(0, 0), (0, 1), (8, 1), (12, 1), (15, 1), (0, 2), (12, 2), (15, 2), (12, 3)]:
         tk = time.monotonic()
         steps = prove_kernel(sme2_obj, "blake3_servil_sme2_counter", 16, cw, groups, True)
         cases += 1
@@ -115,7 +115,7 @@ def main():
             f"({16 * groups:2d} symbolic lanes, {steps:5d} steps) in {time.monotonic() - tk:.2f}s"
         )
 
-    for cw, groups in [(0, 0), (0, 1), (8, 1), (12, 1), (15, 1), (0, 2), (12, 2), (15, 2)]:
+    for cw, groups in [(0, 0), (0, 1), (8, 1), (12, 1), (15, 1), (0, 2), (12, 2), (15, 2), (12, 3)]:
         tk = time.monotonic()
         steps = prove_kernel(neon_obj, "blake3_servil_neon_p11_counter", 11, cw, groups, False)
         cases += 1

@@ -73,6 +73,7 @@ def emit_avx512(name):
     loop_lbl = f".L_{name}_loop"
     init_done_lbl = f".L_{name}_init_done"
 
+    e("endbr64")
     e("test rsi, rsi")
     e(f"jz {done_lbl}")
 
@@ -218,6 +219,7 @@ def emit_avx2(name):
     done_lbl = f".L_{name}_done"
     loop_lbl = f".L_{name}_loop"
 
+    e("endbr64")
     e("test rsi, rsi")
     e(f"jz {done_lbl}")
 

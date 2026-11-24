@@ -88,7 +88,7 @@ def main():
 
     # AVX-512 branches on counter_word in both init and loop increment:
     # prove groups=0 plus EVERY counter_word 0..15 across groups=2 (100% branch coverage).
-    for cw, groups in [(0, 0)] + [(w, 2) for w in range(16)]:
+    for cw, groups in [(0, 0)] + [(w, 2) for w in range(16)] + [(12, 3)]:
         tk = time.monotonic()
         steps = prove_kernel(so, "blake3_servil_avx512_counter", 16, cw, groups)
         cases += 1
@@ -98,8 +98,8 @@ def main():
         )
 
     # AVX2 indexes [rsp + counter_word * 32] uniformly without per-word branches:
-    # prove groups=0, groups=1, and groups=2 across boundary/interior words.
-    for cw, groups in [(0, 0), (0, 1), (7, 1), (12, 1), (15, 1), (0, 2), (12, 2), (15, 2)]:
+    # prove groups=0, groups=1, groups=2, and groups=3 across boundary/interior words.
+    for cw, groups in [(0, 0), (0, 1), (7, 1), (12, 1), (15, 1), (0, 2), (12, 2), (15, 2), (12, 3)]:
         tk = time.monotonic()
         steps = prove_kernel(so, "blake3_servil_avx2_counter", 8, cw, groups)
         cases += 1

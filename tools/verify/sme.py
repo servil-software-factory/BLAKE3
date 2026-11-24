@@ -150,10 +150,13 @@ def step(m, pc, mnem, ops):
         m.v[d] = [x ^ y for x, y in zip(a, b)]
         return True
     if mnem == "mov" and len(ops) == 3 and ops[0].startswith("za"):
+        if not m.streaming:
+            raise Unproved("predicated ZA move outside streaming mode")
         if m.za is None:
             raise Unproved("ZA used while disabled")
         t, vertical, reg, first, count = slices(ops[0])
-        assert not vertical and count == 1 and ops[1].endswith("/m")
+        if vertical or count != 1 or not ops[1].endswith("/m"):
+            raise Unproved(f"unsupported predicated ZA move: {ops}")
         row = slice_index(m, reg, first, 1)
         g = m.p[preg(ops[1].split("/")[0])]
         src, _ = zreg(ops[2])

@@ -15,6 +15,7 @@ blake3_servil_neon_p11_counter:
     stp x25, x26, [sp, #48]
     stp x27, x28, [sp, #64]
     stp x29, x30, [sp, #80]
+    add x29, sp, #80
     stp d8, d9, [sp, #96]
     stp d10, d11, [sp, #112]
     stp d12, d13, [sp, #128]
@@ -22,8 +23,9 @@ blake3_servil_neon_p11_counter:
     mov x26, x1
     mov x25, x4
     and w28, w3, #0xff
-    lsr w29, w3, #8
-    and w29, w29, #0xff
+    lsr w6, w3, #8
+    and w6, w6, #0xff
+    str w6, [sp, #844]
     str x5, [sp, #832]
     str w2, [sp, #840]
     lsr x6, x2, #32
@@ -205,7 +207,8 @@ L_blake3_servil_neon_p11_counter_loop:
     mov v27.16b, v11.16b
     movi v12.4s, #0
     movi v13.4s, #0
-    dup v14.4s, w29
+    ldr w6, [sp, #844]
+    dup v14.4s, w6
     dup v15.4s, w28
     stp q12, q13, [sp, #192]
     stp q14, q15, [sp, #224]
@@ -227,7 +230,7 @@ L_blake3_servil_neon_p11_counter_loop:
     mov w19, wzr
     mov w20, wzr
     add v3.4s, v3.4s, v28.4s
-    mov w21, w29
+    ldr w21, [sp, #844]
     add v0.4s, v0.4s, v4.4s
     mov w22, w28
     add v1.4s, v1.4s, v5.4s
@@ -1858,7 +1861,7 @@ L_blake3_servil_neon_p11_counter_loop:
     str q29, [sp, #208]
     mov w20, wzr
     eor v30.16b, v30.16b, v25.16b
-    mov w21, w29
+    ldr w21, [sp, #844]
     mov w22, w28
     shl v21.4s, v30.4s, #25
     ldr w23, [x24, #0]
@@ -3488,7 +3491,7 @@ L_blake3_servil_neon_p11_counter_loop:
     add v11.4s, v11.4s, v12.4s
     mov w20, wzr
     add v8.4s, v8.4s, v13.4s
-    mov w21, w29
+    ldr w21, [sp, #844]
     add v9.4s, v9.4s, v14.4s
     mov w22, w28
     ldr w23, [x24, #0]
