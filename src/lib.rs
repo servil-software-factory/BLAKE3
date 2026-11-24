@@ -306,8 +306,9 @@ pub(crate) enum Ran {
     /// A batch of messages of up to a chunk, two or more, ran on the
     /// kernels' table a run at a time (many::hash_many_on's short path).
     ShortRun = 128,
-    /// Whole chunks or parents were hashed on a wider kernel than their
-    /// count, the spare lanes a copy of the last (rounded_lanes).
+    /// Whole chunks, parents, or x86-64 multi-block batches were hashed on a
+    /// wider kernel than their count, the spare lanes a copy of the last
+    /// (rounded_lanes / round_x86_blocks).
     RoundedUp = 256,
     /// A table's one-block inputs were copied into one buffer for SME2's
     /// parent kernel (sme2::hash_many): a copy of the input that blocks
@@ -323,6 +324,15 @@ std::thread_local! {
     /// The lanes the rounded-up hash_many calls ran at since the test last
     /// cleared it, as a mask of widths (4 | 8 = 12: both).
     pub(crate) static ROUNDED_WIDTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// `(blocks, inputs.len())` recorded at `Platform::hash_many` and
+    /// `pair::hash_many_blocks`, for verifying actual kernel dispatch widths.
+    pub(crate) static KERNEL_HASH_MANY_CALLS: core::cell::RefCell<std::vec::Vec<(usize, usize)>> = const { core::cell::RefCell::new(std::vec::Vec::new()) };
+}
+
+#[cfg(all(test, feature = "std"))]
+#[inline(always)]
+pub(crate) fn record_hash_many_call(blocks: usize, count: usize) {
+    let _ = KERNEL_HASH_MANY_CALLS.try_with(|v| v.borrow_mut().push((blocks, count)));
 }
 
 /// Note that `kind` happened: in the tests' record, and nothing in any
@@ -971,7 +981,7 @@ fn rounded_lanes(platform: Platform, count: usize) -> Option<usize> {
 /// kernel takes the count in one pass: the spare lanes hash a copy of the
 /// last input, into scratch. Past the widest kernel, the whole groups of
 /// its width first, then the rest rounded.
-fn hash_many_rounded<const N: usize>(
+pub(crate) fn hash_many_rounded<const N: usize>(
     platform: Platform,
     inputs: &[&[u8; N]],
     key: &CVWords,

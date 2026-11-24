@@ -95,6 +95,8 @@ pub(crate) unsafe fn hash_many_blocks(
     out: &mut [u8],
 ) {
     assert!(inputs.len() <= out.len() / OUT_LEN && (1..=CHUNK_LEN / BLOCK_LEN).contains(&blocks));
+    #[cfg(all(test, feature = "std"))]
+    crate::record_hash_many_call(blocks, inputs.len());
     if !takes_platform(platform) {
         // Elsewhere one input after another on the platform's compression
         // (for the tests of hash_many's batches on every platform).

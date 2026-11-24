@@ -407,7 +407,10 @@ impl Platform {
             "hash_many takes whole chunks at incrementing counters, or 1 to 16 blocks at one counter"
         );
         #[cfg(all(test, feature = "std"))]
-        crate::counted(crate::Counted::HashManyCall);
+        {
+            crate::counted(crate::Counted::HashManyCall);
+            crate::record_hash_many_call(N / BLOCK_LEN, inputs.len());
+        }
         match self {
             // Sound: `Platform::SSE41` is constructed only after CPUID or compile-time target-feature verification.
             #[cfg(blake3_sse41_ffi)]
