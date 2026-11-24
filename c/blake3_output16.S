@@ -162,30 +162,14 @@ blake3_servil_output16:
     vshufi32x4 zmm23, zmm23, zmm27, 0xdd
     vshufi32x4 zmm27, zmm24, zmm28, 0x88
     vshufi32x4 zmm24, zmm24, zmm28, 0xdd
-    vshufi32x4 zmm28, zmm30, zmm20, 0x88
-    vshufi32x4 zmm30, zmm30, zmm20, 0xdd
-    vshufi32x4 zmm20, zmm18, zmm26, 0x88
-    vshufi32x4 zmm18, zmm18, zmm26, 0xdd
-    vshufi32x4 zmm26, zmm21, zmm29, 0x88
-    vshufi32x4 zmm21, zmm21, zmm29, 0xdd
-    vshufi32x4 zmm29, zmm19, zmm27, 0x88
-    vshufi32x4 zmm19, zmm19, zmm27, 0xdd
-    vshufi32x4 zmm27, zmm31, zmm22, 0x88
-    vshufi32x4 zmm31, zmm31, zmm22, 0xdd
-    vshufi32x4 zmm22, zmm17, zmm25, 0x88
-    vshufi32x4 zmm17, zmm17, zmm25, 0xdd
-    vshufi32x4 zmm25, zmm8, zmm23, 0x88
-    vshufi32x4 zmm8, zmm8, zmm23, 0xdd
-    vshufi32x4 zmm23, zmm16, zmm24, 0x88
-    vshufi32x4 zmm16, zmm16, zmm24, 0xdd
-    vmovdqa32 zmm0, zmm28
-    vmovdqa32 zmm1, zmm26
-    vmovdqa32 zmm2, zmm20
-    vmovdqa32 zmm3, zmm29
-    vmovdqa32 zmm4, zmm27
-    vmovdqa32 zmm5, zmm25
-    vmovdqa32 zmm6, zmm22
-    vmovdqa32 zmm7, zmm23
+    vshufi32x4 zmm0, zmm30, zmm20, 0x88
+    vshufi32x4 zmm2, zmm18, zmm26, 0x88
+    vshufi32x4 zmm1, zmm21, zmm29, 0x88
+    vshufi32x4 zmm3, zmm19, zmm27, 0x88
+    vshufi32x4 zmm4, zmm31, zmm22, 0x88
+    vshufi32x4 zmm6, zmm17, zmm25, 0x88
+    vshufi32x4 zmm5, zmm8, zmm23, 0x88
+    vshufi32x4 zmm7, zmm16, zmm24, 0x88
     mov rax, QWORD PTR [rdi + 0]
     vmovdqu32 zmm16, ZMMWORD PTR [rax]
     mov rax, QWORD PTR [rdi + 24]

@@ -41,9 +41,12 @@ for i in range(16):
     emit(f'mov DWORD PTR [rsp + {256+4*i}], edx')
     emit(f'movzx edx, BYTE PTR [rdi + {24*i+17}]')
     emit(f'mov DWORD PTR [rsp + {320+4*i}], edx')
-rows = transpose(list(range(16, 32)), 8)
+# Transpose the 8-word CVs straight into zmm0..zmm7, skipping the 8 dead
+# upper-half 0xdd shuffles and 8 register copies (#398).
+cv_dest = [0] * 8
 for w in range(8):
-    emit(f'vmovdqa32 zmm{w}, zmm{rows[ns["WORD"][w]]}')
+    cv_dest[ns['WORD'][w]] = w
+transpose(list(range(16, 32)), 8, low_dest=cv_dest)
 for i in range(16):
     emit(f'mov rax, QWORD PTR [rdi + {24*i}]')
     emit(f'vmovdqu32 zmm{16+i}, ZMMWORD PTR [rax]')

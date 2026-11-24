@@ -73,8 +73,13 @@ def state(group, word):
     return 8*group+word if word < 8 else 16+8*group+(word-8)
 
 
-def transpose(rows, scratch):
-    """Eight or sixteen rows, with one rotating scratch register."""
+def transpose(rows, scratch, low_dest=None):
+    """Eight or sixteen rows, with one rotating scratch register.
+
+    When `low_dest` is given (one destination register per low output row),
+    the final stage writes only the low half directly into `low_dest`,
+    skipping the unused high shuffles and follow-up register copies (#398).
+    """
     rows = rows.copy()
     n = len(rows)
     assert n in (8,16)
@@ -87,6 +92,12 @@ def transpose(rows, scratch):
         (8,'vshufi32x4','vshufi32x4',', 0x88',', 0xdd')]:
         if distance >= n:
             break
+        if low_dest is not None and 2 * distance == n:
+            assert len(low_dest) == distance and set(low_dest).isdisjoint(registers)
+            for i in range(distance):
+                a,b = rows[i],rows[i+distance]
+                emit(f'{lo} zmm{low_dest[i]}, zmm{a}, zmm{b}{imm_lo}')
+            return list(low_dest)
         for base in range(0,n,2*distance):
             for i in range(base,base+distance):
                 j = i+distance
