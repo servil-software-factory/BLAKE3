@@ -395,6 +395,154 @@ fn hash_many_rounded_slow<const N: usize>(
     }
 }
 
+/// Whether a fresh hasher in `update_each` (`hold`) on x86-64 should stream its
+/// first chunk straight into `ChunkState`: keyed/derived hashers do so that
+/// `finalize_each` finishes their final block side by side via 16-lane
+/// `output16` when 16 eligible descriptors pack together; plain hashers stage
+/// instead so `finalize_each` hashes 1 KiB chunks via `hash_many_rounded` and
+/// multi-block `65..=1023 B` prefixes on AVX2/AVX-512 via `hash_by_blocks`
+/// (#404). Non-consuming mid-chunk `finalize()` on a staged plain first chunk
+/// rehashes the staged prefix fresh.
+#[inline(always)]
+pub(crate) fn first_chunk_to_core(stage_empty: bool, hold: bool, is_plain: bool, core_count: u64, input_len: usize) -> bool {
+    stage_empty && hold && !is_plain && core_count + input_len as u64 <= CHUNK_LEN as u64
+}
+
+/// x86-64 `finalize_each` (called for `which.len() >= 2`): partition each
+/// 128-hasher window into staged plain whole chunks (`== 1024 B`, full-width
+/// `hash_many_rounded` when `>= 2`), staged plain multi-block short messages
+/// (`65..=1023 B`, on AVX2/AVX-512 batched via `hash_by_blocks` for equal
+/// prefix blocks with scalar final blocks when `>= 4` or `>= 2` with a message
+/// `> 128 B`; SSE4.1 finishes staged `< 1 KiB` messages individually), and
+/// remaining hashers (`<= 64 B` plain, keyed/derived, or multi-chunk; Linux
+/// AVX-512 packs eligible `ffi_output::input` descriptors independently and
+/// runs 16-lane `output16` on every complete 16-pack). Key values never select
+/// grouping or dispatch (#404).
+#[cfg(feature = "std")]
+pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
+    const FINALIZE_BATCH: usize = 128;
+    const FULL_CHUNK_BATCH: usize = 32;
+    const SHORT_PAIR_MIN_LEN: usize = 2 * crate::BLOCK_LEN;
+    const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
+    let platform = crate::platform::Platform::detect();
+    let block_lanes = crate::pair::takes_platform(platform);
+    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    let output16_lanes = matches!(platform, crate::platform::Platform::AVX512);
+    #[cfg(all(test, blake3_avx512_ffi, target_os = "linux"))]
+    let mut counted_output_turn = false;
+    for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
+        let mut full_chunks = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+        let mut short_plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+        let mut short_plain_max_len = 0usize;
+        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+        let mut output16 = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+        let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+        for (k, &i) in w_chunk.iter().enumerate() {
+            let k = k.to_le_bytes()[0];
+            if hashers[i].is_plain_single_chunk_staged() {
+                let len = hashers[i].staged_bytes().len();
+                if len == CHUNK_LEN {
+                    full_chunks.push(k);
+                    continue;
+                }
+                if block_lanes && len > crate::BLOCK_LEN {
+                    short_plain.push(k);
+                    short_plain_max_len = short_plain_max_len.max(len);
+                    continue;
+                }
+            }
+            #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+            if output16_lanes && crate::ffi_output::input(&hashers[i]).is_some() {
+                output16.push(k);
+                continue;
+            }
+            rest.push(k);
+        }
+        if full_chunks.len() >= 2 {
+            for part in full_chunks.as_slice().chunks(FULL_CHUNK_BATCH) {
+                let refs: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], FULL_CHUNK_BATCH> =
+                    part.iter().map(|&k| hashers[w_chunk[usize::from(k)]].staged_bytes().try_into().unwrap()).collect();
+                let mut digests = [[0u8; OUT_LEN]; FULL_CHUNK_BATCH];
+                crate::hash_many_rounded(
+                    platform,
+                    &refs,
+                    crate::IV,
+                    0,
+                    crate::IncrementCounter::No,
+                    0,
+                    CHUNK_START,
+                    CHUNK_END | crate::ROOT,
+                    digests[..part.len()].as_flattened_mut(),
+                );
+                for (&k, digest) in part.iter().zip(&digests) {
+                    o_chunk[usize::from(k)] = *digest;
+                }
+            }
+        } else {
+            for &k in full_chunks.as_slice() {
+                let k = usize::from(k);
+                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
+            }
+        }
+        // Two 1-prefix-block messages (`65..=128 B`) cost less scalar than
+        // sorting/scattering through `hash_by_blocks`; 4+ or any >= 2-block
+        // prefix (`> 128 B`) pays for SIMD prefix batching.
+        if short_plain.len() >= 4 || (short_plain.len() >= 2 && short_plain_max_len > SHORT_PAIR_MIN_LEN) {
+            for part in short_plain.as_slice().chunks(crate::each::BY_BLOCKS_AT_ONCE) {
+                let bytes: crate::stack_vec::StackVec<&[u8], { crate::each::BY_BLOCKS_AT_ONCE }> =
+                    part.iter().map(|&k| hashers[w_chunk[usize::from(k)]].staged_bytes()).collect();
+                let mut digests = [[0u8; OUT_LEN]; crate::each::BY_BLOCKS_AT_ONCE];
+                crate::each::hash_by_blocks(&bytes, crate::IV, 0, &mut digests[..part.len()], platform);
+                for (&k, digest) in part.iter().zip(&digests) {
+                    o_chunk[usize::from(k)] = *digest;
+                }
+            }
+        } else {
+            for &k in short_plain.as_slice() {
+                let k = usize::from(k);
+                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
+            }
+        }
+        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+        {
+            let done = if output16.len() >= 16 {
+                #[cfg(test)]
+                if !counted_output_turn {
+                    crate::counted(crate::Counted::OutputGroupTurn);
+                    counted_output_turn = true;
+                }
+                let mut done = 0usize;
+                for slots in output16.as_slice().chunks_exact(16) {
+                    let inputs: crate::stack_vec::StackVec<_, 16> =
+                        slots.iter().map(|&k| crate::ffi_output::input(&hashers[w_chunk[usize::from(k)]]).unwrap()).collect();
+                    let mut digests = [[0u8; OUT_LEN]; 16];
+                    // Sound: `output16` is only populated when `platform` is `Platform::AVX512`;
+                    // borrowed descriptors keep every block/CV readable and `digests` holds 16 slots.
+                    unsafe { crate::ffi_output::hash_group::<16>(inputs.as_slice().try_into().unwrap(), &mut digests) };
+                    for (&k, digest) in slots.iter().zip(&digests) {
+                        o_chunk[usize::from(k)] = *digest;
+                    }
+                    done += 16;
+                }
+                done
+            } else {
+                0
+            };
+            for &k in &output16.as_slice()[done..] {
+                let ku = usize::from(k);
+                o_chunk[ku] = *hashers[w_chunk[ku]].take_root_hash().as_bytes();
+            }
+        }
+        for &k in rest.as_slice() {
+            let ku = usize::from(k);
+            o_chunk[ku] = *hashers[w_chunk[ku]].take_root_hash().as_bytes();
+        }
+        for &i in w_chunk {
+            hashers[i].reset();
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

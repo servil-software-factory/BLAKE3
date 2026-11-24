@@ -26,20 +26,23 @@ use crate::{CHUNK_END, CHUNK_LEN, CHUNK_START, CVBytes, CVWords, ChunkState, Has
 /// as a server's uploads, each with its own [`Hasher`]. Requires each `i < hashers.len()`:
 /// a turn that panics on one that is not leaves its hashers as
 /// [after a panic](Hasher#after-a-panic).
-/// Finish the messages with [`finalize_each`]: on AArch64 a message of up
-/// to 1024 bytes waits whole in its hasher, and those that finish together
-/// hash side by side there.
+/// Finish the messages with [`finalize_each`]: plain messages of up to 1024
+/// bytes wait whole in their stage (on both x86-64 and AArch64), so those
+/// that finish together hash side by side there. Because a staged plain
+/// first chunk has not yet compressed into `ChunkState`, calling a
+/// non-consuming `Hasher::finalize()` mid-chunk rehashes that staged prefix
+/// afresh; callers that finish each message once via `finalize_each` avoid
+/// that cost.
 ///
 /// # Or the Pipeline
 ///
 /// A program with threads to give, whose messages keep arriving, has a
 /// faster way in the crate `blake3-servil` (this library with its thread
-/// pool): its `throughput::Pipeline` took a tenth of this call's time and
-/// about a third of its CPU time for 1,024 open messages of 1 KiB arriving
-/// in 256-byte pieces (0.09 ns a byte against 0.94 on a Ryzen 9700X, 0.11
-/// against 1.18 on an EPYC 9255; November 22, 2026, BLAKE3 #470), and a
-/// third of its time for 64 open messages of 1 MiB. It holds a room of
-/// 64 KiB for each open message. This call stays the right one:
+/// pool): its `throughput::Pipeline` splits across worker cores (historically
+/// beating pre-batching `update_each` on 1,024 open 1 KiB messages on Ryzen
+/// 9700X / EPYC 9255, November 22, 2026, BLAKE3 #470, and taking a third of
+/// the time for 64 open messages of 1 MiB). It holds a room of 64 KiB for
+/// each open message. This call stays the right one:
 ///
 /// - on one thread;
 /// - for more open messages than the program has 64 KiB each for (a
@@ -97,8 +100,16 @@ impl Drop for Marked<'_> {
 /// indices: it panics on an index named twice, in every build. A call
 /// that is refused hashes nothing and leaves every hasher as it was.
 /// Messages that finish in one call hash side by side where the CPU has
-/// the lanes: sixteen at once on AVX-512, and on AArch64 the plain
-/// messages of up to 1024 bytes fed by [`update_each`].
+/// the lanes (with at least two eligible hashers in a 128-hasher window):
+/// on x86-64, staged plain 1 KiB chunks via `hash_many_rounded` (ceiling
+/// 32 lanes on Zen 5 / 16 on AVX-512 / 8 on AVX2 / 4 on SSE4.1), staged
+/// plain multi-block `65..=1023 B` messages on AVX2/AVX-512 via
+/// `hash_by_blocks` (equal-prefix-length blocks batched in SIMD, each
+/// message's final block compressed individually; SSE4.1 finishes staged
+/// `< 1 KiB` messages individually), and 16-lane `output16` for every 16
+/// eligible counter-zero final blocks packed from remaining hashers on Linux
+/// AVX-512; on AArch64, staged plain messages of up to 1024 bytes via
+/// `hash_by_blocks` and counter-zero final blocks via NEON `output8`.
 ///
 /// # Key-dependent timing
 ///
@@ -114,33 +125,20 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         marked.count += 1;
     }
     let hashers = &mut *marked.hashers;
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-    if which.len() >= 16 && matches!(Platform::detect(), Platform::AVX512) {
-        #[cfg(all(test, feature = "std"))]
-        crate::counted(crate::Counted::OutputGroupTurn);
-        for (which, out) in which.chunks(16).zip(out.chunks_mut(16)) {
-            if which.len() == 16 {
-                let hashed = {
-                    let inputs: Option<crate::stack_vec::StackVec<_, 16>> = which.iter().map(|&i| crate::ffi_output::input(&hashers[i])).collect();
-                    match inputs {
-                        Some(inputs) => {
-                            // Sound: the detected platform supplies AVX-512F+VL;
-                            // borrowed descriptors keep every block/CV readable.
-                            unsafe { crate::ffi_output::hash_group::<16>(inputs.as_slice().try_into().unwrap(), out) };
-                            true
-                        }
-                        None => false,
-                    }
-                };
-                if hashed {
-                    for &i in which {
-                        hashers[i].reset();
-                    }
-                    continue;
-                }
-            }
-            finish_each(hashers, which, out);
-        }
+    if which.is_empty() {
+        marked.active = false;
+        return;
+    }
+    if which.len() == 1 {
+        let i = which[0];
+        out[0] = *hashers[i].take_root_hash().as_bytes();
+        hashers[i].reset();
+        marked.active = false;
+        return;
+    }
+    #[cfg(blake3_sse41_ffi)]
+    {
+        crate::ffi_partial::finalize_each(hashers, which, out);
         marked.active = false;
         return;
     }
@@ -213,7 +211,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         marked.active = false;
         return;
     }
-    #[cfg(not(blake3_neon))]
+    #[cfg(not(any(blake3_neon, blake3_sse41_ffi)))]
     {
         finish_each(hashers, which, out);
         marked.active = false;
@@ -221,8 +219,8 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
 }
 
 /// Each hasher `which` names finished in place and reset, its digest into
-/// `out`: the path every message takes but a sixteen-lane group.
-#[cfg(not(blake3_neon))]
+/// `out`: fallback for portable targets.
+#[cfg(not(any(blake3_neon, blake3_sse41_ffi)))]
 fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     for (&i, out) in which.iter().zip(out) {
         *out = *hashers[i].take_root_hash().as_bytes();
@@ -386,16 +384,27 @@ fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     if independent_lanes(hashers, held) {
         return;
     }
-    // Plain's key is the IV, the same for every plain hasher. Choose the
-    // smallest workspace tier that holds the cohort so small turns (such as
-    // a single plain stage) do not reserve the full 128-stage stack frame.
+    // Plain's key is the IV, the same for every plain hasher. Tile larger
+    // cohorts in 16-stage L1D-hot blocks (`HeldWorkspace<16>`, ~15 KiB stack)
+    // under one shared `Sme2Turn` so even 17..=128 plain hashers fit inside a
+    // 64 KiB worker stack without reserving a 116 KiB `TABLE`-sized frame.
+    const PLAIN_TILE: usize = 16;
     let mut plain = crate::stack_vec::StackVec::<usize, TABLE>::new();
     plain.extend(held.iter().copied().filter(|&i| hashers[i].is_plain()));
-    match plain.len() {
-        0 => {}
-        1 => hash_cohort::<1>(hashers, &plain),
-        2..=16 => hash_cohort::<16>(hashers, &plain),
-        _ => hash_cohort::<TABLE>(hashers, &plain),
+    if !plain.is_empty() {
+        #[cfg(test)]
+        let _ = HELD_GROUPS.try_with(|groups| groups.borrow_mut().push(plain.as_slice().to_vec()));
+        #[cfg(test)]
+        crate::counted(crate::Counted::HeldPass);
+        let turn = crate::platform::Sme2Turn::take(hashers[plain[0]].platform(), true);
+        let platform = turn.platform();
+        if plain.len() == 1 {
+            hash_cohort_on::<1>(hashers, &plain, platform);
+        } else {
+            for tile in plain.as_slice().chunks(PLAIN_TILE) {
+                hash_cohort_on::<PLAIN_TILE>(hashers, tile, platform);
+            }
+        }
     }
     for &i in held {
         if !hashers[i].is_plain() {
@@ -438,29 +447,36 @@ impl<const N: usize> HeldWorkspace<N> {
 }
 
 /// Hash 1..=N distinct held stages: plain hashers together, or one keyed
-/// or derive-key hasher. Keep chunks and each parent level together so
-/// one SME2 entry covers the cohort; each parent level goes to it as the
-/// run of blocks it is. Spare descriptor slots repeat a readable block
-/// and stay unused.
+/// or derive-key hasher. Acquires an SME2 turn for the cohort and records
+/// test pass counters, then delegates to [`hash_cohort_on`].
 #[cfg(feature = "std")]
-// Keep the workspace frame out of empty turns and the other mode's caller.
 #[inline(never)]
 fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
-    use crate::{BLOCK_LEN, PARENT};
     let first = alike[0];
     #[cfg(all(test, feature = "std"))]
     let _ = HELD_GROUPS.try_with(|groups| groups.borrow_mut().push(alike.to_vec()));
     #[cfg(all(test, feature = "std"))]
-    let _ = LAST_COHORT_TIER.try_with(|t| t.set(N));
-    #[cfg(all(test, feature = "std"))]
     crate::counted(crate::Counted::HeldPass);
+    let turn = crate::platform::Sme2Turn::take(hashers[first].platform(), true);
+    hash_cohort_on::<N>(hashers, alike, turn.platform());
+}
+
+/// Hash one tile of 1..=N distinct held stages on `platform` (with any SME2
+/// turn held by the caller across tiles). Keeps chunks and each parent level
+/// in a bounded `HeldWorkspace<N>` on the stack.
+#[cfg(feature = "std")]
+// Keep the workspace frame out of empty turns and the other mode's caller.
+#[inline(never)]
+fn hash_cohort_on<const N: usize>(hashers: &mut [Hasher], alike: &[usize], platform: Platform) {
+    use crate::{BLOCK_LEN, PARENT};
+    let first = alike[0];
+    #[cfg(all(test, feature = "std"))]
+    let _ = LAST_COHORT_TIER.try_with(|t| t.set(N));
     let domain = hashers[first].domain();
     let flags = domain.flags();
     // Plain cohorts hash under the constant IV directly (fault isolation),
     // while a keyed or derive-key hasher hashes alone here under its own key.
     let key = if domain.is_plain() { *crate::IV } else { *domain.key() };
-    let turn = crate::platform::Sme2Turn::take(hashers[first].platform(), true);
-    let platform = turn.platform();
     let mut work = HeldWorkspace::<N>::new();
     let (mut level, mut next) = work.buffers(alike.len());
     #[cfg(blake3_sme2)]
@@ -531,7 +547,6 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
         core::mem::swap(&mut level, &mut next);
         per /= 2;
     }
-    drop(turn);
     for (k, &i) in alike.iter().enumerate() {
         let (counter, _) = hashers[i].held_group().unwrap();
         let mut result = [0u8; BLOCK_LEN];
@@ -579,9 +594,9 @@ pub fn hash_each(mode: Mode, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LE
 /// The most items [`hash_by_blocks`] sorts at once: a stream task's
 /// members, or with SME2 its message kernel's table.
 #[cfg(blake3_sme2)]
-const BY_BLOCKS_AT_ONCE: usize = TABLE;
+pub(crate) const BY_BLOCKS_AT_ONCE: usize = TABLE;
 #[cfg(not(blake3_sme2))]
-const BY_BLOCKS_AT_ONCE: usize = 64;
+pub(crate) const BY_BLOCKS_AT_ONCE: usize = 64;
 
 /// The digest of each of `items`, every one of up to a chunk, of any
 /// lengths, by their blocks: those with as many whole blocks before their
@@ -593,7 +608,7 @@ const BY_BLOCKS_AT_ONCE: usize = 64;
 /// an empty message's is empty) compressed on its own with CHUNK_END and
 /// ROOT, CHUNK_START too where k is 0. Up to BY_BLOCKS_AT_ONCE items are
 /// sorted at once, on the stack. Requires AVX2 or AVX-512 on x86-64; NEON on AArch64.
-fn hash_by_blocks(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
+pub(crate) fn hash_by_blocks(items: &[&[u8]], key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     hash_chunks_by_blocks(items, key, 0, flags, CHUNK_END | crate::ROOT, out, platform);
 }
 
@@ -1516,23 +1531,85 @@ mod test {
         }
     }
 
-    /// A turn of many hashers on AArch64 keeps a fresh hasher's first
-    /// chunk in its stage, for `finalize_each` to find; elsewhere, and in
-    /// a single `update` everywhere, it goes to the core. The digest is
-    /// the same either way, so the stage's length tells.
+    /// A turn of many hashers keeps a fresh plain hasher's first chunk in its
+    /// stage everywhere (for `finalize_each` SIMD batching), while a keyed
+    /// hasher's first chunk goes to the core on x86-64 (for `output16`) and
+    /// stays staged on AArch64; a single `update` stages everywhere.
     #[test]
     fn a_turn_stages_a_first_chunk_on_aarch64_and_an_update_everywhere() {
         crate::initialize();
         let bytes = [7u8; 300];
-        let mut hashers = vec![Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
-        update_each(&mut hashers, &[(0, &bytes[..100]), (0, &bytes[100..])]);
+        let key = [0x42u8; 32];
+        let mut hashers = vec![Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None), Hasher::new(Mode::Keyed(&key), None)];
+        update_each(&mut hashers, &[(0, &bytes[..100]), (0, &bytes[100..]), (2, &bytes[..100]), (2, &bytes[100..])]);
         hashers[1].update(&bytes);
-        let in_turn = if cfg!(blake3_neon) { (300, 0) } else { (0, 300) };
-        assert_eq!((hashers[0].staged_len(), hashers[0].count() - hashers[0].staged_len() as u64), in_turn, "a turn's first chunk");
+        assert_eq!((hashers[0].staged_len(), hashers[0].count() - hashers[0].staged_len() as u64), (300, 0), "a plain turn's first chunk stays staged");
         assert_eq!((hashers[1].staged_len(), hashers[1].count() - hashers[1].staged_len() as u64), (300, 0), "an update's first chunk waits in the stage");
-        for h in hashers {
-            assert_eq!(h.finalize(), crate::test::official::hash(Mode::Plain, &bytes));
-        }
+        let keyed_in_turn = if cfg!(blake3_neon) { (300, 0) } else { (0, 300) };
+        assert_eq!((hashers[2].staged_len(), hashers[2].count() - hashers[2].staged_len() as u64), keyed_in_turn, "a keyed turn's first chunk");
+        assert_eq!(hashers[0].finalize(), crate::test::official::hash(Mode::Plain, &bytes));
+        assert_eq!(hashers[1].finalize(), crate::test::official::hash(Mode::Plain, &bytes));
+        assert_eq!(hashers[2].finalize(), crate::test::official::hash(Mode::Keyed(&key), &bytes));
+    }
+
+    /// x86-64 `finalize_each` exact dispatch boundaries for staged plain full
+    /// chunks (`== 1024 B` -> `hash_many_rounded` when `>= 2`), staged plain
+    /// multi-block short messages (`65..=1023 B` -> `hash_by_blocks` on AVX2/AVX-512
+    /// when `>= 4` or `>= 2` with length `> 128 B`), `<= 64 B` remaining in `rest`,
+    /// and 128-index window boundaries.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_finalize_each_batches_staged_plain_chunks_and_short_blocks() {
+        crate::initialize();
+        let run_case = |lens: &[usize]| -> (u64, u64, bool) {
+            let data: Vec<Vec<u8>> = lens.iter().enumerate().map(|(i, &n)| (0..n).map(|j| ((i * 41 + j * 13) & 0xff) as u8).collect()).collect();
+            let mut hashers: Vec<_> = (0..lens.len()).map(|_| Hasher::new(Mode::Plain, None)).collect();
+            for offset in (0..1024).step_by(256) {
+                let pieces: Vec<_> =
+                    data.iter().enumerate().filter(|(_, d)| offset < d.len()).map(|(i, d)| (i, &d[offset..(offset + 256).min(d.len())])).collect();
+                if !pieces.is_empty() {
+                    update_each(&mut hashers, &pieces);
+                }
+            }
+            let which: Vec<usize> = (0..lens.len()).collect();
+            let mut out = vec![[0u8; OUT_LEN]; lens.len()];
+            crate::COUNTED.with(|c| {
+                c[crate::Counted::HashManyCall as usize].set(0);
+                c[crate::Counted::ByBlocksCall as usize].set(0);
+            });
+            crate::ROUNDED_WIDTH.with(|w| w.set(0));
+            finalize_each(&mut hashers, &which, &mut out);
+            for (d, got) in data.iter().zip(&out) {
+                assert_eq!(*got, crate::test::official::hash(Mode::Plain, d), "len={}", d.len());
+            }
+            assert!(hashers.iter().all(|h| h.count() == 0));
+            let rounded = crate::ROUNDED_WIDTH.with(|w| w.get()) != 0;
+            (
+                crate::COUNTED.with(|c| c[crate::Counted::HashManyCall as usize].get()),
+                crate::COUNTED.with(|c| c[crate::Counted::ByBlocksCall as usize].get()),
+                rounded,
+            )
+        };
+        let block_lanes = matches!(Platform::detect(), Platform::AVX2 | Platform::AVX512);
+        assert_eq!(run_case(&[1024]), (0, 0, false), "1 full chunk takes scalar root");
+        assert_eq!(run_case(&[1024, 1024]), (1, 0, false), "2 full chunks call hash_many_rounded without padding");
+        assert_eq!(run_case(&[1024; 3]), (1, 0, true), "3 full chunks round up via hash_many_rounded");
+        assert_eq!(run_case(&[1024; 35]), (2, 0, true), "35 full chunks split into 32 + 3");
+        assert_eq!(run_case(&[512]), (0, 0, false), "1 short plain message skips hash_by_blocks");
+        assert_eq!(run_case(&[64, 128]), (0, 0, false), "64 B stays in rest so single 128 B skips hash_by_blocks");
+        assert_eq!(run_case(&[64, 64, 64, 65]), (0, 0, false), "64 B stays in rest so lone 65 B skips hash_by_blocks");
+        assert_eq!(run_case(&[65, 65]), (0, 0, false), "pair of 1-prefix-block 65 B messages stays scalar");
+        assert_eq!(run_case(&[128, 128]), (0, 0, false), "pair of 128 B messages stays scalar");
+        assert_eq!(run_case(&[65; 4]), (0, u64::from(block_lanes), false), "4 x 65 B batches via hash_by_blocks");
+        assert_eq!(run_case(&[129, 129]), (0, u64::from(block_lanes), false), "pair of 129 B (2 prefix blocks) batches");
+        assert_eq!(run_case(&[512, 512]), (0, u64::from(block_lanes), false), "pair of 512 B batches via hash_by_blocks");
+        assert_eq!(run_case(&[1023, 1023]), (0, u64::from(block_lanes), false), "high endpoint 1023 B batches via hash_by_blocks");
+        assert_eq!(run_case(&[65, 129, 512, 1023]), (0, if block_lanes { 4 } else { 0 }, false), "4 distinct prefix buckets batch each bucket");
+        assert_eq!(run_case(&[512; 65]), (0, if block_lanes { 5 } else { 0 }, false), "65 short plain messages split across BY_BLOCKS_AT_ONCE");
+        // Straddling the 128-index window: 128 full chunks (4 x 32) + 3 rounded full chunks in window 2.
+        assert_eq!(run_case(&[1024; 131]), (5, 0, true), "131 full chunks cross the 128-index window and round window 2");
+        // Straddling with a singleton in window 2 (128 full + 1 full): window 2 finishes scalar.
+        assert_eq!(run_case(&[1024; 129]), (4, 0, false), "129 full chunks finish the 129th scalar in window 2");
     }
 
     /// Messages fed by turns and finished together match the official
@@ -2139,15 +2216,16 @@ mod test {
         assert!(ok.load(Ordering::SeqCst), "TLS destructor digests must match");
     }
 
-    /// `hash_held` picks the smallest `hash_cohort::<N>` workspace tier (1, 16,
-    /// or `TABLE`) for plain cohorts across every `std` platform.
+    /// `hash_held` picks the smallest `hash_cohort_on::<N>` workspace tier (1
+    /// for a singleton, 16-stage L1D-hot tiles for 2..=128) for plain cohorts
+    /// across every `std` platform.
     #[cfg(feature = "std")]
     #[test]
     fn hash_held_selects_smallest_cohort_tier() {
         crate::initialize();
         let data = std::vec![0x42u8; crate::STAGE_LEN + 17];
         let expected = *blake3::hash(&data).as_bytes();
-        for (count, expected_tier) in [(1usize, 1usize), (2, 16), (16, 16), (17, TABLE)] {
+        for (count, expected_tier) in [(1usize, 1usize), (2, 16), (16, 16), (17, 16), (33, 16)] {
             let mut hashers: std::vec::Vec<Hasher> = (0..count).map(|_| Hasher::new(Mode::Plain, None)).collect();
             LAST_COHORT_TIER.with(|t| t.set(0));
             for piece in data.chunks(4096) {
@@ -2159,11 +2237,11 @@ mod test {
         }
     }
 
-    /// Feeding small plain (1..=16) or mixed keyed+plain (3..=16) cohorts of
-    /// boxed hashers through a 16 KiB stage in `update_each` must take the
-    /// small `hash_cohort::<1>` / `<16>` and `held_groups_in::<16>` workspaces
-    /// (~1.2–14.5 KiB) rather than the 128-stage workspace (~112 KiB), so all
-    /// succeed on a 64 KiB worker thread stack.
+    /// Feeding plain (including 17 and 33 hashers fed sixteen 1 KiB pieces) or
+    /// mixed keyed+plain (3..=16) cohorts of boxed hashers through a 16 KiB
+    /// stage in `update_each` uses bounded 1/16-stage workspaces (~1.5–15 KiB)
+    /// rather than a 116 KiB 128-stage frame, so all succeed on a 64 KiB worker
+    /// thread stack.
     #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
     #[test]
     fn small_held_cohorts_fit_in_64kib_stack() {
@@ -2172,14 +2250,16 @@ mod test {
         let expected_plain = *blake3::hash(&data).as_bytes();
         let key = [0x5Au8; 32];
         let expected_keyed = *blake3::keyed_hash(&key, &data).as_bytes();
-        for (count, keyed_first) in [(1usize, false), (2, false), (3, true), (16, true)] {
+        for (count, keyed_first, piece_len) in
+            [(1usize, false, 4096usize), (2, false, 4096), (3, true, 4096), (16, true, 4096), (17, false, 1024), (33, false, 1024)]
+        {
             let data_c = data.clone();
             let mut hashers: std::vec::Vec<Hasher> =
                 (0..count).map(|i| if keyed_first && i == 0 { Hasher::new(Mode::Keyed(&key), None) } else { Hasher::new(Mode::Plain, None) }).collect();
             let (first, last) = std::thread::Builder::new()
                 .stack_size(64 * 1024)
                 .spawn(move || {
-                    for piece in data_c.chunks(4096) {
+                    for piece in data_c.chunks(piece_len) {
                         let pieces: std::vec::Vec<(usize, &[u8])> = (0..count).map(|i| (i, piece)).collect();
                         update_each(&mut hashers[..], &pieces);
                     }
@@ -2187,7 +2267,7 @@ mod test {
                 })
                 .expect("spawn 64 KiB thread")
                 .join()
-                .expect("small held cohort must fit in 64 KiB stack");
+                .expect("held cohort must fit in 64 KiB stack");
             assert_eq!(first, if keyed_first { expected_keyed } else { expected_plain }, "cohort of {count} (keyed={keyed_first}) first");
             assert_eq!(last, expected_plain, "cohort of {count} (keyed={keyed_first}) last");
         }

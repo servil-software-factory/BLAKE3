@@ -1196,7 +1196,7 @@ pub(crate) mod domain {
             self.flags
         }
 
-        #[cfg(feature = "std")]
+        #[cfg(any(feature = "std", blake3_sse41_ffi))]
         #[inline(always)]
         pub(crate) const fn is_plain(&self) -> bool {
             self.flags == 0

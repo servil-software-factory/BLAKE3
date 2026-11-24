@@ -552,9 +552,9 @@ mod tests {
                     1 => crate::Mode::Keyed(&key),
                     _ => crate::Mode::DeriveKey("BLAKE3-Servil bulk-root test"),
                 };
-                // Fed in turns: the message waits in its chunk state. A
-                // block or less fed by `update` waits in the stage; both
-                // reach the kernel.
+                // Keyed/derived turns wait in ChunkState; plain turns and
+                // <= 64 B updates wait in the stage. Eligible descriptors pack
+                // into `output16` when 16 remain in `rest`.
                 let mut h = Hasher::new(mode, None);
                 if len <= BLOCK_LEN && i % 2 == 0 {
                     for part in data.chunks(17) {
@@ -577,8 +577,17 @@ mod tests {
             crate::each::finalize_each(&mut hashers, &which, &mut out);
             let wanted: Vec<_> = which.iter().map(|&i| expected[i]).collect();
             assert_eq!(out, wanted);
+            // Plain multi-block items (> 64 B) are routed to `hash_many_rounded` /
+            // `hash_by_blocks` on AVX2/AVX-512; the remaining `rest` items pack
+            // eligible descriptors into 16-lane `output16` when at least 16 fit.
+            let rest_count = (0..count)
+                .filter(|&i| {
+                    let len = [0usize, 1, 31, 63, 64, 65, 127, 255, 511, 1023, 1024][i % 11];
+                    i % 3 != 0 || len <= BLOCK_LEN
+                })
+                .count();
             let reached = crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry() as usize)));
-            assert_eq!(reached, count >= 16 && matches!(Platform::detect(), Platform::AVX512));
+            assert_eq!(reached, rest_count >= 16 && matches!(Platform::detect(), Platform::AVX512));
             assert!(hashers.iter().all(|h| h.count() == 0), "selected hashers reset");
             crate::each::finalize_each(&mut hashers, &which, &mut out);
             let wanted: Vec<_> = which.iter().map(|&i| empty[i]).collect();
@@ -597,9 +606,9 @@ mod tests {
         }
     }
 
-    /// A message partly in its chunk state (a turn's bytes) and partly in
-    /// the stage (an update's after them) is in neither form the kernel
-    /// takes: sixteen of them finish each alone, to the right digests.
+    /// A keyed message partly in its chunk state (a turn's bytes) and partly in
+    /// the stage (an update's after them) is not eligible for `output16`, and a
+    /// plain message follows its staged path: every digest matches official BLAKE3.
     #[test]
     fn a_turn_then_an_update_finishes_outside_the_group() {
         crate::initialize();
@@ -642,5 +651,50 @@ mod tests {
         crate::each::finalize_each(&mut hashers, &which, &mut out);
         assert_eq!(out, expected);
         assert!(!crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry() as usize))));
+    }
+
+    /// Eligible `rest` descriptors pack independently around ineligible ones:
+    /// an ineligible 1025 B plain message interleaved among 16 eligible keyed
+    /// hashers still reaches 16-lane `output16` on AVX-512, and `OutputGroupTurn`
+    /// counts once per `finalize_each` call even across multiple 128-slot windows.
+    #[test]
+    fn mixed_eligible_output16_packs_around_ineligible_messages() {
+        crate::initialize();
+        let key = [0x4Du8; 32];
+        let mut hashers = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..17 {
+            if i == 8 {
+                let data = vec![0x77u8; 1025];
+                let mut h = Hasher::new(crate::Mode::Plain, None);
+                h.update(&data);
+                hashers.push(h);
+                expected.push(crate::test::official::hash(crate::Mode::Plain, &data));
+            } else {
+                let data = vec![i as u8; 32];
+                hashers.push(Hasher::new(crate::Mode::Keyed(&key), None));
+                crate::each::update_each(&mut hashers, &[(i, &data)]);
+                expected.push(crate::test::official::hash(crate::Mode::Keyed(&key), &data));
+            }
+        }
+        let which: Vec<usize> = (0..17).collect();
+        let mut out = vec![[0u8; 32]; 17];
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].set(0));
+        crate::each::finalize_each(&mut hashers, &which, &mut out);
+        assert_eq!(out, expected);
+        let on_avx512 = matches!(Platform::detect(), Platform::AVX512);
+        assert_eq!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry() as usize))), on_avx512);
+        assert_eq!(crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].get()), u64::from(on_avx512));
+
+        // 256 eligible keyed hashers spanning two 128-slot windows still count one OutputGroupTurn.
+        let mut many: Vec<_> = (0..256).map(|_| Hasher::new(crate::Mode::Keyed(&key), None)).collect();
+        let pieces: Vec<_> = (0..256).map(|i| (i, b"short-keyed-msg".as_slice())).collect();
+        crate::each::update_each(&mut many, &pieces);
+        let which256: Vec<usize> = (0..256).collect();
+        let mut out256 = vec![[0u8; 32]; 256];
+        crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].set(0));
+        crate::each::finalize_each(&mut many, &which256, &mut out256);
+        assert_eq!(crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].get()), u64::from(on_avx512));
     }
 }
