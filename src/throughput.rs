@@ -119,6 +119,44 @@ pub fn hash_many<P: Prepared + ?Sized>(mode: Mode, batch: &P, out: &mut [[u8; OU
     crate::hash_many_serial(batch.bytes(), batch.message_len(), batch.slot(), key, flags, out);
 }
 
+/// Hash `out.len()` single-block messages derived from `template` (`4..=64`
+/// bytes) in `mode`, replacing the 4-byte little-endian word at byte offset
+/// `counter_word * 4` with `start.wrapping_add(i)` (modulo 2^32) for
+/// `i in 0..out.len()`.
+///
+/// The template is broadcast once and only the counter word advances in
+/// registers, avoiding caller-side buffer stamping and input memory traffic
+/// in proof-of-work, counter-grinding, and similar loops.
+///
+/// Panics if `template.len() > BLOCK_LEN`, `counter_word >= 16`, or
+/// `counter_word * 4 + 4 > template.len()` (checked in every build, even
+/// when `out` is empty).
+///
+/// # Example
+///
+/// ```
+/// # blake3_servil_core::initialize();
+/// use blake3_servil_core::{Mode, convenience, throughput};
+/// let mut template = [0u8; 52];
+/// template[..48].fill(0xab);
+/// let mut digests = [[0u8; 32]; 16];
+/// throughput::hash_counter_range(Mode::Plain, &template, 12, 100, &mut digests);
+/// template[48..52].copy_from_slice(&103u32.to_le_bytes());
+/// assert_eq!(digests[3], *convenience::hash(&template).as_bytes());
+/// ```
+#[inline(always)]
+pub fn hash_counter_range(mode: Mode, template: &[u8], counter_word: usize, start: u32, out: &mut [[u8; OUT_LEN]]) {
+    crate::ffi_counter::validate_counter_range(template, counter_word);
+    let platform = crate::platform::Platform::detect();
+    if out.is_empty() {
+        return;
+    }
+    let mut room = core::mem::MaybeUninit::uninit();
+    let (key, flags) = mode.key(&mut room);
+    let turn = crate::platform::Sme2Turn::take(platform, out.len() >= 16);
+    crate::ffi_counter::hash_counter_range_on(template, counter_word, start, key, flags, out, turn.platform());
+}
+
 /// Hash a key-derivation context string and return a [`ContextKey`].
 ///
 /// This has the same security requirement as key derivation. **The context
@@ -627,6 +665,24 @@ impl TreeHasher {
     pub fn hash_many<P: Prepared + ?Sized>(&self, batch: &P, out: &mut [[u8; OUT_LEN]]) {
         let turn = self.turn_if(crate::many::sme2_sized(batch.message_len(), out.len()));
         self.hash_many_on(turn.platform(), batch, out);
+    }
+
+    /// Hash `out.len()` single-block messages derived from `template`
+    /// (`4..=64` bytes) in this `TreeHasher`'s mode, replacing the 4-byte
+    /// little-endian word at byte offset `counter_word * 4` with
+    /// `start.wrapping_add(i)` (modulo 2^32) for `i in 0..out.len()`.
+    ///
+    /// Respects [`Self::on_this_core`] on Apple/AArch64 SME2 hosts. Panics if
+    /// `template.len() > BLOCK_LEN`, `counter_word >= 16`, or
+    /// `counter_word * 4 + 4 > template.len()` (checked in every build, even
+    /// when `out` is empty).
+    pub fn hash_counter_range(&self, template: &[u8], counter_word: usize, start: u32, out: &mut [[u8; OUT_LEN]]) {
+        crate::ffi_counter::validate_counter_range(template, counter_word);
+        let turn = self.turn_if(out.len() >= 16);
+        if out.is_empty() {
+            return;
+        }
+        crate::ffi_counter::hash_counter_range_on(template, counter_word, start, self.domain.key(), self.domain.flags(), out, turn.platform());
     }
 
     /// A worker's checked slice of a [`Prepared`] batch, on `platform`'s

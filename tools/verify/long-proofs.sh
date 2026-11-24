@@ -32,7 +32,7 @@ b64() { printf %s "$1" | tr a-f A-F | basenc --base16 -d | basenc --base64url | 
 # tools, the specification, every checked generator, and the executing
 # driver, which can come from another commit. A green run with identical
 # inputs is reused; its status names the run that already passed.
-inputs=$(listing=$(git -C "$root" ls-tree "$commit" -- c c2sp tools/verify tools/gen_neon_hybrid.py tools/gen_sme2_hybrid.py tools/gen_x86.py tools/gen_output16.py tools/gen_output8.py tools/gen_packed_x86.py tools/gen_packed_sme2.py tools/gen_packed_neon.py) && driver=$(sha256sum < "$0") && printf '%s\n%s\n' "$listing" "$driver" | sha256sum | cut -d' ' -f1)
+inputs=$(listing=$(git -C "$root" ls-tree "$commit" -- c c2sp tools/verify tools/gen_neon_hybrid.py tools/gen_sme2_hybrid.py tools/gen_x86.py tools/gen_output16.py tools/gen_output8.py tools/gen_packed_x86.py tools/gen_packed_sme2.py tools/gen_packed_neon.py tools/gen_counter_x86.py tools/gen_counter_sme2.py tools/gen_counter_neon.py) && driver=$(sha256sum < "$0") && printf '%s\n%s\n' "$listing" "$driver" | sha256sum | cut -d' ' -f1)
 logs=$root/tmp/long-proofs/$commit-$inputs
 record=$root/tmp/long-proofs/inputs/$inputs.txt
 if [ -f "$record" ]; then
@@ -75,7 +75,7 @@ run lean_spec python3 c2sp/BLAKE3/check.py
 # version above all (Z3 4.13.3 crashed as it exited, November 15, 2026).
 run versions sh -c 'uname -srm && python3 --version && python3 -c "import z3; print(\"z3\", z3.get_version_string())" && (cd c2sp/BLAKE3 && lake --version)'
 run lean_emit sh -c 'python3 tools/verify/lean/emit.py && git diff --exit-code tools/verify/lean/compress.json tools/verify/lean/Generic.lean'
-run generated sh -c 'python3 tools/gen_neon_hybrid.py | cmp - c/blake3_neon_hybrid_aarch64.S && python3 tools/gen_sme2_hybrid.py | cmp - c/blake3_sme2_hybrid_aarch64.S && python3 tools/gen_x86.py | cmp - c/blake3_partial_x86-64_unix.S && python3 tools/gen_output16.py | cmp - c/blake3_output16.S && python3 tools/gen_output8.py | cmp - c/blake3_output8.S && python3 tools/gen_packed_x86.py | cmp - c/blake3_packed_x86-64_unix.S && python3 tools/gen_packed_sme2.py | cmp - c/blake3_packed_sme2_aarch64.S && python3 tools/gen_packed_neon.py | cmp - c/blake3_packed_neon_aarch64.S'
+run generated sh -c 'python3 tools/gen_neon_hybrid.py | cmp - c/blake3_neon_hybrid_aarch64.S && python3 tools/gen_sme2_hybrid.py | cmp - c/blake3_sme2_hybrid_aarch64.S && python3 tools/gen_x86.py | cmp - c/blake3_partial_x86-64_unix.S && python3 tools/gen_output16.py | cmp - c/blake3_output16.S && python3 tools/gen_output8.py | cmp - c/blake3_output8.S && python3 tools/gen_packed_x86.py | cmp - c/blake3_packed_x86-64_unix.S && python3 tools/gen_packed_sme2.py | cmp - c/blake3_packed_sme2_aarch64.S && python3 tools/gen_packed_neon.py | cmp - c/blake3_packed_neon_aarch64.S && python3 tools/gen_counter_x86.py | cmp - c/blake3_counter_x86-64_unix.S && python3 tools/gen_counter_sme2.py | cmp - c/blake3_counter_sme2_aarch64.S && python3 tools/gen_counter_neon.py | cmp - c/blake3_counter_neon_aarch64.S'
 run helpers python3 -m unittest discover -s tools/verify -p 'test_*.py'
 run prove_hybrid python3 tools/verify/prove_hybrid.py
 run prove_sme2 python3 tools/verify/prove_sme2.py chunks chunks_at messages parents xof chunks_x2 every parents_every xof_every messages_every x2_every
@@ -88,6 +88,8 @@ run prove_output python3 tools/verify/prove_output.py
 run prove_output8 python3 tools/verify/prove_output8.py
 run prove_packed_x86 python3 tools/verify/prove_packed_x86.py
 run prove_packed_aarch64 python3 tools/verify/prove_packed_aarch64.py
+run prove_counter_x86 python3 tools/verify/prove_counter_x86.py
+run prove_counter_aarch64 python3 tools/verify/prove_counter_aarch64.py
 run prove_x86_loop sh -c 'ulimit -v 6291456; exec python3 tools/verify/prove_x86_loop.py'
 if [ $arm = yes ]; then
 	run cross_check python3 tools/verify/cross_check.py
