@@ -578,6 +578,14 @@ pub mod throughput {
         crate::lanes::hash_many_in(kind, key, context, batch.part(0..out.len()), out);
     }
 
+    #[doc(hidden)]
+    pub fn probe_hash_many_mt<P: Prepared>(mode: Mode, batch: &P, out: &mut [[u8; OUT_LEN]]) {
+        crate::lanes::require();
+        assert_eq!(Some(batch.bytes().len()), batch.slot().checked_mul(out.len()), "input holds one slot per output");
+        let (kind, key, context) = crate::lanes::parts(mode);
+        crate::lanes::hash_many_in(kind, key, context, batch.part(0..out.len()), out);
+    }
+
     /// [`hash`], eligible to use other CPU cores above the split threshold:
     /// always the same [`Hash`](struct@Hash) as single-threaded `hash`. For a
     /// message whose bytes are not in blocks (a mapped file, say),
