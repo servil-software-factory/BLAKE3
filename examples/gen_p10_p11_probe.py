@@ -211,7 +211,62 @@ def neon_store_quad(base_reg, slots):
     return L
 
 
-def emit_kernel(name, k, stride, nwords, prefix):
+def neon_quad_half_step_steps(base_reg, spill_d, quads, sched, base, msg_base, nwords):
+    """4-G step-at-a-time half-round (as Quad(steps=True) in gen_neon_hybrid.py),
+    hiding NEON vector latencies on cores with narrower OoO windows (AmpereOne/Neoverse)."""
+    cols = [(f"v{base_reg + ai}", f"v{base_reg + bi}", f"v{base_reg + ci}", f"v{base_reg + di}", di, sched[base + k], sched[base + k + 1])
+            for (ai, bi, ci, di), k in zip(quads, range(0, 8, 2))]
+    if spill_d:
+        # Unit 1 spills d row; keep whole Gs (only 1 dtemp v29).
+        out = []
+        for (ai, bi, ci, di), k in zip(quads, range(0, 8, 2)):
+            out.extend(neon_quad_g(base_reg, True, ai, bi, ci, di, msg_base, sched[base + k], sched[base + k + 1], nwords))
+        return out
+    home = [b for _, b, _, _, _, _, _ in cols]
+    at, spare = list(home), "v30"
+    out = []
+    e = out.append
+    for a, _, _, _, _, mx, _ in cols:
+        if mx < nwords:
+            e(f"ldr q28, [sp, #{msg_base + 16 * mx}]")
+            e(f"add {a}.4s, {a}.4s, v28.4s")
+    for a, b, _, _, _, _, _ in cols:
+        e(f"add {a}.4s, {a}.4s, {b}.4s")
+    for a, _, _, d, _, _, _ in cols:
+        e(f"eor {d}.16b, {d}.16b, {a}.16b")
+    for _, _, _, d, _, _, _ in cols:
+        e(f"rev32 {d}.8h, {d}.8h")
+    for _, _, c, d, _, _, _ in cols:
+        e(f"add {c}.4s, {c}.4s, {d}.4s")
+    for _, b, c, _, _, _, _ in cols:
+        e(f"eor {b}.16b, {b}.16b, {c}.16b")
+    for j in range(4):
+        e(f"shl {spare}.4s, {at[j]}.4s, #20")
+        e(f"sri {spare}.4s, {at[j]}.4s, #12")
+        at[j], spare = spare, at[j]
+    for a, _, _, _, _, _, my in cols:
+        if my < nwords:
+            e(f"ldr q28, [sp, #{msg_base + 16 * my}]")
+            e(f"add {a}.4s, {a}.4s, v28.4s")
+    for j in range(4):
+        e(f"add {cols[j][0]}.4s, {cols[j][0]}.4s, {at[j]}.4s")
+    for a, _, _, d, _, _, _ in cols:
+        e(f"eor {d}.16b, {d}.16b, {a}.16b")
+    for _, _, _, d, _, _, _ in cols:
+        e(f"tbl {d}.16b, {{{d}.16b}}, v31.16b")
+    for _, _, c, d, _, _, _ in cols:
+        e(f"add {c}.4s, {c}.4s, {d}.4s")
+    for j in range(4):
+        e(f"eor {at[j]}.16b, {at[j]}.16b, {cols[j][2]}.16b")
+    for j in reversed(range(4)):
+        e(f"shl {spare}.4s, {at[j]}.4s, #25")
+        e(f"sri {spare}.4s, {at[j]}.4s, #7")
+        at[j], spare = spare, at[j]
+    assert at == home and spare == "v30"
+    return out
+
+
+def emit_kernel(name, k, stride, nwords, prefix, steps=False):
     """Emit one 1-block (8 + k)-lane kernel: 2 NEON quads + k sequential zero-spill scalars."""
     sym = f"{prefix}{name}"
     L = [f".globl {sym}", ".p2align 4", f"{sym}:"]
@@ -279,9 +334,12 @@ def emit_kernel(name, k, stride, nwords, prefix):
     for r in range(7):
         sched = SCHEDULE[r]
         for quads, base in ((COLS, 0), (DIAGS, 8)):
-            for (ai, bi, ci, di), idx in zip(quads, range(0, 8, 2)):
-                mx, my = sched[base + idx], sched[base + idx + 1]
-                vec_stream.extend(neon_quad_g(0, False, ai, bi, ci, di, F_MSG0, mx, my, nwords))
+            if steps:
+                vec_stream.extend(neon_quad_half_step_steps(0, False, quads, sched, base, F_MSG0, nwords))
+            else:
+                for (ai, bi, ci, di), idx in zip(quads, range(0, 8, 2)):
+                    mx, my = sched[base + idx], sched[base + idx + 1]
+                    vec_stream.extend(neon_quad_g(0, False, ai, bi, ci, di, F_MSG0, mx, my, nwords))
             for (ai, bi, ci, di), idx in zip(quads, range(0, 8, 2)):
                 mx, my = sched[base + idx], sched[base + idx + 1]
                 vec_stream.extend(neon_quad_g(16, True, ai, bi, ci, di, F_MSG1, mx, my, nwords))
@@ -315,14 +373,16 @@ def emit_kernel(name, k, stride, nwords, prefix):
 
 
 KERNELS = [
-    ("probe_p10_64", 2, None, 16),
-    ("probe_p11_64", 3, None, 16),
-    ("probe_p10_packed32", 2, 32, 8),
-    ("probe_p11_packed32", 3, 32, 8),
-    ("probe_p10_packed48", 2, 48, 12),
-    ("probe_p11_packed48", 3, 48, 12),
-    ("probe_p11_packed16", 3, 16, 4),
-    ("probe_p11_packed64", 3, 64, 16),
+    ("probe_p10_64", 2, None, 16, False),
+    ("probe_p11_64", 3, None, 16, False),
+    ("probe_p11_64_steps", 3, None, 16, True),
+    ("probe_p10_packed32", 2, 32, 8, False),
+    ("probe_p11_packed32", 3, 32, 8, False),
+    ("probe_p11_packed32_steps", 3, 32, 8, True),
+    ("probe_p10_packed48", 2, 48, 12, False),
+    ("probe_p11_packed48", 3, 48, 12, False),
+    ("probe_p11_packed16", 3, 16, 4, False),
+    ("probe_p11_packed64", 3, 64, 16, False),
 ]
 
 
@@ -330,8 +390,8 @@ def main():
     out_dir = Path("examples")
     for suffix, prefix in (("elf", ""), ("apple", "_")):
         parts = [".text"]
-        for name, k, stride, nwords in KERNELS:
-            parts.append(emit_kernel(name, k, stride, nwords, prefix))
+        for name, k, stride, nwords, steps in KERNELS:
+            parts.append(emit_kernel(name, k, stride, nwords, prefix, steps=steps))
         (out_dir / f"p10_p11_{suffix}.S").write_text("\n\n".join(parts) + "\n")
     print("Generated examples/p10_p11_{elf,apple}.S")
 

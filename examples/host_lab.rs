@@ -16,8 +16,10 @@ core::arch::global_asm!(include_str!("p10_p11_elf.S"), options(raw));
 unsafe extern "C" {
     fn probe_p10_64(inputs: *const *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
     fn probe_p11_64(inputs: *const *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
+    fn probe_p11_64_steps(inputs: *const *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
     fn probe_p10_packed32(base: *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
     fn probe_p11_packed32(base: *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
+    fn probe_p11_packed32_steps(base: *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
     fn probe_p10_packed48(base: *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
     fn probe_p11_packed48(base: *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
     fn probe_p11_packed16(base: *const u8, key: *const u32, counter: u64, flags: u32, block_len: u32, out: *mut u8);
@@ -74,6 +76,11 @@ fn verify_all() {
         for i in 0..11 {
             assert_eq!(out11[i], *hash_with(mode, &msgs64[i]).as_bytes(), "p11_64 {mname} lane {i}");
         }
+        let mut out11s = [[0u8; 32]; 11];
+        unsafe { probe_p11_64_steps(ptrs.as_ptr(), kw.as_ptr(), 0, flags, 64, out11s.as_mut_ptr().cast()) };
+        for i in 0..11 {
+            assert_eq!(out11s[i], *hash_with(mode, &msgs64[i]).as_bytes(), "p11_64_steps {mname} lane {i}");
+        }
 
         let mut out11c = [[0u8; 32]; 11];
         unsafe { probe_p11_packed64(msgs64.as_ptr().cast(), kw.as_ptr(), 0, flags, 64, out11c.as_mut_ptr().cast()) };
@@ -98,6 +105,11 @@ fn verify_all() {
         unsafe { probe_p11_packed32(msgs32.as_ptr().cast(), kw.as_ptr(), 0, flags, 32, out11_32.as_mut_ptr().cast()) };
         for i in 0..11 {
             assert_eq!(out11_32[i], *hash_with(mode, &msgs32[i]).as_bytes(), "p11_packed32 {mname} lane {i}");
+        }
+        let mut out11_32s = [[0u8; 32]; 11];
+        unsafe { probe_p11_packed32_steps(msgs32.as_ptr().cast(), kw.as_ptr(), 0, flags, 32, out11_32s.as_mut_ptr().cast()) };
+        for i in 0..11 {
+            assert_eq!(out11_32s[i], *hash_with(mode, &msgs32[i]).as_bytes(), "p11_packed32_steps {mname} lane {i}");
         }
 
         // 16-byte packed inputs (11 messages)
@@ -131,7 +143,7 @@ fn verify_all() {
             assert_eq!(out11_48[i], *hash_with(mode, &msgs48[i]).as_bytes(), "p11_packed48 {mname} lane {i}");
         }
     }
-    println!("verify_all: ALL 8 probe kernels bit-for-bit identical (Plain + Keyed)!");
+    println!("verify_all: ALL 10 probe kernels bit-for-bit identical (Plain + Keyed)!");
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -195,6 +207,11 @@ fn run_suite(tag: &str, reps_1k: usize) {
             unsafe { probe_p11_64(black_box(ptrs64.as_ptr().add(off)), IV.as_ptr(), 0, FLAGS_PLAIN, 64, black_box(out.as_mut_ptr().add(off).cast())) };
         }
     });
+    let p11_64_steps = time_ns_per_hash(n11, reps_1k, 15, || {
+        for off in (0..n11).step_by(11) {
+            unsafe { probe_p11_64_steps(black_box(ptrs64.as_ptr().add(off)), IV.as_ptr(), 0, FLAGS_PLAIN, 64, black_box(out.as_mut_ptr().add(off).cast())) };
+        }
+    });
     let raw64_ptr = b64.blocks().as_ptr() as *const u8;
     let p11_p64 = time_ns_per_hash(n11, reps_1k, 15, || {
         for off in (0..n11).step_by(11) {
@@ -206,6 +223,7 @@ fn run_suite(tag: &str, reps_1k: usize) {
     println!("  next NEON Batch(64):  {next_neon_64:6.2} ns/h  (1.00x)");
     println!("  probe p10 (8+2 ptrs): {p10_64:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_64 / p10_64);
     println!("  probe p11 (8+3 ptrs): {p11_64:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_64 / p11_64);
+    println!("  probe p11 (steps):    {p11_64_steps:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_64 / p11_64_steps);
     println!("  probe p11 (8+3 raw):  {p11_p64:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_64 / p11_p64);
     println!("  next SME2 Batch(64):  {next_sme2_64:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_64 / next_sme2_64);
 
@@ -226,10 +244,16 @@ fn run_suite(tag: &str, reps_1k: usize) {
             unsafe { probe_p11_packed32(black_box(raw32_ptr.add(off * 32)), IV.as_ptr(), 0, FLAGS_PLAIN, 32, black_box(out.as_mut_ptr().add(off).cast())) };
         }
     });
+    let p11_32_steps = time_ns_per_hash(n11, reps_1k, 15, || {
+        for off in (0..n11).step_by(11) {
+            unsafe { probe_p11_packed32_steps(black_box(raw32_ptr.add(off * 32)), IV.as_ptr(), 0, FLAGS_PLAIN, 32, black_box(out.as_mut_ptr().add(off).cast())) };
+        }
+    });
     println!("Packed<32> (n~1024):");
     println!("  next NEON Packed<32>: {next_neon_32:6.2} ns/h  (1.00x)");
     println!("  probe p10 Packed<32>: {p10_32:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_32 / p10_32);
     println!("  probe p11 Packed<32>: {p11_32:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_32 / p11_32);
+    println!("  probe p11 (steps) 32: {p11_32_steps:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_32 / p11_32_steps);
     println!("  next SME2 Packed<32>: {next_sme2_32:6.2} ns/h  ({:.2}x vs next NEON)", next_neon_32 / next_sme2_32);
 
     let next_neon_16 = time_ns_per_hash(n1k, reps_1k, 15, || {
