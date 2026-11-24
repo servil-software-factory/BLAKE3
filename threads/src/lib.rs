@@ -90,8 +90,8 @@
 //! | Many messages of one length, in one buffer | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] |
 //! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] (fastest for already-prepared batches) or [`throughput::Packed`] (compact storage; expands on the stack internally, avoids refill copies in chains) |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
-//! | Many messages arriving at once (a server's uploads) | [`throughput::Pipeline`]; on one thread, or holding each message's running state, [`throughput::update_each`] |
-//! | Continuous stream of messages or batches | [`throughput::Pipeline`] |
+//! | Many messages arriving at once (a server's uploads) | [`throughput::Pipeline`] (`owned` for zero-copy caller-owned buffers such as `Vec<u8>` or `bytes::Bytes`, `room`/`commit` for streaming); on one thread, or holding each message's running state, [`throughput::update_each`] |
+//! | Continuous stream of messages or batches (single or mixed [`Mode`]s) | [`throughput::Pipeline`] (`message` for the pipeline's default mode, `message_with` for a per-message [`Mode`]) |
 //!
 //! Each call returns once its hash is done, and uses other CPU cores
 //! where that is faster (the forms without `multithreaded` stay on the

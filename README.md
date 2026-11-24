@@ -76,7 +76,7 @@ blake3_servil::initialize(); // once, before any other call
 let hash = blake3_servil::convenience::hash(b"foobarbaz");
 ```
 
-`blake3-servil-core` provides everything except multithreading, running on the calling thread with zero background threads. `blake3-servil` re-exports `blake3-servil-core` and adds multithreading: a multithreaded form of each call, and the `Pipeline`, which hashes a stream of messages as they arrive.
+`blake3-servil-core` provides everything except multithreading, running on the calling thread with zero background threads. `blake3-servil` re-exports `blake3-servil-core` and adds multithreading: a multithreaded form of each call, and the `Pipeline`, which hashes a stream of messages as they arrive (with streaming `room`/`commit`, zero-copy caller-owned buffers via `Pipeline::with_owners` + `Pipeline::owned`, fixed-length `Batch`es, and per-message `Mode` via `Pipeline::message_with`).
 
 The [crate documentation](https://servil-software-factory.github.io/BLAKE3/blake3_servil/) covers the
 calls for programs that hash a lot, and the C library in [`capi/`](capi/).

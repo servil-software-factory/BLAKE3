@@ -559,6 +559,8 @@ fn pipeline_allocates_nothing_after_creation() {
     let mut owned_bufs: Vec<Vec<u8>> = vec![vec![0x11; 64], vec![0x22; 200_000], vec![0x33; 1 << 20]];
     let lent_short = vec![0x44u8; 512];
     let lent_long = vec![0x55u8; (1 << 20) + 123];
+    let custom_key = [0x77u8; 32];
+    let custom_dk = [0x88u8; 32];
     let mut batch_holder = Some((Batch::new(64, 512), vec![[0u8; 32]; 512].into_boxed_slice()));
     let stream_data = vec![0x66u8; 3 * ROOM_LEN + 700];
 
@@ -587,9 +589,16 @@ fn pipeline_allocates_nothing_after_creation() {
                 }
             });
 
-            // 2. Owned messages (Vecs moved in and recovered without reallocation)
+            // 2. Owned messages (Vecs moved in and recovered without reallocation),
+            //    exercising both default `message` and per-message `message_with`.
+            let mut owned_idx = 0usize;
             while let Some(buf) = owned_bufs.pop() {
-                let m = block_on(pipeline.message(200, None));
+                let m = match owned_idx % 3 {
+                    0 => block_on(pipeline.message(200, None)),
+                    1 => block_on(pipeline.message_with(Mode::Keyed(&custom_key), 200, None)),
+                    _ => block_on(pipeline.message_with(Mode::DeriveKeyWith(&custom_dk), 200, None)),
+                };
+                owned_idx += 1;
                 pipeline.owned(m, buf);
             }
 

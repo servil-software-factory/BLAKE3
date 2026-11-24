@@ -366,6 +366,7 @@ struct GroupMemberMeta {
 struct MemberGroup {
     task: UnsafeCell<Task>,
     metas: UnsafeCell<[GroupMemberMeta; MEMBERS]>,
+    tree: UnsafeCell<TreeHasher>,
     epoch: UnsafeCell<u64>,
     completed_epoch: OwnLine<AtomicU64>,
 }
@@ -479,6 +480,7 @@ impl PipeStorage {
                 .map(|_| MemberGroup {
                     task: UnsafeCell::new(Task::members(None)),
                     metas: UnsafeCell::new([dummy; MEMBERS]),
+                    tree: UnsafeCell::new(TreeHasher::new(Mode::Plain)),
                     epoch: UnsafeCell::new(0),
                     completed_epoch: OwnLine(AtomicU64::new(0)),
                 })
@@ -588,6 +590,7 @@ impl Drop for Room {
 }
 
 struct PieceNode {
+    slot: UnsafeCell<u32>,
     room: UnsafeCell<u32>,
     offset: UnsafeCell<u32>,
     len: UnsafeCell<u32>,
@@ -640,12 +643,15 @@ fn finished(storage: &'static PipeStorage, publish: impl FnOnce()) {
 /// storage for the next Pipeline of its size (`create`), as the storage
 /// does, so nothing a worker can reach is memory an owner gives back.
 struct Shared {
-    /// This Pipeline's mode. In a cell: the next Pipeline to take this
+    /// This Pipeline's default mode. In a cell: the next Pipeline to take this
     /// `Shared` writes its own mode here (`create`), and a worker of the
     /// Pipeline before may still be returning from its last task, its
-    /// `&Shared` alive. Workers borrow the mode only to hash, before they
-    /// publish a task done (`Shared::tree`).
+    /// `&Shared` alive. Workers read per-slot or per-group modes only while
+    /// hashing, before they publish a task done.
     tree: UnsafeCell<TreeHasher>,
+    /// Per-slot prepared mode, written by the owner when a slot opens
+    /// (`MessageFut::poll`) and read-only by workers until the slot finishes.
+    slot_trees: Box<[UnsafeCell<TreeHasher>]>,
     storage: &'static PipeStorage,
     hashes: Box<[UnsafeCell<[u8; OUT_LEN]>]>,
     cvs: Box<[UnsafeCell<PieceValues>]>,
@@ -664,14 +670,22 @@ unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
 impl Shared {
-    /// The mode, for hashing one task's bytes or folding its values.
+    /// The Pipeline's default mode, copied into new slots opened with `message`.
     #[inline(always)]
     fn tree(&self) -> &TreeHasher {
-        // Sound: `create` alone writes the mode, when every task of the
-        // Pipeline before is published done; a worker uses this borrow
-        // before it publishes its task, and the owner while its Pipeline
-        // lives.
+        // Sound: `create` alone writes the default mode, when every task of the
+        // Pipeline before is published done; the owner reads it while its
+        // Pipeline lives.
         unsafe { &*self.tree.get() }
+    }
+
+    /// Slot `slot`'s prepared mode, for hashing its bytes or folding its values.
+    #[inline(always)]
+    fn slot_tree(&self, slot: usize) -> &TreeHasher {
+        // Sound: the owner writes `slot_trees[slot]` in `MessageFut::poll`
+        // before dispatching any task for `slot`, and does not write it again
+        // until `slot` returns to `free_slots` after all its tasks finish.
+        unsafe { &*self.slot_trees[slot].get() }
     }
 
     unsafe fn run_action(ctx: *const (), arg: u64, platform: Platform) {
@@ -690,13 +704,16 @@ impl Shared {
     fn run_group(&self, group_idx: usize, platform: Platform) {
         let storage = self.storage;
         let group = &storage.groups[group_idx];
-        // Sound: the owner wrote this group's task, epoch and metas before it
-        // dispatched the group (publish_open), keeping every member's input
-        // and output valid until `completed_epoch` reaches this epoch.
+        // Sound: the owner wrote this group's task, tree, epoch and metas
+        // before it dispatched the group (publish_open), keeping every
+        // member's input and output valid until `completed_epoch` reaches this
+        // epoch.
         let task = unsafe { &*group.task.get() };
+        let tree = unsafe { &*group.tree.get() };
         let count = task.members;
         let epoch = unsafe { *group.epoch.get() };
-        unsafe { task.run_members(self.tree(), platform) };
+        unsafe { task.run_members(tree, platform) };
+        // Sound: `metas` was written before dispatch and stays read-only until `completed_epoch` publishes.
         let metas = unsafe { &*group.metas.get() };
 
         // Coalesce consecutive members sharing a Room into a single atomic subtraction.
@@ -730,6 +747,7 @@ impl Shared {
         // Sound: the owner wrote the piece's fields before dispatching it
         // (commit_multi), and touches the node again only once `done` is set,
         // which is this function's last store.
+        let slot = unsafe { *pnode.slot.get() } as usize;
         let room_idx = unsafe { *pnode.room.get() };
         let offset = unsafe { *pnode.offset.get() } as usize;
         let len = unsafe { *pnode.len.get() } as usize;
@@ -740,12 +758,13 @@ impl Shared {
         // them from being written again until this task releases them below.
         let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };
         let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        let tree = self.slot_tree(slot);
         let value = if index == 0 {
-            RoomValue::First(self.tree().subtree_halves_on(platform, ROOM_LEVEL, index, bytes))
+            RoomValue::First(tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))
         } else if len == ROOM_LEN {
-            RoomValue::Whole(self.tree().subtree_cv_on(platform, ROOM_LEVEL, index, bytes))
+            RoomValue::Whole(tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))
         } else {
-            RoomValue::Last(self.tree().last_cv_on(platform, index << ROOM_LEVEL, bytes))
+            RoomValue::Last(tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))
         };
         // Sound: this piece's output is its worker's alone until `done`.
         unsafe { *pnode.out.0.get() = value };
@@ -774,7 +793,7 @@ impl Shared {
             // Sound: `desc.batch` came from a validated `Batch<'static>` held
             // alive in `Pipeline::batches[slot]` until `slot_done`.
             let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot_len) };
-            self.tree().hash_many_on(platform, &part, digests);
+            self.slot_tree(slot).hash_many_on(platform, &part, digests);
             let storage = self.storage;
             if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {
                 finished(storage, || {
@@ -791,12 +810,13 @@ impl Shared {
         let level = desc.piece_level;
         let bytes = input.chunks(CHUNK_LEN << level).nth(piece_idx).expect("a piece within its message");
         let values = self.cvs[slot].get();
+        let tree = self.slot_tree(slot);
         if piece_idx + 1 == desc.pieces {
-            let value = self.tree().last_cv_on(platform, (piece_idx as u64) << level, bytes);
+            let value = tree.last_cv_on(platform, (piece_idx as u64) << level, bytes);
             // Sound: only the last piece writes this field.
             unsafe { (*values).last = Some(value) };
         } else {
-            let value = self.tree().subtree_cv_on(platform, level, piece_idx as u64, bytes);
+            let value = tree.subtree_cv_on(platform, level, piece_idx as u64, bytes);
             // Sound: a separate slot for each index (submit_multi_slice
             // limits the count); form no borrow of other workers' slots.
             unsafe { core::ptr::addr_of_mut!((*values).whole).cast::<Cv>().add(piece_idx).write(value) };
@@ -809,7 +829,7 @@ impl Shared {
             // writes the slot's values or hash until `slot_done` below.
             let values = unsafe { &mut *values };
             let last = values.last.take().expect("the last piece supplied its value");
-            let hash = fold_multi_cvs(self.tree(), &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
+            let hash = fold_multi_cvs(tree, &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
             unsafe { *self.hashes[slot].get() = *hash.as_bytes() };
             if desc.loan_epoch != 0 {
                 self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);
@@ -893,6 +913,26 @@ impl RoomStream {
 struct SlotMeta<T> {
     tag: Option<T>,
     kind: SlotKind,
+    mode_id: u64,
+}
+
+/// Exact key for deduplicating consecutive short-message modes into one `MemberGroup`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModeKey {
+    Plain,
+    Keyed([u8; OUT_LEN]),
+    DeriveKeyWith([u8; OUT_LEN]),
+}
+
+impl ModeKey {
+    fn from_mode(mode: Mode) -> Option<Self> {
+        match mode {
+            Mode::Plain => Some(ModeKey::Plain),
+            Mode::Keyed(k) => Some(ModeKey::Keyed(*k)),
+            Mode::DeriveKeyWith(k) => Some(ModeKey::DeriveKeyWith(*k)),
+            Mode::DeriveKey(_) => None,
+        }
+    }
 }
 
 process_static! {
@@ -1062,6 +1102,11 @@ pub struct Pipeline<T, B = ()> {
     local_count: usize,
     local_bytes: usize,
     local_batch: Option<usize>,
+    local_mode_id: u64,
+    local_tree: TreeHasher,
+    default_mode_key: Option<ModeKey>,
+    last_custom_mode: Option<(ModeKey, u64)>,
+    next_mode_id: u64,
     local_members: Box<[Member; MEMBERS]>,
     local_rooms: Box<[u32; MEMBERS]>,
     next_loan_epoch: u64,
@@ -1189,6 +1234,8 @@ impl<T, B> Pipeline<T, B> {
         prepare_thread();
         assert!(limits.messages > 0, "Pipeline Limits.messages must be at least 1");
         let tree = TreeHasher::new(mode);
+        let default_mode_key = ModeKey::from_mode(mode);
+        let local_tree = tree.clone();
         let m = limits.messages;
         // Each limit alone first: their sum, next, could wrap round to a
         // small one (`rooms: usize::MAX` passed the check below so).
@@ -1247,7 +1294,8 @@ impl<T, B> Pipeline<T, B> {
             // One it replaces stays allocated: a worker of an earlier
             // Pipeline may still be reading it.
             let new = Box::into_raw(Box::new(Shared {
-                tree: UnsafeCell::new(tree),
+                tree: UnsafeCell::new(tree.clone()),
+                slot_trees: (0..m).map(|_| UnsafeCell::new(tree.clone())).collect(),
                 storage,
                 hashes: (0..m).map(|_| UnsafeCell::new([0u8; OUT_LEN])).collect(),
                 cvs: (0..m).map(|_| UnsafeCell::new(PieceValues { whole: [Cv::unset(); MAX_SLOT_PIECES], last: None })).collect(),
@@ -1268,6 +1316,7 @@ impl<T, B> Pipeline<T, B> {
                     .collect(),
                 pieces: (0..p_cap)
                     .map(|_| PieceNode {
+                        slot: UnsafeCell::new(0),
                         room: UnsafeCell::new(0),
                         offset: UnsafeCell::new(0),
                         len: UnsafeCell::new(0),
@@ -1298,7 +1347,7 @@ impl<T, B> Pipeline<T, B> {
             group_count: g_cap,
             source_slot,
             shared,
-            slots: (0..m).map(|_| SlotMeta { tag: None, kind: SlotKind::Free }).collect(),
+            slots: (0..m).map(|_| SlotMeta { tag: None, kind: SlotKind::Free, mode_id: 0 }).collect(),
             room_streams: vec![RoomStream::EMPTY; m].into_boxed_slice(),
             owners: RawSlots::new(m),
             batches: RawSlots::new(m),
@@ -1314,6 +1363,11 @@ impl<T, B> Pipeline<T, B> {
             local_count: 0,
             local_bytes: 0,
             local_batch: None,
+            local_mode_id: 0,
+            local_tree,
+            default_mode_key,
+            last_custom_mode: None,
+            next_mode_id: 1,
             local_members: Box::new([Member { input: core::ptr::null(), len: 0, out: core::ptr::null_mut() }; MEMBERS]),
             local_rooms: Box::new([NONE; MEMBERS]),
             next_loan_epoch,
@@ -1324,7 +1378,8 @@ impl<T, B> Pipeline<T, B> {
         }
     }
 
-    /// Wait for a free message slot and open a [`Message`].
+    /// Wait for a free message slot and open a [`Message`] in this pipeline's
+    /// default [`Mode`].
     ///
     /// # Panics
     ///
@@ -1335,7 +1390,39 @@ impl<T, B> Pipeline<T, B> {
     #[inline(always)]
     pub fn message(&mut self, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + '_ {
         let _ = length_hint;
-        MessageFut { pipe: self, tag: Some(tag), registered: false }
+        MessageFut { pipe: self, tag: Some(tag), mode: None, registered: false }
+    }
+
+    /// Wait for a free message slot and open a [`Message`] hashed in `mode`,
+    /// overriding this pipeline's default [`Mode`] for that message alone.
+    ///
+    /// `mode` is prepared immediately, so the returned future does not borrow
+    /// it. Consecutive short messages with the same [`Mode::Plain`],
+    /// [`Mode::Keyed`], or [`Mode::DeriveKeyWith`] key still batch together.
+    ///
+    /// # Panics
+    ///
+    /// Same as [`Pipeline::message`].
+    #[inline(always)]
+    pub fn message_with(&mut self, mode: Mode, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + '_ {
+        let _ = length_hint;
+        let tree = TreeHasher::new(mode);
+        let key = ModeKey::from_mode(mode);
+        let mode_id = if key.is_some() && key == self.default_mode_key {
+            0
+        } else if let (Some(k), Some((last_k, last_id))) = (key, self.last_custom_mode)
+            && k == last_k
+        {
+            last_id
+        } else {
+            let id = self.next_mode_id;
+            self.next_mode_id = id.checked_add(1).expect("Pipeline mode ID counter exhausted");
+            if let Some(k) = key {
+                self.last_custom_mode = Some((k, id));
+            }
+            id
+        };
+        MessageFut { pipe: self, tag: Some(tag), mode: Some((tree, mode_id)), registered: false }
     }
 
     fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<u32> {
@@ -1542,6 +1629,7 @@ impl<T, B> Pipeline<T, B> {
         let shared = unsafe { &*self.shared };
         let node = &shared.pieces[pnode as usize];
         unsafe {
+            *node.slot.get() = u32::try_from(s).expect("slot fits u32");
             *node.room.get() = room_idx;
             *node.offset.get() = start_offset;
             *node.len.get() = u32::try_from(written).expect("written <= ROOM_LEN");
@@ -1608,7 +1696,7 @@ impl<T, B> Pipeline<T, B> {
                 // `written` against what was left).
                 let ptr = unsafe { self.shared().storage.rooms.room_ptr(room_idx as usize).add(offset as usize) };
                 let out = self.shared().hashes[s].get() as *mut u8;
-                let (group, epoch) = self.push_member(ptr, len as usize, out, room_idx, None);
+                let (group, epoch) = self.push_member(s, ptr, len as usize, out, room_idx, None);
                 self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group, epoch };
                 self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
             }
@@ -1620,7 +1708,7 @@ impl<T, B> Pipeline<T, B> {
     fn end_slow(&mut self, s: usize) {
         match self.slots[s].kind {
             SlotKind::OpenEmpty => {
-                let empty_hash = self.shared().tree().hash(&[]);
+                let empty_hash = self.shared().slot_tree(s).hash(&[]);
                 // Sound: no task runs for an empty message, so the slot's hash
                 // is the owner's to write.
                 unsafe { *self.shared().hashes[s].get() = *empty_hash.as_bytes() };
@@ -1699,7 +1787,7 @@ impl<T, B> Pipeline<T, B> {
 
         let (completed, epoch) = if bytes.len() <= TASK_LEN {
             let out = self.shared().hashes[s].get() as *mut u8;
-            let (group, epoch) = self.push_member(bytes.as_ptr(), bytes.len(), out, NONE, None);
+            let (group, epoch) = self.push_member(s, bytes.as_ptr(), bytes.len(), out, NONE, None);
             self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group, epoch };
             (&self.shared().storage.groups[group as usize].completed_epoch.0, epoch)
         } else {
@@ -1740,7 +1828,7 @@ impl<T, B> Pipeline<T, B> {
             self.shared().slot_done[s].store(true, Ordering::Relaxed);
             self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
         } else if bytes.len() < TASK_LEN {
-            let (group, epoch) = self.push_member(bytes.as_ptr(), bytes.len(), digests_ptr as *mut u8, NONE, Some(msg_len));
+            let (group, epoch) = self.push_member(s, bytes.as_ptr(), bytes.len(), digests_ptr as *mut u8, NONE, Some(msg_len));
             self.slots[s].kind = SlotKind::WaitBatch { group, epoch };
         } else {
             self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
@@ -1846,7 +1934,7 @@ impl<T, B> Pipeline<T, B> {
     fn submit_slice(&mut self, s: usize, ptr: *const u8, len: usize, has_owner: bool) {
         if len <= TASK_LEN {
             let out = self.shared().hashes[s].get() as *mut u8;
-            let (group, epoch) = self.push_member(ptr, len, out, NONE, None);
+            let (group, epoch) = self.push_member(s, ptr, len, out, NONE, None);
             self.slots[s].kind = SlotKind::WaitSingle { has_owner, group, epoch };
             return;
         }
@@ -1889,7 +1977,7 @@ impl<T, B> Pipeline<T, B> {
                 // Sound: as in `end`.
                 let ptr = unsafe { self.shared().storage.rooms.room_ptr(room_idx as usize).add(offset as usize) };
                 let out = self.shared().hashes[s].get() as *mut u8;
-                let (group, epoch) = self.push_member(ptr, len as usize, out, room_idx, None);
+                let (group, epoch) = self.push_member(s, ptr, len as usize, out, room_idx, None);
                 self.slots[s].kind = SlotKind::OpenShortDispatched { group, epoch };
             }
         }
@@ -1922,13 +2010,14 @@ impl<T, B> Pipeline<T, B> {
     }
 
     #[inline(always)]
-    fn push_member(&mut self, input: *const u8, len: usize, out: *mut u8, room: u32, batch: Option<usize>) -> (u32, u64) {
-        if self.open_group.is_some() && self.local_batch != batch {
+    fn push_member(&mut self, slot: usize, input: *const u8, len: usize, out: *mut u8, room: u32, batch: Option<usize>) -> (u32, u64) {
+        let mode_id = self.slots[slot].mode_id;
+        if self.open_group.is_some() && (self.local_batch != batch || self.local_mode_id != mode_id) {
             self.publish_open();
         }
         let (g, epoch) = match self.open_group {
             Some(pair) => pair,
-            None => self.open_new_group(batch),
+            None => self.open_new_group(slot, batch),
         };
         let idx = self.local_count;
         self.local_members[idx] = Member { input, len, out };
@@ -1945,13 +2034,15 @@ impl<T, B> Pipeline<T, B> {
     }
 
     #[inline(never)]
-    fn open_new_group(&mut self, batch: Option<usize>) -> (u32, u64) {
+    fn open_new_group(&mut self, slot: usize, batch: Option<usize>) -> (u32, u64) {
         let g = self.acquire_free_group();
         let epoch = self.next_group_epoch;
         self.next_group_epoch = epoch.checked_add(1).expect("Pipeline group epoch counter exhausted");
         self.local_count = 0;
         self.local_bytes = 0;
         self.local_batch = batch;
+        self.local_mode_id = self.slots[slot].mode_id;
+        self.local_tree = self.shared().slot_tree(slot).clone();
         self.open_group = Some((g, epoch));
         (g, epoch)
     }
@@ -1984,6 +2075,7 @@ impl<T, B> Pipeline<T, B> {
             for i in 0..count {
                 metas[i] = GroupMemberMeta { room: self.local_rooms[i] };
             }
+            *group.tree.get() = self.local_tree.clone();
             *group.epoch.get() = epoch;
         }
         self.assigned_group_epoch[group_idx as usize] = epoch;
@@ -2042,7 +2134,7 @@ impl<T, B> Pipeline<T, B> {
     fn drain_pieces(&mut self, s: usize, keep_last: bool) {
         // Sound: as `shared()`.
         let shared = unsafe { &*self.shared };
-        let tree = shared.tree();
+        let tree = shared.slot_tree(s);
         let ended = matches!(self.slots[s].kind, SlotKind::WaitRoomMulti);
         let aborted = matches!(self.slots[s].kind, SlotKind::WaitAborted { .. });
 
@@ -2260,6 +2352,7 @@ impl<T, B> Drop for Pipeline<T, B> {
 struct MessageFut<'a, T, B> {
     pipe: &'a mut Pipeline<T, B>,
     tag: Option<T>,
+    mode: Option<(TreeHasher, u64)>,
     registered: bool,
 }
 
@@ -2291,9 +2384,17 @@ impl<T, B> Future for MessageFut<'_, T, B> {
             },
         };
         this.registered = false;
+        let (tree, mode_id) = match this.mode.take() {
+            Some(pair) => pair,
+            None => (this.pipe.shared().tree().clone(), 0),
+        };
+        // Sound: `slot` just came off `free_slots`, so no worker task reads
+        // `slot_trees[slot]` until the owner dispatches work for this slot.
+        unsafe { *this.pipe.shared().slot_trees[slot as usize].get() = tree };
         let sm = &mut this.pipe.slots[slot as usize];
         sm.tag = this.tag.take();
         sm.kind = SlotKind::OpenEmpty;
+        sm.mode_id = mode_id;
         this.pipe.open_messages += 1;
         Poll::Ready(Message { pipeline_id: this.pipe.id, slot })
     }
@@ -4244,7 +4345,7 @@ mod test {
             p_ab.shared().pieces[pnode as usize].done.store(false, Ordering::SeqCst);
             unsafe { *p_ab.shared().pieces[pnode as usize].next.get() = NONE };
             p_ab.room_streams[0] = RoomStream { len: ROOM_LEN as u64, head_piece: pnode, tail_piece: pnode, stack_len: 0, merged_pieces: 0 };
-            p_ab.slots[0] = SlotMeta { tag: Some(77), kind: SlotKind::WaitAborted { group: 0, epoch: 5 } };
+            p_ab.slots[0] = SlotMeta { tag: Some(77), kind: SlotKind::WaitAborted { group: 0, epoch: 5 }, mode_id: 0 };
             p_ab.free_slots.pop_front();
             p_ab.end_queue.push_back(0);
             assert!(p_ab.try_reap_one().is_none());
@@ -4252,6 +4353,152 @@ mod test {
             assert!(p_ab.try_reap_one().is_none());
             p_ab.shared().storage.groups[0].completed_epoch.store(5, Ordering::SeqCst);
             assert!(matches!(p_ab.try_reap_one(), Some(Event::Aborted { tag: 77, owner: None })));
+        }
+    }
+
+    #[test]
+    fn per_message_modes_match_reference_across_all_paths() {
+        let key_a = [0x11u8; 32];
+        let key_b = [0x22u8; 32];
+        let ctx_a = "pipeline per-message mode test A";
+        let ctx_b = "pipeline per-message mode test B";
+        let dk_a = [0x33u8; 32];
+        let dk_b = [0x44u8; 32];
+
+        let ref_hash = |mode: Mode, data: &[u8]| -> [u8; 32] {
+            let mut h = blake3_servil_core::convenience::Hasher::new(mode, None);
+            h.update(data);
+            *h.finalize().as_bytes()
+        };
+
+        let collect_hashes = |pipe: &mut Pipeline<usize, Vec<u8>>, n: usize| -> Vec<(usize, [u8; 32])> {
+            drain_all(pipe, n)
+                .into_iter()
+                .map(|ev| match ev {
+                    Event::Hashed { tag, hash, .. } => (tag, *hash.as_bytes()),
+                    _ => panic!("expected Event::Hashed"),
+                })
+                .collect()
+        };
+
+        let mut pipe = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 16, rooms: 4 });
+        let mut expected: Vec<(usize, [u8; 32])> = Vec::new();
+        let mut tag = 0usize;
+
+        // 1. Empty messages across all four Mode variants (including default `message()`).
+        let modes =
+            [None, Some(Mode::Plain), Some(Mode::Keyed(&key_a)), Some(Mode::Keyed(&key_b)), Some(Mode::DeriveKey(ctx_a)), Some(Mode::DeriveKeyWith(&dk_b))];
+        for om in modes {
+            let m = match om {
+                None => block_on(pipe.message(tag, None)),
+                Some(mode) => block_on(pipe.message_with(mode, tag, None)),
+            };
+            pipe.end(m);
+            expected.push((tag, ref_hash(om.unwrap_or(Mode::Plain), &[])));
+            tag += 1;
+        }
+        assert_eq!(collect_hashes(&mut pipe, expected.len()), expected);
+        expected.clear();
+
+        // 2. Short owned messages: alternating modes AND consecutive same-mode (tests ModeKey batching + flush).
+        let short_cases: &[(Option<Mode>, usize)] = &[
+            (None, 32),
+            (Some(Mode::Plain), 64),
+            (Some(Mode::Keyed(&key_a)), 48),
+            (Some(Mode::Keyed(&key_a)), 80),
+            (Some(Mode::Keyed(&key_b)), 48),
+            (Some(Mode::DeriveKeyWith(&dk_a)), 96),
+            (Some(Mode::DeriveKeyWith(&dk_a)), 128),
+            (Some(Mode::DeriveKey(ctx_b)), 64),
+            (Some(Mode::DeriveKey(ctx_b)), 64),
+            (None, 1024),
+        ];
+        for (i, &(om, len)) in short_cases.iter().enumerate() {
+            let data: Vec<u8> = (0..len).map(|j| ((i * 31 + j * 7) & 0xff) as u8).collect();
+            let exp = ref_hash(om.unwrap_or(Mode::Plain), &data);
+            let m = match om {
+                None => block_on(pipe.message(tag, Some(len as u64))),
+                Some(mode) => block_on(pipe.message_with(mode, tag, Some(len as u64))),
+            };
+            pipe.owned(m, data);
+            expected.push((tag, exp));
+            tag += 1;
+        }
+        assert_eq!(collect_hashes(&mut pipe, expected.len()), expected);
+        expected.clear();
+
+        // 3. Multi-piece owned, lent, and streaming room messages with distinct per-message modes.
+        let long_len = 2 * ROOM_LEN + 137;
+        let owned_long: Vec<u8> = (0..long_len).map(|j| ((j * 13 + 3) & 0xff) as u8).collect();
+        let lent_long: Vec<u8> = (0..long_len).map(|j| ((j * 17 + 9) & 0xff) as u8).collect();
+        let stream_long: Vec<u8> = (0..long_len).map(|j| ((j * 23 + 5) & 0xff) as u8).collect();
+        let stream_short: Vec<u8> = (0..120).map(|j| ((j * 29 + 1) & 0xff) as u8).collect();
+
+        let m_owned = block_on(pipe.message_with(Mode::Keyed(&key_a), tag, Some(long_len as u64)));
+        expected.push((tag, ref_hash(Mode::Keyed(&key_a), &owned_long)));
+        pipe.owned(m_owned, owned_long);
+        tag += 1;
+
+        let m_lent = block_on(pipe.message_with(Mode::DeriveKeyWith(&dk_b), tag, Some(long_len as u64)));
+        expected.push((tag, ref_hash(Mode::DeriveKeyWith(&dk_b), &lent_long)));
+        let guard = unsafe { pipe.lent(m_lent, &lent_long) };
+        tag += 1;
+
+        let mut m_stream = block_on(pipe.message_with(Mode::DeriveKey(ctx_a), tag, Some(long_len as u64)));
+        expected.push((tag, ref_hash(Mode::DeriveKey(ctx_a), &stream_long)));
+        for chunk in stream_long.chunks(ROOM_LEN) {
+            let mut r = block_on(pipe.room());
+            r.bytes_mut()[..chunk.len()].copy_from_slice(chunk);
+            pipe.commit(&mut m_stream, &mut r, chunk.len());
+        }
+        pipe.end(m_stream);
+        tag += 1;
+
+        let mut m_short_room = block_on(pipe.message_with(Mode::Keyed(&key_b), tag, None));
+        expected.push((tag, ref_hash(Mode::Keyed(&key_b), &stream_short)));
+        {
+            let mut r = block_on(pipe.room());
+            r.bytes_mut()[..stream_short.len()].copy_from_slice(&stream_short);
+            pipe.commit(&mut m_short_room, &mut r, stream_short.len());
+        }
+        pipe.end(m_short_room);
+        tag += 1;
+
+        let mut got = Vec::new();
+        while got.len() < expected.len() {
+            if let Some(ev) = pipe.next_event() {
+                if let Event::Hashed { tag: t, hash, .. } = ev {
+                    got.push((t, *hash.as_bytes()));
+                }
+            } else {
+                block_on(pipe.ready());
+            }
+        }
+        drop(guard);
+        assert_eq!(got, expected);
+
+        // 4. Short and multi-piece batches with per-message modes.
+        for &(mode, count, msg_len) in &[(Mode::Keyed(&key_a), 8usize, 64usize), (Mode::DeriveKeyWith(&dk_b), 2048usize, 64usize)] {
+            let mut b = Batch::new(msg_len, count);
+            for i in 0..count {
+                b.message_mut(i).fill(((i * 5 + 1) & 0xff) as u8);
+            }
+            let digests = vec![[0u8; 32]; count].into_boxed_slice();
+            let bm = block_on(pipe.message_with(mode, tag, None));
+            pipe.batch(bm, b, digests);
+            tag += 1;
+            let ev = loop {
+                if let Some(ev) = pipe.next_event() {
+                    break ev;
+                }
+                block_on(pipe.ready());
+            };
+            let Event::Batch { mut batch, digests, .. } = ev else {
+                panic!("expected Event::Batch");
+            };
+            for i in 0..count {
+                assert_eq!(digests[i], ref_hash(mode, batch.message_mut(i)));
+            }
         }
     }
 }
