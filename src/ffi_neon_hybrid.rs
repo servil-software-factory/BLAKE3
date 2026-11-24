@@ -281,18 +281,21 @@ const CHUNK_KERNELS: [Option<Kernel>; 11] = [
 const CHUNK_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[8, 3], &[9, 3], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
 
-/// Parent kernel per exact input count.
-const PARENT_KERNELS: [Option<Kernel>; 10] = [
+/// Parent kernel per exact input count. Zero-spill sequential scalars (#523)
+/// let `pn6` (4+2) and `pn10` (8+2) win on both Apple P-cores and E-cores as
+/// well as AmpereOne without extra stack spills.
+const PARENT_KERNELS: [Option<Kernel>; 11] = [
     None,
     Some(asm::blake3_servil_hybrid_k1),
     Some(asm::blake3_servil_hybrid_p2),
     Some(asm::blake3_servil_hybrid_p3),
     Some(asm::blake3_servil_hybrid_p4),
     Some(asm::blake3_servil_hybrid_p5),
-    None,
+    Some(asm::blake3_servil_hybrid_pn6),
     Some(asm::blake3_servil_hybrid_p7),
     Some(asm::blake3_servil_hybrid_p8),
     Some(asm::blake3_servil_hybrid_p9),
+    Some(asm::blake3_servil_hybrid_pn10),
 ];
 
 /// The l kernels (#247), per exact input count, beside the parent plans
@@ -314,20 +317,17 @@ const LAST_KERNELS: [Option<LastKernel>; 10] = [
 ];
 
 /// Kernel sizes per parent count 1..=16. p3, p5, p7, and p9 hash one
-/// block on the integer units beside the NEON ones, as k3, k5, k7, and k9
-/// do for chunks. Against the binary decomposition over p2, p4, p8, and k1
-/// run one after another, cycles per call on an M4 Max P-core / E-core
-/// (probe/mixed-parents, jobs 121-122): 3 messages -37% / -38%, 5 -27 /
-/// -27, 6 (p3 + p3) -25 / -11, 7 -31 / -34, 9 -18 / -22, 10 (p7 + p3;
-/// p9 + k1 -10 / +1, p5 + p5 -8 / -2) -11 / -8, 11 -13 / -18, 12 -15 / -9,
-/// 13 -12 / -15, 14 -17 / -12, 15 -18 / -19; on the VM 6-39% faster. 2,
-/// 4, 8, and 16 keep their kernels; 13-16 were level with the other
-/// plans tried on the VM. Two scalar lanes stay out: E-cores pay for a
-/// second one what P-cores save. The exception is p4 itself (Zooko,
-/// September 27, 2026): hash_many is built for top speed, P-cores do most
-/// of this machine's work, and four messages were the last batch where
-/// BLAKE3 official led (P -12%, E +30% in cycles per call).
+/// block on the integer units beside the NEON ones; pn6 (4+2) and pn10
+/// (8+2) add two zero-spill sequential scalar lanes (#523) that win on
+/// Apple P-cores, E-cores, and AmpereOne without extra stack spills, so
+/// counts 6, 10, 12..=16 dispatch pn6/pn10 (p4 keeps its concurrent sc2
+/// lanes on P-cores).
 const PARENT_PLANS: [&[usize]; 17] =
+    [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
+
+/// Kernel sizes for the `l` kernels (`l2..l9`, which have no `l6` or `l10`).
+#[cfg(feature = "std")]
+const LAST_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[3, 3], &[7], &[8], &[9], &[7, 3], &[9, 2], &[9, 3], &[9, 4], &[9, 5], &[8, 7], &[8, 8]];
 
 /// The kernels without SHA-3 per exact input count: scalars and quads
@@ -430,9 +430,11 @@ mod ends {
         pub static blake3_servil_hybrid_p3_end: u8;
         pub static blake3_servil_hybrid_p4_end: u8;
         pub static blake3_servil_hybrid_p5_end: u8;
+        pub static blake3_servil_hybrid_pn6_end: u8;
         pub static blake3_servil_hybrid_p7_end: u8;
         pub static blake3_servil_hybrid_p8_end: u8;
         pub static blake3_servil_hybrid_p9_end: u8;
+        pub static blake3_servil_hybrid_pn10_end: u8;
         pub static blake3_servil_hybrid_k1_end: u8;
         pub static blake3_servil_hybrid_k2_end: u8;
         pub static blake3_servil_hybrid_k3_end: u8;
@@ -525,20 +527,22 @@ fn parent_code(n: usize) -> (usize, usize) {
         3 => code!(blake3_servil_hybrid_p3, blake3_servil_hybrid_p3_end),
         4 => code!(blake3_servil_hybrid_p4, blake3_servil_hybrid_p4_end),
         5 => code!(blake3_servil_hybrid_p5, blake3_servil_hybrid_p5_end),
+        6 => code!(blake3_servil_hybrid_pn6, blake3_servil_hybrid_pn6_end),
         7 => code!(blake3_servil_hybrid_p7, blake3_servil_hybrid_p7_end),
         8 => code!(blake3_servil_hybrid_p8, blake3_servil_hybrid_p8_end),
         9 => code!(blake3_servil_hybrid_p9, blake3_servil_hybrid_p9_end),
+        10 => code!(blake3_servil_hybrid_pn10, blake3_servil_hybrid_pn10_end),
         _ => unreachable!("no parent kernel for {n} parents"),
     }
 }
 
 #[cfg(feature = "std")]
-/// Prefetch the code a tree of `whole` chunks and then `partial` bytes
-/// (under a chunk) runs on the hybrids: the chunk kernels
+/// Prefetch the code a tree of `whole` chunks (up to 16) and then `partial`
+/// bytes (under a chunk) runs on the hybrids: the chunk kernels
 /// (`compress_chunks_parallel` and [`hash_chunks_with_partial`] choose
-/// them from the same plans), then [`prefetch_parent_code`]. Requires 1 to
-/// 16 whole chunks.
-pub fn prefetch_tree_code(whole: usize, partial: usize) {
+/// them from the same plans), then [`prefetch_parent_code`] once for
+/// `parent_values` chaining values (clamped to `2..=32`).
+pub fn prefetch_tree_code(whole: usize, partial: usize, parent_values: usize) {
     if partial > 0 && partial_pays(whole, partial) {
         let lead = whole.saturating_sub(9);
         for &n in family().chunk_plans[lead] {
@@ -550,7 +554,7 @@ pub fn prefetch_tree_code(whole: usize, partial: usize) {
             crate::platform::prefetch_code(chunk_code(n, false));
         }
     }
-    prefetch_parent_code(whole + usize::from(partial > 0));
+    prefetch_parent_code(parent_values.min(32));
 }
 
 #[cfg(feature = "std")]
@@ -1065,7 +1069,7 @@ pub unsafe fn hash_last_lanes(
         return;
     }
     let mut done = 0;
-    for &size in PARENT_PLANS[count] {
+    for &size in LAST_PLANS[count] {
         let kernel = LAST_KERNELS[size].expect("an l kernel for every size a plan of two or more names");
         // Sound: the caller's contract, for items done..done + size.
         unsafe {
@@ -1291,7 +1295,7 @@ mod test {
         if sha3_detected() {
             for whole in 1..=16 {
                 for partial in [0, 1, 63, 64, 65, 500, 1023] {
-                    prefetch_tree_code(whole, if whole == 16 { 0 } else { partial });
+                    prefetch_tree_code(whole, if whole == 16 { 0 } else { partial }, whole + usize::from(partial > 0));
                 }
             }
         }

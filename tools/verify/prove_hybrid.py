@@ -356,7 +356,7 @@ def cases(only):
             out.append(("c1", blocks, alias))
     for name in ([f"k{n}" for n in range(2, 11)] + [f"p{n}" for n in (2, 3, 4, 5, 7, 8, 9)]
                  + [f"kn{n}" for n in (2, 4, 5, 6, 8)] + [f"pn{n}" for n in (2, 4, 5, 6, 10)]):
-        for blocks in (range(1, 17) if name[0] == "k" else [1]):
+        for blocks in (range(1, 17) if name[0] == "k" or name in ("pn6", "pn10") else [1]):
             out.append((name, blocks, False))
     for n in range(1, 10):
         for pblocks in range(1, 17):
