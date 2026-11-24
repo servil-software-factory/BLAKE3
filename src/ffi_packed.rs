@@ -97,7 +97,12 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
     if matches!(platform, Platform::AVX2 { .. }) || {
         #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
         {
-            matches!(platform, Platform::AVX512 { .. })
+            // On Linux std AVX-512, a 9..=15 remainder is faster as a single
+            // padded 16-lane `output16` call than `avx2_packed` (8) + a second
+            // kernel call for the remaining 1..=7 messages; keep AVX2 for `8`.
+            let rem = outputs.len() - done;
+            let prefer_output16 = cfg!(all(feature = "std", target_os = "linux")) && (9..16).contains(&rem);
+            matches!(platform, Platform::AVX512 { .. }) && !prefer_output16
         }
         #[cfg(not(all(blake3_avx512_ffi, target_arch = "x86_64")))]
         {

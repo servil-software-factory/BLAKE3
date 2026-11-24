@@ -46,6 +46,12 @@ pub(crate) fn packed<'a>(block: &'a [u8; BLOCK_LEN], key: &'a [u32; 8], len: u8,
     Input { block, cv: key, len, flags: flags | CHUNK_START | CHUNK_END | ROOT }
 }
 
+/// Final block descriptor for a multi-block message inside chunk 0 whose
+/// preceding full blocks already compressed into `cv`.
+pub(crate) fn final_block<'a>(block: &'a [u8; BLOCK_LEN], cv: &'a [u32; 8], len: u8, flags: u8) -> Input<'a> {
+    Input { block, cv, len, flags: flags | CHUNK_END | ROOT }
+}
+
 pub(crate) fn lanes(platform: Platform) -> usize {
     match platform {
         Platform::AVX512 => 16,
@@ -354,11 +360,20 @@ mod tests {
     fn packed_groups_take_the_independent_kernel() {
         use crate::throughput::hash_many;
         let platform = Platform::detect();
-        if lanes(platform) == 0 {
+        let width = lanes(platform);
+        if width == 0 {
             return;
         }
-        let entry = if lanes(platform) == 16 { entry() } else { entry8() } as usize;
-        for (count, reached) in [(lanes(platform), true), (2 * lanes(platform), true), (lanes(platform) - 1, false)] {
+        let e16 = entry() as usize;
+        let e8 = entry8() as usize;
+        // Counts 1..=3 stay serial; 4..=8 take output8; on AVX-512, 9..=16 take
+        // output16, and 17..=24 take output16 plus optional output8.
+        let cases: &[(usize, Option<usize>, usize)] = if width == 16 {
+            &[(3, None, 0), (4, Some(e8), 1), (8, Some(e8), 1), (9, Some(e16), 1), (15, Some(e16), 1), (16, Some(e16), 1), (32, Some(e16), 1)]
+        } else {
+            &[(3, None, 0), (4, Some(e8), 1), (7, Some(e8), 1), (8, Some(e8), 1), (16, Some(e8), 1)]
+        };
+        for &(count, expected_entry, expected_kernels) in cases {
             let mut out = std::vec![[0u8; OUT_LEN]; count];
             for len in [1, 33, 63] {
                 let mut batch = crate::throughput::Batch::new(len, count);
@@ -368,12 +383,47 @@ mod tests {
                 crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
                 hash_many(crate::Mode::Plain, &batch, &mut out);
                 let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
-                assert_eq!(ran.contains(&entry), reached, "{count} batch messages of {len} bytes");
-                if reached {
-                    assert_eq!(ran.len(), 1, "{count} batch messages of {len} bytes on the group kernel alone: {ran:?}");
+                match expected_entry {
+                    Some(k) => {
+                        assert!(ran.contains(&k), "{count} batch messages of {len} bytes should reach {k:#x}: {ran:?}");
+                        assert_eq!(ran.len(), expected_kernels, "{count} batch messages of {len} bytes on the group kernel alone: {ran:?}");
+                    }
+                    None => {
+                        assert!(!ran.contains(&e16) && !ran.contains(&e8), "{count} batch messages of {len} bytes should stay serial: {ran:?}");
+                    }
                 }
                 for i in 0..count {
                     assert_eq!(out[i], *crate::convenience::hash(&std::vec![i as u8; len]).as_bytes(), "{len} bytes, message {i}");
+                }
+            }
+        }
+        // Multi-block messages with a short last block (65..1023 B) also use
+        // output16 / output8 for their final blocks when count >= 4.
+        let key = [0x42u8; crate::KEY_LEN];
+        for len in [65, 100, 200, 500, 1000] {
+            for count in [3, 4, 7, 8, 9, 15, 16, 24, 33] {
+                let mut batch = crate::throughput::Batch::new(len, count);
+                for i in 0..count {
+                    let msg = batch.message_mut(i);
+                    for (j, b) in msg.iter_mut().enumerate() {
+                        *b = ((i * 31 + j * 17 + len) & 0xff) as u8;
+                    }
+                }
+                let mut out = std::vec![[0u8; OUT_LEN]; count];
+                for mode in [crate::Mode::Plain, crate::Mode::Keyed(&key), crate::Mode::DeriveKey("x86-short-last")] {
+                    crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                    hash_many(mode, &batch, &mut out);
+                    let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                    if count < 4 {
+                        assert!(!ran.contains(&e16) && !ran.contains(&e8), "{count} x {len} B should stay serial");
+                    } else if width == 16 && (count >= 16 || count >= 9) {
+                        assert!(ran.contains(&e16), "{count} x {len} B should reach output16");
+                    } else {
+                        assert!(ran.contains(&e8), "{count} x {len} B should reach output8");
+                    }
+                    for i in 0..count {
+                        assert_eq!(out[i], *crate::convenience::hash_with(mode, batch.message(i)).as_bytes(), "{count} x {len} B, msg {i}");
+                    }
                 }
             }
         }
