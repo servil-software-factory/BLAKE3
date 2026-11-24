@@ -4273,6 +4273,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p10_64_end:
 
 .globl _probe_p11_64
 .p2align 4
@@ -9466,6 +9467,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p11_64_end:
 
 .globl _probe_p11_64_steps
 .p2align 4
@@ -14659,6 +14661,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p11_64_steps_end:
 
 .globl _probe_p10_packed32
 .p2align 4
@@ -18397,6 +18400,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p10_packed32_end:
 
 .globl _probe_p11_packed32
 .p2align 4
@@ -22942,6 +22946,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p11_packed32_end:
 
 .globl _probe_p11_packed32_steps
 .p2align 4
@@ -27487,6 +27492,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p11_packed32_steps_end:
 
 .globl _probe_p10_packed48
 .p2align 4
@@ -31477,6 +31483,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p10_packed48_end:
 
 .globl _probe_p11_packed48
 .p2align 4
@@ -36330,6 +36337,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p11_packed48_end:
 
 .globl _probe_p11_packed16
 .p2align 4
@@ -40567,6 +40575,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p11_packed16_end:
 
 .globl _probe_p11_packed64
 .p2align 4
@@ -45728,3 +45737,4 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #768
 ret
+_probe_p11_packed64_end:

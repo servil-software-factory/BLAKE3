@@ -369,6 +369,7 @@ def emit_kernel(name, k, stride, nwords, prefix, steps=False):
         e(f"ldp x{r}, x{r + 1}, [sp, #{F_X19 + 16 * i}]")
     e(f"add sp, sp, #{FRAME}")
     e("ret")
+    e(f"{sym}_end:")
     return "\n".join(L)
 
 
