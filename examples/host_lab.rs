@@ -155,10 +155,10 @@ fn bench_ns_per_try<F: FnMut()>(n_tries: usize, mut f: F) -> f64 {
         for _ in 0..reps {
             f();
         }
-        if t0.elapsed().as_millis() >= 25 {
+        if t0.elapsed().as_millis() >= 15 || reps >= 1_000_000 {
             break;
         }
-        reps = (reps * 2).min(4096);
+        reps *= 2;
     }
     let mut samples = [0.0f64; 9];
     for s in &mut samples {
