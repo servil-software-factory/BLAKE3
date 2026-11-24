@@ -446,7 +446,7 @@ it takes and ticks each step:
      `publish = false` and ships as libraries;
    - b3sum's binaries, built on each machine by `sh tools/b3sum-release.sh`
      from a fresh clone of the version commit (statically linked on Linux,
-     the same bytes whoever builds them), each with its `.sha256`;
+     the same bytes whoever builds them), each with its `.sha256` and `.b3`;
    - no archive of the C library: its build is not reproducible, so a
      published one could not be checked against the source as the other
      artifacts are. Users build it (`capi/README.md`);

@@ -39,6 +39,7 @@ class Versions(unittest.TestCase):
         shutil.copyfile(SCRIPT, self.root / "tools/gen-ver.py")
         # The stamp reads its own commit as the release check will.
         shutil.copyfile(SCRIPT.with_name("release_artifacts.py"), self.root / "tools/release_artifacts.py")
+        shutil.copyfile(SCRIPT.with_name("blake3_ref.py"), self.root / "tools/blake3_ref.py")
         (self.root / "CHANGELOG.md").write_text("# blake3-servil 0.8.0+" + "a" * 40 + ", against official BLAKE3\n")
         (self.root / "capi/b3.h").write_text(f'#define B3_VERSION "{DEV}"\n')
         self.run_command("cargo", "generate-lockfile", "--offline", "--manifest-path", "b3sum/Cargo.toml")

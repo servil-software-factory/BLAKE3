@@ -337,13 +337,22 @@ class Gathered(Repository):
             program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
             open(os.path.join(folder, "b3sum-v0.2.0+old-x86_64-unknown-linux-gnu"), "wb").close()
             with open(os.path.join(folder, program), "rb") as f:
-                line = f"{hashlib.sha256(f.read()).hexdigest()}  {program}\n"
+                raw = f.read()
+            sha_line = f"{hashlib.sha256(raw).hexdigest()}  {program}\n"
+            b3_line = f"{ra.blake3_ref.blake3_hex(raw)}  {program}\n"
             with open(os.path.join(folder, program + ".sha256"), "w") as f:
-                f.write(line)
+                f.write(sha_line)
+            with open(os.path.join(folder, program + ".b3"), "w") as f:
+                f.write(b3_line)
             self.assertEqual(ra.directory(folder, self.release), (True, []))
             with open(os.path.join(folder, program + ".sha256"), "w") as f:
-                f.write(line.replace(line[0], "0" if line[0] != "0" else "1", 1))
+                f.write(sha_line.replace(sha_line[0], "0" if sha_line[0] != "0" else "1", 1))
             self.assertEqual(ra.directory(folder, self.release), (False, [f"NOT CLEAN  {program}.sha256: is not the SHA-256 line of {program}"]))
+            with open(os.path.join(folder, program + ".sha256"), "w") as f:
+                f.write(sha_line)
+            with open(os.path.join(folder, program + ".b3"), "w") as f:
+                f.write(b3_line.replace(b3_line[0], "0" if b3_line[0] != "0" else "1", 1))
+            self.assertEqual(ra.directory(folder, self.release), (False, [f"NOT CLEAN  {program}.b3: is not the BLAKE3 line of {program}"]))
 
     def test_an_artifact_not_there_yet_is_named(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -380,8 +389,12 @@ class Published(Repository):
         return fetch
 
     def digest(self, program, of=None):
-        """The digest file's line for `program`, whose bytes are `of`."""
+        """The SHA-256 digest file's line for `program`, whose bytes are `of`."""
         return f"{hashlib.sha256(self.program() if of is None else of).hexdigest()}  {program}\n".encode()
+
+    def b3_digest(self, program, of=None):
+        """The BLAKE3 digest file's line for `program`, whose bytes are `of`."""
+        return f"{ra.blake3_ref.blake3_hex(self.program() if of is None else of)}  {program}\n".encode()
 
     def run_check(self, fetch):
         out = io.StringIO()
@@ -389,45 +402,80 @@ class Published(Repository):
             bad = ra.check(ra.published(self.release), self.release, out=out)
         return bad, out.getvalue().splitlines()
 
-    def test_a_clean_release_passes_with_its_digest_file(self):
+    def test_a_clean_release_passes_with_its_digest_files(self):
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
-        line = f"{hashlib.sha256(self.program()).hexdigest()}  {program}\n".encode()
-        bad, lines = self.run_check(self.answers({program + ".sha256": line, program: self.program(), "lib.tar.gz": tar_gz({"libb3_servil.a": self.program()})}))
+        bad, lines = self.run_check(
+            self.answers({
+                program + ".sha256": self.digest(program),
+                program + ".b3": self.b3_digest(program),
+                program: self.program(),
+                "lib.tar.gz": tar_gz({"libb3_servil.a": self.program()}),
+            })
+        )
         self.assertEqual(bad, 0, lines)
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 6)
         self.assertTrue(all(line.startswith("clean      ") for line in lines), lines)
 
     def test_a_digest_file_of_other_bytes_or_of_nothing_here_or_of_another_kind_fails(self):
-        # BLAKE3 #439: digest files were passed over.
+        # BLAKE3 #439, #446: both .sha256 and .b3 digest files are held to their artifacts.
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
-        line = f"{hashlib.sha256(b'another program').hexdigest()}  {program}\n".encode()
-        bad, lines = self.run_check(self.answers({program: self.program(), program + ".sha256": line, "gone.sha256": line, program + ".b3": line}))
-        self.assertEqual(bad, 3, lines)
+        bad_sha = f"{hashlib.sha256(b'another program').hexdigest()}  {program}\n".encode()
+        bad_b3 = f"{ra.blake3_ref.blake3_hex(b'another program')}  {program}\n".encode()
+        bad, lines = self.run_check(
+            self.answers({
+                program: self.program(),
+                program + ".sha256": bad_sha,
+                program + ".b3": bad_b3,
+                "gone.sha256": bad_sha,
+                "gone.b3": bad_b3,
+                program + ".md5": bad_sha,
+            })
+        )
+        self.assertEqual(bad, 5, lines)
         self.assertIn(f"NOT CLEAN  the GitHub release: {program}.sha256: is not the SHA-256 line of {program}", lines)
+        self.assertIn(f"NOT CLEAN  the GitHub release: {program}.b3: is not the BLAKE3 line of {program}", lines)
         self.assertIn("NOT CLEAN  the GitHub release: gone.sha256: is the digest of gone, which is no artifact here", lines)
-        self.assertTrue(any(l.startswith(f"NOT CLEAN  the GitHub release: {program}.b3: ") for l in lines), lines)
+        self.assertIn("NOT CLEAN  the GitHub release: gone.b3: is the digest of gone, which is no artifact here", lines)
+        self.assertTrue(any(l.startswith(f"NOT CLEAN  the GitHub release: {program}.md5: ") for l in lines), lines)
 
     def test_a_dirty_program_fails_and_the_rest_still_pass(self):
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
         dirty = self.program(f".{self.commit}.dirty.{'1' * 40}")
-        bad, lines = self.run_check(self.answers({program: dirty, program + ".sha256": self.digest(program, dirty)}))
+        bad, lines = self.run_check(
+            self.answers({program: dirty, program + ".sha256": self.digest(program, dirty), program + ".b3": self.b3_digest(program, dirty)})
+        )
         self.assertEqual(bad, 1)
-        self.assertEqual([line[:9] for line in lines], ["clean    ", "clean    ", "NOT CLEAN", "clean    "])
+        self.assertEqual([line[:9] for line in lines], ["clean    ", "clean    ", "NOT CLEAN", "clean    ", "clean    "])
         self.assertIn(f"the GitHub release: {program}: its build version is", lines[2])
 
     def test_a_crate_or_a_program_not_published_is_missing(self):
         bad, lines = self.run_check(self.answers({}, crates=("top-crate",)))
-        self.assertEqual(bad, 3)
+        self.assertEqual(bad, 4)
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
-        self.assertEqual(lines[1:], [f"MISSING    crates.io: sub-crate-{self.version}.crate", f"MISSING    the GitHub release: {program}", f"MISSING    the GitHub release: {program}.sha256"])
+        self.assertEqual(
+            lines[1:],
+            [
+                f"MISSING    crates.io: sub-crate-{self.version}.crate",
+                f"MISSING    the GitHub release: {program}",
+                f"MISSING    the GitHub release: {program}.sha256",
+                f"MISSING    the GitHub release: {program}.b3",
+            ],
+        )
 
-    def test_a_program_published_without_its_digest_file_is_missing_it(self):
-        """A release's programs come with their SHA-256 files. One that
-        was not there was passed over, where a wrong one failed."""
+    def test_a_program_published_without_either_digest_file_is_missing_it(self):
+        """A release's programs come with both .sha256 and .b3 files (BLAKE3 #446).
+        Missing either digest file fails."""
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
         bad, lines = self.run_check(self.answers({program: self.program()}))
+        self.assertEqual(
+            (bad, lines[-2:]),
+            (2, [f"MISSING    the GitHub release: {program}.sha256", f"MISSING    the GitHub release: {program}.b3"]),
+        )
+        self.assertTrue(all(line.startswith("clean      ") for line in lines[:-2]), lines)
+        bad, lines = self.run_check(self.answers({program: self.program(), program + ".sha256": self.digest(program)}))
+        self.assertEqual((bad, lines[-1]), (1, f"MISSING    the GitHub release: {program}.b3"))
+        bad, lines = self.run_check(self.answers({program: self.program(), program + ".b3": self.b3_digest(program)}))
         self.assertEqual((bad, lines[-1]), (1, f"MISSING    the GitHub release: {program}.sha256"))
-        self.assertTrue(all(line.startswith("clean      ") for line in lines[:-1]), lines)
 
     def test_no_github_release_is_missing(self):
         def fetch(url):
@@ -439,7 +487,14 @@ class Published(Repository):
 
     def test_an_asset_of_an_unknown_kind_fails(self):
         program = f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"
-        bad, lines = self.run_check(self.answers({program: self.program(), program + ".sha256": self.digest(program), "installer.sh": b"#!/bin/sh\n"}))
+        bad, lines = self.run_check(
+            self.answers({
+                program: self.program(),
+                program + ".sha256": self.digest(program),
+                program + ".b3": self.b3_digest(program),
+                "installer.sh": b"#!/bin/sh\n",
+            })
+        )
         self.assertEqual(bad, 1, lines)
         self.assertTrue(any("installer.sh: an artifact of a kind this check does not know" in line for line in lines), lines)
 
@@ -632,8 +687,11 @@ class CommandLine(Repository):
                     f.write(self.program(said))
             with open(clean + ".sha256", "w") as f:
                 f.write(f"{hashlib.sha256(self.program()).hexdigest()}  {os.path.basename(clean)}\n")
-            self.assertEqual(self.run_main(self.tag, clean + ".sha256", clean)[0], 0)
-            self.assertEqual(self.run_main(self.tag, clean + ".sha256")[0], 1, "a digest file with no artifact")
+            with open(clean + ".b3", "w") as f:
+                f.write(f"{ra.blake3_ref.blake3_hex(self.program())}  {os.path.basename(clean)}\n")
+            self.assertEqual(self.run_main(self.tag, clean + ".sha256", clean + ".b3", clean)[0], 0)
+            self.assertEqual(self.run_main(self.tag, clean + ".sha256")[0], 1, "a .sha256 file with no artifact")
+            self.assertEqual(self.run_main(self.tag, clean + ".b3")[0], 1, "a .b3 file with no artifact")
             code, said = self.run_main(self.tag, clean, dirty)
             self.assertEqual(code, 1)
             self.assertIn("1 artifacts are not clean builds of it, or are missing", said)

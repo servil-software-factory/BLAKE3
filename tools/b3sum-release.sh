@@ -2,9 +2,9 @@
 # b3sum's release binary for this machine, built from a fresh clone of the
 # release's version commit: statically linked on Linux (the recommended
 # build, b3sum/README.md), as the platform links elsewhere (macOS). Writes
-# dist/b3sum-VERSION-TARGET and its SHA-256 digest file beside it, for a
-# GitHub release (CONTRIBUTING.md, "Releases"). A BLAKE3 digest file beside
-# those waits for a check that can verify it (BLAKE3 #446).
+# dist/b3sum-VERSION-TARGET with both its SHA-256 (.sha256) and independent
+# pure-Python BLAKE3 (.b3) digest files beside it, for a GitHub release
+# (CONTRIBUTING.md, "Releases"; BLAKE3 #446).
 #
 #     sh tools/b3sum-release.sh
 #
@@ -75,9 +75,13 @@ elif grep -a -q "$commit\.dirty" "$out"; then
 	rm -f "$out"
 	exit 1
 fi
-# The binary checks itself against BLAKE3's published digest of nothing.
+# The binary checks itself against BLAKE3's published digest of nothing,
+# then both .sha256 and .b3 are written independently of the binary under
+# check (tools/blake3_ref.py) and cross-checked against it.
 test "$(printf '' | "$out" --no-names)" = af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
 (cd dist && { sha256sum "$name" 2>/dev/null || shasum -a 256 "$name"; } > "$name.sha256")
+(cd dist && python3 "$root/tools/blake3_ref.py" "$name" > "$name.b3")
+test "$(cd dist && "$root/$out" "$name")" = "$(cat "dist/$name.b3")"
 file "$out"
-cat "dist/$name.sha256"
-echo "b3sum-release: $root/$out, with .sha256 beside it"
+cat "dist/$name.sha256" "dist/$name.b3"
+echo "b3sum-release: $root/$out, with .sha256 and .b3 beside it"

@@ -446,7 +446,7 @@ Two programs check a release's artifacts against its version commit
 (`CONTRIBUTING.md`, "Every artifact is a clean build of the version
 commit"). `tools/release_artifacts.py` compares each crate with the
 commit file by file, reads each program's build version, and holds each
-`.sha256` file to the artifact beside it. `b3sum`'s Linux binaries and
+`.sha256` and `.b3` files to the artifact beside them. `b3sum`'s Linux binaries and
 the four crates are also reproducible: `tools/b3sum-release.sh` and
 `tools/crates-release.sh` give the same bytes on any machine from the
 same commit, the toolchain it names and the dependency lock it holds

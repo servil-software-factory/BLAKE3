@@ -894,7 +894,7 @@ class Artifacts(unittest.TestCase):
                     z.writestr(name, data)
             return archive.getvalue()
 
-        one = zipped({f"dist/{crate}": b"the commit's crate", "dist/b3sum-x86": b"a program", "dist/b3sum-x86.sha256": b"a digest", "dist/notes.txt": b"aside"})
+        one = zipped({f"dist/{crate}": b"the commit's crate", f"dist/{crate}.sha256": b"a sha256", f"dist/{crate}.b3": b"a b3", "dist/b3sum-x86": b"a program", "dist/b3sum-x86.sha256": b"a digest", "dist/b3sum-x86.b3": b"a b3 digest", "dist/notes.txt": b"aside"})
         same = zipped({f"dist/{crate}": b"the commit's crate", "dist/b3sum-arm": b"another program"})
         other = zipped({f"dist/{crate}": b"another crate", "dist/b3sum-arm": b"another program"})
         for archives in ([("b3sum-x86", one), ("b3sum-arm", other)], [("b3sum-arm", other), ("b3sum-x86", one)]):

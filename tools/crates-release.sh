@@ -79,5 +79,13 @@ cargo package --frozen $verify --manifest-path "$stage/Cargo.toml" --target-dir 
 cmp -s "$stage/checkout/tools/release/Cargo.lock" "$stage/Cargo.lock" || { echo "crates-release: packaging changed the lock" >&2; exit 1; }
 mkdir -p dist
 cp "$stage"/target/package/*.crate dist/
-(cd dist && for crate in "$stage"/target/package/*.crate; do sha256sum "$(basename "$crate")"; done)
-echo "crates-release: the four archives are in $root/dist; publish from $stage (CONTRIBUTING.md, step 9): cargo publish --locked --no-verify, the same -p names one at a time"
+(
+	cd dist
+	for crate in "$stage"/target/package/*.crate; do
+		base=$(basename "$crate")
+		{ sha256sum "$base" 2>/dev/null || shasum -a 256 "$base"; } > "$base.sha256"
+		python3 "$root/tools/blake3_ref.py" "$base" > "$base.b3"
+		cat "$base.sha256" "$base.b3"
+	done
+)
+echo "crates-release: the four archives (with .sha256 and .b3) are in $root/dist; publish from $stage (CONTRIBUTING.md, step 9): cargo publish --locked --no-verify, the same -p names one at a time"

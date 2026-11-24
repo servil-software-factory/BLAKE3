@@ -74,6 +74,7 @@ fails on them and passes the release's library and its four crates.
 """
 
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -84,6 +85,17 @@ import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+def _load_blake3_ref():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blake3_ref.py")
+    spec = importlib.util.spec_from_file_location("blake3_ref", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+blake3_ref = _load_blake3_ref()
 
 REPO = "servil-software-factory/BLAKE3"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -318,19 +330,31 @@ def read(path):
         return f.read()
 
 
+DIGEST_SUFFIXES = (".sha256", ".b3")
+
+
 def is_digest(name):
-    """A digest file beside an artifact (tools/b3sum-release.sh writes one)."""
-    return name.endswith(".sha256")
+    """A digest file beside an artifact (tools/b3sum-release.sh and
+    tools/crates-release.sh write .sha256 and .b3)."""
+    return name.endswith(DIGEST_SUFFIXES)
 
 
 def digest_problems(name, data, seen):
-    """Why the digest file `name` is not the SHA-256 line of the artifact
-    it is named for, among those checked before it (`seen`, by name)."""
-    of = name[: -len(".sha256")]
-    if of not in seen:
-        return [f"is the digest of {of}, which is no artifact here"]
-    want = f"{hashlib.sha256(seen[of]).hexdigest()}  {of}\n".encode()
-    return [] if data == want else [f"is not the SHA-256 line of {of}"]
+    """Why the digest file `name` is not the SHA-256 or BLAKE3 line of the
+    artifact it is named for, among those checked before it (`seen`, by name)."""
+    if name.endswith(".sha256"):
+        of = name[: -len(".sha256")]
+        if of not in seen:
+            return [f"is the digest of {of}, which is no artifact here"]
+        want = f"{hashlib.sha256(seen[of]).hexdigest()}  {of}\n".encode()
+        return [] if data == want else [f"is not the SHA-256 line of {of}"]
+    if name.endswith(".b3"):
+        of = name[: -len(".b3")]
+        if of not in seen:
+            return [f"is the digest of {of}, which is no artifact here"]
+        want = f"{blake3_ref.blake3_hex(seen[of])}  {of}\n".encode()
+        return [] if data == want else [f"is not the BLAKE3 line of {of}"]
+    return ["is not a recognized digest file"]
 
 
 def fetch(url):
@@ -377,11 +401,12 @@ def published(release):
     # Each artifact before its digest file, which is checked against it.
     for asset in sorted(listing["assets"], key=lambda asset: (is_digest(asset["name"]), asset["name"])):
         yield f"the GitHub release: {asset['name']}", asset["name"], fetch(asset["browser_download_url"])
-    # Each program, and the digest file the release has beside it
-    # (CONTRIBUTING, tools/b3sum-release.sh): a digest file that was not
-    # there was passed over, where a wrong one failed.
+    # Each program, and both digest files the release has beside it
+    # (CONTRIBUTING, tools/b3sum-release.sh): a missing digest file fails,
+    # as a wrong one does (BLAKE3 #446).
     programs = [n for n in expected(release) if not n.endswith(".crate")]
-    for missing in [n for n in programs + [n + ".sha256" for n in programs] if n not in names]:
+    expected_digests = [n + suffix for n in programs for suffix in DIGEST_SUFFIXES]
+    for missing in [n for n in programs + expected_digests if n not in names]:
         yield f"the GitHub release: {missing}", missing, None
 
 
