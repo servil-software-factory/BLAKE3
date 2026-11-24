@@ -119,6 +119,14 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
     crate::ran(crate::Ran::ShortRun);
     let plans = neon_plans();
     let last_len = len - (slot - BLOCK_LEN);
+    #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    if slot > BLOCK_LEN && last_len < BLOCK_LEN && outputs.len() >= X86_PAD8_MIN {
+        let width = crate::ffi_output::lanes(platform);
+        if width != 0 {
+            multi_block_short_last(input, slot, key, flags, last_len, outputs, platform, width);
+            return;
+        }
+    }
     for (messages, digests) in input.chunks(slot * TABLE).zip(outputs.chunks_mut(TABLE)) {
         match slot / BLOCK_LEN {
             1 => hash_run_short::<{ BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
@@ -167,15 +175,26 @@ fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut
     }
 }
 
-/// The whole groups of `digests.len()` one-block messages (each `len`
-/// bytes of a 64-byte slot in `bytes`, zero past them: a batch's padding,
-/// or the block `hash_packed` writes each packed message into) that run on
-/// the independent-compression kernel side by side: how many messages they
-/// took.
+/// Minimum remaining one-block or short-last-block messages to pad a 16-lane
+/// AVX-512 `output16` call instead of `output8` + scalar.
 #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+const X86_PAD16_MIN: usize = 9;
+/// Minimum remaining one-block or short-last-block messages to pad an 8-lane
+/// AVX2 `output8` call instead of running serial `hash_serial_on` (4 wins on
+/// every tested x86 CPU including Xeon 6330, where 3 read +12% slower).
+#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+const X86_PAD8_MIN: usize = 4;
+
+/// The whole and padded groups of `digests.len()` one-block messages (each
+/// `len` bytes of a 64-byte slot in `bytes`, zero past them: a batch's
+/// padding, or the remainder buffer `hash_packed` writes) that run on the
+/// x86-64 independent-compression kernels side by side: how many messages
+/// they took.
+#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+#[inline(never)]
 fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key: &CVWords, flags: u8, platform: Platform) -> usize {
     // Check the descriptor length once, before narrowing it or filling
-    // any lanes. Both short batches and expanded Packed messages come here.
+    // any lanes. Both short batches and expanded Packed remainders come here.
     assert!(len <= BLOCK_LEN, "an independent short message fits in one block");
     let len = len.to_le_bytes()[0];
     let lanes = crate::ffi_output::lanes(platform);
@@ -196,7 +215,24 @@ fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key
             }
         }
     }
-    groups * lanes
+    let mut done = groups * lanes;
+    let rem = digests.len() - done;
+    let tail = &bytes[done * BLOCK_LEN..];
+    if lanes == 16 && rem >= X86_PAD16_MIN {
+        // Sound: Platform::AVX512 supports output16; every lane reads a valid
+        // 64-byte slot in `tail`, repeating the last message for spare lanes.
+        unsafe { packed_tail::<16>(tail, &mut digests[done..], len, key, flags) };
+        done += rem;
+    } else if rem == 8 {
+        // Sound: both Platform::AVX512 and Platform::AVX2 support AVX2 output8.
+        unsafe { packed_group::<8>(tail, &mut digests[done..done + 8], len, key, flags) };
+        done += 8;
+    } else if rem >= X86_PAD8_MIN {
+        // Sound: both Platform::AVX512 and Platform::AVX2 support AVX2 output8.
+        unsafe { packed_tail::<8>(tail, &mut digests[done..], len, key, flags) };
+        done += rem;
+    }
+    done
 }
 
 /// `W` one-block messages, each `len` bytes zero-padded to a block at the
@@ -209,6 +245,125 @@ unsafe fn packed_group<const W: usize>(blocks: &[u8], out: &mut [[u8; OUT_LEN]],
     // Sound: the caller's CPU runs the W-lane kernel; every block is 64
     // readable bytes.
     unsafe { crate::ffi_output::hash_group::<W>(&inputs, out) };
+}
+
+/// `1..W` one-block messages padded to `W` lanes by repeating the last block
+/// into spare lanes, writing into a stack scratch buffer and copying back
+/// `out.len()` digests.
+#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+unsafe fn packed_tail<const W: usize>(blocks: &[u8], out: &mut [[u8; OUT_LEN]], len: u8, key: &CVWords, flags: u8) {
+    let count = out.len();
+    assert!(count > 0 && count < W, "padded tail holds 1..W messages");
+    let block = |i: usize| -> &[u8; BLOCK_LEN] {
+        let idx = i.min(count - 1);
+        blocks[idx * BLOCK_LEN..][..BLOCK_LEN].try_into().unwrap()
+    };
+    let inputs: [crate::ffi_output::Input<'_>; W] = core::array::from_fn(|i| crate::ffi_output::packed(block(i), key, len, flags));
+    let mut scratch = [[0u8; OUT_LEN]; W];
+    // Sound: the caller's CPU runs the W-lane kernel; every lane reads a valid
+    // 64-byte slot and `scratch` holds all W outputs.
+    unsafe { crate::ffi_output::hash_group::<W>(&inputs, &mut scratch) };
+    out.copy_from_slice(&scratch[..count]);
+}
+
+/// Padded lane count for a single `<= TILE` tile of multi-block prefix
+/// `hash_many_blocks`: round `9..15` lanes up to 16 on AVX-512 (`width == 16`)
+/// and `5..7` lanes up to 8 on both AVX-512 and AVX2 so prefix hashing avoids
+/// scalar tails.
+#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+pub(crate) fn prefix_padded_count(count: usize, width: usize) -> usize {
+    if width == 16 && count % 16 >= X86_PAD16_MIN {
+        count.next_multiple_of(16)
+    } else if count % 8 >= 5 {
+        count.next_multiple_of(8)
+    } else {
+        count
+    }
+}
+
+/// One `4..=TILE` (`TILE` in `{8, 16}`) tile of multi-block short-last messages:
+/// keeps the stack workspace small (`512 B` for `TILE = 8`, `1 KiB` for
+/// `TILE = 16`) so small batches never evict the caller's L1d working set.
+#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+#[inline(never)]
+fn multi_block_short_last_tile<const TILE: usize>(
+    messages: &[u8],
+    slot: usize,
+    key: &CVWords,
+    flags: u8,
+    last_len_u8: u8,
+    outputs: &mut [[u8; OUT_LEN]],
+    platform: Platform,
+) {
+    let count = outputs.len();
+    assert!((X86_PAD8_MIN..=TILE).contains(&count), "tile holds 4..=TILE messages");
+    let prefix_len = slot - BLOCK_LEN;
+    let prefix_blocks = prefix_len / BLOCK_LEN;
+    let padded_count = prefix_padded_count(count, TILE);
+    let mut ptrs = crate::stack_vec::StackVec::<*const u8, TILE>::new();
+    for i in 0..count {
+        ptrs.push(messages[i * slot..].as_ptr());
+    }
+    let last_ptr = ptrs[count - 1];
+    ptrs.extend(core::iter::repeat_n(last_ptr, padded_count - count));
+    let mut cv_bytes = [[0u8; OUT_LEN]; TILE];
+    // Sound: every pointer in `ptrs` reaches `prefix_blocks` whole blocks inside
+    // its slot in `messages`, and `cv_bytes[..padded_count]` holds `padded_count` CVs.
+    unsafe {
+        crate::pair::hash_many_blocks(platform, &ptrs, prefix_blocks, key, 0, false, flags, CHUNK_START, 0, cv_bytes[..padded_count].as_flattened_mut());
+    }
+    let mut cvs = [[0u32; 8]; TILE];
+    for i in 0..count {
+        cvs[i] = core::array::from_fn(|w| u32::from_le_bytes(cv_bytes[i][4 * w..4 * w + 4].try_into().unwrap()));
+    }
+    let last_block = |i: usize| -> &[u8; BLOCK_LEN] { messages[i * slot + prefix_len..][..BLOCK_LEN].try_into().unwrap() };
+    let inputs: [crate::ffi_output::Input<'_>; TILE] = core::array::from_fn(|j| {
+        let idx = j.min(count - 1);
+        crate::ffi_output::final_block(last_block(idx), &cvs[idx], last_len_u8, flags)
+    });
+    if count == TILE {
+        // Sound: `TILE` matches AVX-512 (16) or AVX2/AVX-512 (8); all inputs are valid.
+        unsafe { crate::ffi_output::hash_group::<TILE>(&inputs, outputs) };
+    } else {
+        let mut scratch = [[0u8; OUT_LEN]; TILE];
+        // Sound: `TILE` matches AVX-512 (16) or AVX2/AVX-512 (8); all inputs are valid.
+        unsafe { crate::ffi_output::hash_group::<TILE>(&inputs, &mut scratch) };
+        outputs.copy_from_slice(&scratch[..count]);
+    }
+}
+
+/// Multi-block messages (`slot = 2..=16` blocks) whose final block is short
+/// (`1..64` bytes, zero-padded in each slot) on x86-64 AVX-512 / AVX2: tile
+/// by `width` (`16` on AVX-512, `8` on AVX2), dispatching `4..=8` through the
+/// `512 B` 8-lane tile and `9..=16` through the `1 KiB` 16-lane tile, and
+/// running trailing `1..3` messages serially.
+#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+#[inline(never)]
+fn multi_block_short_last(
+    input: &[u8],
+    slot: usize,
+    key: &CVWords,
+    flags: u8,
+    last_len: usize,
+    outputs: &mut [[u8; OUT_LEN]],
+    platform: Platform,
+    width: usize,
+) {
+    assert!(last_len > 0 && last_len < BLOCK_LEN, "short final block");
+    let prefix_len = slot - BLOCK_LEN;
+    let last_len_u8 = last_len.to_le_bytes()[0];
+    for (messages, digests) in input.chunks(slot * width).zip(outputs.chunks_mut(width)) {
+        let count = digests.len();
+        if count < X86_PAD8_MIN {
+            for (i, output) in digests.iter_mut().enumerate() {
+                *output = *crate::hash_serial_on(&messages[i * slot..][..prefix_len + last_len], key, flags, platform).as_bytes();
+            }
+        } else if count <= 8 {
+            multi_block_short_last_tile::<8>(messages, slot, key, flags, last_len_u8, digests, platform);
+        } else {
+            multi_block_short_last_tile::<16>(messages, slot, key, flags, last_len_u8, digests, platform);
+        }
+    }
 }
 
 /// Fewest messages of 2 to 16 blocks that go to SME2 as one more group of
@@ -624,9 +779,9 @@ fn hash_run_padded<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, ou
 #[inline(never)]
 fn hash_run_short<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, plans: bool, last_len: usize) {
     // One-block messages on x86-64 with the independent-compression kernels
-    // (AVX2's eight lanes, AVX-512's sixteen): whole groups side by side,
-    // a batch's and a `Packed`'s alike; the rest, and every other platform,
-    // as before.
+    // (AVX2's eight lanes, AVX-512's sixteen): whole groups and padded tails
+    // (4..=7 on output8, 9..=15 on output16), a batch's and a `Packed`'s alike;
+    // trailing 1..=3 messages, and every other platform, run as before.
     #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
     let done = if N == BLOCK_LEN { one_block_groups(messages, outputs, last_len, key, flags, platform) } else { 0 };
     #[cfg(not(all(feature = "std", blake3_avx512_ffi, target_os = "linux")))]
