@@ -404,10 +404,14 @@ def emit_chunk_kernel(name, k, blocks, per_input_counter, end_flags, prefix):
 
 
 KERNELS = [
-    ("probe_k10_seq_16", 2, 16, True, 2),       # 1 KiB chunks (CHUNK_END = 2)
-    ("probe_k11_seq_16", 3, 16, True, 2),       # 1 KiB chunks (CHUNK_END = 2)
-    ("probe_m10_seq_4", 2, 4, False, 2 | 8),    # 256 B Merkle leaves (CHUNK_END | ROOT)
-    ("probe_m11_seq_4", 3, 4, False, 2 | 8),    # 256 B Merkle leaves (CHUNK_END | ROOT)
+    ("probe_k10_seq_16", 2, 16, True, 2),       # 1 KiB chunks
+    ("probe_k11_seq_16", 3, 16, True, 2),       # 1 KiB chunks
+    ("probe_k12_seq_16", 4, 16, True, 2),       # 1 KiB chunks
+    ("probe_k13_seq_16", 5, 16, True, 2),       # 1 KiB chunks
+    ("probe_m10_seq_4", 2, 4, False, 2 | 8),    # 256 B Merkle leaves
+    ("probe_m11_seq_4", 3, 4, False, 2 | 8),    # 256 B Merkle leaves
+    ("probe_m12_seq_4", 4, 4, False, 2 | 8),    # 256 B Merkle leaves
+    ("probe_m13_seq_4", 5, 4, False, 2 | 8),    # 256 B Merkle leaves
 ]
 
 
