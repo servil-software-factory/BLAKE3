@@ -6,9 +6,10 @@
                                                          release's assets, crates.io's packages
     ... --rebuilt DIR    each b3sum program and each crate is also, byte for byte, the one in DIR
                          (and the one in each folder inside DIR: a builder's each)
-    ... --builders A,B   with --rebuilt: the builders are the folders A and B inside DIR, and no
-                         others; each must be there, and must hold every crate and a program;
-                         DIR holds nothing else to compare with
+    ... --builders A=T1,B=T2  with --rebuilt: the builders are the folders A and B inside DIR,
+                              each pinned to its b3sum target (T1, T2) and no others; each must
+                              hold every crate, its own target's program, and no other files or
+                              symbolic links; DIR holds nothing else
     ... --commit COMMIT  the version commit, where its tag is not made yet
 
 TAG is a release's tag, vX.Y.Z+<code commit>: it names the version commit
@@ -151,6 +152,7 @@ class Release:
         and nothing else belongs in a version commit: its hash is not in
         the tag's name, and the code commit's is."""
         problems = []
+        changed = False
         raw = subprocess.run(["git", "-C", self.repo, "diff-tree", "-r", "--raw", "--no-renames", "-z", code, self.commit], capture_output=True, check=True).stdout
         fields = raw.split(b"\0")
         for entry, path in zip(fields[0::2], fields[1::2]):
@@ -173,6 +175,10 @@ class Release:
                 if len(stamps_were) != len(stamps_are) or STAMP.split(was) != STAMP.split(now) or any(n != self.version.encode() for n in written):
                     problems.append(f"{path} line {number} changes more than a version to this release's")
                     break
+                if written:
+                    changed = True
+        if not problems and not changed:
+            problems.append("changes no version from its parent")
         return problems
 
     def on_main(self):
@@ -325,6 +331,21 @@ def expected(release):
     return programs + [f"{release.crate(folder)}-{release.version}.crate" for folder in CRATE_DIRS]
 
 
+def expected_program_digests(release):
+    """The .sha256 and .b3 digest sidecars required beside every b3sum
+    program of `release` (tools/b3sum-release.sh, BLAKE3 #446, #465)."""
+    programs = [n for n in expected(release) if not n.endswith(".crate")]
+    return [n + suffix for n in programs for suffix in DIGEST_SUFFIXES]
+
+
+def _plain_file(path):
+    return os.path.isfile(path) and not os.path.islink(path)
+
+
+def _plain_dir(path):
+    return os.path.isdir(path) and not os.path.islink(path)
+
+
 def read(path):
     with open(path, "rb") as f:
         return f.read()
@@ -405,63 +426,110 @@ def published(release):
     # (CONTRIBUTING, tools/b3sum-release.sh): a missing digest file fails,
     # as a wrong one does (BLAKE3 #446).
     programs = [n for n in expected(release) if not n.endswith(".crate")]
-    expected_digests = [n + suffix for n in programs for suffix in DIGEST_SUFFIXES]
-    for missing in [n for n in programs + expected_digests if n not in names]:
+    for missing in [n for n in programs + expected_program_digests(release) if n not in names]:
         yield f"the GitHub release: {missing}", missing, None
 
 
-def rebuilt_problems(name, data, rebuilt, named=None):
+def _parse_builders(named):
+    """Parse `named` builder specs (`NAME=TARGET`), returning (specs, error)."""
+    specs, seen_names, seen_targets = [], set(), set()
+    for item in named:
+        sub, sep, target = item.partition("=")
+        if not sep or sub in ("", ".", "..") or os.path.basename(sub) != sub or sub in seen_names:
+            return None, f"the builders named are not NAME=TARGET pairs with distinct folder names: {', '.join(named)}"
+        if target not in B3SUM_TARGETS or target in seen_targets:
+            return None, f"the builders named do not assign each release target once: {', '.join(named)}"
+        seen_names.add(sub)
+        seen_targets.add(target)
+        specs.append((sub, target))
+    if seen_targets != set(B3SUM_TARGETS):
+        missing = sorted(set(B3SUM_TARGETS) - seen_targets)
+        return None, f"the builders named cover no builder for {', '.join(missing)}"
+    return specs, None
+
+
+def rebuilt_problems(name, data, rebuilt, named=None, release=None):
     """Why the b3sum program or crate `name` is not the second one in the
-    folder `rebuilt`: nothing where the two are the same bytes. A folder
-    inside `rebuilt` is one builder's files: `name` is then compared with
-    every builder's copy, and a builder that made any crate made this
-    one. With `named`, the builders are those folders of `rebuilt` and no
-    others: each is there, and each holds every crate (which builders
-    there should be is then the caller's word, not the folder's: a
-    builder that left no crate at all, or one folder holding everyone's
-    files, was not told from two builders that agree). The names are
-    folders' own, each once, and the folders real ones; `rebuilt` holds
-    no other folder and no copy of `name` beside them; and each builder
-    holds a b3sum program (a third folder that disagreed, one builder
-    named twice, and one builder holding both programs each passed)."""
+    folder `rebuilt`: nothing where the two are the same bytes. Every file
+    and folder inspected under `rebuilt` must be real (never a symbolic
+    link). With `named` (`NAME=TARGET` per builder), `rebuilt` holds those
+    builder folders and nothing else, each builder folder holds only plain
+    files belonging to that builder (its own target's b3sum program, every
+    release crate, and optional .sha256/.b3 sidecars of those), and each
+    b3sum program is compared specifically against its target's builder
+    (BLAKE3 #465)."""
+    if not _plain_dir(rebuilt):
+        return [f"{rebuilt} is not a real directory"]
     if named is None:
-        builders = [rebuilt] + sorted(os.path.join(rebuilt, sub) for sub in os.listdir(rebuilt) if os.path.isdir(os.path.join(rebuilt, sub)))
+        links = sorted(sub for sub in os.listdir(rebuilt) if os.path.islink(os.path.join(rebuilt, sub)))
+        if links:
+            return [f"{rebuilt} holds a symbolic link ({links[0]}): every rebuilt file and folder is real"]
+        builders = [rebuilt] + sorted(os.path.join(rebuilt, sub) for sub in os.listdir(rebuilt) if _plain_dir(os.path.join(rebuilt, sub)))
+        for builder in builders[1:]:
+            sub_links = sorted(e for e in os.listdir(builder) if os.path.islink(os.path.join(builder, e)))
+            if sub_links:
+                return [f"{builder} holds a symbolic link ({sub_links[0]}): every rebuilt file is a plain file"]
+        copies = [builder for builder in builders if _plain_file(os.path.join(builder, name))]
+        if not copies:
+            script = "crates-release" if name.endswith(".crate") else "b3sum-release"
+            return [f"no second build of it in {rebuilt} to compare with (sh tools/{script}.sh at the version commit, on another machine)"]
+        found = []
+        for builder in copies:
+            other = read(os.path.join(builder, name))
+            if other != data:
+                digests = [hashlib.sha256(d).hexdigest() for d in (data, other)]
+                found.append(f"its bytes (SHA-256 {digests[0]}) are not the second build's in {builder} (SHA-256 {digests[1]}): one of the two was not made from the version commit by the release's script")
+        if name.endswith(".crate"):
+            for builder in builders:
+                if builder not in copies and any(_plain_file(os.path.join(builder, n)) and n.endswith(".crate") for n in os.listdir(builder)):
+                    found.append(f"{builder} holds crates and not this one: its builder packaged fewer than the release has")
+        return found
+
+    specs, err = _parse_builders(named)
+    if err is not None:
+        return [err]
+    builder_names = [sub for sub, _ in specs]
+    builders = [(os.path.join(rebuilt, sub), target) for sub, target in specs]
+    absent = [builder for builder, _ in builders if not _plain_dir(builder)]
+    if absent:
+        return [f"no files of the builder {os.path.basename(builder)} in {rebuilt}: each builder named has a folder of its own there" for builder in absent]
+    others = sorted(sub for sub in os.listdir(rebuilt) if sub not in builder_names)
+    if others:
+        return [f"{rebuilt} holds entries outside the builders named ({', '.join(others)}): with builders named, every copy is one builder's"]
+    crate_names = {f"{release.crate(folder)}-{release.version}.crate" for folder in CRATE_DIRS} if release is not None else None
+    for builder, target in builders:
+        entries = sorted(os.listdir(builder))
+        non_plain = [e for e in entries if not _plain_file(os.path.join(builder, e))]
+        if non_plain:
+            return [f"{builder} holds what is no plain file ({non_plain[0]}): every rebuilt file is a plain file"]
+        if release is not None:
+            own_program = f"b3sum-{release.tag}-{target}"
+            allowed = {own_program, *crate_names}
+            allowed |= {n + suffix for n in allowed for suffix in DIGEST_SUFFIXES}
+            extra = [e for e in entries if e not in allowed]
+            if extra:
+                return [f"{builder} holds an unexpected file ({extra[0]}): a builder holds only its own target's program, the release's crates, and their digests"]
+            if own_program not in entries:
+                return [f"{builder} holds no {own_program}: each builder named builds its own target's program"]
+    if name.endswith(".crate"):
+        target_builders = [builder for builder, _ in builders]
     else:
-        if len(set(named)) != len(named) or any(sub in ("", ".", "..") or os.path.basename(sub) != sub for sub in named):
-            return [f"the builders named are not folders' names, each once: {', '.join(named)}"]
-        builders = [os.path.join(rebuilt, sub) for sub in named]
-        absent = [builder for builder in builders if not os.path.isdir(builder) or os.path.islink(builder)]
-        if absent:
-            return [f"no files of the builder {os.path.basename(builder)} in {rebuilt}: each builder named has a folder of its own there" for builder in absent]
-        others = sorted(sub for sub in os.listdir(rebuilt) if sub not in named and os.path.isdir(os.path.join(rebuilt, sub)))
-        if others:
-            return [f"{rebuilt} holds a folder that is no builder named ({', '.join(others)}): its files would go uncompared"]
-        if os.path.lexists(os.path.join(rebuilt, name)):
-            return [f"a copy of it lies in {rebuilt} outside the builders' folders: with builders named, every copy is one builder's"]
-    copies = [builder for builder in builders if os.path.isfile(os.path.join(builder, name))]
+        matched = [builder for builder, target in builders if name.endswith("-" + target)]
+        target_builders = matched or [builder for builder, _ in builders]
+    found = []
+    copies = [builder for builder in target_builders if _plain_file(os.path.join(builder, name))]
     if not copies:
         script = "crates-release" if name.endswith(".crate") else "b3sum-release"
         return [f"no second build of it in {rebuilt} to compare with (sh tools/{script}.sh at the version commit, on another machine)"]
-    found = []
     for builder in copies:
         other = read(os.path.join(builder, name))
         if other != data:
             digests = [hashlib.sha256(d).hexdigest() for d in (data, other)]
             found.append(f"its bytes (SHA-256 {digests[0]}) are not the second build's in {builder} (SHA-256 {digests[1]}): one of the two was not made from the version commit by the release's script")
     if name.endswith(".crate"):
-        for builder in builders:
-            if builder in copies:
-                continue
-            if named is not None:
+        for builder in target_builders:
+            if builder not in copies:
                 found.append(f"{builder} does not hold this crate: every builder named packages every crate of the release")
-            elif any(n.endswith(".crate") for n in os.listdir(builder)):
-                found.append(f"{builder} holds crates and not this one: its builder packaged fewer than the release has")
-    elif named is not None:
-        # The release's programs are named alike but for their machine.
-        release = next((name[: -len(target)] for target in B3SUM_TARGETS if name.endswith("-" + target)), None)
-        for builder in builders:
-            if release is not None and not any(os.path.isfile(os.path.join(builder, release + target)) for target in B3SUM_TARGETS):
-                found.append(f"{builder} holds no b3sum program of the release: every builder named builds one")
     return found
 
 
@@ -481,7 +549,7 @@ def check(items, release, out=None, rebuilt=None, builders=None):
             seen[name] = data
             found = problems(name, data, release)
             if rebuilt is not None and (name.startswith("b3sum-") or name.endswith(".crate")):
-                found = found + rebuilt_problems(name, data, rebuilt, builders)
+                found = found + rebuilt_problems(name, data, rebuilt, builders, release=release)
             lines = [f"NOT CLEAN  {label}: {problem}" for problem in found]
         bad += bool(lines)
         print("\n".join(lines or [f"clean      {label}"]), file=out or sys.stdout)
@@ -491,14 +559,21 @@ def check(items, release, out=None, rebuilt=None, builders=None):
 def directory(path, release, rebuilt=None, builders=None):
     """A release's artifacts gathered in the folder `path` before anything
     is published (the files there that carry its version): (True, [])
-    where every one a release has is there and each is clean; (False, the
+    where every one a release has (including each program's .sha256 and
+    .b3 sidecars) is there as a plain file and each is clean; (False, the
     lines of those that are not clean); (None, the names not there yet).
     `rebuilt`, `builders`: as check's."""
+    if os.path.islink(path):
+        return False, [f"NOT CLEAN  {path}: is a symbolic link"]
     names = sorted((n for n in os.listdir(path) if release.version in n), key=lambda n: (is_digest(n), n)) if os.path.isdir(path) else []
+    non_plain = [n for n in names if not _plain_file(os.path.join(path, n))]
+    if non_plain:
+        return False, [f"NOT CLEAN  {n}: is no plain file" for n in non_plain]
     report = io.StringIO()
     if check(((n, n, read(os.path.join(path, n))) for n in names), release, out=report, rebuilt=rebuilt, builders=builders):
         return False, [line for line in report.getvalue().splitlines() if not line.startswith("clean")]
-    missing = [n for n in expected(release) if n not in names]
+    want = expected(release) + expected_program_digests(release)
+    missing = [n for n in want if n not in names]
     return (None, missing) if missing else (True, [])
 
 

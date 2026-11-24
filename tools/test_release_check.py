@@ -1,6 +1,7 @@
 """Release-gate controls. All GitHub answers and release logs are fixtures."""
 import contextlib
 import datetime
+import hashlib
 import importlib.util
 import io
 import json
@@ -982,7 +983,11 @@ class Artifacts(unittest.TestCase):
 
     def test_without_cis_builds_clean_artifacts_stay_open(self):
         (self.repo / "dist").mkdir()
-        (self.repo / "dist" / f"b3sum-v0.3.0+{self.code}-x86_64-unknown-linux-gnu").write_bytes(f"b3sums 0.3.0+{self.code}\0".encode())
+        prog_name = f"b3sum-v0.3.0+{self.code}-x86_64-unknown-linux-gnu"
+        clean = f"b3sums 0.3.0+{self.code}\0".encode()
+        (self.repo / "dist" / prog_name).write_bytes(clean)
+        (self.repo / "dist" / (prog_name + ".sha256")).write_text(f"{hashlib.sha256(clean).hexdigest()}  {prog_name}\n")
+        (self.repo / "dist" / (prog_name + ".b3")).write_text(f"{check.release_artifacts.blake3_ref.blake3_hex(clean)}  {prog_name}\n")
         crate = io.BytesIO()
         with tarfile.open(fileobj=crate, mode="w:gz") as archive:
             for name, data in ((".cargo_vcs_info.json", json.dumps({"git": {"sha1": self.commit}, "path_in_vcs": ""}).encode()),
@@ -994,9 +999,14 @@ class Artifacts(unittest.TestCase):
         ok, why = self.result(self.commit)
         self.assertIsNone(ok)
         self.assertIn("CI's builds, which each b3sum program and crate must equal byte for byte, are not there yet", why)
-        clean = f"b3sums 0.3.0+{self.code}\0".encode()
         ok, why = self.result(self.commit, ci_built=clean, ci_crate=crate.getvalue())
         self.assertIs(ok, True, why)
+        # Missing either digest sidecar keeps dist/ open (#465).
+        (self.repo / "dist" / (prog_name + ".b3")).unlink()
+        ok, why = self.result(self.commit, ci_built=clean, ci_crate=crate.getvalue())
+        self.assertIsNone(ok)
+        self.assertIn(prog_name + ".b3", why)
+        (self.repo / "dist" / (prog_name + ".b3")).write_text(f"{check.release_artifacts.blake3_ref.blake3_hex(clean)}  {prog_name}\n")
         # A crate whose files are all the commit's, and whose archive is
         # not the one CI packaged: Cargo's own files in it may differ.
         ok, why = self.result(self.commit, ci_built=clean, ci_crate=crate.getvalue() + b"\0")

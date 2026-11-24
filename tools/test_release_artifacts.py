@@ -307,6 +307,12 @@ class TheNameIsTheSource(Repository):
         why = self.version_commit(lambda: os.chmod(os.path.join(self.repo, "src/lib.rs"), 0o755))
         self.assertIn("src/lib.rs is added, removed, or of another kind", why)
 
+    def test_an_empty_version_commit_is_refused(self):
+        self.git("checkout", "-q", "--detach", self.code)
+        self.git("commit", "--allow-empty", "-qm", "empty version commit")
+        with self.assertRaisesRegex(ra.NotARelease, "changes no version from its parent"):
+            ra.Release(self.tag, self.repo, self.git("rev-parse", "HEAD"))
+
     def test_main_holds_a_published_releases_commit(self):
         self.assertIsNone(self.release.on_main(), "no origin/main in this clone")
         self.git("update-ref", "refs/remotes/origin/main", self.code)
@@ -323,10 +329,17 @@ class TheNameIsTheSource(Repository):
 class Gathered(Repository):
     """A release's artifacts in one folder, before anything is published."""
 
-    def fill(self, folder, programs=("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"), crates=("", "sub"), said=""):
+    def fill(self, folder, programs=("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"), crates=("", "sub"), said="", digests=True):
         for target in programs:
-            with open(os.path.join(folder, f"b3sum-{self.tag}-{target}"), "wb") as f:
-                f.write(self.program(said))
+            name = f"b3sum-{self.tag}-{target}"
+            raw = self.program(said)
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(raw)
+            if digests:
+                with open(os.path.join(folder, name + ".sha256"), "w") as f:
+                    f.write(f"{hashlib.sha256(raw).hexdigest()}  {name}\n")
+                with open(os.path.join(folder, name + ".b3"), "w") as f:
+                    f.write(f"{ra.blake3_ref.blake3_hex(raw)}  {name}\n")
         for crate in crates:
             with open(os.path.join(folder, f"{'sub-crate' if crate else 'top-crate'}-{self.version}.crate"), "wb") as f:
                 f.write(self.crate(crate))
@@ -340,10 +353,6 @@ class Gathered(Repository):
                 raw = f.read()
             sha_line = f"{hashlib.sha256(raw).hexdigest()}  {program}\n"
             b3_line = f"{ra.blake3_ref.blake3_hex(raw)}  {program}\n"
-            with open(os.path.join(folder, program + ".sha256"), "w") as f:
-                f.write(sha_line)
-            with open(os.path.join(folder, program + ".b3"), "w") as f:
-                f.write(b3_line)
             self.assertEqual(ra.directory(folder, self.release), (True, []))
             with open(os.path.join(folder, program + ".sha256"), "w") as f:
                 f.write(sha_line.replace(sha_line[0], "0" if sha_line[0] != "0" else "1", 1))
@@ -353,12 +362,26 @@ class Gathered(Repository):
             with open(os.path.join(folder, program + ".b3"), "w") as f:
                 f.write(b3_line.replace(b3_line[0], "0" if b3_line[0] != "0" else "1", 1))
             self.assertEqual(ra.directory(folder, self.release), (False, [f"NOT CLEAN  {program}.b3: is not the BLAKE3 line of {program}"]))
+            # Missing either sidecar in dist/ keeps the release open (#465).
+            os.remove(os.path.join(folder, program + ".b3"))
+            self.assertEqual(ra.directory(folder, self.release), (None, [program + ".b3"]))
+            os.remove(os.path.join(folder, program + ".sha256"))
+            self.assertEqual(ra.directory(folder, self.release), (None, [program + ".sha256", program + ".b3"]))
+            # A symbolic link inside dist/ is refused.
+            os.symlink(program, os.path.join(folder, program + ".sha256"))
+            ok, lines = ra.directory(folder, self.release)
+            self.assertIs(ok, False)
+            self.assertIn(f"NOT CLEAN  {program}.sha256: is no plain file", lines)
 
     def test_an_artifact_not_there_yet_is_named(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertEqual(ra.directory(os.path.join(folder, "none"), self.release)[0], None)
             self.fill(folder, programs=("x86_64-unknown-linux-gnu",), crates=("",))
-            self.assertEqual(ra.directory(folder, self.release), (None, [f"b3sum-{self.tag}-aarch64-unknown-linux-gnu", f"sub-crate-{self.version}.crate"]))
+            arm = f"b3sum-{self.tag}-aarch64-unknown-linux-gnu"
+            self.assertEqual(
+                ra.directory(folder, self.release),
+                (None, [arm, f"sub-crate-{self.version}.crate", arm + ".sha256", arm + ".b3"]),
+            )
 
     def test_one_that_is_not_clean_fails_whatever_else_is_missing(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -518,6 +541,11 @@ class Rebuilt(Gathered):
             name = f"b3sum-{self.tag}-aarch64-unknown-linux-gnu"
             with open(os.path.join(folder, name), "ab") as f:
                 f.write(b"and one byte more")
+            raw = open(os.path.join(folder, name), "rb").read()
+            with open(os.path.join(folder, name + ".sha256"), "w") as f:
+                f.write(f"{hashlib.sha256(raw).hexdigest()}  {name}\n")
+            with open(os.path.join(folder, name + ".b3"), "w") as f:
+                f.write(f"{ra.blake3_ref.blake3_hex(raw)}  {name}\n")
             self.assertEqual(ra.directory(folder, self.release), (True, []), "its own word is clean")
             ok, lines = ra.directory(folder, self.release, rebuilt=second)
             self.assertIs(ok, False)
@@ -554,17 +582,16 @@ class Rebuilt(Gathered):
             self.assertEqual(ra.directory(folder, self.release, rebuilt=second), (True, []))
 
     def test_builders_that_are_named_must_each_be_there_with_every_crate(self):
-        # Told who the builders are, the check no longer takes what it
-        # finds for all there should be: a builder that left its program
-        # and no crate, a builder that left nothing, and one folder that
-        # holds everyone's files each passed while it counted folders.
+        # Told who the builders are (NAME=TARGET), the check holds each
+        # builder to its own target's program and every release crate.
         crate = f"sub-crate-{self.version}.crate"
-        named = ["b3sum-ARM64", "b3sum-X64"]
+        named = ["b3sum-ARM64=aarch64-unknown-linux-gnu", "b3sum-X64=x86_64-unknown-linux-gnu"]
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
             self.fill(folder)
-            for builder in named:
-                os.mkdir(os.path.join(second, builder))
-                self.fill(os.path.join(second, builder))
+            os.mkdir(os.path.join(second, "b3sum-ARM64"))
+            self.fill(os.path.join(second, "b3sum-ARM64"), programs=("aarch64-unknown-linux-gnu",))
+            os.mkdir(os.path.join(second, "b3sum-X64"))
+            self.fill(os.path.join(second, "b3sum-X64"), programs=("x86_64-unknown-linux-gnu",))
             self.assertEqual(ra.directory(folder, self.release, rebuilt=second, builders=named), (True, []))
             # Its program, and no crate at all.
             arm = os.path.join(second, "b3sum-ARM64")
@@ -590,20 +617,22 @@ class Rebuilt(Gathered):
             self.assertTrue(all("no files of the builder" in line for line in lines), lines)
 
     def test_builders_that_are_named_are_all_there_is_to_compare_with(self):
-        # Named builders that agree passed whatever else lay beside them:
-        # a third folder whose crate differed, a copy outside every folder,
-        # one builder named twice (or by a link) for two, and one builder
-        # holding both programs while the other built none.
+        # Named builders (NAME=TARGET) reject extra folders/files, symlinks,
+        # swapped target binaries, and malformed builder specs (#465).
         crate = f"sub-crate-{self.version}.crate"
-        named = ["b3sum-ARM64", "b3sum-X64"]
+        named = ["b3sum-ARM64=aarch64-unknown-linux-gnu", "b3sum-X64=x86_64-unknown-linux-gnu"]
+
         def builders(second):
-            for builder in named:
-                os.mkdir(os.path.join(second, builder))
-                self.fill(os.path.join(second, builder))
+            os.mkdir(os.path.join(second, "b3sum-ARM64"))
+            self.fill(os.path.join(second, "b3sum-ARM64"), programs=("aarch64-unknown-linux-gnu",))
+            os.mkdir(os.path.join(second, "b3sum-X64"))
+            self.fill(os.path.join(second, "b3sum-X64"), programs=("x86_64-unknown-linux-gnu",))
+
         def refused(folder, second, names, words):
             ok, lines = ra.directory(folder, self.release, rebuilt=second, builders=names)
             self.assertIs(ok, False, words)
             self.assertTrue(lines and all(words in line for line in lines), (words, lines))
+
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
             self.fill(folder)
             builders(second)
@@ -612,19 +641,36 @@ class Rebuilt(Gathered):
             third = os.path.join(second, "b3sum-RISCV")
             os.mkdir(third)
             self.fill(third)
-            with open(os.path.join(third, crate), "ab") as f:
-                f.write(b"and one byte more")
-            refused(folder, second, named, "holds a folder that is no builder named (b3sum-RISCV)")
+            refused(folder, second, named, "holds entries outside the builders named (b3sum-RISCV)")
             shutil.rmtree(third)
             # A copy outside every builder's folder.
             shutil.copyfile(os.path.join(second, "b3sum-X64", crate), os.path.join(second, crate))
-            ok, lines = ra.directory(folder, self.release, rebuilt=second, builders=named)
-            self.assertEqual((ok, lines), (False, [f"NOT CLEAN  {crate}: a copy of it lies in {second} outside the builders' folders: with builders named, every copy is one builder's"]))
+            refused(folder, second, named, f"holds entries outside the builders named ({crate})")
             os.remove(os.path.join(second, crate))
-            # One builder for two: named twice, named by a link, and named by a path.
-            refused(folder, second, ["b3sum-X64", "b3sum-X64"], "are not folders' names, each once")
-            refused(folder, second, ["b3sum-X64", "."], "are not folders' names, each once")
-            refused(folder, second, ["b3sum-X64", os.path.join("b3sum-X64", "")], "are not folders' names, each once")
+            # An unexpected extra file inside a builder's folder.
+            stray = os.path.join(second, "b3sum-X64", "extra.bin")
+            open(stray, "wb").close()
+            refused(folder, second, named, "holds an unexpected file (extra.bin)")
+            os.remove(stray)
+            # A symbolic link inside a builder's folder (refused both named and unnamed).
+            arm_crate = os.path.join(second, "b3sum-ARM64", crate)
+            os.remove(arm_crate)
+            os.symlink(os.path.join(second, "b3sum-X64", crate), arm_crate)
+            refused(folder, second, named, f"holds what is no plain file ({crate})")
+            ok_un, lines_un = ra.directory(folder, self.release, rebuilt=second)
+            self.assertIs(ok_un, False)
+            self.assertTrue(any("holds a symbolic link" in l for l in lines_un), lines_un)
+            os.remove(arm_crate)
+            shutil.copyfile(os.path.join(second, "b3sum-X64", crate), arm_crate)
+            # Malformed specs: duplicate name, duplicate target, missing target, no target.
+            refused(folder, second, ["b3sum-X64=x86_64-unknown-linux-gnu", "b3sum-X64=aarch64-unknown-linux-gnu"], "NAME=TARGET")
+            refused(folder, second, ["b3sum-X64=x86_64-unknown-linux-gnu", "b3sum-ARM64=x86_64-unknown-linux-gnu"], "each release target once")
+            refused(folder, second, ["b3sum-X64=x86_64-unknown-linux-gnu"], "cover no builder for aarch64-unknown-linux-gnu")
+            refused(folder, second, ["b3sum-X64", "b3sum-ARM64"], "NAME=TARGET")
+            refused(folder, second, [".=x86_64-unknown-linux-gnu", "b3sum-ARM64=aarch64-unknown-linux-gnu"], "NAME=TARGET")
+            # Swapped target binaries between builders fail.
+            refused(folder, second, ["b3sum-ARM64=x86_64-unknown-linux-gnu", "b3sum-X64=aarch64-unknown-linux-gnu"], "holds an unexpected file")
+            # A builder folder replaced by a symlink.
             shutil.rmtree(os.path.join(second, "b3sum-ARM64"))
             os.symlink("b3sum-X64", os.path.join(second, "b3sum-ARM64"))
             refused(folder, second, named, "no files of the builder b3sum-ARM64")
@@ -636,11 +682,7 @@ class Rebuilt(Gathered):
             for name in os.listdir(arm):
                 if name.startswith("b3sum-"):
                     os.remove(os.path.join(arm, name))
-            self.assertEqual(ra.directory(folder, self.release, rebuilt=second), (True, []), "unnamed, a builder of crates alone owes no program")
-            ok, lines = ra.directory(folder, self.release, rebuilt=second, builders=named)
-            self.assertIs(ok, False)
-            self.assertEqual(lines, [f"NOT CLEAN  b3sum-{self.tag}-{target}: {arm} holds no b3sum program of the release: every builder named builds one"
-                                     for target in ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu")])
+            refused(folder, second, named, f"holds no b3sum-{self.tag}-aarch64-unknown-linux-gnu")
 
     def test_a_program_or_a_crate_with_no_second_build_fails(self):
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as second:
