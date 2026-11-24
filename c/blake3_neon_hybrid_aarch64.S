@@ -9652,11 +9652,11 @@ blake3_servil_hybrid_k6_loop:
         PG v3, v7, v11, v15, 28, 576, 592
         SGB_R w7, w11, w15, w20, w23, x24, 12
         SGB_R w8, w12, w16, w21, w23, x24, 20
-        SGB_R w9, w13, w17, w22, w23, x24, 28
         PG_SPILL v16, v20, v24, 29, 28, 736, 752, 416
+        SGB_R w9, w13, w17, w22, w23, x24, 28
         SGA_R w6, w11, w16, w22, w23, x24, 32
-        SGA_R w7, w12, w17, w19, w23, x24, 40
         PG_SPILL v17, v21, v25, 29, 28, 768, 784, 432
+        SGA_R w7, w12, w17, w19, w23, x24, 40
         SGA_R w8, w13, w14, w20, w23, x24, 48
         SGA_R w9, w10, w15, w21, w23, x24, 56
         PG_SPILL v18, v22, v26, 29, 28, 800, 816, 448
@@ -9668,122 +9668,122 @@ blake3_servil_hybrid_k6_loop:
         SGA_R w6, w10, w14, w19, w23, x24, 8
         PG v0, v5, v10, v15, 28, 608, 624
         SGA_R w7, w11, w15, w20, w23, x24, 12
-        SGA_R w8, w12, w16, w21, w23, x24, 28
         PG v1, v6, v11, v12, 28, 640, 656
+        SGA_R w8, w12, w16, w21, w23, x24, 28
         SGA_R w9, w13, w17, w22, w23, x24, 16
-        SGB_R w6, w10, w14, w19, w23, x24, 24
         PG v2, v7, v8, v13, 28, 672, 688
+        SGB_R w6, w10, w14, w19, w23, x24, 24
         SGB_R w7, w11, w15, w20, w23, x24, 40
-        SGB_R w8, w12, w16, w21, w23, x24, 0
         PG v3, v4, v9, v14, 28, 704, 720
+        SGB_R w8, w12, w16, w21, w23, x24, 0
         SGB_R w9, w13, w17, w22, w23, x24, 52
-        SGA_R w6, w11, w16, w22, w23, x24, 4
         PG_SPILL v16, v21, v26, 29, 28, 864, 880, 464
+        SGA_R w6, w11, w16, w22, w23, x24, 4
         SGA_R w7, w12, w17, w19, w23, x24, 48
-        SGA_R w8, w13, w14, w20, w23, x24, 36
         PG_SPILL v17, v22, v27, 29, 28, 896, 912, 416
+        SGA_R w8, w13, w14, w20, w23, x24, 36
         SGA_R w9, w10, w15, w21, w23, x24, 60
-        SGB_R w6, w11, w16, w22, w23, x24, 44
         PG_SPILL v18, v23, v24, 29, 28, 928, 944, 432
+        SGB_R w6, w11, w16, w22, w23, x24, 44
         SGB_R w7, w12, w17, w19, w23, x24, 20
-        SGB_R w8, w13, w14, w20, w23, x24, 56
         PG_SPILL v19, v20, v25, 29, 28, 960, 976, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 56
         SGB_R w9, w10, w15, w21, w23, x24, 32
         SGA_R w6, w10, w14, w19, w23, x24, 12
         PG v0, v4, v8, v12, 28, 512, 576
         SGA_R w7, w11, w15, w20, w23, x24, 40
-        SGA_R w8, w12, w16, w21, w23, x24, 52
         PG v1, v5, v9, v13, 28, 528, 640
+        SGA_R w8, w12, w16, w21, w23, x24, 52
         SGA_R w9, w13, w17, w22, w23, x24, 28
-        SGB_R w6, w10, w14, w19, w23, x24, 16
         PG v2, v6, v10, v14, 28, 592, 480
+        SGB_R w6, w10, w14, w19, w23, x24, 16
         SGB_R w7, w11, w15, w20, w23, x24, 48
-        SGB_R w8, w12, w16, w21, w23, x24, 8
         PG v3, v7, v11, v15, 28, 544, 688
+        SGB_R w8, w12, w16, w21, w23, x24, 8
         SGB_R w9, w13, w17, w22, w23, x24, 56
-        SGA_R w6, w11, w16, w22, w23, x24, 24
         PG_SPILL v16, v20, v24, 29, 28, 768, 832, 416
+        SGA_R w6, w11, w16, w22, w23, x24, 24
         SGA_R w7, w12, w17, w19, w23, x24, 36
-        SGA_R w8, w13, w14, w20, w23, x24, 44
         PG_SPILL v17, v21, v25, 29, 28, 784, 896, 432
+        SGA_R w8, w13, w14, w20, w23, x24, 44
         SGA_R w9, w10, w15, w21, w23, x24, 32
-        SGB_R w6, w11, w16, w22, w23, x24, 20
         PG_SPILL v18, v22, v26, 29, 28, 848, 736, 448
+        SGB_R w6, w11, w16, w22, w23, x24, 20
         SGB_R w7, w12, w17, w19, w23, x24, 0
-        SGB_R w8, w13, w14, w20, w23, x24, 60
         PG_SPILL v19, v23, v27, 29, 28, 800, 944, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 60
         SGB_R w9, w10, w15, w21, w23, x24, 4
         SGA_R w6, w10, w14, w19, w23, x24, 40
         PG v0, v5, v10, v15, 28, 496, 656
         SGA_R w7, w11, w15, w20, w23, x24, 48
-        SGA_R w8, w12, w16, w21, w23, x24, 56
         PG v1, v6, v11, v12, 28, 672, 560
+        SGA_R w8, w12, w16, w21, w23, x24, 56
         SGA_R w9, w13, w17, w22, w23, x24, 52
-        SGB_R w6, w10, w14, w19, w23, x24, 28
         PG v2, v7, v8, v13, 28, 624, 704
+        SGB_R w6, w10, w14, w19, w23, x24, 28
         SGB_R w7, w11, w15, w20, w23, x24, 36
-        SGB_R w8, w12, w16, w21, w23, x24, 12
         PG v3, v4, v9, v14, 28, 720, 608
+        SGB_R w8, w12, w16, w21, w23, x24, 12
         SGB_R w9, w13, w17, w22, w23, x24, 60
-        SGA_R w6, w11, w16, w22, w23, x24, 16
         PG_SPILL v16, v21, v26, 29, 28, 752, 912, 464
+        SGA_R w6, w11, w16, w22, w23, x24, 16
         SGA_R w7, w12, w17, w19, w23, x24, 44
-        SGA_R w8, w13, w14, w20, w23, x24, 20
         PG_SPILL v17, v22, v27, 29, 28, 928, 816, 416
+        SGA_R w8, w13, w14, w20, w23, x24, 20
         SGA_R w9, w10, w15, w21, w23, x24, 4
-        SGB_R w6, w11, w16, w22, w23, x24, 0
         PG_SPILL v18, v23, v24, 29, 28, 880, 960, 432
+        SGB_R w6, w11, w16, w22, w23, x24, 0
         SGB_R w7, w12, w17, w19, w23, x24, 8
-        SGB_R w8, w13, w14, w20, w23, x24, 32
         PG_SPILL v19, v20, v25, 29, 28, 976, 864, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 32
         SGB_R w9, w10, w15, w21, w23, x24, 24
         SGA_R w6, w10, w14, w19, w23, x24, 48
         PG v0, v4, v8, v12, 28, 528, 544
         SGA_R w7, w11, w15, w20, w23, x24, 36
-        SGA_R w8, w12, w16, w21, w23, x24, 60
         PG v1, v5, v9, v13, 28, 640, 672
+        SGA_R w8, w12, w16, w21, w23, x24, 60
         SGA_R w9, w13, w17, w22, w23, x24, 56
-        SGB_R w6, w10, w14, w19, w23, x24, 52
         PG v2, v6, v10, v14, 28, 688, 512
+        SGB_R w6, w10, w14, w19, w23, x24, 52
         SGB_R w7, w11, w15, w20, w23, x24, 44
-        SGB_R w8, w12, w16, w21, w23, x24, 40
         PG v3, v7, v11, v15, 28, 592, 704
+        SGB_R w8, w12, w16, w21, w23, x24, 40
         SGB_R w9, w13, w17, w22, w23, x24, 32
-        SGA_R w6, w11, w16, w22, w23, x24, 28
         PG_SPILL v16, v20, v24, 29, 28, 784, 800, 416
+        SGA_R w6, w11, w16, w22, w23, x24, 28
         SGA_R w7, w12, w17, w19, w23, x24, 20
-        SGA_R w8, w13, w14, w20, w23, x24, 0
         PG_SPILL v17, v21, v25, 29, 28, 896, 928, 432
+        SGA_R w8, w13, w14, w20, w23, x24, 0
         SGA_R w9, w10, w15, w21, w23, x24, 24
-        SGB_R w6, w11, w16, w22, w23, x24, 8
         PG_SPILL v18, v22, v26, 29, 28, 944, 768, 448
+        SGB_R w6, w11, w16, w22, w23, x24, 8
         SGB_R w7, w12, w17, w19, w23, x24, 12
-        SGB_R w8, w13, w14, w20, w23, x24, 4
         PG_SPILL v19, v23, v27, 29, 28, 848, 960, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 4
         SGB_R w9, w10, w15, w21, w23, x24, 16
         SGA_R w6, w10, w14, w19, w23, x24, 36
         PG v0, v5, v10, v15, 28, 576, 560
         SGA_R w7, w11, w15, w20, w23, x24, 44
-        SGA_R w8, w12, w16, w21, w23, x24, 32
         PG v1, v6, v11, v12, 28, 624, 480
+        SGA_R w8, w12, w16, w21, w23, x24, 32
         SGA_R w9, w13, w17, w22, w23, x24, 60
-        SGB_R w6, w10, w14, w19, w23, x24, 56
         PG v2, v7, v8, v13, 28, 656, 720
+        SGB_R w6, w10, w14, w19, w23, x24, 56
         SGB_R w7, w11, w15, w20, w23, x24, 20
-        SGB_R w8, w12, w16, w21, w23, x24, 48
         PG v3, v4, v9, v14, 28, 608, 496
+        SGB_R w8, w12, w16, w21, w23, x24, 48
         SGB_R w9, w13, w17, w22, w23, x24, 4
-        SGA_R w6, w11, w16, w22, w23, x24, 52
         PG_SPILL v16, v21, v26, 29, 28, 832, 816, 464
+        SGA_R w6, w11, w16, w22, w23, x24, 52
         SGA_R w7, w12, w17, w19, w23, x24, 0
-        SGA_R w8, w13, w14, w20, w23, x24, 8
         PG_SPILL v17, v22, v27, 29, 28, 880, 736, 416
+        SGA_R w8, w13, w14, w20, w23, x24, 8
         SGA_R w9, w10, w15, w21, w23, x24, 16
-        SGB_R w6, w11, w16, w22, w23, x24, 12
         PG_SPILL v18, v23, v24, 29, 28, 912, 976, 432
+        SGB_R w6, w11, w16, w22, w23, x24, 12
         SGB_R w7, w12, w17, w19, w23, x24, 40
-        SGB_R w8, w13, w14, w20, w23, x24, 24
         PG_SPILL v19, v20, v25, 29, 28, 864, 752, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 24
         SGB_R w9, w10, w15, w21, w23, x24, 28
         SGA_R w6, w10, w14, w19, w23, x24, 44
         PG v0, v4, v8, v12, 28, 640, 592
@@ -9801,11 +9801,11 @@ blake3_servil_hybrid_k6_loop:
         PG_SPILL v16, v20, v24, 29, 28, 896, 848, 416
         SGA_R w7, w12, w17, w19, w23, x24, 8
         SGA_R w8, w13, w14, w20, w23, x24, 12
-        SGA_R w9, w10, w15, w21, w23, x24, 28
         PG_SPILL v17, v21, v25, 29, 28, 928, 880, 432
+        SGA_R w9, w10, w15, w21, w23, x24, 28
         SGB_R w6, w11, w16, w22, w23, x24, 40
-        SGB_R w7, w12, w17, w19, w23, x24, 48
         PG_SPILL v18, v22, v26, 29, 28, 960, 784, 448
+        SGB_R w7, w12, w17, w19, w23, x24, 48
         SGB_R w8, w13, w14, w20, w23, x24, 16
         SGB_R w9, w10, w15, w21, w23, x24, 52
         PG_SPILL v19, v23, v27, 29, 28, 944, 976, 464
@@ -9848,11 +9848,11 @@ blake3_servil_hybrid_k6_loop:
         PG v3, v4, v9, v14, 28, 496, 576
         SGB_R w7, w11, w15, w20, w23, x24, 12
         SGB_R w8, w12, w16, w21, w23, x24, 20
-        SGB_R w9, w13, w17, w22, w23, x24, 28
         PG_SPILL v16, v21, v26, 29, 28, 800, 736, 464
+        SGB_R w9, w13, w17, w22, w23, x24, 28
         SGA_R w6, w11, w16, w22, w23, x24, 32
-        SGA_R w7, w12, w17, w19, w23, x24, 40
         PG_SPILL v17, v22, v27, 29, 28, 912, 768, 416
+        SGA_R w7, w12, w17, w19, w23, x24, 40
         SGA_R w8, w13, w14, w20, w23, x24, 48
         SGA_R w9, w10, w15, w21, w23, x24, 56
         PG_SPILL v18, v23, v24, 29, 28, 816, 864, 432
@@ -9864,122 +9864,122 @@ blake3_servil_hybrid_k6_loop:
         SGA_R w6, w10, w14, w19, w23, x24, 8
         PG v0, v4, v8, v12, 28, 672, 688
         SGA_R w7, w11, w15, w20, w23, x24, 12
-        SGA_R w8, w12, w16, w21, w23, x24, 28
         PG v1, v5, v9, v13, 28, 624, 656
+        SGA_R w8, w12, w16, w21, w23, x24, 28
         SGA_R w9, w13, w17, w22, w23, x24, 16
-        SGB_R w6, w10, w14, w19, w23, x24, 24
         PG v2, v6, v10, v14, 28, 720, 640
+        SGB_R w6, w10, w14, w19, w23, x24, 24
         SGB_R w7, w11, w15, w20, w23, x24, 40
-        SGB_R w8, w12, w16, w21, w23, x24, 0
         PG v3, v7, v11, v15, 28, 704, 608
+        SGB_R w8, w12, w16, w21, w23, x24, 0
         SGB_R w9, w13, w17, w22, w23, x24, 52
-        SGA_R w6, w11, w16, w22, w23, x24, 4
         PG_SPILL v16, v20, v24, 29, 28, 928, 944, 416
+        SGA_R w6, w11, w16, w22, w23, x24, 4
         SGA_R w7, w12, w17, w19, w23, x24, 48
-        SGA_R w8, w13, w14, w20, w23, x24, 36
         PG_SPILL v17, v21, v25, 29, 28, 880, 912, 432
+        SGA_R w8, w13, w14, w20, w23, x24, 36
         SGA_R w9, w10, w15, w21, w23, x24, 60
-        SGB_R w6, w11, w16, w22, w23, x24, 44
         PG_SPILL v18, v22, v26, 29, 28, 976, 896, 448
+        SGB_R w6, w11, w16, w22, w23, x24, 44
         SGB_R w7, w12, w17, w19, w23, x24, 20
-        SGB_R w8, w13, w14, w20, w23, x24, 56
         PG_SPILL v19, v23, v27, 29, 28, 960, 864, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 56
         SGB_R w9, w10, w15, w21, w23, x24, 32
         SGA_R w6, w10, w14, w19, w23, x24, 12
         PG v0, v5, v10, v15, 28, 592, 512
         SGA_R w7, w11, w15, w20, w23, x24, 40
-        SGA_R w8, w12, w16, w21, w23, x24, 52
         PG v1, v6, v11, v12, 28, 560, 528
+        SGA_R w8, w12, w16, w21, w23, x24, 52
         SGA_R w9, w13, w17, w22, w23, x24, 28
-        SGB_R w6, w10, w14, w19, w23, x24, 16
         PG v2, v7, v8, v13, 28, 480, 496
+        SGB_R w6, w10, w14, w19, w23, x24, 16
         SGB_R w7, w11, w15, w20, w23, x24, 48
-        SGB_R w8, w12, w16, w21, w23, x24, 8
         PG v3, v4, v9, v14, 28, 576, 544
+        SGB_R w8, w12, w16, w21, w23, x24, 8
         SGB_R w9, w13, w17, w22, w23, x24, 56
-        SGA_R w6, w11, w16, w22, w23, x24, 24
         PG_SPILL v16, v21, v26, 29, 28, 848, 768, 464
+        SGA_R w6, w11, w16, w22, w23, x24, 24
         SGA_R w7, w12, w17, w19, w23, x24, 36
-        SGA_R w8, w13, w14, w20, w23, x24, 44
         PG_SPILL v17, v22, v27, 29, 28, 816, 784, 416
+        SGA_R w8, w13, w14, w20, w23, x24, 44
         SGA_R w9, w10, w15, w21, w23, x24, 32
-        SGB_R w6, w11, w16, w22, w23, x24, 20
         PG_SPILL v18, v23, v24, 29, 28, 736, 752, 432
+        SGB_R w6, w11, w16, w22, w23, x24, 20
         SGB_R w7, w12, w17, w19, w23, x24, 0
-        SGB_R w8, w13, w14, w20, w23, x24, 60
         PG_SPILL v19, v20, v25, 29, 28, 832, 800, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 60
         SGB_R w9, w10, w15, w21, w23, x24, 4
         SGA_R w6, w10, w14, w19, w23, x24, 40
         PG v0, v4, v8, v12, 28, 624, 704
         SGA_R w7, w11, w15, w20, w23, x24, 48
-        SGA_R w8, w12, w16, w21, w23, x24, 56
         PG v1, v5, v9, v13, 28, 656, 560
+        SGA_R w8, w12, w16, w21, w23, x24, 56
         SGA_R w9, w13, w17, w22, w23, x24, 52
-        SGB_R w6, w10, w14, w19, w23, x24, 28
         PG v2, v6, v10, v14, 28, 608, 672
+        SGB_R w6, w10, w14, w19, w23, x24, 28
         SGB_R w7, w11, w15, w20, w23, x24, 36
-        SGB_R w8, w12, w16, w21, w23, x24, 12
         PG v3, v7, v11, v15, 28, 720, 496
+        SGB_R w8, w12, w16, w21, w23, x24, 12
         SGB_R w9, w13, w17, w22, w23, x24, 60
-        SGA_R w6, w11, w16, w22, w23, x24, 16
         PG_SPILL v16, v20, v24, 29, 28, 880, 960, 416
+        SGA_R w6, w11, w16, w22, w23, x24, 16
         SGA_R w7, w12, w17, w19, w23, x24, 44
-        SGA_R w8, w13, w14, w20, w23, x24, 20
         PG_SPILL v17, v21, v25, 29, 28, 912, 816, 432
+        SGA_R w8, w13, w14, w20, w23, x24, 20
         SGA_R w9, w10, w15, w21, w23, x24, 4
-        SGB_R w6, w11, w16, w22, w23, x24, 0
         PG_SPILL v18, v22, v26, 29, 28, 864, 928, 448
+        SGB_R w6, w11, w16, w22, w23, x24, 0
         SGB_R w7, w12, w17, w19, w23, x24, 8
-        SGB_R w8, w13, w14, w20, w23, x24, 32
         PG_SPILL v19, v23, v27, 29, 28, 976, 752, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 32
         SGB_R w9, w10, w15, w21, w23, x24, 24
         SGA_R w6, w10, w14, w19, w23, x24, 48
         PG v0, v5, v10, v15, 28, 688, 528
         SGA_R w7, w11, w15, w20, w23, x24, 36
-        SGA_R w8, w12, w16, w21, w23, x24, 60
         PG v1, v6, v11, v12, 28, 480, 640
+        SGA_R w8, w12, w16, w21, w23, x24, 60
         SGA_R w9, w13, w17, w22, w23, x24, 56
-        SGB_R w6, w10, w14, w19, w23, x24, 52
         PG v2, v7, v8, v13, 28, 512, 576
+        SGB_R w6, w10, w14, w19, w23, x24, 52
         SGB_R w7, w11, w15, w20, w23, x24, 44
-        SGB_R w8, w12, w16, w21, w23, x24, 40
         PG v3, v4, v9, v14, 28, 544, 592
+        SGB_R w8, w12, w16, w21, w23, x24, 40
         SGB_R w9, w13, w17, w22, w23, x24, 32
-        SGA_R w6, w11, w16, w22, w23, x24, 28
         PG_SPILL v16, v21, v26, 29, 28, 944, 784, 464
+        SGA_R w6, w11, w16, w22, w23, x24, 28
         SGA_R w7, w12, w17, w19, w23, x24, 20
-        SGA_R w8, w13, w14, w20, w23, x24, 0
         PG_SPILL v17, v22, v27, 29, 28, 736, 896, 416
+        SGA_R w8, w13, w14, w20, w23, x24, 0
         SGA_R w9, w10, w15, w21, w23, x24, 24
-        SGB_R w6, w11, w16, w22, w23, x24, 8
         PG_SPILL v18, v23, v24, 29, 28, 768, 832, 432
+        SGB_R w6, w11, w16, w22, w23, x24, 8
         SGB_R w7, w12, w17, w19, w23, x24, 12
-        SGB_R w8, w13, w14, w20, w23, x24, 4
         PG_SPILL v19, v20, v25, 29, 28, 800, 848, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 4
         SGB_R w9, w10, w15, w21, w23, x24, 16
         SGA_R w6, w10, w14, w19, w23, x24, 36
         PG v0, v4, v8, v12, 28, 656, 720
         SGA_R w7, w11, w15, w20, w23, x24, 44
-        SGA_R w8, w12, w16, w21, w23, x24, 32
         PG v1, v5, v9, v13, 28, 560, 480
+        SGA_R w8, w12, w16, w21, w23, x24, 32
         SGA_R w9, w13, w17, w22, w23, x24, 60
-        SGB_R w6, w10, w14, w19, w23, x24, 56
         PG v2, v6, v10, v14, 28, 496, 624
+        SGB_R w6, w10, w14, w19, w23, x24, 56
         SGB_R w7, w11, w15, w20, w23, x24, 20
-        SGB_R w8, w12, w16, w21, w23, x24, 48
         PG v3, v7, v11, v15, 28, 608, 576
+        SGB_R w8, w12, w16, w21, w23, x24, 48
         SGB_R w9, w13, w17, w22, w23, x24, 4
-        SGA_R w6, w11, w16, w22, w23, x24, 52
         PG_SPILL v16, v20, v24, 29, 28, 912, 976, 416
+        SGA_R w6, w11, w16, w22, w23, x24, 52
         SGA_R w7, w12, w17, w19, w23, x24, 0
-        SGA_R w8, w13, w14, w20, w23, x24, 8
         PG_SPILL v17, v21, v25, 29, 28, 816, 736, 432
+        SGA_R w8, w13, w14, w20, w23, x24, 8
         SGA_R w9, w10, w15, w21, w23, x24, 16
-        SGB_R w6, w11, w16, w22, w23, x24, 12
         PG_SPILL v18, v22, v26, 29, 28, 752, 880, 448
+        SGB_R w6, w11, w16, w22, w23, x24, 12
         SGB_R w7, w12, w17, w19, w23, x24, 40
-        SGB_R w8, w13, w14, w20, w23, x24, 24
         PG_SPILL v19, v23, v27, 29, 28, 864, 832, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 24
         SGB_R w9, w10, w15, w21, w23, x24, 28
         SGA_R w6, w10, w14, w19, w23, x24, 44
         PG v0, v5, v10, v15, 28, 704, 640
@@ -9997,11 +9997,11 @@ blake3_servil_hybrid_k6_loop:
         PG_SPILL v16, v21, v26, 29, 28, 960, 896, 464
         SGA_R w7, w12, w17, w19, w23, x24, 8
         SGA_R w8, w13, w14, w20, w23, x24, 12
-        SGA_R w9, w10, w15, w21, w23, x24, 28
         PG_SPILL v17, v22, v27, 29, 28, 768, 928, 416
+        SGA_R w9, w10, w15, w21, w23, x24, 28
         SGB_R w6, w11, w16, w22, w23, x24, 40
-        SGB_R w7, w12, w17, w19, w23, x24, 48
         PG_SPILL v18, v23, v24, 29, 28, 784, 800, 432
+        SGB_R w7, w12, w17, w19, w23, x24, 48
         SGB_R w8, w13, w14, w20, w23, x24, 16
         SGB_R w9, w10, w15, w21, w23, x24, 52
         PG_SPILL v19, v20, v25, 29, 28, 848, 944, 448
@@ -11037,24 +11037,24 @@ blake3_servil_hybrid_k8_loop:
         QG v1, v5, v9, v13, 28, v30, 512, 528
         SGA_R w7, w11, w15, w20, w23, x24, 8
         SGA_R w8, w12, w16, w21, w23, x24, 16
-        QG v2, v6, v10, v14, 28, v30, 544, 560
         SGA_R w9, w13, w17, w22, w23, x24, 24
+        QG v2, v6, v10, v14, 28, v30, 544, 560
         SGB_R w6, w10, w14, w19, w23, x24, 4
-        QG v3, v7, v11, v15, 28, v30, 576, 592
         SGB_R w7, w11, w15, w20, w23, x24, 12
+        QG v3, v7, v11, v15, 28, v30, 576, 592
         SGB_R w8, w12, w16, w21, w23, x24, 20
         SGB_R w9, w13, w17, w22, w23, x24, 28
-        PG_SPILL v16, v20, v24, 29, 28, 736, 752, 416
         SGA_R w6, w11, w16, w22, w23, x24, 32
+        PG_SPILL v16, v20, v24, 29, 28, 736, 752, 416
         SGA_R w7, w12, w17, w19, w23, x24, 40
-        PG_SPILL v17, v21, v25, 29, 28, 768, 784, 432
         SGA_R w8, w13, w14, w20, w23, x24, 48
+        PG_SPILL v17, v21, v25, 29, 28, 768, 784, 432
         SGA_R w9, w10, w15, w21, w23, x24, 56
-        PG_SPILL v18, v22, v26, 29, 28, 800, 816, 448
         SGB_R w6, w11, w16, w22, w23, x24, 36
+        PG_SPILL v18, v22, v26, 29, 28, 800, 816, 448
         SGB_R w7, w12, w17, w19, w23, x24, 44
-        PG_SPILL v19, v23, v27, 29, 28, 832, 848, 464
         SGB_R w8, w13, w14, w20, w23, x24, 52
+        PG_SPILL v19, v23, v27, 29, 28, 832, 848, 464
         SGB_R w9, w10, w15, w21, w23, x24, 60
         SGA_R w6, w10, w14, w19, w23, x24, 8
         QG v0, v5, v10, v15, 28, v30, 608, 624
@@ -11069,8 +11069,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v4, v9, v14, 28, v30, 704, 720
         SGB_R w9, w13, w17, w22, w23, x24, 52
         SGA_R w6, w11, w16, w22, w23, x24, 4
-        PG_SPILL v16, v21, v26, 29, 28, 864, 880, 464
         SGA_R w7, w12, w17, w19, w23, x24, 48
+        PG_SPILL v16, v21, v26, 29, 28, 864, 880, 464
         SGA_R w8, w13, w14, w20, w23, x24, 36
         PG_SPILL v17, v22, v27, 29, 28, 896, 912, 416
         SGA_R w9, w10, w15, w21, w23, x24, 60
@@ -11093,8 +11093,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v7, v11, v15, 28, v30, 544, 688
         SGB_R w9, w13, w17, w22, w23, x24, 56
         SGA_R w6, w11, w16, w22, w23, x24, 24
-        PG_SPILL v16, v20, v24, 29, 28, 768, 832, 416
         SGA_R w7, w12, w17, w19, w23, x24, 36
+        PG_SPILL v16, v20, v24, 29, 28, 768, 832, 416
         SGA_R w8, w13, w14, w20, w23, x24, 44
         PG_SPILL v17, v21, v25, 29, 28, 784, 896, 432
         SGA_R w9, w10, w15, w21, w23, x24, 32
@@ -11117,8 +11117,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v4, v9, v14, 28, v30, 720, 608
         SGB_R w9, w13, w17, w22, w23, x24, 60
         SGA_R w6, w11, w16, w22, w23, x24, 16
-        PG_SPILL v16, v21, v26, 29, 28, 752, 912, 464
         SGA_R w7, w12, w17, w19, w23, x24, 44
+        PG_SPILL v16, v21, v26, 29, 28, 752, 912, 464
         SGA_R w8, w13, w14, w20, w23, x24, 20
         PG_SPILL v17, v22, v27, 29, 28, 928, 816, 416
         SGA_R w9, w10, w15, w21, w23, x24, 4
@@ -11141,8 +11141,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v7, v11, v15, 28, v30, 592, 704
         SGB_R w9, w13, w17, w22, w23, x24, 32
         SGA_R w6, w11, w16, w22, w23, x24, 28
-        PG_SPILL v16, v20, v24, 29, 28, 784, 800, 416
         SGA_R w7, w12, w17, w19, w23, x24, 20
+        PG_SPILL v16, v20, v24, 29, 28, 784, 800, 416
         SGA_R w8, w13, w14, w20, w23, x24, 0
         PG_SPILL v17, v21, v25, 29, 28, 896, 928, 432
         SGA_R w9, w10, w15, w21, w23, x24, 24
@@ -11165,8 +11165,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v4, v9, v14, 28, v30, 608, 496
         SGB_R w9, w13, w17, w22, w23, x24, 4
         SGA_R w6, w11, w16, w22, w23, x24, 52
-        PG_SPILL v16, v21, v26, 29, 28, 832, 816, 464
         SGA_R w7, w12, w17, w19, w23, x24, 0
+        PG_SPILL v16, v21, v26, 29, 28, 832, 816, 464
         SGA_R w8, w13, w14, w20, w23, x24, 8
         PG_SPILL v17, v22, v27, 29, 28, 880, 736, 416
         SGA_R w9, w10, w15, w21, w23, x24, 16
@@ -11186,11 +11186,11 @@ blake3_servil_hybrid_k8_loop:
         QG v2, v6, v10, v14, 28, v30, 704, 528
         SGB_R w7, w11, w15, w20, w23, x24, 0
         SGB_R w8, w12, w16, w21, w23, x24, 36
-        QG v3, v7, v11, v15, 28, v30, 688, 720
         SGB_R w9, w13, w17, w22, w23, x24, 24
+        QG v3, v7, v11, v15, 28, v30, 688, 720
         SGA_R w6, w11, w16, w22, w23, x24, 56
-        PG_SPILL v16, v20, v24, 29, 28, 896, 848, 416
         SGA_R w7, w12, w17, w19, w23, x24, 8
+        PG_SPILL v16, v20, v24, 29, 28, 896, 848, 416
         SGA_R w8, w13, w14, w20, w23, x24, 12
         SGA_R w9, w10, w15, w21, w23, x24, 28
         PG_SPILL v17, v21, v25, 29, 28, 928, 880, 432
@@ -11233,24 +11233,24 @@ blake3_servil_hybrid_k8_loop:
         QG v1, v6, v11, v12, 28, v30, 656, 512
         SGA_R w7, w11, w15, w20, w23, x24, 8
         SGA_R w8, w12, w16, w21, w23, x24, 16
-        QG v2, v7, v8, v13, 28, v30, 560, 608
         SGA_R w9, w13, w17, w22, w23, x24, 24
+        QG v2, v7, v8, v13, 28, v30, 560, 608
         SGB_R w6, w10, w14, w19, w23, x24, 4
-        QG v3, v4, v9, v14, 28, v30, 496, 576
         SGB_R w7, w11, w15, w20, w23, x24, 12
+        QG v3, v4, v9, v14, 28, v30, 496, 576
         SGB_R w8, w12, w16, w21, w23, x24, 20
         SGB_R w9, w13, w17, w22, w23, x24, 28
-        PG_SPILL v16, v21, v26, 29, 28, 800, 736, 464
         SGA_R w6, w11, w16, w22, w23, x24, 32
+        PG_SPILL v16, v21, v26, 29, 28, 800, 736, 464
         SGA_R w7, w12, w17, w19, w23, x24, 40
-        PG_SPILL v17, v22, v27, 29, 28, 912, 768, 416
         SGA_R w8, w13, w14, w20, w23, x24, 48
+        PG_SPILL v17, v22, v27, 29, 28, 912, 768, 416
         SGA_R w9, w10, w15, w21, w23, x24, 56
-        PG_SPILL v18, v23, v24, 29, 28, 816, 864, 432
         SGB_R w6, w11, w16, w22, w23, x24, 36
+        PG_SPILL v18, v23, v24, 29, 28, 816, 864, 432
         SGB_R w7, w12, w17, w19, w23, x24, 44
-        PG_SPILL v19, v20, v25, 29, 28, 752, 832, 448
         SGB_R w8, w13, w14, w20, w23, x24, 52
+        PG_SPILL v19, v20, v25, 29, 28, 752, 832, 448
         SGB_R w9, w10, w15, w21, w23, x24, 60
         SGA_R w6, w10, w14, w19, w23, x24, 8
         QG v0, v4, v8, v12, 28, v30, 672, 688
@@ -11265,8 +11265,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v7, v11, v15, 28, v30, 704, 608
         SGB_R w9, w13, w17, w22, w23, x24, 52
         SGA_R w6, w11, w16, w22, w23, x24, 4
-        PG_SPILL v16, v20, v24, 29, 28, 928, 944, 416
         SGA_R w7, w12, w17, w19, w23, x24, 48
+        PG_SPILL v16, v20, v24, 29, 28, 928, 944, 416
         SGA_R w8, w13, w14, w20, w23, x24, 36
         PG_SPILL v17, v21, v25, 29, 28, 880, 912, 432
         SGA_R w9, w10, w15, w21, w23, x24, 60
@@ -11289,8 +11289,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v4, v9, v14, 28, v30, 576, 544
         SGB_R w9, w13, w17, w22, w23, x24, 56
         SGA_R w6, w11, w16, w22, w23, x24, 24
-        PG_SPILL v16, v21, v26, 29, 28, 848, 768, 464
         SGA_R w7, w12, w17, w19, w23, x24, 36
+        PG_SPILL v16, v21, v26, 29, 28, 848, 768, 464
         SGA_R w8, w13, w14, w20, w23, x24, 44
         PG_SPILL v17, v22, v27, 29, 28, 816, 784, 416
         SGA_R w9, w10, w15, w21, w23, x24, 32
@@ -11313,8 +11313,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v7, v11, v15, 28, v30, 720, 496
         SGB_R w9, w13, w17, w22, w23, x24, 60
         SGA_R w6, w11, w16, w22, w23, x24, 16
-        PG_SPILL v16, v20, v24, 29, 28, 880, 960, 416
         SGA_R w7, w12, w17, w19, w23, x24, 44
+        PG_SPILL v16, v20, v24, 29, 28, 880, 960, 416
         SGA_R w8, w13, w14, w20, w23, x24, 20
         PG_SPILL v17, v21, v25, 29, 28, 912, 816, 432
         SGA_R w9, w10, w15, w21, w23, x24, 4
@@ -11337,8 +11337,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v4, v9, v14, 28, v30, 544, 592
         SGB_R w9, w13, w17, w22, w23, x24, 32
         SGA_R w6, w11, w16, w22, w23, x24, 28
-        PG_SPILL v16, v21, v26, 29, 28, 944, 784, 464
         SGA_R w7, w12, w17, w19, w23, x24, 20
+        PG_SPILL v16, v21, v26, 29, 28, 944, 784, 464
         SGA_R w8, w13, w14, w20, w23, x24, 0
         PG_SPILL v17, v22, v27, 29, 28, 736, 896, 416
         SGA_R w9, w10, w15, w21, w23, x24, 24
@@ -11361,8 +11361,8 @@ blake3_servil_hybrid_k8_loop:
         QG v3, v7, v11, v15, 28, v30, 608, 576
         SGB_R w9, w13, w17, w22, w23, x24, 4
         SGA_R w6, w11, w16, w22, w23, x24, 52
-        PG_SPILL v16, v20, v24, 29, 28, 912, 976, 416
         SGA_R w7, w12, w17, w19, w23, x24, 0
+        PG_SPILL v16, v20, v24, 29, 28, 912, 976, 416
         SGA_R w8, w13, w14, w20, w23, x24, 8
         PG_SPILL v17, v21, v25, 29, 28, 816, 736, 432
         SGA_R w9, w10, w15, w21, w23, x24, 16
@@ -11382,11 +11382,11 @@ blake3_servil_hybrid_k8_loop:
         QG v2, v7, v8, v13, 28, v30, 528, 544
         SGB_R w7, w11, w15, w20, w23, x24, 0
         SGB_R w8, w12, w16, w21, w23, x24, 36
-        QG v3, v4, v9, v14, 28, v30, 592, 688
         SGB_R w9, w13, w17, w22, w23, x24, 24
+        QG v3, v4, v9, v14, 28, v30, 592, 688
         SGA_R w6, w11, w16, w22, w23, x24, 56
-        PG_SPILL v16, v21, v26, 29, 28, 960, 896, 464
         SGA_R w7, w12, w17, w19, w23, x24, 8
+        PG_SPILL v16, v21, v26, 29, 28, 960, 896, 464
         SGA_R w8, w13, w14, w20, w23, x24, 12
         SGA_R w9, w10, w15, w21, w23, x24, 28
         PG_SPILL v17, v22, v27, 29, 28, 768, 928, 416
@@ -12530,9 +12530,6 @@ blake3_servil_hybrid_k10_loop:
         ldr w2, [sp, #1152]
         ldr w3, [sp, #1156]
         ldp w14, w15, [sp, #184]
-        ldp w16, w17, [sp, #192]
-        ldr x4, [sp, #200]
-        mov w19, w4
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -12542,11 +12539,13 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
+        ldp w16, w17, [sp, #192]
+        ldr x4, [sp, #200]
+        mov w19, w4
         lsr x20, x4, #32
         mov w21, w3
         mov w22, w2
         SGA_R w6, w10, w14, w19, w23, x24, 0
-        SGA_R w7, w11, w15, w20, w23, x24, 8
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -12556,7 +12555,7 @@ blake3_servil_hybrid_k10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w8, w12, w16, w21, w23, x24, 16
+        SGA_R w7, w11, w15, w20, w23, x24, 8
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -12566,8 +12565,7 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGA_R w9, w13, w17, w22, w23, x24, 24
-        SGB_R w6, w10, w14, w19, w23, x24, 4
+        SGA_R w8, w12, w16, w21, w23, x24, 16
         ldr q28, [sp, #496]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #528]
@@ -12577,7 +12575,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #592]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w7, w11, w15, w20, w23, x24, 12
+        SGA_R w9, w13, w17, w22, w23, x24, 24
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -12587,8 +12585,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w8, w12, w16, w21, w23, x24, 20
-        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGB_R w6, w10, w14, w19, w23, x24, 4
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -12598,7 +12595,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 32
+        SGB_R w7, w11, w15, w20, w23, x24, 12
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -12608,16 +12605,19 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
+        SGB_R w8, w12, w16, w21, w23, x24, 20
+        QG_SPILL v16, v20, v24, 29, 28, v30, 736, 752, 416
+        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 32
+        QG_SPILL v17, v21, v25, 29, 28, v30, 768, 784, 432
         SGA_R w7, w12, w17, w19, w23, x24, 40
         SGA_R w8, w13, w14, w20, w23, x24, 48
-        QG_SPILL v16, v20, v24, 29, 28, v30, 736, 752, 416
         SGA_R w9, w10, w15, w21, w23, x24, 56
-        QG_SPILL v17, v21, v25, 29, 28, v30, 768, 784, 432
+        QG_SPILL v18, v22, v26, 29, 28, v30, 800, 816, 448
         SGB_R w6, w11, w16, w22, w23, x24, 36
         SGB_R w7, w12, w17, w19, w23, x24, 44
-        QG_SPILL v18, v22, v26, 29, 28, v30, 800, 816, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 52
         QG_SPILL v19, v23, v27, 29, 28, v30, 832, 848, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 52
         SGB_R w9, w10, w15, w21, w23, x24, 60
         SGA_R w6, w10, w14, w19, w23, x24, 8
         ldr q28, [sp, #608]
@@ -12629,7 +12629,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #704]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 12
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -12639,7 +12638,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 28
+        SGA_R w7, w11, w15, w20, w23, x24, 12
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -12649,8 +12648,7 @@ blake3_servil_hybrid_k10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 16
-        SGB_R w6, w10, w14, w19, w23, x24, 24
+        SGA_R w8, w12, w16, w21, w23, x24, 28
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -12660,7 +12658,7 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 40
+        SGA_R w9, w13, w17, w22, w23, x24, 16
         ldr q28, [sp, #624]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #656]
@@ -12670,7 +12668,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 24
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -12680,8 +12678,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 52
-        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGB_R w7, w11, w15, w20, w23, x24, 40
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -12691,7 +12688,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w12, w16, w21, w23, x24, 0
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -12701,15 +12698,18 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGB_R w9, w13, w17, w22, w23, x24, 52
         QG_SPILL v16, v21, v26, 29, 28, v30, 864, 880, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 60
-        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGA_R w7, w12, w17, w19, w23, x24, 48
         QG_SPILL v17, v22, v27, 29, 28, v30, 896, 912, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 20
+        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGA_R w9, w10, w15, w21, w23, x24, 60
         QG_SPILL v18, v23, v24, 29, 28, v30, 928, 944, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 56
+        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGB_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v19, v20, v25, 29, 28, v30, 960, 976, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 56
         SGB_R w9, w10, w15, w21, w23, x24, 32
         SGA_R w6, w10, w14, w19, w23, x24, 12
         ldr q28, [sp, #512]
@@ -12721,7 +12721,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #544]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 40
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -12731,7 +12730,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 52
+        SGA_R w7, w11, w15, w20, w23, x24, 40
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -12741,8 +12740,7 @@ blake3_servil_hybrid_k10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 28
-        SGB_R w6, w10, w14, w19, w23, x24, 16
+        SGA_R w8, w12, w16, w21, w23, x24, 52
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -12752,7 +12750,7 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 48
+        SGA_R w9, w13, w17, w22, w23, x24, 28
         ldr q28, [sp, #576]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #640]
@@ -12762,7 +12760,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #688]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 8
+        SGB_R w6, w10, w14, w19, w23, x24, 16
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -12772,8 +12770,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 56
-        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 48
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -12783,7 +12780,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 36
+        SGB_R w8, w12, w16, w21, w23, x24, 8
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -12793,15 +12790,18 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGB_R w9, w13, w17, w22, w23, x24, 56
         QG_SPILL v16, v20, v24, 29, 28, v30, 768, 832, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 32
-        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGA_R w7, w12, w17, w19, w23, x24, 36
         QG_SPILL v17, v21, v25, 29, 28, v30, 784, 896, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 0
+        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGA_R w9, w10, w15, w21, w23, x24, 32
         QG_SPILL v18, v22, v26, 29, 28, v30, 848, 736, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 60
+        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGB_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v19, v23, v27, 29, 28, v30, 800, 944, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 60
         SGB_R w9, w10, w15, w21, w23, x24, 4
         SGA_R w6, w10, w14, w19, w23, x24, 40
         ldr q28, [sp, #496]
@@ -12813,7 +12813,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 48
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -12823,7 +12822,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 56
+        SGA_R w7, w11, w15, w20, w23, x24, 48
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -12833,8 +12832,7 @@ blake3_servil_hybrid_k10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 52
-        SGB_R w6, w10, w14, w19, w23, x24, 28
+        SGA_R w8, w12, w16, w21, w23, x24, 56
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -12844,7 +12842,7 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 36
+        SGA_R w9, w13, w17, w22, w23, x24, 52
         ldr q28, [sp, #656]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #560]
@@ -12854,7 +12852,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 12
+        SGB_R w6, w10, w14, w19, w23, x24, 28
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -12864,8 +12862,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 60
-        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGB_R w7, w11, w15, w20, w23, x24, 36
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -12875,7 +12872,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 44
+        SGB_R w8, w12, w16, w21, w23, x24, 12
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -12885,15 +12882,18 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGB_R w9, w13, w17, w22, w23, x24, 60
         QG_SPILL v16, v21, v26, 29, 28, v30, 752, 912, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 4
-        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGA_R w7, w12, w17, w19, w23, x24, 44
         QG_SPILL v17, v22, v27, 29, 28, v30, 928, 816, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGA_R w9, w10, w15, w21, w23, x24, 4
         QG_SPILL v18, v23, v24, 29, 28, v30, 880, 960, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 32
+        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGB_R w7, w12, w17, w19, w23, x24, 8
         QG_SPILL v19, v20, v25, 29, 28, v30, 976, 864, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 32
         SGB_R w9, w10, w15, w21, w23, x24, 24
         SGA_R w6, w10, w14, w19, w23, x24, 48
         ldr q28, [sp, #528]
@@ -12905,7 +12905,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #592]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 36
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -12915,7 +12914,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 60
+        SGA_R w7, w11, w15, w20, w23, x24, 36
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -12925,8 +12924,7 @@ blake3_servil_hybrid_k10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 56
-        SGB_R w6, w10, w14, w19, w23, x24, 52
+        SGA_R w8, w12, w16, w21, w23, x24, 60
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -12936,7 +12934,7 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 44
+        SGA_R w9, w13, w17, w22, w23, x24, 56
         ldr q28, [sp, #544]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #672]
@@ -12946,7 +12944,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #704]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 40
+        SGB_R w6, w10, w14, w19, w23, x24, 52
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -12956,8 +12954,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 32
-        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGB_R w7, w11, w15, w20, w23, x24, 44
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -12967,7 +12964,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 20
+        SGB_R w8, w12, w16, w21, w23, x24, 40
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -12977,15 +12974,18 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGB_R w9, w13, w17, w22, w23, x24, 32
         QG_SPILL v16, v20, v24, 29, 28, v30, 784, 800, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 24
-        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGA_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v17, v21, v25, 29, 28, v30, 896, 928, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 12
+        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGA_R w9, w10, w15, w21, w23, x24, 24
         QG_SPILL v18, v22, v26, 29, 28, v30, 944, 768, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 4
+        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGB_R w7, w12, w17, w19, w23, x24, 12
         QG_SPILL v19, v23, v27, 29, 28, v30, 848, 960, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 4
         SGB_R w9, w10, w15, w21, w23, x24, 16
         SGA_R w6, w10, w14, w19, w23, x24, 36
         ldr q28, [sp, #576]
@@ -12997,7 +12997,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 44
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -13007,7 +13006,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 32
+        SGA_R w7, w11, w15, w20, w23, x24, 44
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -13017,8 +13016,7 @@ blake3_servil_hybrid_k10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 60
-        SGB_R w6, w10, w14, w19, w23, x24, 56
+        SGA_R w8, w12, w16, w21, w23, x24, 32
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -13028,7 +13026,7 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 20
+        SGA_R w9, w13, w17, w22, w23, x24, 60
         ldr q28, [sp, #560]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #480]
@@ -13038,7 +13036,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #496]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 48
+        SGB_R w6, w10, w14, w19, w23, x24, 56
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13048,8 +13046,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 4
-        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGB_R w7, w11, w15, w20, w23, x24, 20
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -13059,7 +13056,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 0
+        SGB_R w8, w12, w16, w21, w23, x24, 48
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -13069,15 +13066,18 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGB_R w9, w13, w17, w22, w23, x24, 4
         QG_SPILL v16, v21, v26, 29, 28, v30, 832, 816, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 16
-        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGA_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v17, v22, v27, 29, 28, v30, 880, 736, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 40
+        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGA_R w9, w10, w15, w21, w23, x24, 16
         QG_SPILL v18, v23, v24, 29, 28, v30, 912, 976, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 24
+        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGB_R w7, w12, w17, w19, w23, x24, 40
         QG_SPILL v19, v20, v25, 29, 28, v30, 864, 752, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 24
         SGB_R w9, w10, w15, w21, w23, x24, 28
         SGA_R w6, w10, w14, w19, w23, x24, 44
         ldr q28, [sp, #640]
@@ -13110,7 +13110,6 @@ blake3_servil_hybrid_k10_loop:
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
         SGA_R w9, w13, w17, w22, w23, x24, 32
-        SGB_R w6, w10, w14, w19, w23, x24, 60
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -13120,7 +13119,7 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 60
         ldr q28, [sp, #592]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #624]
@@ -13130,8 +13129,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 36
-        SGB_R w9, w13, w17, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 0
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -13141,7 +13139,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 56
+        SGB_R w8, w12, w16, w21, w23, x24, 36
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -13151,8 +13149,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 8
-        SGA_R w8, w13, w14, w20, w23, x24, 12
+        SGB_R w9, w13, w17, w22, w23, x24, 24
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -13162,17 +13159,20 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 56
         QG_SPILL v16, v20, v24, 29, 28, v30, 896, 848, 416
-        SGB_R w6, w11, w16, w22, w23, x24, 40
-        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGA_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 12
         QG_SPILL v17, v21, v25, 29, 28, v30, 928, 880, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 16
+        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGB_R w6, w11, w16, w22, w23, x24, 40
         QG_SPILL v18, v22, v26, 29, 28, v30, 960, 784, 448
+        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w13, w14, w20, w23, x24, 16
         SGB_R w9, w10, w15, w21, w23, x24, 52
+        QG_SPILL v19, v23, v27, 29, 28, v30, 944, 976, 464
         eor w6, w6, w14
         eor w7, w7, w15
-        QG_SPILL v19, v23, v27, 29, 28, v30, 944, 976, 464
         eor w8, w8, w16
         eor w9, w9, w17
         eor w10, w10, w19
@@ -13202,9 +13202,6 @@ blake3_servil_hybrid_k10_loop:
         ldr w2, [sp, #1152]
         ldr w3, [sp, #1156]
         ldp w14, w15, [sp, #184]
-        ldp w16, w17, [sp, #192]
-        ldr x4, [sp, #216]
-        mov w19, w4
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -13214,11 +13211,13 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
+        ldp w16, w17, [sp, #192]
+        ldr x4, [sp, #216]
+        mov w19, w4
         lsr x20, x4, #32
         mov w21, w3
         mov w22, w2
         SGA_R w6, w10, w14, w19, w23, x24, 0
-        SGA_R w7, w11, w15, w20, w23, x24, 8
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -13228,7 +13227,7 @@ blake3_servil_hybrid_k10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w8, w12, w16, w21, w23, x24, 16
+        SGA_R w7, w11, w15, w20, w23, x24, 8
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -13238,8 +13237,7 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGA_R w9, w13, w17, w22, w23, x24, 24
-        SGB_R w6, w10, w14, w19, w23, x24, 4
+        SGA_R w8, w12, w16, w21, w23, x24, 16
         ldr q28, [sp, #480]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #512]
@@ -13249,7 +13247,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #576]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w7, w11, w15, w20, w23, x24, 12
+        SGA_R w9, w13, w17, w22, w23, x24, 24
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13259,8 +13257,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w8, w12, w16, w21, w23, x24, 20
-        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGB_R w6, w10, w14, w19, w23, x24, 4
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -13270,7 +13267,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 32
+        SGB_R w7, w11, w15, w20, w23, x24, 12
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -13280,16 +13277,19 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
+        SGB_R w8, w12, w16, w21, w23, x24, 20
+        QG_SPILL v16, v21, v26, 29, 28, v30, 800, 736, 464
+        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 32
+        QG_SPILL v17, v22, v27, 29, 28, v30, 912, 768, 416
         SGA_R w7, w12, w17, w19, w23, x24, 40
         SGA_R w8, w13, w14, w20, w23, x24, 48
-        QG_SPILL v16, v21, v26, 29, 28, v30, 800, 736, 464
         SGA_R w9, w10, w15, w21, w23, x24, 56
-        QG_SPILL v17, v22, v27, 29, 28, v30, 912, 768, 416
+        QG_SPILL v18, v23, v24, 29, 28, v30, 816, 864, 432
         SGB_R w6, w11, w16, w22, w23, x24, 36
         SGB_R w7, w12, w17, w19, w23, x24, 44
-        QG_SPILL v18, v23, v24, 29, 28, v30, 816, 864, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 52
         QG_SPILL v19, v20, v25, 29, 28, v30, 752, 832, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 52
         SGB_R w9, w10, w15, w21, w23, x24, 60
         SGA_R w6, w10, w14, w19, w23, x24, 8
         ldr q28, [sp, #672]
@@ -13301,7 +13301,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #704]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 12
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13311,7 +13310,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 28
+        SGA_R w7, w11, w15, w20, w23, x24, 12
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -13321,8 +13320,7 @@ blake3_servil_hybrid_k10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 16
-        SGB_R w6, w10, w14, w19, w23, x24, 24
+        SGA_R w8, w12, w16, w21, w23, x24, 28
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -13332,7 +13330,7 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 40
+        SGA_R w9, w13, w17, w22, w23, x24, 16
         ldr q28, [sp, #688]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #656]
@@ -13342,7 +13340,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 24
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -13352,8 +13350,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 52
-        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGB_R w7, w11, w15, w20, w23, x24, 40
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -13363,7 +13360,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w12, w16, w21, w23, x24, 0
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -13373,15 +13370,18 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGB_R w9, w13, w17, w22, w23, x24, 52
         QG_SPILL v16, v20, v24, 29, 28, v30, 928, 944, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 60
-        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGA_R w7, w12, w17, w19, w23, x24, 48
         QG_SPILL v17, v21, v25, 29, 28, v30, 880, 912, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 20
+        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGA_R w9, w10, w15, w21, w23, x24, 60
         QG_SPILL v18, v22, v26, 29, 28, v30, 976, 896, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 56
+        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGB_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v19, v23, v27, 29, 28, v30, 960, 864, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 56
         SGB_R w9, w10, w15, w21, w23, x24, 32
         SGA_R w6, w10, w14, w19, w23, x24, 12
         ldr q28, [sp, #592]
@@ -13393,7 +13393,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #576]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 40
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -13403,7 +13402,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 52
+        SGA_R w7, w11, w15, w20, w23, x24, 40
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -13413,8 +13412,7 @@ blake3_servil_hybrid_k10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 28
-        SGB_R w6, w10, w14, w19, w23, x24, 16
+        SGA_R w8, w12, w16, w21, w23, x24, 52
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -13424,7 +13422,7 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 48
+        SGA_R w9, w13, w17, w22, w23, x24, 28
         ldr q28, [sp, #512]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #528]
@@ -13434,7 +13432,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #544]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 8
+        SGB_R w6, w10, w14, w19, w23, x24, 16
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13444,8 +13442,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 56
-        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 48
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -13455,7 +13452,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 36
+        SGB_R w8, w12, w16, w21, w23, x24, 8
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -13465,15 +13462,18 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGB_R w9, w13, w17, w22, w23, x24, 56
         QG_SPILL v16, v21, v26, 29, 28, v30, 848, 768, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 32
-        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGA_R w7, w12, w17, w19, w23, x24, 36
         QG_SPILL v17, v22, v27, 29, 28, v30, 816, 784, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 0
+        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGA_R w9, w10, w15, w21, w23, x24, 32
         QG_SPILL v18, v23, v24, 29, 28, v30, 736, 752, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 60
+        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGB_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v19, v20, v25, 29, 28, v30, 832, 800, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 60
         SGB_R w9, w10, w15, w21, w23, x24, 4
         SGA_R w6, w10, w14, w19, w23, x24, 40
         ldr q28, [sp, #624]
@@ -13485,7 +13485,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 48
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13495,7 +13494,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 56
+        SGA_R w7, w11, w15, w20, w23, x24, 48
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -13505,8 +13504,7 @@ blake3_servil_hybrid_k10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 52
-        SGB_R w6, w10, w14, w19, w23, x24, 28
+        SGA_R w8, w12, w16, w21, w23, x24, 56
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -13516,7 +13514,7 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 36
+        SGA_R w9, w13, w17, w22, w23, x24, 52
         ldr q28, [sp, #704]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #560]
@@ -13526,7 +13524,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #496]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 12
+        SGB_R w6, w10, w14, w19, w23, x24, 28
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -13536,8 +13534,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 60
-        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGB_R w7, w11, w15, w20, w23, x24, 36
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -13547,7 +13544,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 44
+        SGB_R w8, w12, w16, w21, w23, x24, 12
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -13557,15 +13554,18 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGB_R w9, w13, w17, w22, w23, x24, 60
         QG_SPILL v16, v20, v24, 29, 28, v30, 880, 960, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 4
-        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGA_R w7, w12, w17, w19, w23, x24, 44
         QG_SPILL v17, v21, v25, 29, 28, v30, 912, 816, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGA_R w9, w10, w15, w21, w23, x24, 4
         QG_SPILL v18, v22, v26, 29, 28, v30, 864, 928, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 32
+        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGB_R w7, w12, w17, w19, w23, x24, 8
         QG_SPILL v19, v23, v27, 29, 28, v30, 976, 752, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 32
         SGB_R w9, w10, w15, w21, w23, x24, 24
         SGA_R w6, w10, w14, w19, w23, x24, 48
         ldr q28, [sp, #688]
@@ -13577,7 +13577,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #544]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 36
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -13587,7 +13586,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 60
+        SGA_R w7, w11, w15, w20, w23, x24, 36
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -13597,8 +13596,7 @@ blake3_servil_hybrid_k10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 56
-        SGB_R w6, w10, w14, w19, w23, x24, 52
+        SGA_R w8, w12, w16, w21, w23, x24, 60
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -13608,7 +13606,7 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 44
+        SGA_R w9, w13, w17, w22, w23, x24, 56
         ldr q28, [sp, #528]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #640]
@@ -13618,7 +13616,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #592]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 40
+        SGB_R w6, w10, w14, w19, w23, x24, 52
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13628,8 +13626,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 32
-        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGB_R w7, w11, w15, w20, w23, x24, 44
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -13639,7 +13636,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 20
+        SGB_R w8, w12, w16, w21, w23, x24, 40
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -13649,15 +13646,18 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGB_R w9, w13, w17, w22, w23, x24, 32
         QG_SPILL v16, v21, v26, 29, 28, v30, 944, 784, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 24
-        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGA_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v17, v22, v27, 29, 28, v30, 736, 896, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 12
+        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGA_R w9, w10, w15, w21, w23, x24, 24
         QG_SPILL v18, v23, v24, 29, 28, v30, 768, 832, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 4
+        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGB_R w7, w12, w17, w19, w23, x24, 12
         QG_SPILL v19, v20, v25, 29, 28, v30, 800, 848, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 4
         SGB_R w9, w10, w15, w21, w23, x24, 16
         SGA_R w6, w10, w14, w19, w23, x24, 36
         ldr q28, [sp, #656]
@@ -13669,7 +13669,6 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 44
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13679,7 +13678,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 32
+        SGA_R w7, w11, w15, w20, w23, x24, 44
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -13689,8 +13688,7 @@ blake3_servil_hybrid_k10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 60
-        SGB_R w6, w10, w14, w19, w23, x24, 56
+        SGA_R w8, w12, w16, w21, w23, x24, 32
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -13700,7 +13698,7 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 20
+        SGA_R w9, w13, w17, w22, w23, x24, 60
         ldr q28, [sp, #720]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #480]
@@ -13710,7 +13708,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #576]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 48
+        SGB_R w6, w10, w14, w19, w23, x24, 56
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -13720,8 +13718,7 @@ blake3_servil_hybrid_k10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 4
-        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGB_R w7, w11, w15, w20, w23, x24, 20
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -13731,7 +13728,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 0
+        SGB_R w8, w12, w16, w21, w23, x24, 48
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -13741,15 +13738,18 @@ blake3_servil_hybrid_k10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGB_R w9, w13, w17, w22, w23, x24, 4
         QG_SPILL v16, v20, v24, 29, 28, v30, 912, 976, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 16
-        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGA_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v17, v21, v25, 29, 28, v30, 816, 736, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 40
+        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGA_R w9, w10, w15, w21, w23, x24, 16
         QG_SPILL v18, v22, v26, 29, 28, v30, 752, 880, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 24
+        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGB_R w7, w12, w17, w19, w23, x24, 40
         QG_SPILL v19, v23, v27, 29, 28, v30, 864, 832, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 24
         SGB_R w9, w10, w15, w21, w23, x24, 28
         SGA_R w6, w10, w14, w19, w23, x24, 44
         ldr q28, [sp, #704]
@@ -13782,7 +13782,6 @@ blake3_servil_hybrid_k10_loop:
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
         SGA_R w9, w13, w17, w22, w23, x24, 32
-        SGB_R w6, w10, w14, w19, w23, x24, 60
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -13792,7 +13791,7 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 60
         ldr q28, [sp, #640]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #672]
@@ -13802,8 +13801,7 @@ blake3_servil_hybrid_k10_loop:
         ldr q28, [sp, #688]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 36
-        SGB_R w9, w13, w17, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 0
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -13813,7 +13811,7 @@ blake3_servil_hybrid_k10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 56
+        SGB_R w8, w12, w16, w21, w23, x24, 36
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -13823,8 +13821,7 @@ blake3_servil_hybrid_k10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 8
-        SGA_R w8, w13, w14, w20, w23, x24, 12
+        SGB_R w9, w13, w17, w22, w23, x24, 24
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -13834,17 +13831,20 @@ blake3_servil_hybrid_k10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 56
         QG_SPILL v16, v21, v26, 29, 28, v30, 960, 896, 464
-        SGB_R w6, w11, w16, w22, w23, x24, 40
-        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGA_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 12
         QG_SPILL v17, v22, v27, 29, 28, v30, 768, 928, 416
-        SGB_R w8, w13, w14, w20, w23, x24, 16
+        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGB_R w6, w11, w16, w22, w23, x24, 40
         QG_SPILL v18, v23, v24, 29, 28, v30, 784, 800, 432
+        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w13, w14, w20, w23, x24, 16
         SGB_R w9, w10, w15, w21, w23, x24, 52
+        QG_SPILL v19, v20, v25, 29, 28, v30, 848, 944, 448
         eor w6, w6, w14
         eor w7, w7, w15
-        QG_SPILL v19, v20, v25, 29, 28, v30, 848, 944, 448
         eor w8, w8, w16
         eor w9, w9, w17
         eor w10, w10, w19
@@ -32399,9 +32399,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr w2, [sp, #1152]
         ldr w3, [sp, #1156]
         ldp w14, w15, [sp, #184]
-        ldp w16, w17, [sp, #192]
-        ldr x4, [sp, #200]
-        mov w19, w4
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -32411,11 +32408,13 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
+        ldp w16, w17, [sp, #192]
+        ldr x4, [sp, #200]
+        mov w19, w4
         lsr x20, x4, #32
         mov w21, w3
         mov w22, w2
         SGA_R w6, w10, w14, w19, w23, x24, 0
-        SGA_R w7, w11, w15, w20, w23, x24, 8
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -32425,7 +32424,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w8, w12, w16, w21, w23, x24, 16
+        SGA_R w7, w11, w15, w20, w23, x24, 8
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -32435,8 +32434,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGA_R w9, w13, w17, w22, w23, x24, 24
-        SGB_R w6, w10, w14, w19, w23, x24, 4
+        SGA_R w8, w12, w16, w21, w23, x24, 16
         ldr q28, [sp, #496]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #528]
@@ -32446,7 +32444,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #592]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w7, w11, w15, w20, w23, x24, 12
+        SGA_R w9, w13, w17, w22, w23, x24, 24
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -32456,8 +32454,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w8, w12, w16, w21, w23, x24, 20
-        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGB_R w6, w10, w14, w19, w23, x24, 4
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -32467,7 +32464,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 32
+        SGB_R w7, w11, w15, w20, w23, x24, 12
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -32477,16 +32474,19 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
+        SGB_R w8, w12, w16, w21, w23, x24, 20
+        QG_SPILL v16, v20, v24, 29, 28, v30, 736, 752, 416
+        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 32
+        QG_SPILL v17, v21, v25, 29, 28, v30, 768, 784, 432
         SGA_R w7, w12, w17, w19, w23, x24, 40
         SGA_R w8, w13, w14, w20, w23, x24, 48
-        QG_SPILL v16, v20, v24, 29, 28, v30, 736, 752, 416
         SGA_R w9, w10, w15, w21, w23, x24, 56
-        QG_SPILL v17, v21, v25, 29, 28, v30, 768, 784, 432
+        QG_SPILL v18, v22, v26, 29, 28, v30, 800, 816, 448
         SGB_R w6, w11, w16, w22, w23, x24, 36
         SGB_R w7, w12, w17, w19, w23, x24, 44
-        QG_SPILL v18, v22, v26, 29, 28, v30, 800, 816, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 52
         QG_SPILL v19, v23, v27, 29, 28, v30, 832, 848, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 52
         SGB_R w9, w10, w15, w21, w23, x24, 60
         SGA_R w6, w10, w14, w19, w23, x24, 8
         ldr q28, [sp, #608]
@@ -32498,7 +32498,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #704]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 12
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -32508,7 +32507,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 28
+        SGA_R w7, w11, w15, w20, w23, x24, 12
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -32518,8 +32517,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 16
-        SGB_R w6, w10, w14, w19, w23, x24, 24
+        SGA_R w8, w12, w16, w21, w23, x24, 28
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -32529,7 +32527,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 40
+        SGA_R w9, w13, w17, w22, w23, x24, 16
         ldr q28, [sp, #624]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #656]
@@ -32539,7 +32537,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 24
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -32549,8 +32547,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 52
-        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGB_R w7, w11, w15, w20, w23, x24, 40
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -32560,7 +32557,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w12, w16, w21, w23, x24, 0
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -32570,15 +32567,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGB_R w9, w13, w17, w22, w23, x24, 52
         QG_SPILL v16, v21, v26, 29, 28, v30, 864, 880, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 60
-        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGA_R w7, w12, w17, w19, w23, x24, 48
         QG_SPILL v17, v22, v27, 29, 28, v30, 896, 912, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 20
+        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGA_R w9, w10, w15, w21, w23, x24, 60
         QG_SPILL v18, v23, v24, 29, 28, v30, 928, 944, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 56
+        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGB_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v19, v20, v25, 29, 28, v30, 960, 976, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 56
         SGB_R w9, w10, w15, w21, w23, x24, 32
         SGA_R w6, w10, w14, w19, w23, x24, 12
         ldr q28, [sp, #512]
@@ -32590,7 +32590,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #544]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 40
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -32600,7 +32599,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 52
+        SGA_R w7, w11, w15, w20, w23, x24, 40
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -32610,8 +32609,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 28
-        SGB_R w6, w10, w14, w19, w23, x24, 16
+        SGA_R w8, w12, w16, w21, w23, x24, 52
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -32621,7 +32619,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 48
+        SGA_R w9, w13, w17, w22, w23, x24, 28
         ldr q28, [sp, #576]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #640]
@@ -32631,7 +32629,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #688]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 8
+        SGB_R w6, w10, w14, w19, w23, x24, 16
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -32641,8 +32639,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 56
-        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 48
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -32652,7 +32649,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 36
+        SGB_R w8, w12, w16, w21, w23, x24, 8
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -32662,15 +32659,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGB_R w9, w13, w17, w22, w23, x24, 56
         QG_SPILL v16, v20, v24, 29, 28, v30, 768, 832, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 32
-        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGA_R w7, w12, w17, w19, w23, x24, 36
         QG_SPILL v17, v21, v25, 29, 28, v30, 784, 896, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 0
+        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGA_R w9, w10, w15, w21, w23, x24, 32
         QG_SPILL v18, v22, v26, 29, 28, v30, 848, 736, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 60
+        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGB_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v19, v23, v27, 29, 28, v30, 800, 944, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 60
         SGB_R w9, w10, w15, w21, w23, x24, 4
         SGA_R w6, w10, w14, w19, w23, x24, 40
         ldr q28, [sp, #496]
@@ -32682,7 +32682,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 48
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -32692,7 +32691,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 56
+        SGA_R w7, w11, w15, w20, w23, x24, 48
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -32702,8 +32701,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 52
-        SGB_R w6, w10, w14, w19, w23, x24, 28
+        SGA_R w8, w12, w16, w21, w23, x24, 56
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -32713,7 +32711,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 36
+        SGA_R w9, w13, w17, w22, w23, x24, 52
         ldr q28, [sp, #656]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #560]
@@ -32723,7 +32721,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 12
+        SGB_R w6, w10, w14, w19, w23, x24, 28
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -32733,8 +32731,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 60
-        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGB_R w7, w11, w15, w20, w23, x24, 36
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -32744,7 +32741,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 44
+        SGB_R w8, w12, w16, w21, w23, x24, 12
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -32754,15 +32751,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGB_R w9, w13, w17, w22, w23, x24, 60
         QG_SPILL v16, v21, v26, 29, 28, v30, 752, 912, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 4
-        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGA_R w7, w12, w17, w19, w23, x24, 44
         QG_SPILL v17, v22, v27, 29, 28, v30, 928, 816, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGA_R w9, w10, w15, w21, w23, x24, 4
         QG_SPILL v18, v23, v24, 29, 28, v30, 880, 960, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 32
+        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGB_R w7, w12, w17, w19, w23, x24, 8
         QG_SPILL v19, v20, v25, 29, 28, v30, 976, 864, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 32
         SGB_R w9, w10, w15, w21, w23, x24, 24
         SGA_R w6, w10, w14, w19, w23, x24, 48
         ldr q28, [sp, #528]
@@ -32774,7 +32774,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #592]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 36
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -32784,7 +32783,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 60
+        SGA_R w7, w11, w15, w20, w23, x24, 36
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -32794,8 +32793,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 56
-        SGB_R w6, w10, w14, w19, w23, x24, 52
+        SGA_R w8, w12, w16, w21, w23, x24, 60
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -32805,7 +32803,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 44
+        SGA_R w9, w13, w17, w22, w23, x24, 56
         ldr q28, [sp, #544]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #672]
@@ -32815,7 +32813,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #704]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 40
+        SGB_R w6, w10, w14, w19, w23, x24, 52
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -32825,8 +32823,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 32
-        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGB_R w7, w11, w15, w20, w23, x24, 44
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -32836,7 +32833,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 20
+        SGB_R w8, w12, w16, w21, w23, x24, 40
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -32846,15 +32843,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGB_R w9, w13, w17, w22, w23, x24, 32
         QG_SPILL v16, v20, v24, 29, 28, v30, 784, 800, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 24
-        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGA_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v17, v21, v25, 29, 28, v30, 896, 928, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 12
+        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGA_R w9, w10, w15, w21, w23, x24, 24
         QG_SPILL v18, v22, v26, 29, 28, v30, 944, 768, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 4
+        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGB_R w7, w12, w17, w19, w23, x24, 12
         QG_SPILL v19, v23, v27, 29, 28, v30, 848, 960, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 4
         SGB_R w9, w10, w15, w21, w23, x24, 16
         SGA_R w6, w10, w14, w19, w23, x24, 36
         ldr q28, [sp, #576]
@@ -32866,7 +32866,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 44
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -32876,7 +32875,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 32
+        SGA_R w7, w11, w15, w20, w23, x24, 44
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -32886,8 +32885,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 60
-        SGB_R w6, w10, w14, w19, w23, x24, 56
+        SGA_R w8, w12, w16, w21, w23, x24, 32
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -32897,7 +32895,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 20
+        SGA_R w9, w13, w17, w22, w23, x24, 60
         ldr q28, [sp, #560]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #480]
@@ -32907,7 +32905,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #496]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 48
+        SGB_R w6, w10, w14, w19, w23, x24, 56
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -32917,8 +32915,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 4
-        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGB_R w7, w11, w15, w20, w23, x24, 20
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -32928,7 +32925,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 0
+        SGB_R w8, w12, w16, w21, w23, x24, 48
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -32938,15 +32935,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGB_R w9, w13, w17, w22, w23, x24, 4
         QG_SPILL v16, v21, v26, 29, 28, v30, 832, 816, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 16
-        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGA_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v17, v22, v27, 29, 28, v30, 880, 736, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 40
+        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGA_R w9, w10, w15, w21, w23, x24, 16
         QG_SPILL v18, v23, v24, 29, 28, v30, 912, 976, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 24
+        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGB_R w7, w12, w17, w19, w23, x24, 40
         QG_SPILL v19, v20, v25, 29, 28, v30, 864, 752, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 24
         SGB_R w9, w10, w15, w21, w23, x24, 28
         SGA_R w6, w10, w14, w19, w23, x24, 44
         ldr q28, [sp, #640]
@@ -32979,7 +32979,6 @@ blake3_servil_hybrid_pn10_loop:
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
         SGA_R w9, w13, w17, w22, w23, x24, 32
-        SGB_R w6, w10, w14, w19, w23, x24, 60
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -32989,7 +32988,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 60
         ldr q28, [sp, #592]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #624]
@@ -32999,8 +32998,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 36
-        SGB_R w9, w13, w17, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 0
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -33010,7 +33008,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 56
+        SGB_R w8, w12, w16, w21, w23, x24, 36
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -33020,8 +33018,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 8
-        SGA_R w8, w13, w14, w20, w23, x24, 12
+        SGB_R w9, w13, w17, w22, w23, x24, 24
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -33031,17 +33028,20 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 56
         QG_SPILL v16, v20, v24, 29, 28, v30, 896, 848, 416
-        SGB_R w6, w11, w16, w22, w23, x24, 40
-        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGA_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 12
         QG_SPILL v17, v21, v25, 29, 28, v30, 928, 880, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 16
+        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGB_R w6, w11, w16, w22, w23, x24, 40
         QG_SPILL v18, v22, v26, 29, 28, v30, 960, 784, 448
+        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w13, w14, w20, w23, x24, 16
         SGB_R w9, w10, w15, w21, w23, x24, 52
+        QG_SPILL v19, v23, v27, 29, 28, v30, 944, 976, 464
         eor w6, w6, w14
         eor w7, w7, w15
-        QG_SPILL v19, v23, v27, 29, 28, v30, 944, 976, 464
         eor w8, w8, w16
         eor w9, w9, w17
         eor w10, w10, w19
@@ -33071,9 +33071,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr w2, [sp, #1152]
         ldr w3, [sp, #1156]
         ldp w14, w15, [sp, #184]
-        ldp w16, w17, [sp, #192]
-        ldr x4, [sp, #216]
-        mov w19, w4
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -33083,11 +33080,13 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
+        ldp w16, w17, [sp, #192]
+        ldr x4, [sp, #216]
+        mov w19, w4
         lsr x20, x4, #32
         mov w21, w3
         mov w22, w2
         SGA_R w6, w10, w14, w19, w23, x24, 0
-        SGA_R w7, w11, w15, w20, w23, x24, 8
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -33097,7 +33096,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w8, w12, w16, w21, w23, x24, 16
+        SGA_R w7, w11, w15, w20, w23, x24, 8
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -33107,8 +33106,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGA_R w9, w13, w17, w22, w23, x24, 24
-        SGB_R w6, w10, w14, w19, w23, x24, 4
+        SGA_R w8, w12, w16, w21, w23, x24, 16
         ldr q28, [sp, #480]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #512]
@@ -33118,7 +33116,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #576]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w7, w11, w15, w20, w23, x24, 12
+        SGA_R w9, w13, w17, w22, w23, x24, 24
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -33128,8 +33126,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w8, w12, w16, w21, w23, x24, 20
-        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGB_R w6, w10, w14, w19, w23, x24, 4
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -33139,7 +33136,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 32
+        SGB_R w7, w11, w15, w20, w23, x24, 12
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -33149,16 +33146,19 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
+        SGB_R w8, w12, w16, w21, w23, x24, 20
+        QG_SPILL v16, v21, v26, 29, 28, v30, 800, 736, 464
+        SGB_R w9, w13, w17, w22, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 32
+        QG_SPILL v17, v22, v27, 29, 28, v30, 912, 768, 416
         SGA_R w7, w12, w17, w19, w23, x24, 40
         SGA_R w8, w13, w14, w20, w23, x24, 48
-        QG_SPILL v16, v21, v26, 29, 28, v30, 800, 736, 464
         SGA_R w9, w10, w15, w21, w23, x24, 56
-        QG_SPILL v17, v22, v27, 29, 28, v30, 912, 768, 416
+        QG_SPILL v18, v23, v24, 29, 28, v30, 816, 864, 432
         SGB_R w6, w11, w16, w22, w23, x24, 36
         SGB_R w7, w12, w17, w19, w23, x24, 44
-        QG_SPILL v18, v23, v24, 29, 28, v30, 816, 864, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 52
         QG_SPILL v19, v20, v25, 29, 28, v30, 752, 832, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 52
         SGB_R w9, w10, w15, w21, w23, x24, 60
         SGA_R w6, w10, w14, w19, w23, x24, 8
         ldr q28, [sp, #672]
@@ -33170,7 +33170,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #704]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 12
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -33180,7 +33179,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 28
+        SGA_R w7, w11, w15, w20, w23, x24, 12
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -33190,8 +33189,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 16
-        SGB_R w6, w10, w14, w19, w23, x24, 24
+        SGA_R w8, w12, w16, w21, w23, x24, 28
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -33201,7 +33199,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 40
+        SGA_R w9, w13, w17, w22, w23, x24, 16
         ldr q28, [sp, #688]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #656]
@@ -33211,7 +33209,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 24
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -33221,8 +33219,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 52
-        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGB_R w7, w11, w15, w20, w23, x24, 40
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -33232,7 +33229,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w12, w16, w21, w23, x24, 0
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -33242,15 +33239,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGB_R w9, w13, w17, w22, w23, x24, 52
         QG_SPILL v16, v20, v24, 29, 28, v30, 928, 944, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 60
-        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGA_R w6, w11, w16, w22, w23, x24, 4
+        SGA_R w7, w12, w17, w19, w23, x24, 48
         QG_SPILL v17, v21, v25, 29, 28, v30, 880, 912, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 20
+        SGA_R w8, w13, w14, w20, w23, x24, 36
+        SGA_R w9, w10, w15, w21, w23, x24, 60
         QG_SPILL v18, v22, v26, 29, 28, v30, 976, 896, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 56
+        SGB_R w6, w11, w16, w22, w23, x24, 44
+        SGB_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v19, v23, v27, 29, 28, v30, 960, 864, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 56
         SGB_R w9, w10, w15, w21, w23, x24, 32
         SGA_R w6, w10, w14, w19, w23, x24, 12
         ldr q28, [sp, #592]
@@ -33262,7 +33262,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #576]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 40
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -33272,7 +33271,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 52
+        SGA_R w7, w11, w15, w20, w23, x24, 40
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -33282,8 +33281,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 28
-        SGB_R w6, w10, w14, w19, w23, x24, 16
+        SGA_R w8, w12, w16, w21, w23, x24, 52
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -33293,7 +33291,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 48
+        SGA_R w9, w13, w17, w22, w23, x24, 28
         ldr q28, [sp, #512]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #528]
@@ -33303,7 +33301,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #544]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 8
+        SGB_R w6, w10, w14, w19, w23, x24, 16
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -33313,8 +33311,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 56
-        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 48
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -33324,7 +33321,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 36
+        SGB_R w8, w12, w16, w21, w23, x24, 8
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -33334,15 +33331,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGB_R w9, w13, w17, w22, w23, x24, 56
         QG_SPILL v16, v21, v26, 29, 28, v30, 848, 768, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 32
-        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGA_R w6, w11, w16, w22, w23, x24, 24
+        SGA_R w7, w12, w17, w19, w23, x24, 36
         QG_SPILL v17, v22, v27, 29, 28, v30, 816, 784, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 0
+        SGA_R w8, w13, w14, w20, w23, x24, 44
+        SGA_R w9, w10, w15, w21, w23, x24, 32
         QG_SPILL v18, v23, v24, 29, 28, v30, 736, 752, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 60
+        SGB_R w6, w11, w16, w22, w23, x24, 20
+        SGB_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v19, v20, v25, 29, 28, v30, 832, 800, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 60
         SGB_R w9, w10, w15, w21, w23, x24, 4
         SGA_R w6, w10, w14, w19, w23, x24, 40
         ldr q28, [sp, #624]
@@ -33354,7 +33354,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #720]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 48
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -33364,7 +33363,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 56
+        SGA_R w7, w11, w15, w20, w23, x24, 48
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -33374,8 +33373,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 52
-        SGB_R w6, w10, w14, w19, w23, x24, 28
+        SGA_R w8, w12, w16, w21, w23, x24, 56
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -33385,7 +33383,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 36
+        SGA_R w9, w13, w17, w22, w23, x24, 52
         ldr q28, [sp, #704]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #560]
@@ -33395,7 +33393,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #496]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 12
+        SGB_R w6, w10, w14, w19, w23, x24, 28
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -33405,8 +33403,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 60
-        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGB_R w7, w11, w15, w20, w23, x24, 36
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -33416,7 +33413,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 44
+        SGB_R w8, w12, w16, w21, w23, x24, 12
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -33426,15 +33423,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGB_R w9, w13, w17, w22, w23, x24, 60
         QG_SPILL v16, v20, v24, 29, 28, v30, 880, 960, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 4
-        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGA_R w6, w11, w16, w22, w23, x24, 16
+        SGA_R w7, w12, w17, w19, w23, x24, 44
         QG_SPILL v17, v21, v25, 29, 28, v30, 912, 816, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 20
+        SGA_R w9, w10, w15, w21, w23, x24, 4
         QG_SPILL v18, v22, v26, 29, 28, v30, 864, 928, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 32
+        SGB_R w6, w11, w16, w22, w23, x24, 0
+        SGB_R w7, w12, w17, w19, w23, x24, 8
         QG_SPILL v19, v23, v27, 29, 28, v30, 976, 752, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 32
         SGB_R w9, w10, w15, w21, w23, x24, 24
         SGA_R w6, w10, w14, w19, w23, x24, 48
         ldr q28, [sp, #688]
@@ -33446,7 +33446,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #544]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v5.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 36
         add v1.4s, v1.4s, v6.4s
         add v2.4s, v2.4s, v7.4s
         add v3.4s, v3.4s, v4.4s
@@ -33456,7 +33455,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         rev32 v15.8h, v15.8h
         rev32 v12.8h, v12.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 60
+        SGA_R w7, w11, w15, w20, w23, x24, 36
         rev32 v13.8h, v13.8h
         rev32 v14.8h, v14.8h
         add v10.4s, v10.4s, v15.4s
@@ -33466,8 +33465,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v5.16b, v5.16b, v10.16b
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 56
-        SGB_R w6, w10, w14, w19, w23, x24, 52
+        SGA_R w8, w12, w16, w21, w23, x24, 60
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -33477,7 +33475,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 44
+        SGA_R w9, w13, w17, w22, w23, x24, 56
         ldr q28, [sp, #528]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #640]
@@ -33487,7 +33485,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #592]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 40
+        SGB_R w6, w10, w14, w19, w23, x24, 52
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -33497,8 +33495,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 32
-        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGB_R w7, w11, w15, w20, w23, x24, 44
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -33508,7 +33505,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 20
+        SGB_R w8, w12, w16, w21, w23, x24, 40
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -33518,15 +33515,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGB_R w9, w13, w17, w22, w23, x24, 32
         QG_SPILL v16, v21, v26, 29, 28, v30, 944, 784, 464
-        SGA_R w9, w10, w15, w21, w23, x24, 24
-        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGA_R w6, w11, w16, w22, w23, x24, 28
+        SGA_R w7, w12, w17, w19, w23, x24, 20
         QG_SPILL v17, v22, v27, 29, 28, v30, 736, 896, 416
-        SGB_R w7, w12, w17, w19, w23, x24, 12
+        SGA_R w8, w13, w14, w20, w23, x24, 0
+        SGA_R w9, w10, w15, w21, w23, x24, 24
         QG_SPILL v18, v23, v24, 29, 28, v30, 768, 832, 432
-        SGB_R w8, w13, w14, w20, w23, x24, 4
+        SGB_R w6, w11, w16, w22, w23, x24, 8
+        SGB_R w7, w12, w17, w19, w23, x24, 12
         QG_SPILL v19, v20, v25, 29, 28, v30, 800, 848, 448
+        SGB_R w8, w13, w14, w20, w23, x24, 4
         SGB_R w9, w10, w15, w21, w23, x24, 16
         SGA_R w6, w10, w14, w19, w23, x24, 36
         ldr q28, [sp, #656]
@@ -33538,7 +33538,6 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #608]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v4.4s
-        SGA_R w7, w11, w15, w20, w23, x24, 44
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -33548,7 +33547,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         rev32 v12.8h, v12.8h
         rev32 v13.8h, v13.8h
-        SGA_R w8, w12, w16, w21, w23, x24, 32
+        SGA_R w7, w11, w15, w20, w23, x24, 44
         rev32 v14.8h, v14.8h
         rev32 v15.8h, v15.8h
         add v8.4s, v8.4s, v12.4s
@@ -33558,8 +33557,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v4.16b, v4.16b, v8.16b
         eor v5.16b, v5.16b, v9.16b
         eor v6.16b, v6.16b, v10.16b
-        SGA_R w9, w13, w17, w22, w23, x24, 60
-        SGB_R w6, w10, w14, w19, w23, x24, 56
+        SGA_R w8, w12, w16, w21, w23, x24, 32
         eor v7.16b, v7.16b, v11.16b
         shl v30.4s, v4.4s, #20
         sri v30.4s, v4.4s, #12
@@ -33569,7 +33567,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v6.4s, #12
         shl v6.4s, v7.4s, #20
         sri v6.4s, v7.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 20
+        SGA_R w9, w13, w17, w22, w23, x24, 60
         ldr q28, [sp, #720]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #480]
@@ -33579,7 +33577,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #576]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 48
+        SGB_R w6, w10, w14, w19, w23, x24, 56
         add v1.4s, v1.4s, v4.4s
         add v2.4s, v2.4s, v5.4s
         add v3.4s, v3.4s, v6.4s
@@ -33589,8 +33587,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v15.16b, v15.16b, v3.16b
         tbl v12.16b, {v12.16b}, v31.16b
         tbl v13.16b, {v13.16b}, v31.16b
-        SGB_R w9, w13, w17, w22, w23, x24, 4
-        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGB_R w7, w11, w15, w20, w23, x24, 20
         tbl v14.16b, {v14.16b}, v31.16b
         tbl v15.16b, {v15.16b}, v31.16b
         add v8.4s, v8.4s, v12.4s
@@ -33600,7 +33597,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v8.16b
         eor v4.16b, v4.16b, v9.16b
         eor v5.16b, v5.16b, v10.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 0
+        SGB_R w8, w12, w16, w21, w23, x24, 48
         eor v6.16b, v6.16b, v11.16b
         shl v7.4s, v6.4s, #25
         sri v7.4s, v6.4s, #7
@@ -33610,15 +33607,18 @@ blake3_servil_hybrid_pn10_loop:
         sri v5.4s, v4.4s, #7
         shl v4.4s, v30.4s, #25
         sri v4.4s, v30.4s, #7
-        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGB_R w9, w13, w17, w22, w23, x24, 4
         QG_SPILL v16, v20, v24, 29, 28, v30, 912, 976, 416
-        SGA_R w9, w10, w15, w21, w23, x24, 16
-        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGA_R w6, w11, w16, w22, w23, x24, 52
+        SGA_R w7, w12, w17, w19, w23, x24, 0
         QG_SPILL v17, v21, v25, 29, 28, v30, 816, 736, 432
-        SGB_R w7, w12, w17, w19, w23, x24, 40
+        SGA_R w8, w13, w14, w20, w23, x24, 8
+        SGA_R w9, w10, w15, w21, w23, x24, 16
         QG_SPILL v18, v22, v26, 29, 28, v30, 752, 880, 448
-        SGB_R w8, w13, w14, w20, w23, x24, 24
+        SGB_R w6, w11, w16, w22, w23, x24, 12
+        SGB_R w7, w12, w17, w19, w23, x24, 40
         QG_SPILL v19, v23, v27, 29, 28, v30, 864, 832, 464
+        SGB_R w8, w13, w14, w20, w23, x24, 24
         SGB_R w9, w10, w15, w21, w23, x24, 28
         SGA_R w6, w10, w14, w19, w23, x24, 44
         ldr q28, [sp, #704]
@@ -33651,7 +33651,6 @@ blake3_servil_hybrid_pn10_loop:
         eor v6.16b, v6.16b, v11.16b
         eor v7.16b, v7.16b, v8.16b
         SGA_R w9, w13, w17, w22, w23, x24, 32
-        SGB_R w6, w10, w14, w19, w23, x24, 60
         eor v4.16b, v4.16b, v9.16b
         shl v30.4s, v5.4s, #20
         sri v30.4s, v5.4s, #12
@@ -33661,7 +33660,7 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v7.4s, #12
         shl v7.4s, v4.4s, #20
         sri v7.4s, v4.4s, #12
-        SGB_R w7, w11, w15, w20, w23, x24, 0
+        SGB_R w6, w10, w14, w19, w23, x24, 60
         ldr q28, [sp, #640]
         add v0.4s, v0.4s, v28.4s
         ldr q28, [sp, #672]
@@ -33671,8 +33670,7 @@ blake3_servil_hybrid_pn10_loop:
         ldr q28, [sp, #688]
         add v3.4s, v3.4s, v28.4s
         add v0.4s, v0.4s, v30.4s
-        SGB_R w8, w12, w16, w21, w23, x24, 36
-        SGB_R w9, w13, w17, w22, w23, x24, 24
+        SGB_R w7, w11, w15, w20, w23, x24, 0
         add v1.4s, v1.4s, v5.4s
         add v2.4s, v2.4s, v6.4s
         add v3.4s, v3.4s, v7.4s
@@ -33682,7 +33680,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v14.16b, v14.16b, v3.16b
         tbl v15.16b, {v15.16b}, v31.16b
         tbl v12.16b, {v12.16b}, v31.16b
-        SGA_R w6, w11, w16, w22, w23, x24, 56
+        SGB_R w8, w12, w16, w21, w23, x24, 36
         tbl v13.16b, {v13.16b}, v31.16b
         tbl v14.16b, {v14.16b}, v31.16b
         add v10.4s, v10.4s, v15.4s
@@ -33692,8 +33690,7 @@ blake3_servil_hybrid_pn10_loop:
         eor v30.16b, v30.16b, v10.16b
         eor v5.16b, v5.16b, v11.16b
         eor v6.16b, v6.16b, v8.16b
-        SGA_R w7, w12, w17, w19, w23, x24, 8
-        SGA_R w8, w13, w14, w20, w23, x24, 12
+        SGB_R w9, w13, w17, w22, w23, x24, 24
         eor v7.16b, v7.16b, v9.16b
         shl v4.4s, v7.4s, #25
         sri v4.4s, v7.4s, #7
@@ -33703,17 +33700,20 @@ blake3_servil_hybrid_pn10_loop:
         sri v6.4s, v5.4s, #7
         shl v5.4s, v30.4s, #25
         sri v5.4s, v30.4s, #7
-        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGA_R w6, w11, w16, w22, w23, x24, 56
         QG_SPILL v16, v21, v26, 29, 28, v30, 960, 896, 464
-        SGB_R w6, w11, w16, w22, w23, x24, 40
-        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGA_R w7, w12, w17, w19, w23, x24, 8
+        SGA_R w8, w13, w14, w20, w23, x24, 12
         QG_SPILL v17, v22, v27, 29, 28, v30, 768, 928, 416
-        SGB_R w8, w13, w14, w20, w23, x24, 16
+        SGA_R w9, w10, w15, w21, w23, x24, 28
+        SGB_R w6, w11, w16, w22, w23, x24, 40
         QG_SPILL v18, v23, v24, 29, 28, v30, 784, 800, 432
+        SGB_R w7, w12, w17, w19, w23, x24, 48
+        SGB_R w8, w13, w14, w20, w23, x24, 16
         SGB_R w9, w10, w15, w21, w23, x24, 52
+        QG_SPILL v19, v20, v25, 29, 28, v30, 848, 944, 448
         eor w6, w6, w14
         eor w7, w7, w15
-        QG_SPILL v19, v20, v25, 29, 28, v30, 848, 944, 448
         eor w8, w8, w16
         eor w9, w9, w17
         eor w10, w10, w19

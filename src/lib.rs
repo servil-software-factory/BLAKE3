@@ -1427,12 +1427,10 @@ fn prefetch_kernels(len: usize, platform: Platform) {
     #[cfg(not(blake3_sme2))]
     let hybrids = matches!(platform, Platform::NEON);
     if hybrids && neon_hybrid::sha3_detected() {
-        let chunks = len / CHUNK_LEN;
-        let whole = chunks.min(16);
-        neon_hybrid::prefetch_tree_code(whole, if whole == 16 { 0 } else { len % CHUNK_LEN });
-        if chunks >= 32 {
-            neon_hybrid::prefetch_parent_code(32);
-        }
+        let total_chunks = len.div_ceil(CHUNK_LEN);
+        let whole = (len / CHUNK_LEN).min(16);
+        let partial = if whole == 16 { 0 } else { len % CHUNK_LEN };
+        neon_hybrid::prefetch_tree_code(whole, partial, total_chunks);
     }
 }
 
@@ -1458,10 +1456,7 @@ fn prefetch_update_kernels(len: usize, platform: Platform) {
             left -= subtree;
             continue;
         }
-        neon_hybrid::prefetch_tree_code(chunks.min(16), 0);
-        if chunks >= 32 {
-            neon_hybrid::prefetch_parent_code(32);
-        }
+        neon_hybrid::prefetch_tree_code(chunks.min(16), 0, chunks);
         counter += chunks as u64;
         left -= subtree;
     }

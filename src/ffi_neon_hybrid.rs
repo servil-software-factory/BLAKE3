@@ -317,19 +317,11 @@ const LAST_KERNELS: [Option<LastKernel>; 10] = [
 ];
 
 /// Kernel sizes per parent count 1..=16. p3, p5, p7, and p9 hash one
-/// block on the integer units beside the NEON ones, as k3, k5, k7, and k9
-/// do for chunks. Against the binary decomposition over p2, p4, p8, and k1
-/// run one after another, cycles per call on an M4 Max P-core / E-core
-/// (probe/mixed-parents, jobs 121-122): 3 messages -37% / -38%, 5 -27 /
-/// -27, 6 (p3 + p3) -25 / -11, 7 -31 / -34, 9 -18 / -22, 10 (p7 + p3;
-/// p9 + k1 -10 / +1, p5 + p5 -8 / -2) -11 / -8, 11 -13 / -18, 12 -15 / -9,
-/// 13 -12 / -15, 14 -17 / -12, 15 -18 / -19; on the VM 6-39% faster. 2,
-/// 4, 8, and 16 keep their kernels; 13-16 were level with the other
-/// plans tried on the VM. Two scalar lanes stay out: E-cores pay for a
-/// second one what P-cores save. The exception is p4 itself (Zooko,
-/// September 27, 2026): hash_many is built for top speed, P-cores do most
-/// of this machine's work, and four messages were the last batch where
-/// BLAKE3 official led (P -12%, E +30% in cycles per call).
+/// block on the integer units beside the NEON ones; pn6 (4+2) and pn10
+/// (8+2) add two zero-spill sequential scalar lanes (#523) that win on
+/// Apple P-cores, E-cores, and AmpereOne without extra stack spills, so
+/// counts 6, 10, 12..=16 dispatch pn6/pn10 (p4 keeps its concurrent sc2
+/// lanes on P-cores).
 const PARENT_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
 
@@ -545,12 +537,12 @@ fn parent_code(n: usize) -> (usize, usize) {
 }
 
 #[cfg(feature = "std")]
-/// Prefetch the code a tree of `whole` chunks and then `partial` bytes
-/// (under a chunk) runs on the hybrids: the chunk kernels
+/// Prefetch the code a tree of `whole` chunks (up to 16) and then `partial`
+/// bytes (under a chunk) runs on the hybrids: the chunk kernels
 /// (`compress_chunks_parallel` and [`hash_chunks_with_partial`] choose
-/// them from the same plans), then [`prefetch_parent_code`]. Requires 1 to
-/// 16 whole chunks.
-pub fn prefetch_tree_code(whole: usize, partial: usize) {
+/// them from the same plans), then [`prefetch_parent_code`] once for
+/// `parent_values` chaining values (clamped to `2..=32`).
+pub fn prefetch_tree_code(whole: usize, partial: usize, parent_values: usize) {
     if partial > 0 && partial_pays(whole, partial) {
         let lead = whole.saturating_sub(9);
         for &n in family().chunk_plans[lead] {
@@ -562,7 +554,7 @@ pub fn prefetch_tree_code(whole: usize, partial: usize) {
             crate::platform::prefetch_code(chunk_code(n, false));
         }
     }
-    prefetch_parent_code(whole + usize::from(partial > 0));
+    prefetch_parent_code(parent_values.min(32));
 }
 
 #[cfg(feature = "std")]
@@ -1303,7 +1295,7 @@ mod test {
         if sha3_detected() {
             for whole in 1..=16 {
                 for partial in [0, 1, 63, 64, 65, 500, 1023] {
-                    prefetch_tree_code(whole, if whole == 16 { 0 } else { partial });
+                    prefetch_tree_code(whole, if whole == 16 { 0 } else { partial }, whole + usize::from(partial > 0));
                 }
             }
         }

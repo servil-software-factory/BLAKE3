@@ -20,13 +20,14 @@ Kernels: k<n> hashes n chunks. Composition per kernel:
   k1: scalar
   k2: pair                       k3: scalar + pair
   k4: two scalars + pair         k5: scalar + two pairs
-  k6: two scalars + two pairs    k7: scalar + quad + pair
-  k8: two scalars + quad + pair  k9: scalar + two quads
-  k10: two scalars + two quads
+  k6: two seq scalars + 2 pairs  k7: scalar + quad + pair
+  k8: two seq scalars + quad+pair k9: scalar + two quads
+  k10: two seq scalars + 2 quads
 
 CPUs without SHA-3 (no `xar`) run a second family: kn2, kn4, kn5, kn6, kn8
 and pn2, pn4, pn5, pn6, pn10, of scalars and quads (whose rotates are
-`rev32`, `tbl`, and `shl` + `sri`), chosen by `sha3_detected()`; counts 3
+`rev32`, `tbl`, and `shl` + `sri`; kn6, pn6, and pn10 use zero-spill
+sequential scalars), chosen by `sha3_detected()`; counts 3
 and 7 run a kernel and k1 after it. x4 and x8 are quads with an extended-
 output stage, and x1 is k1's rounds with that stage, for one block. Every
 Arm kernel is this generator's assembly, proved as assembled (tools/verify); a kernel in intrinsics is whatever the compiler
@@ -1203,19 +1204,32 @@ def kernel(name, scalars, units, partial=False, xof=False, last=False, seq_scala
             e(f"str w2, [sp, #{F_SEQ_FL}]")
             e(f"str w3, [sp, #{F_SEQ_FL + 4}]")
 
+            MACRO_INSNS = {
+                "SGA": 9,
+                "SGB": 9,
+                "SGA_R": 8,
+                "SGB_R": 8,
+                "SG_SPILL": 20,
+                "SG_SPILL_R": 18,
+                "PG_REG": 10,
+                "PG": 12,
+                "PG_SPILL": 14,
+                "QG": 18,
+                "QG_SPILL": 20,
+            }
+
             def weight(ins):
-                # Macro calls expand to multiple instructions; weight them by
-                # their real instruction count so proportional interleaving
-                # spreads zero-spill scalar rounds evenly across every NEON
-                # half-step instead of front-loading them into round 0.
-                op = ins.split()[0]
-                if op in ("SGA_R", "SGB_R", "SGA", "SGB"):
-                    return 8
-                if op in ("PG_L", "PG_S"):
-                    return 16
-                if op in ("QG_L", "QG_S"):
-                    return 19
-                return 1
+                # Count actual expanded machine instructions per emitted item
+                # (including multi-line bundles and macro invocations) so
+                # proportional interleaving spreads zero-spill scalar rounds
+                # evenly across every NEON half-step.
+                total = 0
+                for line in ins.splitlines():
+                    s = line.strip()
+                    if not s or s.endswith(":") or s.startswith("//") or s.startswith("."):
+                        continue
+                    total += MACRO_INSNS.get(s.split()[0], 1)
+                return max(total, 1)
 
             def prop_interleave(a, b):
                 if not a:
