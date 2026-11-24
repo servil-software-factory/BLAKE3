@@ -93,10 +93,9 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// same hashes over several cores, the crate `blake3-servil` has
 /// `hash_many_multithreaded`.
 ///
-/// A `Packed` of 16- or 32-byte messages (with `std`) is a batch too, as the program
-/// holds them, with no caller-side copy into [`Block`]s (currently
-/// expanded into padded blocks on the stack in 128-message groups; see
-/// `Packed` for the layout trade-off against [`Batch`]):
+/// A `Packed` of 16-, 32-, or 48-byte messages (with `std`, or a borrowed
+/// `&[[u8; N]]` slice in `no_std`) is a batch too, hashed directly from
+/// contiguous caller memory on full SIMD groups with no copy into [`Block`]s:
 ///
 /// ```
 /// # blake3_servil_core::initialize();

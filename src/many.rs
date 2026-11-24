@@ -142,21 +142,23 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
     }
 }
 
-/// Packed messages (`len` bytes each, at a stride of `len`): sixteen at a
-/// time expanded into blocks on the stack, each message at the start of
-/// its block and the block's rest zero, then the one-block path for
-/// messages of 1 to 63 bytes. The expansion copies `len` bytes a message
-/// within L1; a kernel that reads the packed form itself (its padding
-/// words constants, never in memory) is the next step once the Merkle
-/// cells show what this copy costs (Zooko, November 7, 2026).
+/// Packed messages (`len` bytes each, at a stride of `len`): full SIMD
+/// groups run directly on the zero-padding-free packed kernels in
+/// `ffi_packed` (#501) across SME2, AVX-512, AVX2, and NEON `8+3`; any
+/// short remainder (or SSE4.1 fallback) expands up to 16 messages at a
+/// time into a 1 KiB zero-padded stack buffer.
 #[inline(never)]
 fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     // Packed's three lengths, in every build: a block-length message sent
     // here would hash right and slow (a mutant of `packed` did).
     assert!(matches!(len, 16 | 32 | 48), "packed messages are 16, 32, or 48 bytes, not {len}");
+    let done = crate::ffi_packed::hash_packed_groups(input, len, key, flags, outputs, platform);
+    if done == outputs.len() {
+        return;
+    }
     let plans = neon_plans();
-    let mut blocks = [crate::block::Block::ZERO; TABLE];
-    for (messages, digests) in input.chunks(len * TABLE).zip(outputs.chunks_mut(TABLE)) {
+    let mut blocks = [crate::block::Block::ZERO; 16];
+    for (messages, digests) in input[done * len..].chunks(len * 16).zip(outputs[done..].chunks_mut(16)) {
         let bytes = crate::block::Block::bytes_mut(&mut blocks);
         for (i, message) in messages.chunks_exact(len).enumerate() {
             bytes[i * BLOCK_LEN..][..len].copy_from_slice(message);

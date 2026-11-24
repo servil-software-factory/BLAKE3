@@ -457,6 +457,7 @@ fn run() -> usize {
     {
         checked += crate::ffi_output::self_test(platform);
     }
+    checked += crate::ffi_packed::self_test(platform);
     let _ = previous;
     platform.record();
     checked
@@ -508,7 +509,6 @@ pub(crate) fn unsupported(why: core::fmt::Arguments) -> ! {
 /// Direct non-unwinding fail-stop for self-test mismatches in helper modules
 /// (`avx512_32`, `ffi_output`) so every startup mismatch terminates even in
 /// `no_std` non-unwinding builds.
-#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
 #[cold]
 pub(crate) fn fail(why: core::fmt::Arguments) -> ! {
     stop(why)
@@ -719,6 +719,28 @@ mod test {
             }
             expected
         };
+        #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+        if matches!(Platform::detect_unchecked(), Platform::AVX512 { .. }) {
+            for (name, entry) in crate::ffi_packed::entries_avx512() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+            }
+        }
+        #[cfg(blake3_avx2_ffi)]
+        if matches!(Platform::detect_unchecked(), Platform::AVX2 { .. }) || {
+            #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+            {
+                matches!(Platform::detect_unchecked(), Platform::AVX512 { .. })
+            }
+            #[cfg(not(all(blake3_avx512_ffi, target_arch = "x86_64")))]
+            {
+                false
+            }
+        } {
+            for (name, entry) in crate::ffi_packed::entries_avx2() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+            }
+        }
+        let expected = expected + 3;
         assert_eq!(checked, expected);
     }
 
@@ -792,10 +814,12 @@ mod test {
         let mut want: std::vec::Vec<(std::string::String, *const ())> = std::vec::Vec::new();
         assert!(!crate::neon_hybrid::entries().is_empty(), "the hybrids' entries");
         want.extend(crate::neon_hybrid::entries());
+        want.extend(crate::ffi_packed::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         #[cfg(blake3_sme2)]
         if crate::platform::sme2_detected() {
             assert!(!crate::sme2::entries().is_empty(), "SME2's entries");
             want.extend(crate::sme2::entries().into_iter().map(|(n, e)| (n.into(), e)));
+            want.extend(crate::ffi_packed::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
         }
         let ran = loop {
             RAN.with(|r| r.set(0));

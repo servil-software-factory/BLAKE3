@@ -82,6 +82,9 @@ step sh -c 'python3 tools/gen_x86_chunk_root.py | cmp - c/blake3_chunk_root_x86-
 step sh -c 'python3 tools/gen_avx512_32.py | cmp - c/blake3_avx512_32.S'
 step sh -c 'python3 tools/gen_output16.py | cmp - c/blake3_output16.S'
 step sh -c 'python3 tools/gen_output8.py | cmp - c/blake3_output8.S'
+step sh -c 'python3 tools/gen_packed_x86.py | cmp - c/blake3_packed_x86-64_unix.S'
+step sh -c 'python3 tools/gen_packed_sme2.py | cmp - c/blake3_packed_sme2_aarch64.S'
+step sh -c 'python3 tools/gen_packed_neon.py | cmp - c/blake3_packed_neon_aarch64.S'
 # Both crates document their traits and account for their lifecycle
 # operations: with every feature on, so that a trait implementation
 # behind a feature (as 0.9's Zeroize was) is one of those accounted for.

@@ -1230,5 +1230,21 @@ mod test {
             }),
             16
         );
+        let packed_flags = (crate::CHUNK_START | crate::CHUNK_END | crate::ROOT) as u32;
+        for len in [16usize, 32, 48] {
+            assert_eq!(
+                run_with_dormant_za([0, 0, 1, 0, 0, 0], false, &mut || unsafe {
+                    crate::ffi_packed::call_sme2_packed(len, chunks_buf.as_ptr(), crate::IV.as_ptr(), packed_flags, out_18.as_flattened_mut().as_mut_ptr(), 1)
+                }),
+                0
+            );
+            assert_eq!(
+                run_with_dormant_za([0; 6], true, &mut || unsafe {
+                    crate::ffi_packed::call_sme2_packed(len, chunks_buf.as_ptr(), crate::IV.as_ptr(), packed_flags, out_18.as_flattened_mut().as_mut_ptr(), 1)
+                }),
+                16
+            );
+            assert_eq!(out_18[0], *blake3::hash(&chunks_buf[..len]).as_bytes());
+        }
     }
 }

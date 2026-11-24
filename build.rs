@@ -280,6 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage_asm(&out_dir, "c/blake3_chunk_root_x86-64_unix.S", "blake3_chunk_root.s", false, "chunk_root");
         stage_asm(&out_dir, "c/blake3_avx512_x86-64_unix.S", "blake3_avx512.s", false, "avx512");
         stage_asm(&out_dir, "c/blake3_avx512_32.S", "blake3_avx512_32.s", false, "avx512_32");
+        stage_asm(&out_dir, "c/blake3_packed_x86-64_unix.S", "blake3_packed_x86.s", false, "packed_x86");
         if env::var_os("CARGO_FEATURE_STD").is_some() {
             stage_asm(&out_dir, "c/blake3_output16.S", "blake3_output16.s", false, "output16");
             stage_asm(&out_dir, "c/blake3_output8.S", "blake3_output8.s", false, "output8");
@@ -291,7 +292,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo::rustc-cfg=blake3_sme2");
         println!("cargo::metadata=sme2=1");
         stage_asm(&out_dir, "c/blake3_neon_hybrid_aarch64.S", "blake3_neon_hybrid.s", is_apple, "neon");
+        stage_asm(&out_dir, "c/blake3_packed_neon_aarch64.S", "blake3_packed_neon.s", is_apple, "packed_neon");
         stage_asm(&out_dir, "c/blake3_sme2_aarch64.S", "blake3_sme2.s", is_apple, "sme2");
+        stage_asm(&out_dir, "c/blake3_packed_sme2_aarch64.S", "blake3_packed_sme2.s", is_apple, "packed_sme2");
         stage_asm(&out_dir, "c/blake3_sme2_hybrid_aarch64.S", "blake3_sme2_hybrid.s", is_apple, "sme2_hybrid");
     }
 

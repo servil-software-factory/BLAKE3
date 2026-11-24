@@ -266,6 +266,7 @@ mod sme2;
 // tools/gen_x86.py, built with the SSE4.1 and AVX2 assembly).
 #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
 mod ffi_output;
+mod ffi_packed;
 #[cfg(blake3_sse41_ffi)]
 mod ffi_partial;
 #[cfg(blake3_sse41_ffi)]
