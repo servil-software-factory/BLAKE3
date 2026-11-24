@@ -47,6 +47,12 @@ const MAX_SLOT_PIECES: usize = 64;
 /// each `commit` consumes 1 credit locally on `&mut Room` without atomic RMW,
 /// and `Room::drop` returns the unused credits in one atomic subtraction.
 const ROOM_CREDITS: usize = 1 << 30;
+/// High bit stamped onto `Rooms::refs[i]` by `Pipeline::drop` after all worker
+/// tasks have finished, marking any still-live [`Room`] that outlives its
+/// `Pipeline` so `Room::drop` releases `PipeStorage::holders` only in that rare
+/// case and `make_room`/`Room::drop` pay zero `holders` atomics while the
+/// `Pipeline` is alive (#494).
+const ROOM_CLOSING_BIT: usize = 1usize << (usize::BITS - 1);
 
 const NONE: u32 = u32::MAX;
 
@@ -298,7 +304,7 @@ struct Rooms {
     #[allow(dead_code)]
     backing: (*mut u8, usize),
     count: usize,
-    refs: Box<[OwnLine<AtomicUsize>]>,
+    refs: Box<[AtomicUsize]>,
 }
 
 // Sound: `buf` points into the rooms' own allocation, which is never freed or
@@ -334,7 +340,7 @@ impl Rooms {
             #[cfg(shuttle)]
             backing: whole,
             count,
-            refs: (0..count).map(|_| OwnLine(AtomicUsize::new(0))).collect(),
+            refs: (0..count).map(|_| AtomicUsize::new(0)).collect(),
         }
     }
 
@@ -448,10 +454,14 @@ impl PipeStorage {
     /// Give up one hold on `st` (its Pipeline's, or a Room's): the last
     /// one puts it on the free list. A Room may outlive its Pipeline, so
     /// either may be the last.
-    fn release(st: &'static PipeStorage) {
-        if st.holders.fetch_sub(1, Ordering::AcqRel) == 1 {
+    fn release_n(st: &'static PipeStorage, n: usize) {
+        if st.holders.fetch_sub(n, Ordering::AcqRel) == n {
             FREE_STORAGES.lock().unwrap().push(st);
         }
+    }
+
+    fn release(st: &'static PipeStorage) {
+        Self::release_n(st, 1);
     }
 
     fn acquire(actions: usize, messages: usize, rooms: usize, groups: usize) -> &'static PipeStorage {
@@ -582,10 +592,20 @@ impl Drop for Room {
     #[inline]
     fn drop(&mut self) {
         let unused = ROOM_CREDITS - (self.commits as usize);
-        if self.storage.rooms.release_n(self.index, unused) {
+        let prev = self.storage.rooms.refs[self.index as usize].fetch_sub(unused, Ordering::SeqCst);
+        if prev & ROOM_CLOSING_BIT != 0 {
+            // Pipeline::drop stamped ROOM_CLOSING_BIT after draining workers
+            // and reserved a `holders` ref for this Room; clear the slot back
+            // to 0 before releasing that hold (`AcqRel` establishes happens-
+            // before with the storage returning to FREE_STORAGES).
+            assert_eq!(prev & !ROOM_CLOSING_BIT, unused, "surviving room ref count");
+            self.storage.rooms.refs[self.index as usize].store(0, Ordering::Release);
+            PipeStorage::release(self.storage);
+        } else if prev == unused {
+            // Even if Pipeline::drop races right after our `fetch_sub` and
+            // recycles `&'static PipeStorage`, waking a WakerSlot is benign.
             self.storage.waker.notify_after_seqcst();
         }
-        PipeStorage::release(self.storage);
     }
 }
 
@@ -1623,7 +1643,6 @@ impl<T, B, P> Pipeline<T, B, P> {
     #[inline(always)]
     fn make_room(&self, index: u32) -> Room {
         let storage = self.shared().storage;
-        storage.holders.fetch_add(1, Ordering::Relaxed);
         Room { pipeline_id: self.id, index, offset: 0, commits: 0, ptr: storage.rooms.room_ptr(index as usize), storage }
     }
 
@@ -2325,16 +2344,31 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         }
         crate::lanes::sources::closed();
         let storage = self.shared().storage;
+        // Pre-reserve one hold per room slot before stamping ROOM_CLOSING_BIT so
+        // any surviving Room dropped concurrently on another thread cannot drop
+        // `storage.holders` to 0 while this loop is still running.
+        let room_count = storage.rooms.count;
+        storage.holders.fetch_add(room_count, Ordering::Relaxed);
+        let mut survivors = 0usize;
+        for r in &storage.rooms.refs {
+            let prev = r.fetch_or(ROOM_CLOSING_BIT, Ordering::SeqCst);
+            if prev != 0 {
+                survivors += 1;
+            } else {
+                r.store(0, Ordering::Relaxed);
+            }
+        }
+        let release_holds = (room_count - survivors) + 1;
         // Sound: the Pipeline still holds the storage; these cells are its
         // holder's. Save epochs before any user drop (waker or owner) can unwind.
         unsafe {
             *storage.saved_loan_epoch.get() = self.next_loan_epoch;
             *storage.saved_group_epoch.get() = self.next_group_epoch;
         }
-        struct ReleaseStorage(&'static PipeStorage);
+        struct ReleaseStorage(&'static PipeStorage, usize);
         impl Drop for ReleaseStorage {
             fn drop(&mut self) {
-                PipeStorage::release(self.0);
+                PipeStorage::release_n(self.0, self.1);
             }
         }
         struct DrainPending<'a, T, B, P>(&'a mut Pipeline<T, B, P>);
@@ -2366,7 +2400,7 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         // Guards run in LIFO order (`_drain` then `_release`), so even if
         // dropping the saved waker or one owner unwinds, every remaining owner
         // and batch still drops and the storage returns to FREE_STORAGES.
-        let _release = ReleaseStorage(storage);
+        let _release = ReleaseStorage(storage, release_holds);
         let _drain = DrainPending(self);
         storage.waker.clear();
     }
@@ -3505,6 +3539,39 @@ mod test {
             let (a, b, c) = (pipe.room().await, pipe.room().await, pipe.room().await);
             assert!(a.index != b.index && b.index != c.index && a.index != c.index);
         });
+    }
+
+    /// Multiple Rooms outliving their Pipeline hold `PipeStorage::holders`
+    /// via `ROOM_CLOSING_BIT` until every survivor drops, clear their ref
+    /// slots back to 0, and return the storage to `FREE_STORAGES` cleanly (#494).
+    #[test]
+    fn surviving_rooms_return_storage_after_pipeline_drop() {
+        crate::initialize_multithreaded(None);
+        let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 4 });
+        let storage: *const PipeStorage = pipe.shared().storage;
+        let (r0, r1) = block_on(async { (pipe.room().await, pipe.room().await) });
+        let (i0, i1) = (r0.index as usize, r1.index as usize);
+        assert_eq!(r0.storage.holders.load(Ordering::SeqCst), 1, "live Rooms do not bump holders while Pipeline lives");
+        drop(pipe);
+        assert_eq!(r0.storage.holders.load(Ordering::SeqCst), 2, "two surviving Rooms hold the storage");
+        for i in 0..4 {
+            let v = r0.storage.rooms.refs[i].load(Ordering::SeqCst);
+            if i == i0 || i == i1 {
+                assert_eq!(v, ROOM_CLOSING_BIT | ROOM_CREDITS, "surviving room {i} stamped");
+            } else {
+                assert_eq!(v, 0, "idle room {i} cleared to 0");
+            }
+        }
+        drop(r0);
+        assert_eq!(r1.storage.holders.load(Ordering::SeqCst), 1);
+        assert_eq!(r1.storage.rooms.refs[i0].load(Ordering::SeqCst), 0);
+        drop(r1);
+        let next = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 4 });
+        let next_storage: *const PipeStorage = next.shared().storage;
+        assert_eq!(next_storage, storage, "storage returned to FREE_STORAGES once last surviving Room dropped");
+        for i in 0..4 {
+            assert_eq!(next.shared().storage.rooms.refs[i].load(Ordering::SeqCst), 0);
+        }
     }
 
     /// A commit that finds no piece node free takes back the finished ones

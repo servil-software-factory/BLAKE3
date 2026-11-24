@@ -532,13 +532,17 @@ fn a_pipeline_after_another_reuses_its_storage_soundly() {
 fn a_room_outlives_its_pipeline() {
     check(|| {
         with_workers(1, || {
-            let first = Pipeline::<usize, ()>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
-            let mut first = first;
-            let mut held = block_on(first.room());
+            let mut first = Pipeline::<usize, ()>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+            let mut held_after = block_on(first.room());
+            let mut held_race = block_on(first.room());
+            let racer = thread::spawn(move || {
+                held_race.bytes_mut().fill(0x5a);
+                drop(held_race);
+            });
             drop(first);
             let giver = thread::spawn(move || {
-                held.bytes_mut().fill(0xa5);
-                drop(held);
+                held_after.bytes_mut().fill(0xa5);
+                drop(held_after);
             });
             let others: Vec<_> = (0..2u8)
                 .map(|which| {
@@ -551,6 +555,7 @@ fn a_room_outlives_its_pipeline() {
                     })
                 })
                 .collect();
+            racer.join().unwrap();
             giver.join().unwrap();
             for other in others {
                 other.join().unwrap();
