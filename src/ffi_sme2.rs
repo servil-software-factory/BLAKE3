@@ -602,13 +602,58 @@ unsafe fn flat_walk(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u6
     unsafe { walk_on_stack(input, key, chunk_counter, flags, keep, out, n) }
 }
 
-/// [`walk_in`] with the scratch on the stack, out of line so the usual
-/// path keeps a small frame.
+/// Bytes of the small flat-walk stack scratch (covers `n <= SMALL_SCRATCH_MAX_CHUNKS`
+/// = 64 chunks, i.e., up to 64 KiB including startup self-test's 32 KiB case, saving
+/// 56 KiB of stack frame on cold SME2 startup, #509).
+const SMALL_SCRATCH: usize = 8 * 1024;
+const SMALL_SCRATCH_MAX_CHUNKS: usize = 64;
+
+/// 4 KiB-aligned small scratch block for `walk_on_stack_small`.
+#[repr(C, align(4096))]
+struct SmallScratch([core::mem::MaybeUninit<u8>; SMALL_SCRATCH]);
+
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    /// Most recent stack scratch size used by `walk_on_stack` on this thread.
+    static LAST_STACK_SCRATCH_BYTES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// [`walk_in`] on an 8 KiB stack scratch for small subtrees (`n <= 64` chunks),
+/// out of line so the 64 KiB frame stays off the small-walk path.
 #[inline(never)]
-unsafe fn walk_on_stack(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize) -> usize {
+unsafe fn walk_on_stack_small(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize) -> usize {
+    assert!(n <= SMALL_SCRATCH_MAX_CHUNKS, "small stack scratch fits up to 64 chunks");
+    #[cfg(all(test, feature = "std"))]
+    LAST_STACK_SCRATCH_BYTES.with(|b| b.set(SMALL_SCRATCH));
+    let mut block = SmallScratch([core::mem::MaybeUninit::<u8>::uninit(); SMALL_SCRATCH]);
+    // Sound: `n <= SMALL_SCRATCH_MAX_CHUNKS`, so `scratch_layout(n)` places every
+    // buffer inside `SMALL_SCRATCH` bytes, and `block` is a live 4 KiB-aligned
+    // `SMALL_SCRATCH`-byte buffer exclusively owned by this frame.
+    unsafe { walk_in(input, key, chunk_counter, flags, keep, out, n, block.0.as_mut_ptr() as *mut u8) }
+}
+
+/// [`walk_in`] on the full 64 KiB stack scratch (`n > 64` chunks), out of line
+/// so small subtrees and startup self-test never reserve 64 KiB on the stack.
+#[inline(never)]
+unsafe fn walk_on_stack_large(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize) -> usize {
+    #[cfg(all(test, feature = "std"))]
+    LAST_STACK_SCRATCH_BYTES.with(|b| b.set(SCRATCH));
     let mut block = Scratch([core::mem::MaybeUninit::<u8>::uninit(); SCRATCH]);
     // Sound: `block` is a live 4 KiB-aligned `SCRATCH`-byte buffer exclusively owned by this frame.
     unsafe { walk_in(input, key, chunk_counter, flags, keep, out, n, block.0.as_mut_ptr() as *mut u8) }
+}
+
+/// [`walk_in`] with the scratch on the stack, selecting the 8 KiB tier for
+/// `n <= 64` chunks (including startup self-test's 32 KiB case) and the 64 KiB
+/// tier for larger subtrees.
+unsafe fn walk_on_stack(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize) -> usize {
+    if n <= SMALL_SCRATCH_MAX_CHUNKS {
+        // Sound: `n <= SMALL_SCRATCH_MAX_CHUNKS` satisfies `walk_on_stack_small`'s contract.
+        unsafe { walk_on_stack_small(input, key, chunk_counter, flags, keep, out, n) }
+    } else {
+        // Sound: caller's contract bounds `n <= FLAT_MAX_CHUNKS` for `walk_on_stack_large`.
+        unsafe { walk_on_stack_large(input, key, chunk_counter, flags, keep, out, n) }
+    }
 }
 
 /// The flat walk's scratch, on a 4 KiB boundary, so the residues mod 4 KiB
@@ -795,9 +840,10 @@ const SCRATCH: usize = 64 * 1024;
 fn scratch_layout(n: usize) -> (usize, usize) {
     let cvs = (8 * n).next_multiple_of(4096) + 1024;
     let half = cvs + (32 * n.max(32)).saturating_sub(2048).next_multiple_of(4096) + 2048;
+    let limit = if n <= SMALL_SCRATCH_MAX_CHUNKS { SMALL_SCRATCH } else { SCRATCH };
     // The offsets reserve the table and the first CV level in order.
     // Check the last buffer once, before walk_in writes to scratch.
-    assert!(half + 16 * n.max(64) <= SCRATCH, "the flat walk's scratch holds its buffers");
+    assert!(half + 16 * n.max(64) <= limit, "the flat walk's scratch holds its buffers");
     (cvs, half)
 }
 
@@ -837,9 +883,33 @@ mod scratch_layout_tests {
             let padded = 2 * GROUP;
             assert!(8 * n <= cvs, "{n} chunks: the pointer table runs into the values");
             assert!(cvs + OUT_LEN * n.max(padded) <= half, "{n} chunks: the values run into the level above");
-            assert!(half + OUT_LEN * (n / 2).max(padded) <= SCRATCH, "{n} chunks: the level above runs past the scratch");
+            let limit = if n <= SMALL_SCRATCH_MAX_CHUNKS { SMALL_SCRATCH } else { SCRATCH };
+            assert!(half + OUT_LEN * (n / 2).max(padded) <= limit, "{n} chunks: the level above runs past the scratch");
             assert_eq!((cvs % 4096, half % 4096), (1024, 3072), "{n} chunks: the buffers' places mod 4 KiB");
             n *= 2;
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_walk_on_stack_selects_small_tier_up_to_64_chunks() {
+        crate::initialize();
+        if !matches!(crate::platform::Platform::detect(), crate::platform::Platform::SME2) {
+            return;
+        }
+        let data = std::vec![0x3cu8; 128 * CHUNK_LEN];
+        for (chunks, want_scratch) in [(32usize, SMALL_SCRATCH), (64, SMALL_SCRATCH), (128, SCRATCH)] {
+            let mut out = [0u8; 2 * OUT_LEN];
+            LAST_STACK_SCRATCH_BYTES.with(|b| b.set(0));
+            // Sound: SME2 was detected, `chunks` is a valid flat-walk size, and `out` holds 2 CVs.
+            let kept = unsafe { walk_on_stack(&data[..chunks * CHUNK_LEN], crate::IV, 0, 0, 2, &mut out, chunks) };
+            assert_eq!(kept, 2);
+            assert_eq!(LAST_STACK_SCRATCH_BYTES.with(|b| b.get()), want_scratch, "chunks={chunks}");
+            let mut block = [0u8; crate::BLOCK_LEN];
+            block.copy_from_slice(&out);
+            let mut root_cv = *crate::IV;
+            crate::platform::Platform::NEON.compress_in_place(&mut root_cv, &block, crate::BLOCK_LEN as u8, 0, crate::PARENT | crate::ROOT);
+            assert_eq!(crate::hasher::le_bytes(&root_cv), *blake3::hash(&data[..chunks * CHUNK_LEN]).as_bytes(), "chunks={chunks} digest");
         }
     }
 }

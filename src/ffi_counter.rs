@@ -231,6 +231,7 @@ fn self_test_template() -> [u8; SELF_TEST_LEN] {
 /// counter wrapping and remainder dispatch on every ISA kernel in one call.
 const SELF_TEST_EXPECTED: u64 = 0xb837_cd90_1a80_d68b;
 
+#[inline(never)]
 pub(crate) fn self_test(platform: Platform) -> usize {
     let key = self_test_key_words();
     let tmpl = self_test_template();

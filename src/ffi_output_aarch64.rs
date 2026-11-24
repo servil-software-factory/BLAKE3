@@ -253,8 +253,17 @@ fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; OUT_LEN]]))
 }
 
 #[cfg(blake3_sme2)]
+#[inline(never)]
 fn chunks_keyed_self_test_shape(mut hash: impl FnMut(&[[u8; CHUNK_LEN]; 32], &[u64; 2], &[[u32; 8]; 2], &[u8; 2], &mut [[u8; OUT_LEN]; 32])) -> u64 {
-    let chunks: [[u8; CHUNK_LEN]; 32] = core::array::from_fn(|c| core::array::from_fn(|b| ((c * 37 + b * 17 + (b >> 6)) ^ 0x5a).to_le_bytes()[0]));
+    // Initialize the 32 KiB input table in place (avoiding `core::array::from_fn`'s
+    // duplicate 32 KiB temporary on the stack) so startup fits easily in a 128 KiB
+    // thread stack (#509).
+    let mut chunks = [[0u8; CHUNK_LEN]; 32];
+    for (c, chunk) in chunks.iter_mut().enumerate() {
+        for (b, byte) in chunk.iter_mut().enumerate() {
+            *byte = ((c * 37 + b * 17 + (b >> 6)) ^ 0x5a).to_le_bytes()[0];
+        }
+    }
     let counters = [u64::from(u32::MAX) - 5, 0x0000_0003_0000_0007];
     let keys: [[u32; 8]; 2] = core::array::from_fn(|g| {
         let g = u32::try_from(g).unwrap();
@@ -269,6 +278,7 @@ fn chunks_keyed_self_test_shape(mut hash: impl FnMut(&[[u8; CHUNK_LEN]; 32], &[u
     crate::self_test::fold(out.as_flattened())
 }
 
+#[inline(never)]
 pub(crate) fn self_test(platform: Platform) -> usize {
     let neon_answer = self_test_shape(|inputs, out| {
         crate::ran_kernel(blake3_servil_neon_output8 as *const ());

@@ -257,6 +257,7 @@ unsafe fn hash_on_platform(platform: Platform, inputs: &[Input<'_>; 16], out: &m
 #[cfg(test)]
 pub(crate) static PLANTED_WRONG_OUTPUT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+#[inline(never)]
 pub(crate) fn self_test(platform: Platform) -> usize {
     if lanes(platform) == 0 {
         return 0;

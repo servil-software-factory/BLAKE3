@@ -163,6 +163,7 @@ fn fill_self_test_input(buf: &mut [u8], len: usize) {
 /// AVX-512, `self_test` additionally checks an 8-message batch on `avx2_packed`).
 const SELF_TEST_EXPECTED: [u64; 3] = [0x13f1c329fc53200f, 0x1e4294615a858573, 0x93901e850f4221b8];
 
+#[inline(never)]
 pub(crate) fn self_test(platform: Platform) -> usize {
     let key = self_test_key_words();
     let mut input = [0u8; SELF_TEST_COUNT * 48];

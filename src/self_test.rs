@@ -209,6 +209,9 @@ pub(crate) fn fold(bytes: &[u8]) -> u64 {
 /// one. `outputs` hashes one case into its buffer and returns how many
 /// bytes it wrote; `check` sees each case's fold as it comes. Returns the
 /// final chaining seed for the platform-specific checks that follow.
+// Kept out of line so its `INPUT_LEN` buffer (32 KiB on AArch64) is popped off
+// the stack before `run` invokes the platform-specific self-tests (#509).
+#[inline(never)]
 pub(crate) fn chain(mut outputs: impl FnMut(Case, &[u8], &[u8; 32], &mut [u8]) -> usize, mut check: impl FnMut(usize, u64)) -> [u8; 32] {
     let mut input = [0u8; INPUT_LEN];
     fill(&mut input);
@@ -1306,5 +1309,27 @@ mod stops {
             .output()
             .expect("spawn child");
         assert_eq!(out.status.signal(), Some(6), "broken stderr pipe must terminate by SIGABRT (6), not SIGPIPE (13): {:?}", out.status);
+    }
+
+    /// Startup self-test must fit cleanly inside a 128 KiB thread stack in
+    /// optimized builds (`[profile.test]` and `--release`) on every platform,
+    /// including AArch64 SME2 `chunks_keyed` and 32 KiB `walk_on_stack` (#509).
+    /// Unoptimized (`opt-level = 0`) builds reserve larger temporary frames for
+    /// `Hasher` (`finalize_xof`) and are outside the 128 KiB stack budget.
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_self_test_fits_in_128kib_thread_stack() {
+        let checked = std::thread::Builder::new()
+            .name("self-test-128k".into())
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let n = run();
+                assert_eq!(crate::convenience::hash(b"").as_bytes(), blake3::hash(b"").as_bytes());
+                n
+            })
+            .expect("spawn 128 KiB stack thread")
+            .join()
+            .expect("startup self-test must not overflow a 128 KiB thread stack");
+        assert!(checked >= CASES.len(), "self-test ran fewer than CASES.len() checks");
     }
 }
