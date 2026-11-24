@@ -918,12 +918,7 @@ fn spare_lane(platform: Platform, whole: usize, partial: usize) -> Option<usize>
     }
 }
 
-/// The widths the platform's many-lane kernels run at, in one pass each,
-/// rising: SSE4.1 four lanes; AVX2 eight (and four); AVX-512 sixteen (and
-/// eight, four), and thirty-two where the 32-input kernel runs
-/// (wide_avx512, Zen 5 on Linux). Below the smallest, one and two lanes
-/// have passes of their own as cheap as one.
-fn lane_widths(platform: Platform) -> &'static [usize] {
+fn lane_widths_for_wide<const N: usize>(platform: Platform, wide: bool) -> &'static [usize] {
     match platform {
         #[cfg(blake3_sse41_ffi)]
         Platform::SSE41 => &[4],
@@ -931,7 +926,7 @@ fn lane_widths(platform: Platform) -> &'static [usize] {
         Platform::AVX2 => &[4, 8],
         #[cfg(blake3_avx512_ffi)]
         Platform::AVX512 => {
-            if cfg!(target_os = "linux") && crate::platform::wide_avx512() {
+            if N == CHUNK_LEN && wide {
                 &[4, 8, 16, 32]
             } else {
                 &[4, 8, 16]
@@ -944,7 +939,25 @@ fn lane_widths(platform: Platform) -> &'static [usize] {
     }
 }
 
-/// The lanes `count` whole inputs run on when the kernels' cascade would
+/// The widths the platform's many-lane kernels run at for `N`-byte inputs, in
+/// one pass each, rising: SSE4.1 four lanes; AVX2 eight (and four); AVX-512
+/// sixteen (and eight, four), and thirty-two for whole chunks (`CHUNK_LEN`)
+/// where the 32-input kernel runs (`wide_avx512`, Zen 5 on Linux). Below the
+/// smallest, one and two lanes have passes of their own as cheap as one.
+pub(crate) fn lane_widths_for<const N: usize>(platform: Platform) -> &'static [usize] {
+    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    let wide = crate::platform::wide_avx512();
+    #[cfg(not(all(blake3_avx512_ffi, target_os = "linux")))]
+    let wide = false;
+    lane_widths_for_wide::<N>(platform, wide)
+}
+
+#[cfg(test)]
+fn lane_widths(platform: Platform) -> &'static [usize] {
+    lane_widths_for::<CHUNK_LEN>(platform)
+}
+
+/// The lanes `count` whole `N`-byte inputs run on when the kernels' cascade would
 /// take two or more passes for them: on x86 a many-lane kernel hashes its
 /// width at a time, then the next width down, and so on to one, each
 /// pass about as long as a 1-lane pass of the same blocks (i7-12700K,
@@ -960,48 +973,44 @@ fn lane_widths(platform: Platform) -> &'static [usize] {
 /// Shackleton's EPYC 9255 and Ryzen 9700X, 9-15 on 16 lanes -39 to
 /// -67%, 17-31 on 32 lanes -20 to -65%; her Xeon Gold 6330, 9-15 on 16
 /// -7 to -43%, and the remainder past 16 rounded -2 to -29%.
-fn rounded_lanes(platform: Platform, count: usize) -> Option<usize> {
+pub(crate) fn rounded_lanes_for<const N: usize>(platform: Platform, count: usize) -> Option<usize> {
     if count <= 2 {
         return None;
     }
-    lane_widths(platform).iter().copied().find(|&w| w >= count).filter(|&w| w != count)
+    lane_widths_for::<N>(platform).iter().copied().find(|&w| w >= count).filter(|&w| w != count)
 }
 
-/// `platform.hash_many` over `inputs`, on `rounded_lanes` where a wider
-/// kernel takes the count in one pass: the spare lanes hash a copy of the
-/// last input, into scratch. Past the widest kernel, the whole groups of
-/// its width first, then the rest rounded.
-fn hash_many_rounded<const N: usize>(
+#[cfg(test)]
+fn rounded_lanes(platform: Platform, count: usize) -> Option<usize> {
+    rounded_lanes_for::<CHUNK_LEN>(platform, count)
+}
+
+#[inline(never)]
+fn hash_many_rounded_slow<const N: usize>(
     platform: Platform,
     inputs: &[&[u8; N]],
+    widest: usize,
     key: &CVWords,
-    counter: u64,
+    mut counter: u64,
     increment_counter: IncrementCounter,
     flags: u8,
     flags_start: u8,
     flags_end: u8,
-    out: &mut [u8],
+    mut out: &mut [u8],
 ) {
-    // Past the widest kernel, where the rest would round: its whole groups
-    // first, one call each, then the rest below (a loop, each turn a whole
-    // group fewer).
-    let widest = lane_widths(platform).last().copied().unwrap_or(usize::MAX);
     let mut inputs = inputs;
-    let mut out = out;
-    let mut counter = counter;
-    if inputs.len() > widest && rounded_lanes(platform, inputs.len() % widest).is_some() {
-        while inputs.len() > widest {
-            let (head, rest) = inputs.split_at(widest);
-            let (head_out, rest_out) = out.split_at_mut(widest * OUT_LEN);
-            platform.hash_many(head, key, counter, increment_counter, flags, flags_start, flags_end, head_out);
-            if increment_counter.yes() {
-                counter += widest as u64;
-            }
-            inputs = rest;
-            out = rest_out;
+    let full = inputs.len() / widest * widest;
+    if full != 0 {
+        let (head, rest) = inputs.split_at(full);
+        let (head_out, rest_out) = out.split_at_mut(full * OUT_LEN);
+        platform.hash_many(head, key, counter, increment_counter, flags, flags_start, flags_end, head_out);
+        if increment_counter.yes() {
+            counter += full as u64;
         }
+        inputs = rest;
+        out = rest_out;
     }
-    if let Some(lanes) = rounded_lanes(platform, inputs.len()) {
+    if let Some(lanes) = rounded_lanes_for::<N>(platform, inputs.len()) {
         ran(Ran::RoundedUp);
         let last = *inputs.last().expect("a count that rounds up is 3 or more");
         let mut padded = StackVec::<&[u8; N], 32>::new();
@@ -1019,6 +1028,31 @@ fn hash_many_rounded<const N: usize>(
     } else {
         platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
     }
+}
+
+/// `platform.hash_many` over `inputs`, on `rounded_lanes_for` where a wider
+/// kernel takes the count in one pass: the spare lanes hash a copy of the
+/// last input, into scratch. Past the widest kernel, the whole groups of
+/// its width first, then the rest rounded.
+pub(crate) fn hash_many_rounded<const N: usize>(
+    platform: Platform,
+    inputs: &[&[u8; N]],
+    key: &CVWords,
+    counter: u64,
+    increment_counter: IncrementCounter,
+    flags: u8,
+    flags_start: u8,
+    flags_end: u8,
+    out: &mut [u8],
+) {
+    let Some(&widest) = lane_widths_for::<N>(platform).last() else {
+        return platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    };
+    let rem = if inputs.len() > widest { inputs.len() % widest } else { inputs.len() };
+    if rounded_lanes_for::<N>(platform, rem).is_some() {
+        return hash_many_rounded_slow(platform, inputs, widest, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    }
+    platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
 }
 
 // Use SIMD parallelism to hash up to MAX_SIMD_DEGREE chunks at the same time

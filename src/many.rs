@@ -427,7 +427,7 @@ pub(crate) fn hash_group_across(messages: &[&[u8]], len: usize, key: &CVWords, f
         for k in 0..full {
             let refs: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], GROUP> =
                 (0..count).map(|m| message(m)[k * CHUNK_LEN..][..CHUNK_LEN].try_into().unwrap()).collect();
-            platform.hash_many(&refs, key, k as u64, IncrementCounter::No, flags, CHUNK_START, CHUNK_END, cvs[k][..count].as_flattened_mut());
+            crate::hash_many_rounded(platform, &refs, key, k as u64, IncrementCounter::No, flags, CHUNK_START, CHUNK_END, cvs[k][..count].as_flattened_mut());
         }
         if full < chunks {
             let partial = len - full * CHUNK_LEN;
@@ -772,11 +772,15 @@ fn hash_blocks<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, output
 /// call each for one or two.
 #[inline(never)]
 fn hash_four_at_a_time<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
-    // Keep the padded fourth lane for remainders of three. For other
-    // x86 tails, the existing platform kernel avoids separate scalar hashes.
-    if cfg!(target_arch = "x86_64") && lanes.len() % 4 != 3 {
+    // On x86-64, multi-block messages (N >= 2 * BLOCK_LEN) amortize wide SIMD
+    // lane rounding across blocks, so round every multi-pass count (3->4,
+    // 5..7->8, 9..15->16, and 17..31->32 for 1 KiB). Single-block (64 B) runs
+    // stay unrounded in `hash_run` so cold-cache `ManyMessages|6` avoids extra
+    // kernel I-cache misses.
+    if cfg!(target_arch = "x86_64") {
+        const { assert!(N >= 2 * BLOCK_LEN && N <= CHUNK_LEN && N % BLOCK_LEN == 0) };
         noted_lanes(lanes.len());
-        whole_messages(lanes, key, flags, outputs, platform);
+        crate::hash_many_rounded(platform, lanes, key, 0, IncrementCounter::No, flags, CHUNK_START, CHUNK_END | ROOT, outputs.as_flattened_mut());
         return;
     }
     let fours = lanes.len() / 4 * 4;
@@ -924,33 +928,31 @@ mod test {
         assert!(sme2_sized(1 << 20, 1) && !sme2_sized(1 << 20, 0), "a long message, none of them: nothing");
     }
 
-    /// hash_four_at_a_time's arrangement on x86-64 (BLAKE3 #219): a count
-    /// of whole-block messages that leaves a remainder of three goes to
-    /// hash_many in fours and then the three with a spare lane; any other
-    /// count goes in one call.
+    /// Whole-block batches on x86-64 delegate to `hash_many_rounded`, rounding
+    /// every multi-pass count up to the platform's next one-pass kernel width
+    /// (3 -> 4, 5..7 -> 8 on AVX2/AVX-512, 9..15 -> 16 on AVX-512, 17..31 -> 32
+    /// on wide AVX-512 for whole chunks).
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn test_hash_four_at_a_time_arrangement() {
         let platform = Platform::detect();
-        let input = messages(BLOCK_LEN, 12);
-        let lanes: Vec<&[u8; BLOCK_LEN]> = (0..12).map(|i| input[i * BLOCK_LEN..][..BLOCK_LEN].try_into().unwrap()).collect();
-        for (count, calls) in [
-            (1, vec![1]),
-            (2, vec![2]),
-            (3, vec![4]),
-            (4, vec![4]),
-            (5, vec![5]),
-            (6, vec![6]),
-            (7, vec![4, 4]),
-            (8, vec![8]),
-            (9, vec![9]),
-            (11, vec![8, 4]),
-            (12, vec![12]),
-        ] {
+        const LEN: usize = 2 * BLOCK_LEN;
+        let input = messages(LEN, 16);
+        let lanes: Vec<&[u8; LEN]> = (0..16).map(|i| input[i * LEN..][..LEN].try_into().unwrap()).collect();
+        for count in 1..=16 {
             let mut out = vec![[0u8; OUT_LEN]; count];
             FOUR_AT_A_TIME_LANES.with(|v| v.borrow_mut().clear());
-            hash_four_at_a_time::<BLOCK_LEN>(&lanes[..count], crate::IV, 0, &mut out, platform);
-            assert_eq!(FOUR_AT_A_TIME_LANES.with(|v| v.borrow().clone()), calls, "{count} messages");
+            #[cfg(feature = "std")]
+            crate::ROUNDED_WIDTH.with(|w| w.set(0));
+            hash_four_at_a_time::<LEN>(&lanes[..count], crate::IV, 0, &mut out, platform);
+            assert_eq!(FOUR_AT_A_TIME_LANES.with(|v| v.borrow().clone()), vec![count], "{count} messages");
+            #[cfg(feature = "std")]
+            {
+                let widest = crate::lane_widths_for::<LEN>(platform).last().copied().unwrap_or(usize::MAX);
+                let rem = if count > widest { count % widest } else { count };
+                let want_width = crate::rounded_lanes_for::<LEN>(platform, rem).unwrap_or(0);
+                assert_eq!(crate::ROUNDED_WIDTH.with(|w| w.get()), want_width, "{count} messages rounded width on {platform:?}");
+            }
             for (i, o) in out.iter().enumerate() {
                 assert_eq!(*o, *crate::convenience::hash(lanes[i]).as_bytes(), "{count} messages, digest {i}");
             }
