@@ -323,7 +323,7 @@ const LAST_KERNELS: [Option<LastKernel>; 10] = [
 /// counts 6, 10, 12..=16 dispatch pn6/pn10 (p4 keeps its concurrent sc2
 /// lanes on P-cores).
 const PARENT_PLANS: [&[usize]; 17] =
-    [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
+    [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[8, 8]];
 
 /// Kernel sizes for the `l` kernels (`l2..l9`, which have no `l6` or `l10`).
 #[cfg(feature = "std")]
