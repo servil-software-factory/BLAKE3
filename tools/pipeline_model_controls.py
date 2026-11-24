@@ -54,8 +54,8 @@ LOCK_FILES = ("Cargo.lock", os.path.join("threads", "Cargo.lock"))
 FAULTS = [
     (
         "a group is published done before its members are hashed",
-        "        unsafe { task.run_members(self.tree(), platform) };\n",
-        "        group.completed_epoch.swap(epoch, Ordering::SeqCst);\n        unsafe { task.run_members(self.tree(), platform) };\n",
+        "        unsafe { task.run_members(tree, platform) };\n",
+        "        group.completed_epoch.swap(epoch, Ordering::SeqCst);\n        unsafe { task.run_members(tree, platform) };\n",
     ),
     (
         "a finished task wakes no one",

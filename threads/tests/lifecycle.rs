@@ -42,7 +42,7 @@ use std::{
 };
 
 // WALKED
-// Pipeline::new Pipeline::with_owners Pipeline::message Pipeline::room Pipeline::commit Pipeline::end Pipeline::abort Pipeline::owned
+// Pipeline::new Pipeline::with_owners Pipeline::message Pipeline::message_with Pipeline::room Pipeline::commit Pipeline::end Pipeline::abort Pipeline::owned
 // Pipeline::lent Pipeline::batch Pipeline::next_event Pipeline::ready Pipeline::Drop Room::len Room::bytes_mut Room::as_mut_ptr Room::Drop Lent::Drop
 // Pipeline::Send Room::Send
 // NOT_WALKED
@@ -292,7 +292,7 @@ async fn without_owners(mode: Mode<'static>, limits: Limits, data: &[u8]) {
     assert_eq!(*hash.as_bytes(), official(mode, &data[..1025]));
     drop(guard);
     if limits.rooms > 0 {
-        let mut m = p.message(2, None).await;
+        let mut m = p.message_with(mode, 2, None).await;
         let mut room = p.room().await;
         room.bytes_mut()[..37].copy_from_slice(&data[..37]);
         p.commit(&mut m, &mut room, 37);
