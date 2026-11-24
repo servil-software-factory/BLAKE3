@@ -11,8 +11,13 @@
 //!   Files `< 4 MiB` go straight onto it (the kernel's `io_read` serves
 //!   cached hits inline and dispatches NVMe reads asynchronously), and each
 //!   is hashed on the core that read it, whether or not the pool runs.
-//!   Cold files `>= 4 MiB` stream into 64 KiB `Pipeline::room()`s at
-//!   ~20 MiB RSS; they are the only cold files that start the pool.
+//!   Cold files `>= 32 MiB` with at least 4 direct-I/O threads available per
+//!   file worker read past the page cache via `direct::hash` (`O_DIRECT`,
+//!   2 MiB pieces; its CV table scales with file size at ~20 MiB/TiB, as on
+//!   the single-file path) before starting the pool; cold files in
+//!   `4 MiB..32 MiB` (or with fewer threads, or when direct I/O is
+//!   unavailable) stream into 64 KiB `Pipeline::room()`s at ~20 MiB RSS, and
+//!   are the only cold files that start the pool.
 
 use crate::Args;
 use crate::file_end::{self, CacheRead, InputRole, SMALL_MEM_CAP, StdinContext, StreamId};
@@ -32,6 +37,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SMALL: u64 = crate::MAP_LEN as u64;
 const COLD_RING_MAX_FILE: u64 = 4 << 20;
+const COLD_DIRECT_MIN: u64 = 32 << 20;
+const MIN_MULTI_DIRECT_PER_FILE: usize = 4;
 const WARM_BATCH_MAX_FILE: usize = 16 * 1024;
 const WARM_SLOT_BLOCKS: usize = (WARM_BATCH_MAX_FILE / 64) + 1;
 const WARM_BATCH_SLOTS: usize = 16;
@@ -495,6 +502,13 @@ impl WarmBatch {
 #[cfg(test)]
 static FORCE_MISS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Count of cold `>= COLD_DIRECT_MIN` files hashed and accepted through
+/// `direct::hash` in `run_hybrid_worker`, and the thread count passed to it.
+#[cfg(test)]
+static DIRECT_MULTI_SUCCEEDED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static DIRECT_MULTI_LAST_THREADS: AtomicUsize = AtomicUsize::new(0);
+
 #[cfg(test)]
 pub(crate) fn force_miss() -> bool {
     FORCE_MISS.load(Ordering::Relaxed)
@@ -848,6 +862,15 @@ fn readers(total_threads: usize, nfiles: usize) -> usize {
     (3 + nfiles / 32).clamp(4, 12).min(nfiles).min(total_threads)
 }
 
+/// Direct-I/O helper threads a multi-file worker asks for on one cold file of
+/// at least [`COLD_DIRECT_MIN`] bytes: targets [`crate::DIRECT_THREADS`] (16)
+/// concurrent direct reads across the planned `io_threads`, bounded by
+/// `total_threads / io_threads`.
+fn multi_file_direct_threads(total_threads: usize, io_threads: usize) -> usize {
+    let workers = io_threads.max(1);
+    (crate::DIRECT_THREADS / workers).max(1).min((total_threads / workers).max(1))
+}
+
 fn hash_paths_inner(
     args: &Args,
     paths: &[PathBuf],
@@ -959,6 +982,7 @@ fn run_hybrid_worker(
     let mut medium_buf: Vec<u8> = Vec::new();
     let mut warm_pipe: Option<WarmLargePipe> = None;
     let mut cold: Option<ColdRingState> = None;
+    let mut direct_piece: Option<crate::direct::Piece> = None;
     let mut probe_stack: [MaybeUninit<u8>; WARM_SLOT_BLOCKS * 64] = [MaybeUninit::uninit(); WARM_SLOT_BLOCKS * 64];
     let mut sink = Sink { done, open: true };
 
@@ -1139,6 +1163,7 @@ fn run_hybrid_worker(
 
         // 3. Large files `>= 512 KiB`: check `resident(&map)` BEFORE creating any `Uring`!
         warm_batch.flush(args.mode, &mut sink);
+        let mut mapped_cold = false;
         if let Some(map) = args.map(&file) {
             if !force_miss() && crate::resident(&map) {
                 if size < (4 << 20) {
@@ -1169,6 +1194,40 @@ fn run_hybrid_worker(
                 }
             } else {
                 drop(map);
+                mapped_cold = true;
+            }
+        }
+
+        // Cold `>= 32 MiB` when this worker can lease at least 4 direct-I/O
+        // readers: read past the page cache (`O_DIRECT`, 2 MiB pieces) before
+        // opening an `io_uring` or starting the global pool. Using `resident`
+        // above avoids a `preadv2(RWF_NOWAIT)` probe on the descriptor before
+        // an `io_uring` fallback (`--no-mmap` falls back to `direct::is_for`).
+        // Honors `--num-threads` via `DirectPermits`.
+        let want_direct = multi_file_direct_threads(total_threads, io_threads);
+        if size >= COLD_DIRECT_MIN
+            && want_direct >= MIN_MULTI_DIRECT_PER_FILE
+            && let Ok(len) = usize::try_from(size)
+            && (mapped_cold || crate::direct::is_for(&file, size))
+        {
+            let direct_hash = {
+                let permits = crate::DirectPermits::acquire(want_direct.saturating_sub(1));
+                let direct_threads = 1 + permits.extra;
+                if direct_threads >= MIN_MULTI_DIRECT_PER_FILE {
+                    let h = crate::direct::hash(args.mode, &file, len, direct_threads, direct_piece.get_or_insert_with(crate::direct::Piece::new));
+                    #[cfg(test)]
+                    if h.is_some() {
+                        DIRECT_MULTI_SUCCEEDED.fetch_add(1, Ordering::Relaxed);
+                        DIRECT_MULTI_LAST_THREADS.store(direct_threads, Ordering::Relaxed);
+                    }
+                    h
+                } else {
+                    None
+                }
+            };
+            if let Some(h) = direct_hash {
+                sink.put(i, Ok(h));
+                continue;
             }
         }
 
@@ -1236,6 +1295,7 @@ fn run_hybrid_worker(
 mod test {
     use std::os::fd::AsRawFd;
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn the_readers_grow_with_the_files() {
@@ -1797,5 +1857,150 @@ mod test {
         let mut remaining = String::new();
         std::io::Read::read_to_string(&mut &reader, &mut remaining).unwrap();
         assert_eq!(remaining, "untouched-manifest-bytes");
+    }
+
+    #[test]
+    fn multi_file_direct_threads_bounds_total_readers() {
+        for total in [2usize, 4, 8, 16, 48, 112] {
+            for workers in [1usize, 2, 3, 4, 6, 8, 12] {
+                if workers > total {
+                    continue;
+                }
+                let per = super::multi_file_direct_threads(total, workers);
+                assert!(per >= 1, "total={total} workers={workers}");
+                assert!(per * workers <= crate::DIRECT_THREADS, "total={total} workers={workers} per={per}");
+                assert!(per * workers <= total, "total={total} workers={workers} per={per}");
+            }
+        }
+        assert_eq!(super::multi_file_direct_threads(16, 4), 4);
+        assert_eq!(super::multi_file_direct_threads(56, 4), 4);
+        assert_eq!(super::multi_file_direct_threads(16, 2), 8);
+        assert_eq!(super::multi_file_direct_threads(4, 4), 1);
+        assert_eq!(super::multi_file_direct_threads(48, 12), 1);
+    }
+
+    #[test]
+    fn cold_large_multi_file_uses_direct_io_and_matches_reference() {
+        use std::os::unix::fs::OpenOptionsExt;
+        blake3::initialize();
+        // Force a 16-thread budget so 3 files -> io_threads=3 -> want_direct=5 >= 4
+        // deterministically even on 4-CPU CI runners.
+        crate::THREADS.set(std::num::NonZeroUsize::new(16).unwrap()).expect("fresh test process");
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
+        // Pin literal 32 MiB threshold (and 32 MiB - 1 below it).
+        let at_32m: usize = 32 * 1024 * 1024;
+        let below_32m: usize = at_32m - 1;
+        let make = |seed: u8, len: usize| -> Vec<u8> {
+            let mut out = vec![0u8; len];
+            blake3::convenience::Hasher::new(blake3::Mode::Plain, None).update(&[seed]).finalize_xof().fill(&mut out);
+            out
+        };
+        let a = make(1, at_32m);
+        let b = make(2, at_32m + 4096 + 13);
+        let c = make(3, below_32m);
+        let paths = vec![dir.path().join("big-a"), dir.path().join("big-b"), dir.path().join("below-c")];
+        std::fs::write(&paths[0], &a).unwrap();
+        std::fs::write(&paths[1], &b).unwrap();
+        std::fs::write(&paths[2], &c).unwrap();
+        let want = vec![blake3::convenience::hash(&a), blake3::convenience::hash(&b), blake3::convenience::hash(&c)];
+
+        let supports_direct = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(&paths[0]).is_ok();
+        super::DIRECT_MULTI_SUCCEEDED.store(0, Ordering::Relaxed);
+        super::DIRECT_MULTI_LAST_THREADS.store(0, Ordering::Relaxed);
+        super::set_force_miss(true);
+        let got_cold = hashes_in_order(&paths);
+        super::set_force_miss(false);
+        assert_eq!(got_cold, want);
+        if supports_direct {
+            assert_eq!(super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed), 2, "only the two >= 32 MiB cold files should succeed on O_DIRECT");
+            assert_eq!(super::DIRECT_MULTI_LAST_THREADS.load(Ordering::Relaxed), 5, "3 workers on 16 threads get 16/3 = 5 direct threads");
+        }
+
+        // Warm files (just written, FORCE_MISS = false) must not enter O_DIRECT.
+        let before_warm = super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed);
+        let got_warm = hashes_in_order(&paths);
+        assert_eq!(got_warm, want);
+        assert_eq!(super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed), before_warm, "warm >= 32 MiB files must stay on mapped WarmLargePipe");
+    }
+
+    #[test]
+    fn cold_large_multi_file_skips_direct_with_few_threads() {
+        blake3::initialize();
+        crate::THREADS.set(std::num::NonZeroUsize::new(4).unwrap()).expect("fresh test process");
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
+        let at_32m: usize = 32 * 1024 * 1024;
+        let mut a = vec![0u8; at_32m];
+        let mut b = vec![0u8; at_32m + 17];
+        blake3::convenience::Hasher::new(blake3::Mode::Plain, None).update(b"f1").finalize_xof().fill(&mut a);
+        blake3::convenience::Hasher::new(blake3::Mode::Plain, None).update(b"f2").finalize_xof().fill(&mut b);
+        let paths = vec![dir.path().join("f-a"), dir.path().join("f-b")];
+        std::fs::write(&paths[0], &a).unwrap();
+        std::fs::write(&paths[1], &b).unwrap();
+        let want = vec![blake3::convenience::hash(&a), blake3::convenience::hash(&b)];
+
+        let args = crate::Args::for_test_plain_threads(paths.clone(), 4);
+        super::DIRECT_MULTI_SUCCEEDED.store(0, Ordering::Relaxed);
+        super::set_force_miss(true);
+        let mut got = vec![None; 2];
+        super::hash_paths_inner(&args, &paths, None, false, &mut |i, res| {
+            got[i] = Some(res.unwrap());
+            true
+        });
+        super::set_force_miss(false);
+        assert_eq!(got.into_iter().map(Option::unwrap).collect::<Vec<_>>(), want);
+        assert_eq!(super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed), 0, "4 threads across 2 workers (2/worker < 4) must skip O_DIRECT");
+    }
+
+    #[test]
+    fn cold_large_multi_file_honors_direct_permits_budget() {
+        use std::os::unix::fs::OpenOptionsExt;
+        blake3::initialize();
+        // With 8 total threads and 2 files, `max_file_threads(8) = 4`, `io_threads = 2`,
+        // so `want_direct = 4`: each worker leases 3 extra permits -> 2 + 2*3 = 8 total.
+        crate::THREADS.set(std::num::NonZeroUsize::new(8).unwrap()).expect("fresh test process");
+        let dir = crate::tempfile::tempdir_in(".").unwrap_or_else(|_| crate::tempfile::tempdir().unwrap());
+        let at_32m: usize = 32 * 1024 * 1024;
+        let mut a = vec![0u8; at_32m];
+        let mut b = vec![0u8; at_32m + 17];
+        blake3::convenience::Hasher::new(blake3::Mode::Plain, None).update(b"p1").finalize_xof().fill(&mut a);
+        blake3::convenience::Hasher::new(blake3::Mode::Plain, None).update(b"p2").finalize_xof().fill(&mut b);
+        let paths = vec![dir.path().join("p-a"), dir.path().join("p-b")];
+        std::fs::write(&paths[0], &a).unwrap();
+        std::fs::write(&paths[1], &b).unwrap();
+        let want = vec![blake3::convenience::hash(&a), blake3::convenience::hash(&b)];
+        let supports_direct = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECT).open(&paths[0]).is_ok();
+
+        let args = crate::Args::for_test_plain_threads(paths.clone(), 8);
+        super::DIRECT_MULTI_SUCCEEDED.store(0, Ordering::Relaxed);
+        super::DIRECT_MULTI_LAST_THREADS.store(0, Ordering::Relaxed);
+        super::set_force_miss(true);
+        let mut got = vec![None; 2];
+        super::hash_paths_inner(&args, &paths, None, false, &mut |i, res| {
+            got[i] = Some(res.unwrap());
+            true
+        });
+        super::set_force_miss(false);
+        assert_eq!(got.into_iter().map(Option::unwrap).collect::<Vec<_>>(), want);
+        if supports_direct {
+            assert_eq!(super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed), 2);
+            assert_eq!(super::DIRECT_MULTI_LAST_THREADS.load(Ordering::Relaxed), 4);
+        }
+
+        // Pre-lease 4 of the 6 spare permits under a strict guard: each worker can
+        // lease at most 2 extra (1 + 2 = 3 < 4), so both must skip O_DIRECT.
+        let _strict = crate::FileThreadsGuard::enter(2);
+        let held = crate::DirectPermits::acquire(4);
+        assert_eq!(held.extra, 4, "all permits released after previous run");
+        super::DIRECT_MULTI_SUCCEEDED.store(0, Ordering::Relaxed);
+        super::set_force_miss(true);
+        let mut got2 = vec![None; 2];
+        super::hash_paths_inner(&args, &paths, None, false, &mut |i, res| {
+            got2[i] = Some(res.unwrap());
+            true
+        });
+        super::set_force_miss(false);
+        drop(held);
+        assert_eq!(got2.into_iter().map(Option::unwrap).collect::<Vec<_>>(), want);
+        assert_eq!(super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed), 0, "exhausted DirectPermits must prevent O_DIRECT oversubscription");
     }
 }

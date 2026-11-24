@@ -172,12 +172,14 @@ What happens when a file changes during the run:
 
 ## Direct I/O for large cold files
 
-On Linux, `b3sum` reads cold files of 4 MiB or more with direct I/O (bypassing
-the page cache) when hashing a single file, or when hashing any file with
-`--outboard`. Bypassing the cache avoids extra memory copies and leaves the page
-cache undisturbed when hashing large sets of files once. On a Ryzen 9700X with
-NVMe storage, hashing a cold 1 GiB file drops from 0.22 s through the page cache
-to 0.10 s with direct I/O.
+On Linux, `b3sum` reads cold files with direct I/O (bypassing the page cache)
+when hashing a single file of 4 MiB or more, multiple files of 32 MiB or more
+when at least 4 direct-I/O threads per file worker are available (or 4 MiB or
+more when `io_uring` is unavailable), or any file of 4 MiB or more with
+`--outboard`. Bypassing the cache avoids extra memory copies and leaves the
+page cache undisturbed when hashing large sets of files once. On a Ryzen 9700X
+with NVMe storage, hashing a cold 1 GiB file drops from 0.22 s through the page
+cache to 0.10 s with direct I/O.
 
 ## Outboards for verified streaming
 

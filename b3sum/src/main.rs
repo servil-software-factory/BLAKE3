@@ -146,6 +146,13 @@ impl Args {
         Self { inner, file_args, mode: blake3::Mode::Plain, base_hasher: blake3::convenience::Hasher::new(blake3::Mode::Plain, None) }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test_plain_threads(file_args: Vec<PathBuf>, num_threads: usize) -> Self {
+        let mut args = Self::for_test_plain(file_args);
+        args.inner.num_threads = std::num::NonZeroUsize::new(num_threads);
+        args
+    }
+
     #[inline(always)]
     fn is_standard_32(&self) -> bool {
         self.inner.seek == 0 && self.inner.length <= blake3::OUT_LEN as u64
@@ -761,7 +768,7 @@ const POOL_START_LEN: usize = 4 << 20;
 /// a drive's answer grows little past this many reads at once (a Ryzen
 /// 9700X's: 5.7 GB/s at 2, 8.8 at 4, 10.3 at 8, 10.7 at 16).
 #[cfg(target_os = "linux")]
-const DIRECT_THREADS: usize = 16;
+pub(crate) const DIRECT_THREADS: usize = 16;
 
 /// Hard ceiling on effective `--num-threads` so absurd values (e.g. `usize::MAX`)
 /// are bounded cleanly as an upper limit instead of aborting in pool allocation.
