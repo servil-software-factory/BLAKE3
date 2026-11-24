@@ -1305,6 +1305,27 @@ mod tree_test {
         let items: std::vec::Vec<(&[Block], usize)> = (0..16).map(|i| (&blocks.blocks()[i * 32..(i + 1) * 32], 2 * CHUNK_LEN)).collect();
         let mut expected_each = std::vec![[0u8; OUT_LEN]; 16];
         tree.clone().on_this_core().hash_each(&items, &mut expected_each);
+        // Few-message parent-round boundary: 3 x 15 KiB = 21 pairs (>= 16),
+        // 2 x 15 KiB + 1 x 4 KiB = 16 pairs (exact threshold), and
+        // 3 x 11 KiB = 15 pairs (< 16, must not contend for SME2 turn).
+        let big_raw: std::vec::Vec<std::vec::Vec<u8>> = (0..3).map(|k| (0..15 * CHUNK_LEN).map(|i| ((i + k * 29) & 0xff) as u8).collect()).collect();
+        let big_slices: std::vec::Vec<&[u8]> = big_raw.iter().map(|v| v.as_slice()).collect();
+        let big_blocks = crate::test::messages(&big_slices);
+        let items_3x15k: std::vec::Vec<(&[Block], usize)> = big_blocks.iter().map(|b| (b.as_slice(), 15 * CHUNK_LEN)).collect();
+        let items_16_pairs: std::vec::Vec<(&[Block], usize)> =
+            std::vec![(big_blocks[0].as_slice(), 15 * CHUNK_LEN), (big_blocks[1].as_slice(), 15 * CHUNK_LEN), (&big_blocks[2][..64], 4 * CHUNK_LEN)];
+        let items_15_pairs: std::vec::Vec<(&[Block], usize)> = std::vec![
+            (&big_blocks[0][..176], 11 * CHUNK_LEN),
+            (&big_blocks[1][..176], 11 * CHUNK_LEN),
+            (&big_blocks[2][..176], 11 * CHUNK_LEN),
+            (&big_blocks[0][..32], 2 * CHUNK_LEN),
+        ];
+        let mut expected_3x15k = [[0u8; OUT_LEN]; 3];
+        let mut expected_16_pairs = [[0u8; OUT_LEN]; 3];
+        let mut expected_15_pairs = [[0u8; OUT_LEN]; 4];
+        tree.clone().on_this_core().hash_each(&items_3x15k, &mut expected_3x15k);
+        tree.clone().on_this_core().hash_each(&items_16_pairs, &mut expected_16_pairs);
+        tree.clone().on_this_core().hash_each(&items_15_pairs, &mut expected_15_pairs);
         let tmpl = [0x5au8; 52];
         let mut expected_counter = std::vec![[0u8; OUT_LEN]; 16];
         tree.clone().on_this_core().hash_counter_range(&tmpl, 12, 7, &mut expected_counter);
@@ -1334,6 +1355,15 @@ mod tree_test {
         assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "15 parent pairs must not try to take the SME2 turn");
         tree.hash_each(&items[..15], &mut got_each[..15]);
         assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "15 two-chunk messages must not try to take the SME2 turn");
+        let mut got_3 = [[0u8; OUT_LEN]; 3];
+        let mut got_4 = [[0u8; OUT_LEN]; 4];
+        tree.hash_each(&items_15_pairs, &mut got_4);
+        assert_eq!(
+            crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32,
+            0,
+            "3 x 11 KiB + 1 x 2 KiB (15 parent pairs) must not try to take the SME2 turn"
+        );
+        assert_eq!(got_4, expected_15_pairs);
         tree.hash_counter_range(&tmpl, 12, 7, &mut got_counter[..15]);
         assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "15 TreeHasher counters must not try to take the SME2 turn");
         assert_eq!(&got_counter[..15], &expected_counter[..15]);
@@ -1352,6 +1382,14 @@ mod tree_test {
         crate::RAN.with(|r| r.set(0));
         tree.hash_each(&items, &mut got_each);
         assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "16 two-chunk messages must consult the SME2 turn");
+        crate::RAN.with(|r| r.set(0));
+        tree.hash_each(&items_16_pairs, &mut got_3);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "16 first-round parent pairs must consult the SME2 turn");
+        assert_eq!(got_3, expected_16_pairs);
+        crate::RAN.with(|r| r.set(0));
+        tree.hash_each(&items_3x15k, &mut got_3);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "3 x 15 KiB (21 parent pairs) must consult the SME2 turn");
+        assert_eq!(got_3, expected_3x15k);
         crate::RAN.with(|r| r.set(0));
         tree.hash_counter_range(&tmpl, 12, 7, &mut got_counter);
         assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "16 TreeHasher counters must consult the SME2 turn");
@@ -1388,5 +1426,21 @@ mod tree_test {
         assert!(ran.contains(&messages_fn), "16 two-chunk messages should enter SME2 when turn is free");
         assert_eq!(got_parents, expected_parents);
         assert_eq!(got_each, expected_each);
+
+        // And with the turn free, 3 x 15 KiB (21 first-round parent pairs) enters SME2 parents.
+        let mut ran_3x15k = None;
+        for _ in 0..10_000 {
+            crate::RAN.with(|r| r.set(0));
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            tree.hash_each(&items_3x15k, &mut got_3);
+            if crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32 == 0 {
+                ran_3x15k = Some(crate::RAN_ENTRIES.with(|r| r.borrow().clone()));
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let ran_3x15k = ran_3x15k.expect("failed to observe uncontended SME2 turn for 3 x 15 KiB");
+        assert!(ran_3x15k.contains(&parents_fn), "3 x 15 KiB (21 parent pairs) should enter SME2 parents when turn is free");
+        assert_eq!(got_3, expected_3x15k);
     }
 }
