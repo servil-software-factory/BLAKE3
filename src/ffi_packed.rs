@@ -8,9 +8,11 @@
 
 use crate::{CHUNK_END, CHUNK_START, CVWords, OUT_LEN, ROOT, platform::Platform};
 
-/// Hash every full SIMD group of `len`-byte packed messages (`len` in
+/// Hash full SIMD groups of `len`-byte packed messages (`len` in
 /// `{16, 32, 48}`) on `platform`, writing one 32-byte digest per message to
-/// `outputs` and returning the number of messages hashed.
+/// `outputs` and returning the number of messages hashed. On Linux `std`
+/// AVX-512, a `10..=15`-message remainder after full 16-lane groups is left
+/// for `one_block_groups` so it finishes in one padded `output16` call.
 ///
 /// Requires `input.len() == len * outputs.len()`.
 pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) -> usize {
@@ -97,7 +99,12 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
     if matches!(platform, Platform::AVX2 { .. }) || {
         #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
         {
-            matches!(platform, Platform::AVX512 { .. })
+            // On Linux std AVX-512, a 10..=15 remainder is faster as a single
+            // padded 16-lane `output16` call than `avx2_packed` (8) + a second
+            // kernel call for the remaining 2..=7 messages; keep AVX2 for `8..=9`.
+            let rem = outputs.len() - done;
+            let prefer_output16 = cfg!(all(feature = "std", target_os = "linux")) && (10..16).contains(&rem);
+            matches!(platform, Platform::AVX512 { .. }) && !prefer_output16
         }
         #[cfg(not(all(blake3_avx512_ffi, target_arch = "x86_64")))]
         {
@@ -151,8 +158,9 @@ fn fill_self_test_input(buf: &mut [u8], len: usize) {
 }
 
 /// Folds of `43` keyed packed digests (`16`, `32`, `48` B) from official BLAKE3 1.8.7.
-/// `43 = 2*16 + 11 = 2*16 + 8 + 3 = 5*8 + 3 = 3*11 + 10`, exercising multi-group
-/// pipelining and remainder dispatch on every direct-load packed backend in one call.
+/// `43 = 2*16 + 11 = 5*8 + 3 = 3*11 + 10`, exercising multi-group pipelining and
+/// remainder dispatch across SME2, AVX-512, AVX2, and NEON `8+3` (on Linux `std`
+/// AVX-512, `self_test` additionally checks an 8-message batch on `avx2_packed`).
 const SELF_TEST_EXPECTED: [u64; 3] = [0x13f1c329fc53200f, 0x1e4294615a858573, 0x93901e850f4221b8];
 
 pub(crate) fn self_test(platform: Platform) -> usize {
@@ -172,6 +180,17 @@ pub(crate) fn self_test(platform: Platform) -> usize {
                 SELF_TEST_EXPECTED[idx],
                 got,
             ));
+        }
+        // On AVX-512 Linux std, 43 = 2*16 + 11 dispatches the 11-message tail
+        // through padded `output16` instead of `avx2_packed`; also exercise an
+        // 8-message packed batch so `avx2_packed{16,32,48}` is verified at startup.
+        #[cfg(all(feature = "std", blake3_avx512_ffi, blake3_avx2_ffi, target_arch = "x86_64", target_os = "linux"))]
+        if matches!(platform, Platform::AVX512) {
+            let mut out8 = [[0u8; OUT_LEN]; 8];
+            crate::many::hash_many_on(&slice[..8 * len], len, len, &key, crate::KEYED_HASH, &mut out8, platform);
+            if out8 != out[..8] {
+                crate::self_test::fail(format_args!("blake3-servil startup self-test failed: avx2_packed<{len}> mismatch against avx512_packed<{len}>"));
+            }
         }
     }
     3

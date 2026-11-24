@@ -46,6 +46,12 @@ pub(crate) fn packed<'a>(block: &'a [u8; BLOCK_LEN], key: &'a [u32; 8], len: u8,
     Input { block, cv: key, len, flags: flags | CHUNK_START | CHUNK_END | ROOT }
 }
 
+/// Final block descriptor for a multi-block message inside chunk 0 whose
+/// preceding full blocks already compressed into `cv`.
+pub(crate) fn final_block<'a>(block: &'a [u8; BLOCK_LEN], cv: &'a [u32; 8], len: u8, flags: u8) -> Input<'a> {
+    Input { block, cv, len, flags: flags | CHUNK_END | ROOT }
+}
+
 pub(crate) fn lanes(platform: Platform) -> usize {
     match platform {
         Platform::AVX512 => 16,
@@ -346,19 +352,31 @@ mod tests {
         }
     }
 
-    /// Short one-block batches (1 to 63 bytes) in whole groups take the
-    /// independent-compression kernel (#294): a group of the platform's width
-    /// reaches its entry, and fewer than a group reach none of it. (Packed
-    /// 16/32/48-byte batches take the direct-load kernels in `ffi_packed`.)
+    /// Short one-block batches (1 to 63 bytes) and multi-block short-last
+    /// batches (65 to 1023 bytes) on Linux x86-64 take `output16` / `output8`
+    /// for whole groups and padded tails (`4..=8` on `output8`, `9..=16` on
+    /// `output16`), while `1..=3` remainders stay serial. Packed `16/32/48`-byte
+    /// remainders of `10..=15` on AVX-512 bypass `avx2_packed` to finish in one
+    /// padded `output16` call.
     #[test]
     fn packed_groups_take_the_independent_kernel() {
+        use crate::block::Prepared;
         use crate::throughput::hash_many;
         let platform = Platform::detect();
-        if lanes(platform) == 0 {
+        let width = lanes(platform);
+        if width == 0 {
             return;
         }
-        let entry = if lanes(platform) == 16 { entry() } else { entry8() } as usize;
-        for (count, reached) in [(lanes(platform), true), (2 * lanes(platform), true), (lanes(platform) - 1, false)] {
+        let e16 = entry() as usize;
+        let e8 = entry8() as usize;
+        // Counts 1..=3 stay serial; 4..=8 take output8; on AVX-512, 9..=16 take
+        // output16, and 17..=24 take output16 plus optional output8.
+        let cases: &[(usize, Option<usize>, usize)] = if width == 16 {
+            &[(3, None, 0), (4, Some(e8), 1), (8, Some(e8), 1), (9, Some(e16), 1), (15, Some(e16), 1), (16, Some(e16), 1), (32, Some(e16), 1)]
+        } else {
+            &[(3, None, 0), (4, Some(e8), 1), (7, Some(e8), 1), (8, Some(e8), 1), (16, Some(e8), 1)]
+        };
+        for &(count, expected_entry, expected_kernels) in cases {
             let mut out = std::vec![[0u8; OUT_LEN]; count];
             for len in [1, 33, 63] {
                 let mut batch = crate::throughput::Batch::new(len, count);
@@ -368,14 +386,130 @@ mod tests {
                 crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
                 hash_many(crate::Mode::Plain, &batch, &mut out);
                 let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
-                assert_eq!(ran.contains(&entry), reached, "{count} batch messages of {len} bytes");
-                if reached {
-                    assert_eq!(ran.len(), 1, "{count} batch messages of {len} bytes on the group kernel alone: {ran:?}");
+                match expected_entry {
+                    Some(k) => {
+                        assert!(ran.contains(&k), "{count} batch messages of {len} bytes should reach {k:#x}: {ran:?}");
+                        assert_eq!(ran.len(), expected_kernels, "{count} batch messages of {len} bytes on the group kernel alone: {ran:?}");
+                    }
+                    None => {
+                        assert!(!ran.contains(&e16) && !ran.contains(&e8), "{count} batch messages of {len} bytes should stay serial: {ran:?}");
+                    }
                 }
                 for i in 0..count {
                     assert_eq!(out[i], *crate::convenience::hash(&std::vec![i as u8; len]).as_bytes(), "{len} bytes, message {i}");
                 }
             }
+        }
+        // Verify Packed<16/32/48> remainder dispatch on AVX-512 vs AVX2:
+        // on AVX-512 Linux std, 8..=9 remainders take `avx2_packed`, while
+        // 10..=15 remainders bypass `avx2_packed` and finish in one `output16`.
+        let avx2_packed = crate::ffi_packed::entries_avx2();
+        let avx512_packed = crate::ffi_packed::entries_avx512();
+        for (idx, len) in [16usize, 32, 48].into_iter().enumerate() {
+            let p2 = avx2_packed[idx].1 as usize;
+            let p512 = avx512_packed[idx].1 as usize;
+            for count in [8usize, 9, 10, 11, 15, 24, 25, 26, 27, 31] {
+                let mut bytes = std::vec![0u8; count * len];
+                for i in 0..count {
+                    for j in 0..len {
+                        bytes[i * len + j] = ((i * 29 + j * 13 + len) & 0xff) as u8;
+                    }
+                }
+                let mut out = std::vec![[0u8; OUT_LEN]; count];
+                crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                crate::many::hash_many_on(&bytes, len, len, crate::IV, 0, &mut out, platform);
+                let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                if width == 16 {
+                    let rem = count % 16;
+                    assert_eq!(ran.contains(&p512), count >= 16, "Packed<{len}> count={count} avx512_packed");
+                    assert_eq!(ran.contains(&p2), (8..=9).contains(&rem), "Packed<{len}> count={count} avx2_packed");
+                    assert_eq!(ran.contains(&e16), (10..=15).contains(&rem), "Packed<{len}> count={count} output16");
+                } else {
+                    assert!(ran.contains(&p2), "AVX2 Packed<{len}> count={count} avx2_packed");
+                    let rem = count % 8;
+                    assert_eq!(ran.contains(&e8), rem >= 4, "AVX2 Packed<{len}> count={count} output8");
+                }
+                for i in 0..count {
+                    assert_eq!(out[i], *blake3::hash(&bytes[i * len..][..len]).as_bytes(), "Packed<{len}> count={count} msg {i}");
+                }
+            }
+        }
+        // Multi-block messages with a short last block (65..1023 B) tile by
+        // platform width across every supported platform, exercising tile-2
+        // `< 4` serial remainders (`17..19`, `129..132`) with distinct bytes
+        // per slot and mixed-width `output16` + `output8` (`24` on AVX-512).
+        let key = [0x42u8; crate::KEY_LEN];
+        for plat in crate::test::every_platform() {
+            let pw = lanes(plat);
+            for len in [65, 100, 200, 500, 1000] {
+                for count in [3, 4, 7, 8, 9, 15, 16, 17, 18, 19, 24, 33, 129, 130, 131, 132] {
+                    let mut batch = crate::throughput::Batch::new(len, count);
+                    for i in 0..count {
+                        let msg = batch.message_mut(i);
+                        for (j, b) in msg.iter_mut().enumerate() {
+                            *b = ((i * 31 + j * 17 + len) & 0xff) as u8;
+                        }
+                    }
+                    let mut out = std::vec![[0u8; OUT_LEN]; count];
+                    let slot = batch.slot();
+                    for mode in [crate::Mode::Plain, crate::Mode::Keyed(&key), crate::Mode::DeriveKey("x86-short-last")] {
+                        let (kw, fl) = match mode {
+                            crate::Mode::Plain => (*crate::IV, 0u8),
+                            crate::Mode::Keyed(k) => (crate::platform::words_from_le_bytes_32(k), crate::KEYED_HASH),
+                            crate::Mode::DeriveKey(ctx) => (
+                                crate::platform::words_from_le_bytes_32(crate::hash_serial(ctx.as_bytes(), crate::IV, crate::DERIVE_KEY_CONTEXT).as_bytes()),
+                                crate::DERIVE_KEY_MATERIAL,
+                            ),
+                            crate::Mode::DeriveKeyWith(_) => unreachable!(),
+                        };
+                        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                        crate::many::hash_many_on(batch.bytes(), len, slot, &kw, fl, &mut out, plat);
+                        let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                        if pw == 0 || count < 4 {
+                            assert!(!ran.contains(&e16) && !ran.contains(&e8), "{plat:?} {count} x {len} B should stay serial");
+                        } else if pw == 16 {
+                            let need16 = count >= 9;
+                            let need8 = (count < 9) || (4..=8).contains(&(count % 16));
+                            assert_eq!(ran.contains(&e16), need16, "{plat:?} {count} x {len} B output16");
+                            assert_eq!(ran.contains(&e8), need8, "{plat:?} {count} x {len} B output8");
+                        } else {
+                            assert!(ran.contains(&e8), "{plat:?} {count} x {len} B should reach output8");
+                            assert!(!ran.contains(&e16), "{plat:?} {count} x {len} B should not reach output16");
+                        }
+                        for i in 0..count {
+                            let msg = &batch.bytes()[i * slot..][..len];
+                            let expected = match mode {
+                                crate::Mode::Plain => *blake3::hash(msg).as_bytes(),
+                                crate::Mode::Keyed(k) => *blake3::keyed_hash(k, msg).as_bytes(),
+                                crate::Mode::DeriveKey(ctx) => blake3::derive_key(ctx, msg),
+                                crate::Mode::DeriveKeyWith(_) => unreachable!(),
+                            };
+                            assert_eq!(out[i], expected, "{plat:?} {count} x {len} B, msg {i}");
+                        }
+                    }
+                }
+            }
+        }
+        // Pin prefix_padded_count boundaries for AVX2 (8) and AVX-512 (16).
+        for (count, w, want) in [
+            (4, 8, 4),
+            (5, 8, 8),
+            (7, 8, 8),
+            (8, 8, 8),
+            (12, 8, 12),
+            (13, 8, 16),
+            (4, 16, 4),
+            (5, 16, 8),
+            (8, 16, 8),
+            (9, 16, 16),
+            (15, 16, 16),
+            (16, 16, 16),
+            (20, 16, 20),
+            (21, 16, 24),
+            (24, 16, 24),
+            (25, 16, 32),
+        ] {
+            assert_eq!(crate::many::prefix_padded_count(count, w), want, "prefix_padded_count({count}, {w})");
         }
     }
 
