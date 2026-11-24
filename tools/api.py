@@ -153,7 +153,9 @@ def trait_ty(t):
 
 def bound(b):
     if "trait_bound" in b:
-        return trait_ty(b["trait_bound"]["trait"])
+        tb = b["trait_bound"]
+        prefix = "?" if tb.get("modifier") == "maybe" else ""
+        return prefix + trait_ty(tb["trait"])
     return b.get("outlives", "?")
 
 

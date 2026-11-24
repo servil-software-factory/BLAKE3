@@ -562,7 +562,7 @@ pub mod throughput {
     // Inlined, so a constant mode folds to its constants (as
     // convenience::hash is: no mode stored for the call to read).
     #[inline(always)]
-    pub fn hash_many_multithreaded<P: Prepared>(mode: Mode, batch: &P, out: &mut [[u8; OUT_LEN]]) {
+    pub fn hash_many_multithreaded<P: Prepared + ?Sized>(mode: Mode, batch: &P, out: &mut [[u8; OUT_LEN]]) {
         crate::lanes::require();
         // The short path first and inline, so a small batch costs what
         // hash_many costs (which checks its length against the digests);

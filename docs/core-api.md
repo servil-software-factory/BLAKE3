@@ -139,7 +139,7 @@ The throughput API, for power users.
   Feed each piece to its hasher.
 - `fn hash(mode: Mode<'_>, input: &[Block], len: usize) -> Hash`  
   The hash in `mode` of the message of `len` bytes that starts `input`.
-- `fn hash_many<P: Prepared>(mode: Mode<'_>, batch: &P, out: &mut [[u8; 32]])`  
+- `fn hash_many<P: Prepared + ?Sized>(mode: Mode<'_>, batch: &P, out: &mut [[u8; 32]])`  
   The hashes of a `Batch`'s messages, in `mode`, on the calling thread.
 - `fn context_key(context: &str) -> ContextKey`  
   Hash a key-derivation context string and return a `ContextKey`.
@@ -245,7 +245,7 @@ A `Mode` prepared for a program that builds or verifies a BLAKE3 tree itself (ve
 fn new(mode: Mode<'_>) -> Self
 fn on_this_core(self) -> Self
 fn hash(&self, input: &[u8]) -> Hash
-fn hash_many<P: Prepared>(&self, batch: &P, out: &mut [[u8; 32]])
+fn hash_many<P: Prepared + ?Sized>(&self, batch: &P, out: &mut [[u8; 32]])
 fn hash_each(&self, items: &[(&[Block], usize)], out: &mut [[u8; 32]])
 fn subtree_cv(&self, level: u32, index: u64, input: &[u8]) -> Cv
 fn subtree_halves(&self, level: u32, index: u64, input: &[u8]) -> [Cv; 2]

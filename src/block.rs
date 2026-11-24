@@ -225,7 +225,7 @@ struct Line([u8; 128]);
 ///   allocation's trailing padding.
 /// - `DerefMut` lets the caller replace message bytes without changing the
 ///   count or accessing trailing padding.
-/// - `Prepared` lends the contiguous 16- or 32-byte messages directly to
+/// - `Prepared` lends the contiguous 16-, 32-, or 48-byte messages directly to
 ///   batch calls.
 #[cfg(feature = "std")]
 pub struct Packed<const N: usize> {
@@ -235,12 +235,13 @@ pub struct Packed<const N: usize> {
 
 #[cfg(feature = "std")]
 impl<const N: usize> Packed<N> {
-    const FITS: () = assert!(N == 16 || N == 32, "Packed holds messages of 16 or 32 bytes");
+    const FITS: () = assert!(N == 16 || N == 32 || N == 48, "Packed holds messages of 16, 32, or 48 bytes");
 
     /// `count` messages of zeros, resident from the making.
     pub fn new(count: usize) -> Self {
         let () = Self::FITS;
-        let lines = count.div_ceil(128 / N);
+        let bytes = count.checked_mul(N).expect("Packed byte length overflow");
+        let lines = bytes.div_ceil(128);
         Packed { lines: std::vec![Line([0; 128]); lines], count }
     }
 
@@ -288,8 +289,9 @@ impl<const N: usize> core::ops::DerefMut for Packed<N> {
 
 /// The batch calls' input: messages of one length, prepared so that a
 /// call reads them as they are. [`Batch`] holds them in blocks, any
-/// length; `Packed` (with `std`) holds 16- or 32-byte messages end to end. Sealed:
-/// the crate's types alone.
+/// length; `Packed` (with `std`) and borrowed `&[[u8; 16]]`, `&[[u8; 32]]`,
+/// `&[[u8; 48]]` slices hold 16-, 32-, or 48-byte messages end to end.
+/// Sealed: the crate's types and fixed-width byte-array slices alone.
 pub trait Prepared: sealed::Sealed {
     /// The messages' bytes, one every `slot` bytes.
     #[doc(hidden)]
@@ -415,6 +417,30 @@ impl<const N: usize> Prepared for Packed<N> {
         N
     }
 }
+
+macro_rules! impl_prepared_slice {
+    ($($n:literal),+) => {
+        $(
+            impl sealed::Sealed for [[u8; $n]] {}
+            impl Prepared for [[u8; $n]] {
+                #[inline]
+                fn bytes(&self) -> &[u8] {
+                    self.as_flattened()
+                }
+                #[inline]
+                fn message_len(&self) -> usize {
+                    $n
+                }
+                #[inline]
+                fn slot(&self) -> usize {
+                    $n
+                }
+            }
+        )+
+    };
+}
+
+impl_prepared_slice!(16, 32, 48);
 
 #[cfg(feature = "std")]
 impl Batch<'_> {
@@ -701,12 +727,13 @@ mod packed_test {
         }
         check::<16>();
         check::<32>();
+        check::<48>();
     }
 
     fn packed<const N: usize>(count: usize, seed: u8) -> Packed<N> {
         let mut leaves = Packed::<N>::new(count);
         assert_eq!(leaves.count, count);
-        assert_eq!(leaves.lines.len(), count.div_ceil(128 / N));
+        assert_eq!(leaves.lines.len(), (count * N).div_ceil(128));
         for (i, leaf) in leaves.iter_mut().enumerate() {
             for (j, b) in leaf.iter_mut().enumerate() {
                 *b = (i as u8).wrapping_mul(31).wrapping_add(j as u8).wrapping_add(seed);
@@ -736,6 +763,45 @@ mod packed_test {
                 for (i, leaf) in short.iter().enumerate() {
                     let want = *crate::convenience::hash_with(mode, leaf).as_bytes();
                     assert_eq!(out[i], want, "16 B, {count} messages, message {i}, {name}");
+                }
+                let mid = packed::<48>(count, 9);
+                let mut out = vec![[0u8; 32]; count];
+                hash_many(mode, &mid, &mut out);
+                for (i, leaf) in mid.iter().enumerate() {
+                    let want = *crate::convenience::hash_with(mode, leaf).as_bytes();
+                    assert_eq!(out[i], want, "48 B, {count} messages, message {i}, {name}");
+                }
+            }
+        }
+    }
+
+    /// Borrowed `&[[u8; 16]]`, `&[[u8; 32]]`, and `&[[u8; 48]]` slices
+    /// implement `Prepared` directly (zero copy, works without `Packed`).
+    #[test]
+    fn borrowed_array_slices_hash_as_packed() {
+        crate::initialize();
+        let key = [0x42u8; 32];
+        for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("slice packed")] {
+            for count in [0, 1, 2, 7, 16, 17, 129, 260] {
+                let s16: Vec<[u8; 16]> = (0..count).map(|i| [(i as u8).wrapping_mul(3); 16]).collect();
+                let mut out16 = vec![[0u8; 32]; count];
+                hash_many(mode, s16.as_slice(), &mut out16);
+                for (i, m) in s16.iter().enumerate() {
+                    assert_eq!(out16[i], *crate::convenience::hash_with(mode, m).as_bytes());
+                }
+
+                let s32: Vec<[u8; 32]> = (0..count).map(|i| [(i as u8).wrapping_mul(5); 32]).collect();
+                let mut out32 = vec![[0u8; 32]; count];
+                hash_many(mode, s32.as_slice(), &mut out32);
+                for (i, m) in s32.iter().enumerate() {
+                    assert_eq!(out32[i], *crate::convenience::hash_with(mode, m).as_bytes());
+                }
+
+                let s48: Vec<[u8; 48]> = (0..count).map(|i| [(i as u8).wrapping_mul(7); 48]).collect();
+                let mut out48 = vec![[0u8; 32]; count];
+                hash_many(mode, s48.as_slice(), &mut out48);
+                for (i, m) in s48.iter().enumerate() {
+                    assert_eq!(out48[i], *crate::convenience::hash_with(mode, m).as_bytes());
                 }
             }
         }

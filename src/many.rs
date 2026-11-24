@@ -59,11 +59,12 @@ pub fn assert_slots(input: &[u8], len: usize, slot: usize, count: usize) {
 }
 
 /// Whether messages of `len` bytes at a stride of `slot` are packed: the
-/// stride is the message, one of the two supported packed widths (16 or 32
-/// bytes), so the block's remaining bytes are not in memory (`Packed`).
+/// stride is the message, one of the three supported packed widths (16, 32,
+/// or 48 bytes), so the block's remaining bytes are not in memory (`Packed`
+/// or `&[[u8; N]]`).
 #[inline]
 pub(crate) fn packed(len: usize, slot: usize) -> bool {
-    matches!(len, 16 | 32) && slot == len
+    matches!(len, 16 | 32 | 48) && slot == len
 }
 
 /// `outputs[i] = hash(input[i * slot..][..len])` for every message, with
@@ -150,9 +151,9 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
 /// cells show what this copy costs (Zooko, November 7, 2026).
 #[inline(never)]
 fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
-    // Packed's two lengths, in every build: a block-length message sent
+    // Packed's three lengths, in every build: a block-length message sent
     // here would hash right and slow (a mutant of `packed` did).
-    assert!(matches!(len, 16 | 32), "packed messages are 16 or 32 bytes, not {len}");
+    assert!(matches!(len, 16 | 32 | 48), "packed messages are 16, 32, or 48 bytes, not {len}");
     let plans = neon_plans();
     let mut blocks = [crate::block::Block::ZERO; TABLE];
     for (messages, digests) in input.chunks(len * TABLE).zip(outputs.chunks_mut(TABLE)) {

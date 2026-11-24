@@ -114,7 +114,7 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 // Inlined, so a constant mode folds to its constants (as
 // convenience::hash is: no mode stored for the call to read).
 #[inline(always)]
-pub fn hash_many<P: Prepared>(mode: Mode, batch: &P, out: &mut [[u8; OUT_LEN]]) {
+pub fn hash_many<P: Prepared + ?Sized>(mode: Mode, batch: &P, out: &mut [[u8; OUT_LEN]]) {
     let mut room = core::mem::MaybeUninit::uninit();
     let (key, flags) = mode.key(&mut room);
     crate::hash_many_serial(batch.bytes(), batch.message_len(), batch.slot(), key, flags, out);
@@ -625,7 +625,7 @@ impl TreeHasher {
     /// this `TreeHasher`'s mode: `out[i]` becomes the hash of message `i`.
     ///
     /// Requires one output a message.
-    pub fn hash_many<P: Prepared>(&self, batch: &P, out: &mut [[u8; OUT_LEN]]) {
+    pub fn hash_many<P: Prepared + ?Sized>(&self, batch: &P, out: &mut [[u8; OUT_LEN]]) {
         let turn = self.turn_if(crate::many::sme2_sized(batch.message_len(), out.len()));
         self.hash_many_on(turn.platform(), batch, out);
     }
@@ -634,7 +634,7 @@ impl TreeHasher {
     /// kernels (the worker already holds its turn; BLAKE3 #458).
     #[doc(hidden)]
     #[inline]
-    pub fn hash_many_on<P: Prepared>(&self, platform: crate::platform::Platform, batch: &P, out: &mut [[u8; OUT_LEN]]) {
+    pub fn hash_many_on<P: Prepared + ?Sized>(&self, platform: crate::platform::Platform, batch: &P, out: &mut [[u8; OUT_LEN]]) {
         crate::many::hash_many_on(batch.bytes(), batch.message_len(), batch.slot(), self.domain.key(), self.domain.flags(), out, platform);
     }
 
