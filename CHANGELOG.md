@@ -13,6 +13,7 @@ Changes landed on `next` since `0.10.0` (unreleased).
   was experimental and is no longer shipped in `b3sums`. Existing
   manifests written with `--sigilcode` will need to be re-generated in
   standard hex.
+- **Parameterized `Pipeline` / `Event` batch type (`#509`):** `Pipeline<T, B = (), P = Batch<'static>>` and `Event<T, B = (), P = Batch<'static>>` add a third default type parameter `P` so `Pipeline::batch` accepts `Packed<16/32/48>`, `Vec<[u8; N]>`, and `Box<[[u8; N]]>` via `Pipeline::with_batches` / `Pipeline::with_owners_and_batches`. Existing `Pipeline::new` and `Pipeline::with_owners` callers keep `P = Batch<'static>` without change, but standalone `Event::Hashed` / `Event::Aborted` literals constructed outside a `Pipeline` context (e.g. `Event::Aborted { tag: 0, owner: None }`) now need a type annotation such as `Event<u32, ()>` so `P` is constrained.
 - **Arm `PSTATE.DIT` for `Hash`/`Cv`/`LastCv` equality** (`6366776f`,
   `#479`): owned branchless integer assembly (`src/ct.rs`) replaces
   `constant_time_eq` and leaves Arm `PSTATE.DIT` as the calling thread

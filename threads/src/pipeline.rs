@@ -794,8 +794,9 @@ impl Shared {
             // `count`).
             let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(first * slot_len), count * slot_len) };
             let digests = unsafe { core::slice::from_raw_parts_mut(desc.digests.add(first), count) };
-            // Sound: `desc.batch` came from a validated `Batch<'static>` held
-            // alive in `Pipeline::batches[slot]` until `slot_done`.
+            // Sound: `desc.batch` came from a validated `Prepared` batch
+            // (including zero-length messages padded to `BLOCK_LEN`) held alive
+            // in `Pipeline::batches[slot]` until `slot_done`.
             let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot_len) };
             self.slot_tree(slot).hash_many_on(platform, &part, digests);
             let storage = self.storage;
@@ -1303,9 +1304,11 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
                     loan_epoch: 0,
                 }
             };
-            let sme2 = per_part.saturating_mul(work_slot) >= SME2_MIN_LEN;
             let s32 = u32::try_from(s).expect("slot fits u32");
             for p in 0..pieces {
+                let first = p.saturating_mul(per_part);
+                let piece_n = (count - first).min(per_part);
+                let sme2 = piece_n.saturating_mul(work_slot) >= SME2_MIN_LEN;
                 self.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32"), sme2);
             }
             self.dispatch_many(pieces);
@@ -2039,8 +2042,8 @@ impl<T, B, P> Pipeline<T, B, P> {
         self.local_rooms[idx] = room;
         let after = idx + 1;
         let work_len = match batch {
-            Some((_, slot)) if slot < crate::BLOCK_LEN => (len / slot).saturating_mul(crate::BLOCK_LEN),
-            _ => len,
+            Some((_, slot)) => (len / slot).saturating_mul(slot.max(crate::BLOCK_LEN)),
+            None => len,
         };
         let bytes = self.local_bytes.saturating_add(work_len);
         self.local_count = after;
@@ -4668,19 +4671,36 @@ mod test {
     fn packed_batches_in_pipeline_match_reference() {
         use crate::throughput::Packed;
         let key = [0x66u8; 32];
+        let fill_msg = |dst: &mut [u8], tag: usize, idx: usize| {
+            // Encode full u32 index + position-dependent bytes so no period-256
+            // aliasing hides offset bugs across multi-piece batch tasks.
+            let idx_bytes = (idx as u32).to_le_bytes();
+            let tag_byte = (tag as u8).wrapping_mul(31).wrapping_add(7);
+            for (j, b) in dst.iter_mut().enumerate() {
+                *b = if j < 4 {
+                    idx_bytes[j] ^ tag_byte
+                } else {
+                    ((idx.wrapping_mul(17).wrapping_add(j.wrapping_mul(13)).wrapping_add(tag.wrapping_mul(5))) & 0xff) as u8
+                };
+            }
+        };
 
-        // 1. Packed<32> (inferred without turbofish!): empty, small (MemberGroup), and BLINCS multi-piece (6,144 msgs -> 6 pieces).
+        // 1. Packed<32> (inferred without turbofish!): empty, small (MemberGroup),
+        //    multi-piece BLINCS batch (6,144 msgs -> 6 pieces), and 1,025-msg tail
+        //    checking per-piece sme2 flag (piece 0: 1,024 msgs >= SME2_MIN_LEN,
+        //    piece 1: 1 msg < SME2_MIN_LEN).
         let mut p32_pipe = Pipeline::with_batches(Mode::Plain, Limits { messages: 4, rooms: 0 });
-        for &(tag, count, mode) in &[(0usize, 0usize, Mode::Plain), (1, 37, Mode::Plain), (2, 6144, Mode::Keyed(&key))] {
+        for &(tag, count, mode) in &[(0usize, 0usize, Mode::Plain), (1, 37, Mode::Plain), (2, 6144, Mode::Keyed(&key)), (3, 1025, Mode::Plain)] {
             let mut batch = Packed::<32>::new(count);
             for i in 0..count {
-                batch[i] = [((i * 13 + tag * 7) & 0xff) as u8; 32];
+                fill_msg(&mut batch[i], tag, i);
             }
             let digests = vec![[0u8; 32]; count].into_boxed_slice();
             let m = block_on(p32_pipe.message_with(mode, tag, None));
             let slot_idx = m.slot as usize;
             p32_pipe.batch(m, batch, digests);
-            let got_pieces = if count == 6144 { unsafe { (*p32_pipe.shared().multi[slot_idx].get()).pieces } } else { 0 };
+            let got_pieces = if count >= 1024 { unsafe { (*p32_pipe.shared().multi[slot_idx].get()).pieces } } else { 0 };
+            let tail_sme2 = if count == 1025 { Some((p32_pipe.action_buf[0] & ACTION_SME2 != 0, p32_pipe.action_buf[1] & ACTION_SME2 != 0)) } else { None };
             let ev = loop {
                 if let Some(ev) = p32_pipe.next_event() {
                     break ev;
@@ -4690,6 +4710,11 @@ mod test {
             if count == 6144 {
                 // Verify 6,144 x 32 B split into 6 compression-work pieces (1,024 msgs each).
                 assert_eq!(got_pieces, 6);
+            }
+            if let Some((p0_sme2, p1_sme2)) = tail_sme2 {
+                assert_eq!(got_pieces, 2);
+                assert_eq!(p0_sme2, 1024 * crate::BLOCK_LEN >= SME2_MIN_LEN);
+                assert!(!p1_sme2, "1-message tail piece must not claim Sme2Turn");
             }
             let Event::Batch { tag: got_tag, batch, digests } = ev else {
                 panic!("expected Event::Batch");
@@ -4701,12 +4726,39 @@ mod test {
             }
         }
 
-        // 2. Packed<16> and Packed<48> (small + multi-piece) and owned Vec<[u8; 32]>.
+        // 2. Compression-work flushing in push_member: 1,023 x 32 B (32,736 raw B,
+        //    65,472 work B < 65,536) stays in open_group, then +1 x 32 B pushes
+        //    work bytes to 65,536 == TASK_LEN and flushes open_group immediately
+        //    (raw bytes would only be 32,768 < TASK_LEN).
+        {
+            let mut flush_pipe = Pipeline::with_batches(Mode::Plain, Limits { messages: 4, rooms: 0 });
+            let mut b1 = Packed::<32>::new(1023);
+            for i in 0..1023 {
+                fill_msg(&mut b1[i], 10, i);
+            }
+            let m1 = block_on(flush_pipe.message(10usize, None));
+            flush_pipe.batch(m1, b1, vec![[0u8; 32]; 1023].into_boxed_slice());
+            assert!(flush_pipe.open_group.is_some(), "1023 x 32 B (< TASK_LEN work) stays buffered");
+            let mut b2 = Packed::<32>::new(1);
+            fill_msg(&mut b2[0], 11, 0);
+            let m2 = block_on(flush_pipe.message(11usize, None));
+            flush_pipe.batch(m2, b2, vec![[0u8; 32]; 1].into_boxed_slice());
+            assert!(flush_pipe.open_group.is_none(), "1023 + 1 x 32 B reaches TASK_LEN compression work and flushes");
+            let events = drain_all(&mut flush_pipe, 2);
+            for ev in events {
+                let Event::Batch { batch, digests, .. } = ev else { panic!("expected Event::Batch") };
+                for i in 0..batch.len() {
+                    assert_eq!(digests[i], *blake3_servil_core::convenience::hash(&batch[i]).as_bytes());
+                }
+            }
+        }
+
+        // 3. Packed<16> and Packed<48> (small + multi-piece) and owned Vec<[u8; 32]>.
         let mut p16_pipe = Pipeline::<usize, (), Packed<16>>::with_batches(Mode::Plain, Limits { messages: 2, rooms: 0 });
         for &count in &[17usize, 2051] {
             let mut batch = Packed::<16>::new(count);
             for i in 0..count {
-                batch[i] = [((i * 19 + 3) & 0xff) as u8; 16];
+                fill_msg(&mut batch[i], 4, i);
             }
             let m = block_on(p16_pipe.message(count, None));
             p16_pipe.batch(m, batch, vec![[0u8; 32]; count].into_boxed_slice());
@@ -4722,7 +4774,7 @@ mod test {
         for &count in &[19usize, 1500] {
             let mut batch = Packed::<48>::new(count);
             for i in 0..count {
-                batch[i] = [((i * 23 + 5) & 0xff) as u8; 48];
+                fill_msg(&mut batch[i], 5, i);
             }
             let m = block_on(p48_pipe.message(count, None));
             p48_pipe.batch(m, batch, vec![[0u8; 32]; count].into_boxed_slice());
@@ -4735,7 +4787,13 @@ mod test {
         }
 
         let mut vec_pipe = Pipeline::<usize, Vec<u8>, Vec<[u8; 32]>>::with_owners_and_batches(Mode::Plain, Limits { messages: 2, rooms: 0 });
-        let vec_batch: Vec<[u8; 32]> = (0..1200).map(|i| [(i & 0xff) as u8; 32]).collect();
+        let vec_batch: Vec<[u8; 32]> = (0..1200)
+            .map(|i| {
+                let mut msg = [0u8; 32];
+                fill_msg(&mut msg, 6, i);
+                msg
+            })
+            .collect();
         let m = block_on(vec_pipe.message(1, None));
         vec_pipe.batch(m, vec_batch, vec![[0u8; 32]; 1200].into_boxed_slice());
         let Event::Batch { batch, digests, .. } = drain_all(&mut vec_pipe, 1).pop().unwrap() else {
@@ -4756,7 +4814,14 @@ mod test {
         assert_eq!(hash, blake3_servil_core::convenience::hash(&[0x42u8; 64]));
 
         let mut box_pipe = Pipeline::with_batches(Mode::Plain, Limits { messages: 2, rooms: 0 });
-        let boxed: Box<[[u8; 32]]> = (0..600).map(|i| [(i & 0xff) as u8; 32]).collect::<Vec<_>>().into_boxed_slice();
+        let boxed: Box<[[u8; 32]]> = (0..600)
+            .map(|i| {
+                let mut msg = [0u8; 32];
+                fill_msg(&mut msg, 7, i);
+                msg
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let mb = block_on(box_pipe.message(7usize, None));
         box_pipe.batch(mb, boxed, vec![[0u8; 32]; 600].into_boxed_slice());
         let Event::Batch { tag: 7, batch, digests } = drain_all(&mut box_pipe, 1).pop().unwrap() else {

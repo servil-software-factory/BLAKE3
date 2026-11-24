@@ -200,7 +200,7 @@ struct Line([u8; 128]);
 /// `count` messages of `N` bytes each, packed end to end with nothing
 /// between them, on a 128-byte boundary: a compact layout for many
 /// short messages of one length (a Merkle layer's leaves or digests)
-/// without per-message block padding in caller memory (`N` is 16 or 32;
+/// without per-message block padding in caller memory (`N` is 16, 32, or 48;
 /// backing storage is `N` bytes per message rounded up once to a
 /// 128-byte line). It reads and writes as a `[[u8; N]]`
 /// (`leaves[i] = digest`), and the batch calls take it as they take a
@@ -289,9 +289,10 @@ impl<const N: usize> core::ops::DerefMut for Packed<N> {
 
 /// The batch calls' input: messages of one length, prepared so that a
 /// call reads them as they are. [`Batch`] holds them in blocks, any
-/// length; `Packed` (with `std`) and borrowed `&[[u8; 16]]`, `&[[u8; 32]]`,
-/// `&[[u8; 48]]` slices hold 16-, 32-, or 48-byte messages end to end.
-/// Sealed: the crate's types and fixed-width byte-array slices alone.
+/// length; `Packed` (with `std`), owned `Vec<[u8; N]>` / `Box<[[u8; N]]>`
+/// (with `std`), and borrowed `&[[u8; N]]` slices (`N` = 16, 32, or 48)
+/// hold fixed-width messages end to end. Sealed: the crate's types and
+/// fixed-width byte-array collections/slices alone.
 pub trait Prepared: sealed::Sealed {
     /// The messages' bytes, one every `slot` bytes.
     #[doc(hidden)]

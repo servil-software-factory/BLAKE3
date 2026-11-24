@@ -160,18 +160,15 @@ src/lib.rs	replace __confine_cli_to_one_node with ()	1	compiled out off Linux: s
 src/lib.rs	replace __all_workers_parked -> bool with true	1	a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	speed: changes how many parked workers a publisher wakes or owes (BLAKE3 #119: every wake direct, the cascade alone and 8 direct measured 4-25% apart on the EPYC and the i7); no result waits on a worker waking: the publisher hashes every piece no worker takes, and finish.rs's handshake wakes a waiting caller
-src/pipeline.rs	delete ! in Pipeline<T, B>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
-src/pipeline.rs	delete ! in Pipeline<T, B>::alloc_piece_node	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
-src/pipeline.rs	replace != with == in <impl Drop for Pipeline<T, B>>::drop	1	cleanup: only releases a room credit if an uncommitted Message was mem::forget-ed before Pipeline::drop
+src/pipeline.rs	delete ! in Pipeline<T, B, P>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
+src/pipeline.rs	delete ! in Pipeline<T, B, P>::alloc_piece_node	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
+src/pipeline.rs	replace != with == in <impl Drop for Pipeline<T, B, P>>::drop	1	cleanup: only releases a room credit if an uncommitted Message was mem::forget-ed before Pipeline::drop
 src/pipeline.rs	replace * with +	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the piece alongside NEON workers (identical digests)
-src/pipeline.rs	replace * with + in Pipeline<T, B>::batch	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the batch piece (identical digests)
 src/pipeline.rs	replace * with /	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the piece alongside NEON workers (identical digests)
-src/pipeline.rs	replace * with / in Pipeline<T, B>::batch	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the batch piece (identical digests)
-src/pipeline.rs	replace < with <= in Pipeline<T, B>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; reloading from the atomic checks the same >= assigned condition
-src/pipeline.rs	replace < with == in Pipeline<T, B>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
-src/pipeline.rs	replace < with > in Pipeline<T, B>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
-src/pipeline.rs	replace == with != in Pipeline<T, B>::acquire_free_group	1	equivalent: when assigned == 0, completed_epoch >= 0 is already true for every u64; the check skips the atomic load on the first revolution
-src/pipeline.rs	replace >= with < in Pipeline<T, B>::batch	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the batch piece (identical digests)
-src/pipeline.rs	replace >= with < in Pipeline<T, B>::commit_multi	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the room piece (identical digests)
+src/pipeline.rs	replace < with <= in Pipeline<T, B, P>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; reloading from the atomic checks the same >= assigned condition
+src/pipeline.rs	replace < with == in Pipeline<T, B, P>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
+src/pipeline.rs	replace < with > in Pipeline<T, B, P>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; when seen >= assigned the cached value already satisfies the check
+src/pipeline.rs	replace == with != in Pipeline<T, B, P>::acquire_free_group	1	equivalent: when assigned == 0, completed_epoch >= 0 is already true for every u64; the check skips the atomic load on the first revolution
+src/pipeline.rs	replace >= with < in Pipeline<T, B, P>::commit_multi	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the room piece (identical digests)
 src/pipeline.rs	replace >= with < in block_on	1	speed: SPIN_BEFORE_SLEEP governs only how long block_on spins before parking; ThreadPark wakes the thread either way
 src/pipeline.rs	replace | with ^ in pack_arg	3	equivalent: | and ^ agree on non-overlapping bitfields (kind << 61, a << 32, b, ACTION_SME2)

@@ -3657,9 +3657,10 @@ impl Task {
     /// `self.members <= MEMBERS`, and for every active member `m` in
     /// `self.member[..self.members]`: `m.input` must be valid for reads of
     /// `m.len` initialized bytes (and for `self.batch = Some((message_len, slot))`,
-    /// whole slots of a validated `Prepared` batch with padding zeroed), and `m.out`
-    /// must point to non-overlapping writable output space for the member's
-    /// digest(s) until completion is published.
+    /// whole slots of a validated `Prepared` batch — including zero-length
+    /// messages padded to `slot = BLOCK_LEN` — with trailing slot bytes zeroed),
+    /// and `m.out` must point to non-overlapping writable output space for the
+    /// member's digest(s) until completion is published.
     pub(crate) unsafe fn run_members(&self, tree: &TreeHasher, platform: Platform) {
         let members = &self.member[..self.members];
         if let Some((message_len, slot)) = self.batch {
