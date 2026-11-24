@@ -393,7 +393,8 @@ struct PipeStorage {
     /// The workers' view of the Pipeline that holds this storage, kept for
     /// the next one (the owner's alone to read and write: `create`).
     shared: UnsafeCell<*mut Shared>,
-    /// Who holds this storage: its Pipeline, and each Room the caller has.
+    /// Who holds this storage: its Pipeline while alive, plus teardown
+    /// reservations and any surviving Rooms stamped with `ROOM_CLOSING_BIT`.
     holders: OwnLine<AtomicUsize>,
 }
 
@@ -451,9 +452,9 @@ process_static! {
 pub(crate) mod model_storages;
 
 impl PipeStorage {
-    /// Give up one hold on `st` (its Pipeline's, or a Room's): the last
-    /// one puts it on the free list. A Room may outlive its Pipeline, so
-    /// either may be the last.
+    /// Give up `n` holds on `st` (its Pipeline's teardown holds, or a
+    /// surviving Room's): the last hold puts it on the free list. A Room may
+    /// outlive its Pipeline, so either may be the last.
     fn release_n(st: &'static PipeStorage, n: usize) {
         if st.holders.fetch_sub(n, Ordering::AcqRel) == n {
             FREE_STORAGES.lock().unwrap().push(st);
@@ -594,10 +595,11 @@ impl Drop for Room {
         let unused = ROOM_CREDITS - (self.commits as usize);
         let prev = self.storage.rooms.refs[self.index as usize].fetch_sub(unused, Ordering::SeqCst);
         if prev & ROOM_CLOSING_BIT != 0 {
-            // Pipeline::drop stamped ROOM_CLOSING_BIT after draining workers
-            // and reserved a `holders` ref for this Room; clear the slot back
-            // to 0 before releasing that hold (`AcqRel` establishes happens-
-            // before with the storage returning to FREE_STORAGES).
+            // Pipeline::drop stamped ROOM_CLOSING_BIT after observing all
+            // dispatched work complete and reserved a `holders` ref for this
+            // Room; clear the slot back to 0 before releasing that hold
+            // (`AcqRel` establishes happens-before with the storage returning
+            // to FREE_STORAGES).
             assert_eq!(prev & !ROOM_CLOSING_BIT, unused, "surviving room ref count");
             self.storage.rooms.refs[self.index as usize].store(0, Ordering::Release);
             PipeStorage::release(self.storage);

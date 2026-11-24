@@ -81,8 +81,8 @@ FAULTS = [
     ),
     (
         "a storage goes back on the free list while a Room still holds it",
-        "        if st.holders.fetch_sub(1, Ordering::AcqRel) == 1 {",
-        "        if st.holders.fetch_sub(1, Ordering::AcqRel) >= 1 {",
+        "        if st.holders.fetch_sub(n, Ordering::AcqRel) == n {",
+        "        if st.holders.fetch_sub(n, Ordering::AcqRel) >= n {",
     ),
     (
         "a Room's drop gives back one credit more than it has",
@@ -91,8 +91,8 @@ FAULTS = [
     ),
     (
         "a Room's drop wakes no one",
-        "        if self.storage.rooms.release_n(self.index, unused) {\n            self.storage.waker.notify_after_seqcst();\n        }\n",
-        "        self.storage.rooms.release_n(self.index, unused);\n",
+        "        } else if prev == unused {\n            // Even if Pipeline::drop races right after our `fetch_sub` and\n            // recycles `&'static PipeStorage`, waking a WakerSlot is benign.\n            self.storage.waker.notify_after_seqcst();\n        }",
+        "        }",
     ),
     (
         "a loan's event comes before the loan is marked complete",
