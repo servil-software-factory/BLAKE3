@@ -1,7 +1,9 @@
 //! Measure register-only Apple SME2 counter grinding (#511) vs `next` `Batch`
 //! (+stamp & pure) across len=52 (BLINCS WOTS+C), len=36, len=64 on Apple M4/M6
 //! P-cores and E-cores.
-use blake3_servil_core::{Batch, Hasher, Mode};
+#![cfg_attr(not(target_arch = "aarch64"), allow(dead_code, unused_imports))]
+use blake3_servil_core::Mode;
+use blake3_servil_core::throughput::{Batch, TreeHasher};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -71,6 +73,7 @@ fn template_words(b: &[u8; 64]) -> [u32; 16] {
 
 #[cfg(target_arch = "aarch64")]
 fn verify_all() {
+    let th = TreeHasher::new(Mode::Keyed(&KEY_BYTES));
     let kw = key_words();
     let mut out = vec![[0u8; 32]; 64];
 
@@ -100,7 +103,7 @@ fn verify_all() {
         for i in 0..n {
             let mut msg = tb;
             msg[4 * word..4 * word + 4].copy_from_slice(&base.wrapping_add(i as u32).to_le_bytes());
-            let expected = *Hasher::new_keyed(&KEY_BYTES).update(&msg[..len]).finalize().as_bytes();
+            let expected = *th.hash(&msg[..len]).as_bytes();
             assert_eq!(out[i], expected, "mismatch gen len={len} word={word} i={i}");
         }
     }
@@ -135,7 +138,7 @@ fn verify_all() {
         for i in 0..16 * groups {
             let mut msg = tb;
             msg[4 * word..4 * word + 4].copy_from_slice(&base.wrapping_add(i as u32).to_le_bytes());
-            let expected = *Hasher::new_keyed(&KEY_BYTES).update(&msg[..len]).finalize().as_bytes();
+            let expected = *th.hash(&msg[..len]).as_bytes();
             assert_eq!(out[i], expected, "mismatch pruned len={len} i={i}");
         }
     }
@@ -173,7 +176,7 @@ fn bench_ns_per_try<F: FnMut()>(n_tries: usize, mut f: F) -> f64 {
 fn run_suite(label: &str) {
     println!("\n=== {label} (Mode::Keyed, ns/try) ===");
     let kw = key_words();
-    let mode = Mode::Keyed(KEY_BYTES);
+    let th = TreeHasher::new(Mode::Keyed(&KEY_BYTES));
 
     for (len, word) in [(52usize, 12usize), (36, 8), (64, 15)] {
         let tb = template_bytes(len);
@@ -191,7 +194,7 @@ fn run_suite(label: &str) {
             let mut out = vec![[0u8; 32]; count];
 
             let pure = bench_ns_per_try(count, || {
-                mode.hash_many(black_box(&batch), black_box(&mut out));
+                th.hash_many(black_box(&batch), black_box(&mut out));
                 black_box(&out);
             });
             let mut ctr = 0u32;
@@ -203,7 +206,7 @@ fn run_suite(label: &str) {
                     dst[4 * word..4 * word + 4]
                         .copy_from_slice(&b.wrapping_add(i as u32).to_le_bytes());
                 }
-                mode.hash_many(black_box(&batch), black_box(&mut out));
+                th.hash_many(black_box(&batch), black_box(&mut out));
                 black_box(&out);
             });
             let sme_gen = bench_ns_per_try(count, || {
@@ -266,6 +269,7 @@ unsafe extern "C" {
 }
 
 fn main() {
+    blake3_servil_core::initialize();
     #[cfg(target_arch = "aarch64")]
     {
         verify_all();
