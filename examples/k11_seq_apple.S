@@ -4403,6 +4403,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #896
 ret
+_probe_k10_seq_16_end:
 
 .globl _probe_k11_seq_16
 .p2align 4
@@ -9745,6 +9746,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #896
 ret
+_probe_k11_seq_16_end:
 
 .globl _probe_m10_seq_4
 .p2align 4
@@ -14149,6 +14151,7 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #896
 ret
+_probe_m10_seq_4_end:
 
 .globl _probe_m11_seq_4
 .p2align 4
@@ -19491,3 +19494,4 @@ ldp x27, x28, [sp, #64]
 ldp x29, x30, [sp, #80]
 add sp, sp, #896
 ret
+_probe_m11_seq_4_end:

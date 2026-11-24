@@ -399,6 +399,7 @@ def emit_chunk_kernel(name, k, blocks, per_input_counter, end_flags, prefix):
         e(f"ldp x{r}, x{r + 1}, [sp, #{F_X19 + 16 * i}]")
     e(f"add sp, sp, #{FRAME}")
     e("ret")
+    e(f"{sym}_end:")
     return "\n".join(L)
 
 
