@@ -281,9 +281,11 @@ const CHUNK_KERNELS: [Option<Kernel>; 11] = [
 const CHUNK_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[8, 3], &[9, 3], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
 
-/// Parent kernel per exact input count. Zero-spill sequential scalars (#523)
-/// let `pn6` (4+2) and `pn10` (8+2) win on both Apple P-cores and E-cores as
-/// well as AmpereOne without extra stack spills.
+/// Parent kernel per exact input count on SHA-3 cores. Zero-spill sequential
+/// scalars (#523) let `pn10` (8+2) win without extra stack spills; 6 single-block
+/// messages stay on `[3, 3]` (`p3 + p3` uses SHA-3 `eor3` with independent
+/// registers, whereas `pn6` serialized its two scalar lanes on Apple M6 and
+/// slowed `ManyMessages|6` by +55.6%). `pn6` stays active in `PLAIN` (no SHA-3).
 const PARENT_KERNELS: [Option<Kernel>; 11] = [
     None,
     Some(asm::blake3_servil_hybrid_k1),
@@ -291,7 +293,7 @@ const PARENT_KERNELS: [Option<Kernel>; 11] = [
     Some(asm::blake3_servil_hybrid_p3),
     Some(asm::blake3_servil_hybrid_p4),
     Some(asm::blake3_servil_hybrid_p5),
-    Some(asm::blake3_servil_hybrid_pn6),
+    None,
     Some(asm::blake3_servil_hybrid_p7),
     Some(asm::blake3_servil_hybrid_p8),
     Some(asm::blake3_servil_hybrid_p9),
@@ -316,14 +318,13 @@ const LAST_KERNELS: [Option<LastKernel>; 10] = [
     Some(asm::blake3_servil_hybrid_l9),
 ];
 
-/// Kernel sizes per parent count 1..=16. p3, p5, p7, and p9 hash one
-/// block on the integer units beside the NEON ones; pn6 (4+2) and pn10
-/// (8+2) add two zero-spill sequential scalar lanes (#523) that win on
-/// Apple P-cores, E-cores, and AmpereOne without extra stack spills, so
-/// counts 6, 10, 12..=16 dispatch pn6/pn10 (p4 keeps its concurrent sc2
-/// lanes on P-cores).
+/// Kernel sizes per parent count 1..=16 on SHA-3 cores. p3, p5, p7, and p9
+/// hash one block on the integer units beside the NEON ones; pn10 (8+2) adds
+/// two zero-spill sequential scalar lanes (#523) without extra stack spills,
+/// so counts 10 and 12..=16 dispatch pn10 while 6 keeps `[3, 3]` (p3 + p3,
+/// SHA-3 `eor3` with independent registers) and 16 uses `[10, 3, 3]`.
 const PARENT_PLANS: [&[usize]; 17] =
-    [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
+    [&[], &[1], &[2], &[3], &[4], &[5], &[3, 3], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[10, 3, 3]];
 
 /// Kernel sizes for the `l` kernels (`l2..l9`, which have no `l6` or `l10`).
 #[cfg(feature = "std")]
@@ -430,7 +431,6 @@ mod ends {
         pub static blake3_servil_hybrid_p3_end: u8;
         pub static blake3_servil_hybrid_p4_end: u8;
         pub static blake3_servil_hybrid_p5_end: u8;
-        pub static blake3_servil_hybrid_pn6_end: u8;
         pub static blake3_servil_hybrid_p7_end: u8;
         pub static blake3_servil_hybrid_p8_end: u8;
         pub static blake3_servil_hybrid_p9_end: u8;
@@ -527,7 +527,6 @@ fn parent_code(n: usize) -> (usize, usize) {
         3 => code!(blake3_servil_hybrid_p3, blake3_servil_hybrid_p3_end),
         4 => code!(blake3_servil_hybrid_p4, blake3_servil_hybrid_p4_end),
         5 => code!(blake3_servil_hybrid_p5, blake3_servil_hybrid_p5_end),
-        6 => code!(blake3_servil_hybrid_pn6, blake3_servil_hybrid_pn6_end),
         7 => code!(blake3_servil_hybrid_p7, blake3_servil_hybrid_p7_end),
         8 => code!(blake3_servil_hybrid_p8, blake3_servil_hybrid_p8_end),
         9 => code!(blake3_servil_hybrid_p9, blake3_servil_hybrid_p9_end),

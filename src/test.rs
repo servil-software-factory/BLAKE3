@@ -1907,7 +1907,7 @@ mod dispatch {
             (64, 17, &["hash16_parents", "k1", "p1"]),
             (64, 20, &["hash16_parents", "p4"]),
             (64, 21, &["hash16_messages"]),
-            (2 * CHUNK_LEN, 6, &["p6"]),
+            (2 * CHUNK_LEN, 6, &["p3"]),
             (2 * CHUNK_LEN, 7, &["hash16_messages", "hash16_parents"]),
             (2 * CHUNK_LEN, 17, &["c1", "hash16_messages", "hash16_parents", "k2"]),
             (256, 2, &["p2"]),
