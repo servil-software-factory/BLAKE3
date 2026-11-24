@@ -436,6 +436,40 @@ macro_rules! impl_prepared_slice {
                     $n
                 }
             }
+            #[cfg(feature = "std")]
+            impl sealed::Sealed for std::vec::Vec<[u8; $n]> {}
+            #[cfg(feature = "std")]
+            impl Prepared for std::vec::Vec<[u8; $n]> {
+                #[inline]
+                fn bytes(&self) -> &[u8] {
+                    self.as_flattened()
+                }
+                #[inline]
+                fn message_len(&self) -> usize {
+                    $n
+                }
+                #[inline]
+                fn slot(&self) -> usize {
+                    $n
+                }
+            }
+            #[cfg(feature = "std")]
+            impl sealed::Sealed for std::boxed::Box<[[u8; $n]]> {}
+            #[cfg(feature = "std")]
+            impl Prepared for std::boxed::Box<[[u8; $n]]> {
+                #[inline]
+                fn bytes(&self) -> &[u8] {
+                    self.as_flattened()
+                }
+                #[inline]
+                fn message_len(&self) -> usize {
+                    $n
+                }
+                #[inline]
+                fn slot(&self) -> usize {
+                    $n
+                }
+            }
         )+
     };
 }

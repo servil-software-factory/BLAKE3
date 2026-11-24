@@ -124,7 +124,8 @@ mod pipeline;
 
 // What src/pipeline.rs takes from its crate's root: the core library's
 // own items, as threads/src/lib.rs names them.
-pub(crate) use blake3_servil_core::thread_support::{Platform, assert_slots, slot_len};
+pub(crate) use blake3_servil_core::BLOCK_LEN;
+pub(crate) use blake3_servil_core::thread_support::{Platform, assert_slots};
 pub(crate) use blake3_servil_core::{CHUNK_LEN, Hash, Mode, OUT_LEN, convenience};
 pub(crate) mod throughput {
     pub use blake3_servil_core::throughput::*;
@@ -160,14 +161,14 @@ mod lanes {
 
     pub(crate) struct Task {
         pub(crate) len: usize,
-        pub(crate) batch: Option<usize>,
+        pub(crate) batch: Option<(usize, usize)>,
         pub(crate) members: usize,
         pub(crate) member: [Member; MEMBERS],
     }
     unsafe impl Send for Task {}
 
     impl Task {
-        pub(crate) fn members(batch: Option<usize>) -> Task {
+        pub(crate) fn members(batch: Option<(usize, usize)>) -> Task {
             Task { len: 0, batch, members: 0, member: [NO_MEMBER; MEMBERS] }
         }
 
@@ -177,8 +178,7 @@ mod lanes {
                 // A worker may be switched away from before each member.
                 shuttle::thread::yield_now();
                 let bytes = unsafe { core::slice::from_raw_parts(m.input, m.len) };
-                if let Some(message_len) = self.batch {
-                    let slot = crate::slot_len(message_len);
+                if let Some((message_len, slot)) = self.batch {
                     let digests = unsafe { core::slice::from_raw_parts_mut(m.out as *mut [u8; crate::OUT_LEN], m.len / slot) };
                     let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot) };
                     tree.hash_many_on(platform, &part, digests);

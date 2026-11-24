@@ -260,7 +260,9 @@ pub use blake3_servil_core::{
 };
 
 pub(crate) use blake3_servil_core::convenience::Hasher;
-pub(crate) use blake3_servil_core::thread_support::{MAX_SIMD_DEGREE, Platform, Sme2Turn, assert_slots, prepare_collection_thread, slot_len};
+#[cfg(test)]
+pub(crate) use blake3_servil_core::thread_support::slot_len;
+pub(crate) use blake3_servil_core::thread_support::{MAX_SIMD_DEGREE, Platform, Sme2Turn, assert_slots, prepare_collection_thread};
 #[allow(unused_imports)]
 pub(crate) mod block {
     pub use blake3_servil_core::throughput::{Batch, Block};

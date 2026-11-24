@@ -42,7 +42,7 @@ use std::{
 };
 
 // WALKED
-// Pipeline::new Pipeline::with_owners Pipeline::message Pipeline::message_with Pipeline::room Pipeline::commit Pipeline::end Pipeline::abort Pipeline::owned
+// Pipeline::new Pipeline::with_owners Pipeline::with_batches Pipeline::with_owners_and_batches Pipeline::message Pipeline::message_with Pipeline::room Pipeline::commit Pipeline::end Pipeline::abort Pipeline::owned
 // Pipeline::lent Pipeline::batch Pipeline::next_event Pipeline::ready Pipeline::Drop Room::len Room::bytes_mut Room::as_mut_ptr Room::Drop Lent::Drop
 // Pipeline::Send Room::Send
 // NOT_WALKED
@@ -291,6 +291,22 @@ async fn without_owners(mode: Mode<'static>, limits: Limits, data: &[u8]) {
     let Some(Event::Hashed { tag: 1, hash, owner: None }) = p.next_event() else { panic!("the loan's event") };
     assert_eq!(*hash.as_bytes(), official(mode, &data[..1025]));
     drop(guard);
+    {
+        let mut pb = Pipeline::<usize, (), blake3_servil::throughput::Packed<32>>::with_batches(mode, Limits { messages: 1, rooms: 0 });
+        let mb = pb.message(0, None).await;
+        let mut packed = blake3_servil::throughput::Packed::<32>::new(4);
+        for (i, item) in packed.iter_mut().enumerate() {
+            item.fill(i as u8);
+        }
+        pb.batch(mb, packed, vec![[0u8; 32]; 4].into_boxed_slice());
+        pb.ready().await;
+        let Some(Event::Batch { batch, digests, .. }) = pb.next_event() else {
+            panic!("expected packed Event::Batch");
+        };
+        for i in 0..4 {
+            assert_eq!(digests[i], official(mode, &batch[i]));
+        }
+    }
     if limits.rooms > 0 {
         let mut m = p.message_with(mode, 2, None).await;
         let mut room = p.room().await;

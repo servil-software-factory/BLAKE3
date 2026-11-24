@@ -3618,7 +3618,7 @@ pub(crate) const TASK_LEN: usize = 64 * CHUNK_LEN;
 /// one message length), hashed side by side via [`Task::run_members`].
 pub(crate) struct Task {
     pub(crate) len: usize,
-    pub(crate) batch: Option<usize>,
+    pub(crate) batch: Option<(usize, usize)>,
     pub(crate) members: usize,
     pub(crate) member: [Member; MEMBERS],
 }
@@ -3640,8 +3640,8 @@ const NO_MEMBER: Member = Member { input: core::ptr::null(), len: 0, out: core::
 unsafe impl Send for Task {}
 
 impl Task {
-    /// An empty task of short messages, or batches of one message length.
-    pub(crate) fn members(batch: Option<usize>) -> Task {
+    /// An empty task of short messages, or batches of one `(message_len, slot)` shape.
+    pub(crate) fn members(batch: Option<(usize, usize)>) -> Task {
         Task { len: 0, batch, members: 0, member: [NO_MEMBER; MEMBERS] }
     }
 }
@@ -3656,22 +3656,21 @@ impl Task {
     ///
     /// `self.members <= MEMBERS`, and for every active member `m` in
     /// `self.member[..self.members]`: `m.input` must be valid for reads of
-    /// `m.len` initialized bytes (and for `self.batch = Some(message_len)`,
-    /// whole slots of a validated `Batch` with padding zeroed), and `m.out`
+    /// `m.len` initialized bytes (and for `self.batch = Some((message_len, slot))`,
+    /// whole slots of a validated `Prepared` batch with padding zeroed), and `m.out`
     /// must point to non-overlapping writable output space for the member's
     /// digest(s) until completion is published.
     pub(crate) unsafe fn run_members(&self, tree: &TreeHasher, platform: Platform) {
         let members = &self.member[..self.members];
-        if let Some(message_len) = self.batch {
+        if let Some((message_len, slot)) = self.batch {
             for m in members {
                 // Sound: the Pipeline keeps each batch's bytes and digest
                 // space in place until the group publishes `completed_epoch`.
                 let bytes = unsafe { core::slice::from_raw_parts(m.input, m.len) };
-                let slot = crate::slot_len(message_len);
                 let count = m.len / slot;
                 let digests = unsafe { core::slice::from_raw_parts_mut(m.out as *mut [u8; crate::OUT_LEN], count) };
-                // Sound: the Pipeline keeps a validated `Batch`'s slots alive
-                // until the group publishes `completed_epoch`.
+                // Sound: the Pipeline keeps a validated `Prepared` batch's
+                // slots alive until the group publishes `completed_epoch`.
                 let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot) };
                 tree.hash_many_on(platform, &part, digests);
             }

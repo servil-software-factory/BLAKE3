@@ -203,10 +203,10 @@ pub struct Limits {
 }
 
 /// Completion of a message submitted to a [`Pipeline`].
-pub enum Event<T, B = ()> {
+pub enum Event<T, B = (), P = Batch<'static>> {
     Hashed { tag: T, hash: Hash, owner: Option<B> },
     Aborted { tag: T, owner: Option<B> },
-    Batch { tag: T, batch: Batch<'static>, digests: Box<[[u8; 32]]> },
+    Batch { tag: T, batch: P, digests: Box<[[u8; 32]]> },
 }
 
 /// An open message on a [`Pipeline`].
@@ -1068,9 +1068,9 @@ process_static! {
 ///   for one; otherwise it drops quietly, with the messages not yet handed
 ///   over, the events not taken and their owners, and keeps its buffers
 ///   for a later Pipeline.
-/// - `Send` lets a pipeline move between threads when its tags and owners
-///   are `Send`, keeping the same messages and tokens.
-pub struct Pipeline<T, B = ()> {
+/// - `Send` lets a pipeline move between threads when its tags, owners, and
+///   batches are `Send`, keeping the same messages and tokens.
+pub struct Pipeline<T, B = (), P = Batch<'static>> {
     id: u64,
     limits: Limits,
     group_count: usize,
@@ -1079,13 +1079,13 @@ pub struct Pipeline<T, B = ()> {
     slots: Box<[SlotMeta<T>]>,
     room_streams: Box<[RoomStream]>,
     owners: RawSlots<B>,
-    batches: RawSlots<(Batch<'static>, Box<[[u8; OUT_LEN]]>)>,
+    batches: RawSlots<(P, Box<[[u8; OUT_LEN]]>)>,
     /// FIFO ring of free message slots: slots cycle around the full ring
     /// before reuse so worker-written cache lines cool before another worker writes them.
     free_slots: Ring<u32>,
     open_messages: usize,
     end_queue: Ring<u32>,
-    events: Ring<Event<T, B>>,
+    events: Ring<Event<T, B, P>>,
     /// FIFO ring of free rooms, refilled by a circular cursor scan over `rooms.refs`.
     local_free_rooms: Ring<u32>,
     room_cursor: usize,
@@ -1096,7 +1096,7 @@ pub struct Pipeline<T, B = ()> {
     open_group: Option<(u32, u64)>,
     local_count: usize,
     local_bytes: usize,
-    local_batch: Option<usize>,
+    local_batch: Option<(usize, usize)>,
     local_group_mode: SlotMode,
     local_custom_tree: Option<TreeHasher>,
     local_members: Box<[Member; MEMBERS]>,
@@ -1108,12 +1108,12 @@ pub struct Pipeline<T, B = ()> {
     action_buf: [u64; MAX_SLOT_PIECES],
 }
 
-// Sound: the Pipeline owns its tags and owners (hence `T: Send, B: Send`); the
-// raw pointers are to its never-freed Shared and into buffers it holds, which
-// workers read only through tasks it dispatched.
-unsafe impl<T: Send, B: Send> Send for Pipeline<T, B> {}
+// Sound: the Pipeline owns its tags, owners, and batches (hence
+// `T: Send, B: Send, P: Send`); the raw pointers are to its never-freed Shared
+// and into buffers it holds, which workers read only through tasks it dispatched.
+unsafe impl<T: Send, B: Send, P: Send> Send for Pipeline<T, B, P> {}
 
-impl<T> Pipeline<T, ()> {
+impl<T> Pipeline<T, (), Batch<'static>> {
     /// Create a pipeline in `mode` with fixed memory `limits`.
     ///
     /// # Panics
@@ -1129,6 +1129,21 @@ impl<T> Pipeline<T, ()> {
     }
 }
 
+impl<T, P: Prepared + 'static> Pipeline<T, (), P> {
+    /// Create a pipeline whose [`Pipeline::batch`] accepts owned prepared
+    /// batches of type `P`, such as [`Packed<16>`](crate::throughput::Packed),
+    /// [`Packed<32>`](crate::throughput::Packed),
+    /// [`Packed<48>`](crate::throughput::Packed), `Vec<[u8; 32]>`,
+    /// `Box<[[u8; 32]]>`, or [`Batch<'static>`].
+    ///
+    /// # Panics
+    ///
+    /// As [`new`](Pipeline::new).
+    pub fn with_batches(mode: Mode, limits: Limits) -> Self {
+        Self::create(mode, limits)
+    }
+}
+
 // `B: 'static`: the workers read an owner's bytes until its message is
 // hashed, and a Pipeline can be forgotten (`core::mem::forget`) while they
 // do, which no borrow outlives soundly. An owner that borrows nothing
@@ -1136,7 +1151,7 @@ impl<T> Pipeline<T, ()> {
 // good (BLAKE3 #417: a `&[u8]` was an owner, and safe code could free the
 // bytes under the workers). Borrowed bytes are [`Pipeline::lent`]'s, which
 // is unsafe for that reason.
-impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
+impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B, Batch<'static>> {
     /// Create a pipeline that also accepts owned message buffers of type `B`
     /// ([`Pipeline::owned`]): a type that owns its bytes, such as `Vec<u8>`
     /// or `Box<[u8]>`.
@@ -1166,7 +1181,22 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
     pub fn with_owners(mode: Mode, limits: Limits) -> Self {
         Self::create(mode, limits)
     }
+}
 
+impl<T, B: AsRef<[u8]> + 'static, P: Prepared + 'static> Pipeline<T, B, P> {
+    /// Create a pipeline that accepts both owned message buffers of type `B`
+    /// ([`Pipeline::owned`]) and owned prepared batches of type `P`
+    /// ([`Pipeline::batch`]).
+    ///
+    /// # Panics
+    ///
+    /// As [`new`](Pipeline::new).
+    pub fn with_owners_and_batches(mode: Mode, limits: Limits) -> Self {
+        Self::create(mode, limits)
+    }
+}
+
+impl<T, B: AsRef<[u8]> + 'static, P> Pipeline<T, B, P> {
     /// Hash `owner`'s bytes in place and return `owner` in the message's
     /// [`Event::Hashed`].
     ///
@@ -1214,7 +1244,77 @@ impl<T, B: AsRef<[u8]> + 'static> Pipeline<T, B> {
     }
 }
 
-impl<T, B> Pipeline<T, B> {
+impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
+    /// Hash `batch` into `digests` and return both in [`Event::Batch`].
+    ///
+    /// Accepts any owned [`Prepared`] batch type `P` chosen when the pipeline
+    /// was constructed ([`Batch<'static>`] by default, or
+    /// [`Packed<N>`](crate::throughput::Packed) / `Vec<[u8; N]>` /
+    /// `Box<[[u8; N]]>` via [`Pipeline::with_batches`] or
+    /// [`Pipeline::with_owners_and_batches`]).
+    ///
+    /// # Panics
+    ///
+    /// If `message` is another Pipeline's, or has had a commit from a
+    /// Room already (even one of no bytes); or if `digests` has not one place
+    /// for each message of `batch`.
+    pub fn batch(&mut self, message: Message, batch: P, digests: Box<[[u8; OUT_LEN]]>) {
+        let (pid, s) = message.take();
+        assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
+        self.assert_uncommitted(s);
+        crate::assert_slots(batch.bytes(), batch.message_len(), batch.slot(), digests.len());
+        self.open_messages -= 1;
+
+        // Sound: the slot is open and holds no batch (assert_uncommitted); the
+        // batch and digests stay in the move-insensitive raw slot until its
+        // event reads them out or the Pipeline's drop drops them.
+        let hold = unsafe { (*self.batches.slot(s)).write((batch, digests)) };
+        let msg_len = hold.0.message_len();
+        let slot_len = hold.0.slot();
+        let bytes = hold.0.bytes();
+        let count = hold.1.len();
+        let digests_ptr = hold.1.as_mut_ptr();
+        let work_slot = slot_len.max(crate::BLOCK_LEN);
+        let work_bytes = count.saturating_mul(work_slot);
+
+        if count == 0 {
+            self.shared().slot_done[s].store(true, Ordering::Relaxed);
+            self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
+        } else if work_bytes < TASK_LEN {
+            let (group, epoch) = self.push_member(s, bytes.as_ptr(), bytes.len(), digests_ptr as *mut u8, NONE, Some((msg_len, slot_len)));
+            self.slots[s].kind = SlotKind::WaitBatch { group, epoch };
+        } else {
+            self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
+            let per_part = (TASK_LEN / work_slot).max(1).max(count.div_ceil(MAX_SLOT_PIECES));
+            let pieces = count.div_ceil(per_part);
+            debug_assert!((1..=MAX_SLOT_PIECES).contains(&pieces));
+            self.shared().slot_done[s].store(false, Ordering::Relaxed);
+            self.shared().tasks_left[s].store(pieces, Ordering::Relaxed);
+            // Sound: no task of this slot is in flight (it was open), so its
+            // description is the owner's to write before the dispatch below.
+            unsafe {
+                *self.shared().multi[s].get() = MultiDesc {
+                    input: bytes.as_ptr(),
+                    total_len: count,
+                    piece_level: 0,
+                    pieces,
+                    batch: Some((msg_len, slot_len, per_part)),
+                    digests: digests_ptr,
+                    loan_epoch: 0,
+                }
+            };
+            let sme2 = per_part.saturating_mul(work_slot) >= SME2_MIN_LEN;
+            let s32 = u32::try_from(s).expect("slot fits u32");
+            for p in 0..pieces {
+                self.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32"), sme2);
+            }
+            self.dispatch_many(pieces);
+        }
+        self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
+    }
+}
+
+impl<T, B, P> Pipeline<T, B, P> {
     #[inline(always)]
     fn shared(&self) -> &Shared {
         // Sound: `shared` is this Pipeline's Shared (create), never freed.
@@ -1394,7 +1494,7 @@ impl<T, B> Pipeline<T, B> {
     ///
     /// Same as [`Pipeline::message`].
     #[inline(always)]
-    pub fn message_with<'p>(&'p mut self, mode: Mode<'_>, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + use<'p, T, B> {
+    pub fn message_with<'p>(&'p mut self, mode: Mode<'_>, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + use<'p, T, B, P> {
         let _ = length_hint;
         let is_plain = matches!(mode, Mode::Plain);
         MessageWithFut { pipe: self, tag: Some(tag), tree: Some(TreeHasher::new(mode)), is_plain, registered: false }
@@ -1775,66 +1875,6 @@ impl<T, B> Pipeline<T, B> {
         Lent { completed, epoch, _bytes: PhantomData }
     }
 
-    /// Hash `batch` into `digests` and return both in [`Event::Batch`].
-    ///
-    /// # Panics
-    ///
-    /// If `message` is another Pipeline's, or has had a commit from a
-    /// Room already (even one of no bytes); or if `digests` has not one place
-    /// for each message of `batch`.
-    pub fn batch(&mut self, message: Message, batch: Batch<'static>, digests: Box<[[u8; OUT_LEN]]>) {
-        let (pid, s) = message.take();
-        assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
-        self.assert_uncommitted(s);
-        crate::assert_slots(batch.bytes(), batch.message_len(), batch.slot(), digests.len());
-        self.open_messages -= 1;
-
-        // Sound: the slot is open and holds no batch (assert_uncommitted); the
-        // batch and digests stay in the move-insensitive raw slot until its
-        // event reads them out or the Pipeline's drop drops them.
-        let hold = unsafe { (*self.batches.slot(s)).write((batch, digests)) };
-        let msg_len = hold.0.message_len();
-        let slot_len = hold.0.slot();
-        let bytes = hold.0.bytes();
-        let count = hold.1.len();
-        let digests_ptr = hold.1.as_mut_ptr();
-
-        if count == 0 {
-            self.shared().slot_done[s].store(true, Ordering::Relaxed);
-            self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
-        } else if bytes.len() < TASK_LEN {
-            let (group, epoch) = self.push_member(s, bytes.as_ptr(), bytes.len(), digests_ptr as *mut u8, NONE, Some(msg_len));
-            self.slots[s].kind = SlotKind::WaitBatch { group, epoch };
-        } else {
-            self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
-            let per_part = (TASK_LEN / slot_len).max(1).max(count.div_ceil(MAX_SLOT_PIECES));
-            let pieces = count.div_ceil(per_part);
-            debug_assert!((1..=MAX_SLOT_PIECES).contains(&pieces));
-            self.shared().slot_done[s].store(false, Ordering::Relaxed);
-            self.shared().tasks_left[s].store(pieces, Ordering::Relaxed);
-            // Sound: no task of this slot is in flight (it was open), so its
-            // description is the owner's to write before the dispatch below.
-            unsafe {
-                *self.shared().multi[s].get() = MultiDesc {
-                    input: bytes.as_ptr(),
-                    total_len: count,
-                    piece_level: 0,
-                    pieces,
-                    batch: Some((msg_len, slot_len, per_part)),
-                    digests: digests_ptr,
-                    loan_epoch: 0,
-                }
-            };
-            let sme2 = per_part * slot_len >= SME2_MIN_LEN;
-            let s32 = u32::try_from(s).expect("slot fits u32");
-            for p in 0..pieces {
-                self.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32"), sme2);
-            }
-            self.dispatch_many(pieces);
-        }
-        self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
-    }
-
     /// Pull the next finished [`Event`], if one is ready.
     ///
     /// This takes what is finished and starts nothing. A message's work
@@ -1843,7 +1883,7 @@ impl<T, B> Pipeline<T, B> {
     /// this may never be given an event: where this gives `None`, await
     /// `ready`.
     #[inline(always)]
-    pub fn next_event(&mut self) -> Option<Event<T, B>> {
+    pub fn next_event(&mut self) -> Option<Event<T, B, P>> {
         if let Some(ev) = self.events.pop_front() {
             return Some(ev);
         }
@@ -1985,7 +2025,7 @@ impl<T, B> Pipeline<T, B> {
     }
 
     #[inline(always)]
-    fn push_member(&mut self, slot: usize, input: *const u8, len: usize, out: *mut u8, room: u32, batch: Option<usize>) -> (u32, u64) {
+    fn push_member(&mut self, slot: usize, input: *const u8, len: usize, out: *mut u8, room: u32, batch: Option<(usize, usize)>) -> (u32, u64) {
         let slot_mode = self.slots[slot].mode;
         if self.open_group.is_some() && (self.local_batch != batch || slot_mode == SlotMode::Custom || self.local_group_mode != slot_mode) {
             self.publish_open();
@@ -1998,7 +2038,11 @@ impl<T, B> Pipeline<T, B> {
         self.local_members[idx] = Member { input, len, out };
         self.local_rooms[idx] = room;
         let after = idx + 1;
-        let bytes = self.local_bytes + len;
+        let work_len = match batch {
+            Some((_, slot)) if slot < crate::BLOCK_LEN => (len / slot).saturating_mul(crate::BLOCK_LEN),
+            _ => len,
+        };
+        let bytes = self.local_bytes.saturating_add(work_len);
         self.local_count = after;
         self.local_bytes = bytes;
         let byte_limit = if batch.is_some() { TASK_LEN } else { TASK_LEN / 4 };
@@ -2009,7 +2053,7 @@ impl<T, B> Pipeline<T, B> {
     }
 
     #[inline(never)]
-    fn open_new_group(&mut self, slot: usize, batch: Option<usize>) -> (u32, u64) {
+    fn open_new_group(&mut self, slot: usize, batch: Option<(usize, usize)>) -> (u32, u64) {
         let g = self.acquire_free_group();
         let epoch = self.next_group_epoch;
         self.next_group_epoch = epoch.checked_add(1).expect("Pipeline group epoch counter exhausted");
@@ -2159,7 +2203,7 @@ impl<T, B> Pipeline<T, B> {
     }
 
     #[inline(always)]
-    fn try_reap_one(&mut self) -> Option<Event<T, B>> {
+    fn try_reap_one(&mut self) -> Option<Event<T, B, P>> {
         let &front = self.end_queue.front()?;
         let s = front as usize;
 
@@ -2254,7 +2298,7 @@ impl<T, B> Pipeline<T, B> {
     }
 }
 
-impl<T, B> Drop for Pipeline<T, B> {
+impl<T, B, P> Drop for Pipeline<T, B, P> {
     fn drop(&mut self) {
         if self.has_in_flight_work() {
             stop_process("blake3-servil: Pipeline dropped while worker tasks are still in flight\n");
@@ -2290,8 +2334,8 @@ impl<T, B> Drop for Pipeline<T, B> {
                 PipeStorage::release(self.0);
             }
         }
-        struct DrainPending<'a, T, B>(&'a mut Pipeline<T, B>);
-        impl<T, B> Drop for DrainPending<'_, T, B> {
+        struct DrainPending<'a, T, B, P>(&'a mut Pipeline<T, B, P>);
+        impl<T, B, P> Drop for DrainPending<'_, T, B, P> {
             fn drop(&mut self) {
                 while let Some(s_idx) = self.0.end_queue.pop_front() {
                     let s = s_idx as usize;
@@ -2325,15 +2369,15 @@ impl<T, B> Drop for Pipeline<T, B> {
     }
 }
 
-struct MessageFut<'a, T, B> {
-    pipe: &'a mut Pipeline<T, B>,
+struct MessageFut<'a, T, B, P> {
+    pipe: &'a mut Pipeline<T, B, P>,
     tag: Option<T>,
     registered: bool,
 }
 
-impl<T, B> Unpin for MessageFut<'_, T, B> {}
+impl<T, B, P> Unpin for MessageFut<'_, T, B, P> {}
 
-impl<T, B> Drop for MessageFut<'_, T, B> {
+impl<T, B, P> Drop for MessageFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
             self.pipe.shared().storage.waker.clear();
@@ -2341,7 +2385,7 @@ impl<T, B> Drop for MessageFut<'_, T, B> {
     }
 }
 
-impl<T, B> Future for MessageFut<'_, T, B> {
+impl<T, B, P> Future for MessageFut<'_, T, B, P> {
     type Output = Message;
 
     #[inline(always)]
@@ -2371,17 +2415,17 @@ impl<T, B> Future for MessageFut<'_, T, B> {
     }
 }
 
-struct MessageWithFut<'a, T, B> {
-    pipe: &'a mut Pipeline<T, B>,
+struct MessageWithFut<'a, T, B, P> {
+    pipe: &'a mut Pipeline<T, B, P>,
     tag: Option<T>,
     tree: Option<TreeHasher>,
     is_plain: bool,
     registered: bool,
 }
 
-impl<T, B> Unpin for MessageWithFut<'_, T, B> {}
+impl<T, B, P> Unpin for MessageWithFut<'_, T, B, P> {}
 
-impl<T, B> Drop for MessageWithFut<'_, T, B> {
+impl<T, B, P> Drop for MessageWithFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
             self.pipe.shared().storage.waker.clear();
@@ -2389,7 +2433,7 @@ impl<T, B> Drop for MessageWithFut<'_, T, B> {
     }
 }
 
-impl<T, B> Future for MessageWithFut<'_, T, B> {
+impl<T, B, P> Future for MessageWithFut<'_, T, B, P> {
     type Output = Message;
 
     #[inline(always)]
@@ -2423,14 +2467,14 @@ impl<T, B> Future for MessageWithFut<'_, T, B> {
     }
 }
 
-struct RoomFut<'a, T, B> {
-    pipe: &'a mut Pipeline<T, B>,
+struct RoomFut<'a, T, B, P> {
+    pipe: &'a mut Pipeline<T, B, P>,
     registered: bool,
 }
 
-impl<T, B> Unpin for RoomFut<'_, T, B> {}
+impl<T, B, P> Unpin for RoomFut<'_, T, B, P> {}
 
-impl<T, B> Drop for RoomFut<'_, T, B> {
+impl<T, B, P> Drop for RoomFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
             self.pipe.shared().storage.waker.clear();
@@ -2438,7 +2482,7 @@ impl<T, B> Drop for RoomFut<'_, T, B> {
     }
 }
 
-impl<T, B> Future for RoomFut<'_, T, B> {
+impl<T, B, P> Future for RoomFut<'_, T, B, P> {
     type Output = Room;
 
     #[inline(always)]
@@ -2460,14 +2504,14 @@ impl<T, B> Future for RoomFut<'_, T, B> {
     }
 }
 
-struct ReadyFut<'a, T, B> {
-    pipe: &'a mut Pipeline<T, B>,
+struct ReadyFut<'a, T, B, P> {
+    pipe: &'a mut Pipeline<T, B, P>,
     registered: bool,
 }
 
-impl<T, B> Unpin for ReadyFut<'_, T, B> {}
+impl<T, B, P> Unpin for ReadyFut<'_, T, B, P> {}
 
-impl<T, B> Drop for ReadyFut<'_, T, B> {
+impl<T, B, P> Drop for ReadyFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
             self.pipe.shared().storage.waker.clear();
@@ -2475,7 +2519,7 @@ impl<T, B> Drop for ReadyFut<'_, T, B> {
     }
 }
 
-impl<T, B> Future for ReadyFut<'_, T, B> {
+impl<T, B, P> Future for ReadyFut<'_, T, B, P> {
     type Output = ();
 
     #[inline(always)]
@@ -2923,7 +2967,7 @@ mod test {
 
     use crate::convenience;
 
-    fn drain_all<T, B>(pipeline: &mut Pipeline<T, B>, want: usize) -> Vec<Event<T, B>> {
+    fn drain_all<T, B, P>(pipeline: &mut Pipeline<T, B, P>, want: usize) -> Vec<Event<T, B, P>> {
         let mut out = Vec::with_capacity(want);
         while out.len() < want {
             if let Some(ev) = pipeline.next_event() {
@@ -4618,5 +4662,108 @@ mod test {
         assert_eq!(Arc::strong_count(&wake_arc), 1, "Dropping Pending MessageWithFut must clear waker");
         p1.shared().storage.groups[0].completed_epoch.store(pending_epoch, Ordering::SeqCst);
         assert!(matches!(p1.try_reap_one(), Some(Event::Aborted { tag: 0, owner: None })));
+    }
+
+    #[test]
+    fn packed_batches_in_pipeline_match_reference() {
+        use crate::throughput::Packed;
+        let key = [0x66u8; 32];
+
+        // 1. Packed<32> (inferred without turbofish!): empty, small (MemberGroup), and BLINCS multi-piece (6,144 msgs -> 6 pieces).
+        let mut p32_pipe = Pipeline::with_batches(Mode::Plain, Limits { messages: 4, rooms: 0 });
+        for &(tag, count, mode) in &[(0usize, 0usize, Mode::Plain), (1, 37, Mode::Plain), (2, 6144, Mode::Keyed(&key))] {
+            let mut batch = Packed::<32>::new(count);
+            for i in 0..count {
+                batch[i] = [((i * 13 + tag * 7) & 0xff) as u8; 32];
+            }
+            let digests = vec![[0u8; 32]; count].into_boxed_slice();
+            let m = block_on(p32_pipe.message_with(mode, tag, None));
+            let slot_idx = m.slot as usize;
+            p32_pipe.batch(m, batch, digests);
+            let got_pieces = if count == 6144 { unsafe { (*p32_pipe.shared().multi[slot_idx].get()).pieces } } else { 0 };
+            let ev = loop {
+                if let Some(ev) = p32_pipe.next_event() {
+                    break ev;
+                }
+                block_on(p32_pipe.ready());
+            };
+            if count == 6144 {
+                // Verify 6,144 x 32 B split into 6 compression-work pieces (1,024 msgs each).
+                assert_eq!(got_pieces, 6);
+            }
+            let Event::Batch { tag: got_tag, batch, digests } = ev else {
+                panic!("expected Event::Batch");
+            };
+            assert_eq!(got_tag, tag);
+            for i in 0..count {
+                let want = *blake3_servil_core::convenience::hash_with(mode, &batch[i]).as_bytes();
+                assert_eq!(digests[i], want, "Packed<32> tag={tag} msg={i}");
+            }
+        }
+
+        // 2. Packed<16> and Packed<48> (small + multi-piece) and owned Vec<[u8; 32]>.
+        let mut p16_pipe = Pipeline::<usize, (), Packed<16>>::with_batches(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        for &count in &[17usize, 2051] {
+            let mut batch = Packed::<16>::new(count);
+            for i in 0..count {
+                batch[i] = [((i * 19 + 3) & 0xff) as u8; 16];
+            }
+            let m = block_on(p16_pipe.message(count, None));
+            p16_pipe.batch(m, batch, vec![[0u8; 32]; count].into_boxed_slice());
+            let Event::Batch { batch, digests, .. } = drain_all(&mut p16_pipe, 1).pop().unwrap() else {
+                panic!("expected Event::Batch");
+            };
+            for i in 0..count {
+                assert_eq!(digests[i], *blake3_servil_core::convenience::hash(&batch[i]).as_bytes());
+            }
+        }
+
+        let mut p48_pipe = Pipeline::<usize, (), Packed<48>>::with_batches(Mode::Keyed(&key), Limits { messages: 2, rooms: 0 });
+        for &count in &[19usize, 1500] {
+            let mut batch = Packed::<48>::new(count);
+            for i in 0..count {
+                batch[i] = [((i * 23 + 5) & 0xff) as u8; 48];
+            }
+            let m = block_on(p48_pipe.message(count, None));
+            p48_pipe.batch(m, batch, vec![[0u8; 32]; count].into_boxed_slice());
+            let Event::Batch { batch, digests, .. } = drain_all(&mut p48_pipe, 1).pop().unwrap() else {
+                panic!("expected Event::Batch");
+            };
+            for i in 0..count {
+                assert_eq!(digests[i], *blake3_servil_core::convenience::hash_with(Mode::Keyed(&key), &batch[i]).as_bytes());
+            }
+        }
+
+        let mut vec_pipe = Pipeline::<usize, Vec<u8>, Vec<[u8; 32]>>::with_owners_and_batches(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        let vec_batch: Vec<[u8; 32]> = (0..1200).map(|i| [(i & 0xff) as u8; 32]).collect();
+        let m = block_on(vec_pipe.message(1, None));
+        vec_pipe.batch(m, vec_batch, vec![[0u8; 32]; 1200].into_boxed_slice());
+        let Event::Batch { batch, digests, .. } = drain_all(&mut vec_pipe, 1).pop().unwrap() else {
+            panic!("expected Event::Batch");
+        };
+        for i in 0..1200 {
+            assert_eq!(digests[i], *blake3_servil_core::convenience::hash(&batch[i]).as_bytes());
+        }
+
+        // Verify Pipeline::with_owners still infers P = Batch<'static> with no batch() call,
+        // and Box<[[u8; 32]]> works through with_batches.
+        let mut inferred_owners = Pipeline::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 });
+        let mo = block_on(inferred_owners.message(9usize, None));
+        inferred_owners.owned(mo, vec![0x42u8; 64]);
+        let Event::Hashed { tag: 9, hash, .. } = drain_all(&mut inferred_owners, 1).pop().unwrap() else {
+            panic!("expected Event::Hashed");
+        };
+        assert_eq!(hash, blake3_servil_core::convenience::hash(&[0x42u8; 64]));
+
+        let mut box_pipe = Pipeline::with_batches(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        let boxed: Box<[[u8; 32]]> = (0..600).map(|i| [(i & 0xff) as u8; 32]).collect::<Vec<_>>().into_boxed_slice();
+        let mb = block_on(box_pipe.message(7usize, None));
+        box_pipe.batch(mb, boxed, vec![[0u8; 32]; 600].into_boxed_slice());
+        let Event::Batch { tag: 7, batch, digests } = drain_all(&mut box_pipe, 1).pop().unwrap() else {
+            panic!("expected Event::Batch");
+        };
+        for i in 0..600 {
+            assert_eq!(digests[i], *blake3_servil_core::convenience::hash(&batch[i]).as_bytes());
+        }
     }
 }
