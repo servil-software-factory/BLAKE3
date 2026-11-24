@@ -567,9 +567,10 @@ pub mod throughput {
         crate::lanes::require();
         // The short path first and inline, so a small batch costs what
         // hash_many costs (which checks its length against the digests);
-        // everything the pool needs is behind the call after. Each message
-        // takes at least one 64-byte compression, so Packed<16>/Packed<32>
-        // count 64 bytes per message toward MIN_SPLIT_LEN just as Batch does.
+        // everything the pool needs is behind the call after. The admission
+        // gate counts at least one 64-byte compression per message so
+        // Packed<16>/Packed<32> enter the pool at 8,192 messages like Batch;
+        // once admitted, hash_many_over_pool keeps its storage-based piece cut.
         if out.len() < 2 || out.len().saturating_mul(batch.slot().max(crate::BLOCK_LEN)) < crate::lanes::MIN_SPLIT_LEN {
             return hash_many(mode, batch, out);
         }
