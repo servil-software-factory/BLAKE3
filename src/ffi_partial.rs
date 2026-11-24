@@ -117,6 +117,108 @@ pub unsafe fn hash_chunks_with_partial_avx2(whole: &[&[u8; CHUNK_LEN]], partial:
     hash_chunks_with_partial::<8>(blake3_servil_partial_avx2, whole, partial, key, counter, flags, out)
 }
 
+pub(crate) fn lane_widths(platform: crate::platform::Platform) -> &'static [usize] {
+    match platform {
+        crate::platform::Platform::SSE41 => &[4],
+        #[cfg(blake3_avx2_ffi)]
+        crate::platform::Platform::AVX2 => &[4, 8],
+        #[cfg(blake3_avx512_ffi)]
+        crate::platform::Platform::AVX512 => {
+            if cfg!(target_os = "linux") && crate::platform::wide_avx512() {
+                &[4, 8, 16, 32]
+            } else {
+                &[4, 8, 16]
+            }
+        }
+        #[allow(unreachable_patterns)]
+        _ => &[],
+    }
+}
+
+/// The lanes `count` whole inputs run on when the x86 kernels' cascade would
+/// take two or more passes for them (3 -> 4, 5..=7 -> 8, 9..=15 -> 16,
+/// 17..=31 -> 32 on wide AVX-512). Every power of two from 4 through the
+/// platform's widest kernel is present in `lane_widths`.
+pub(crate) fn rounded_lanes(platform: crate::platform::Platform, count: usize) -> Option<usize> {
+    if count <= 2 {
+        return None;
+    }
+    lane_widths(platform).iter().copied().find(|&w| w >= count).filter(|&w| w != count)
+}
+
+/// Fast-path `platform.hash_many` on powers of two (every power of two from 4
+/// through the platform's widest kernel is present in `lane_widths`, so powers
+/// of two never pad and larger ones divide evenly by the widest kernel),
+/// keeping the 1 KiB rounding scratch and extra dispatch copies out of hot
+/// callers' stack frames and cold instruction cache lines (`#376`).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hash_many_rounded<const N: usize>(
+    platform: crate::platform::Platform,
+    inputs: &[&[u8; N]],
+    key: &CVWords,
+    counter: u64,
+    increment_counter: crate::IncrementCounter,
+    flags: u8,
+    flags_start: u8,
+    flags_end: u8,
+    out: &mut [u8],
+) {
+    if inputs.len().is_power_of_two() {
+        platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    } else {
+        hash_many_rounded_slow(platform, inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    }
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn hash_many_rounded_slow<const N: usize>(
+    platform: crate::platform::Platform,
+    inputs: &[&[u8; N]],
+    key: &CVWords,
+    counter: u64,
+    increment_counter: crate::IncrementCounter,
+    flags: u8,
+    flags_start: u8,
+    flags_end: u8,
+    out: &mut [u8],
+) {
+    let widest = lane_widths(platform).last().copied().unwrap_or(usize::MAX);
+    let mut inputs = inputs;
+    let mut out = out;
+    let mut counter = counter;
+    if inputs.len() > widest && rounded_lanes(platform, inputs.len() % widest).is_some() {
+        while inputs.len() > widest {
+            let (head, rest) = inputs.split_at(widest);
+            let (head_out, rest_out) = out.split_at_mut(widest * OUT_LEN);
+            platform.hash_many(head, key, counter, increment_counter, flags, flags_start, flags_end, head_out);
+            if increment_counter.yes() {
+                counter += widest as u64;
+            }
+            inputs = rest;
+            out = rest_out;
+        }
+    }
+    if let Some(lanes) = rounded_lanes(platform, inputs.len()) {
+        crate::ran(crate::Ran::RoundedUp);
+        let last = *inputs.last().expect("a count that rounds up is 3 or more");
+        let mut padded = crate::stack_vec::StackVec::<&[u8; N], 32>::new();
+        padded.extend_from_slice(inputs);
+        while padded.len() < lanes {
+            padded.push(last);
+        }
+        #[cfg(all(test, feature = "std"))]
+        crate::ROUNDED_WIDTH.with(|w| w.set(w.get() | padded.len()));
+        let mut scratch = [0u8; 32 * OUT_LEN];
+        platform.hash_many(&padded, key, counter, increment_counter, flags, flags_start, flags_end, &mut scratch[..lanes * OUT_LEN]);
+        out[..inputs.len() * OUT_LEN].copy_from_slice(&scratch[..inputs.len() * OUT_LEN]);
+    } else {
+        platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

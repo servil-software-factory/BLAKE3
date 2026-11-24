@@ -34,6 +34,7 @@ impl<T: Copy, const N: usize> StackVec<T, N> {
     /// Appends a copy of `other`. Panics when it does not fit (taking the
     /// free slots it needs is the check, made once).
     #[inline]
+    #[cfg(any(blake3_sse41_ffi, test))]
     pub(crate) fn extend_from_slice(&mut self, other: &[T]) {
         let room = &mut self.buf[self.len..][..other.len()];
         for (slot, &item) in room.iter_mut().zip(other) {

@@ -76,6 +76,9 @@ src/ffi_output.rs	replace | with ^ in input	4	equivalent: mode flags (0, 16, 32,
 src/ffi_output.rs	replace | with ^ in packed	3	equivalent: | and ^ agree on flag bits that never overlap: the mode's flags hold none of CHUNK_START, CHUNK_END and ROOT
 src/ffi_output.rs	replace | with ^ in self_test_shape	2	equivalent: fixture structural flags (3, 2, 4), mode flags (0, 16, 32, 64) and optional ROOT (8) occupy disjoint bits
 src/ffi_partial.rs	replace % with + in rotation	1	equivalent: k % 4 becomes k + 4, which adds 16 to each shuffle index; pshufb reads an index's low four bits (and bit 7, clear: the largest is 47), so the shuffle is the same
+src/ffi_partial.rs	replace && with || in lane_widths	1	[cpu has avx512f avx512vl amd_family_ge_1a] equivalent on this CPU: on Linux the condition is then wide_avx512() or true, and wide_avx512() holds here (AMD Zen 5 with AVX-512), so the widths are the same; other CPUs catch it
+src/ffi_partial.rs	replace > with >= in hash_many_rounded_slow	2	equivalent: a count equal to the widest kernel has no rest to round (rounded_lanes(0) is None), so neither the `if` nor the loop runs one more time with a result that differs
+src/ffi_partial.rs	replace | with ^ in hash_many_rounded_slow	1	the tests' record of the widths a count rounded to (ROUNDED_WIDTH): `|` and `^` agree unless one width is recorded twice in a reading, which no test's reading holds (three x86-64 machines' whole runs, November 10, 2026)
 src/ffi_partial.rs	replace | with ^ in rotation	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/hasher.rs	replace + with *	1	untested bound: `const DEPTH: usize = MAX_DEPTH + 1` (55 -> 53 or 54) holds lazy-merged stack entries up to 2^64 bytes; no test feeds >= 2^53 chunks (8 EiB)
 src/hasher.rs	replace + with -	1	untested bound: `const DEPTH: usize = MAX_DEPTH + 1` (55 -> 53 or 54) holds lazy-merged stack entries up to 2^64 bytes; no test feeds >= 2^53 chunks (8 EiB)
@@ -110,9 +113,7 @@ src/lib.rs	delete match arm Mode::Plain in Mode<'_>::key	1	equivalent: without t
 src/lib.rs	replace % with + in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace % with / in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace && with || in compress_chunks_parallel	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/lib.rs	replace && with || in hash_many_rounded	1	equivalent: with `||` a count at or under the widest kernel enters the groups' loop, whose own condition (len > widest) is false at once, so nothing changes
 src/lib.rs	replace && with || in hash_serial_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/lib.rs	replace && with || in lane_widths	1	[cpu has avx512f avx512vl amd_family_ge_1a] equivalent on this CPU: on Linux the condition is then wide_avx512() or true, and wide_avx512() holds here (AMD Zen 5 with AVX-512), so the widths are the same; other CPUs catch it
 src/lib.rs	replace && with || in prefetch_kernels	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace && with || in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace * with +	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -139,7 +140,6 @@ src/lib.rs	replace << with >>	1	same code: every test binary hashes as the unmut
 src/lib.rs	replace == with != in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace > with < in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace > with == in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/lib.rs	replace > with >= in hash_many_rounded	2	equivalent: a count equal to the widest kernel has no rest to round (rounded_lanes(0) is None), so neither the `if` nor the loop runs one more time with a result that differs
 src/lib.rs	replace > with >= in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace >= with < in hash_serial_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace >= with < in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -154,7 +154,6 @@ src/lib.rs	replace | with ^ in Hash::from_hex::hex_val	2	equivalent: a character
 src/lib.rs	replace | with ^ in Output::root_output_block	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in OutputReader::fill	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in compress_parents_parallel	1	equivalent: | and ^ agree on flag bits that never overlap
-src/lib.rs	replace | with ^ in hash_many_rounded	1	the tests' record of the widths a count rounded to (ROUNDED_WIDTH): `|` and `^` agree unless one width is recorded twice in a reading, which no test's reading holds (three x86-64 machines' whole runs, November 10, 2026)
 src/lib.rs	replace | with ^ in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace || with && in compress_chunks_parallel	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace % with + in hash_blocks	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
