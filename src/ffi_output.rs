@@ -346,19 +346,22 @@ mod tests {
         }
     }
 
-    /// Short one-block batches (1 to 63 bytes) in whole groups take the
-    /// independent-compression kernel (#294): a group of the platform's width
-    /// reaches its entry, and fewer than a group reach none of it. (Packed
-    /// 16/32/48-byte batches take the direct-load kernels in `ffi_packed`.)
+    /// Short one-block batches (1 to 63 bytes) and `Packed<16/32/48>` tails
+    /// take the independent-compression kernels (#294, #509): whole groups
+    /// plus padded tails (`output16` from 9 on AVX-512, `output8` for `4..=8`
+    /// on AVX-512 and `4..=7` on AVX2), leaving `0..=3` for one-at-a-time
+    /// hashing. (Full SIMD groups of `Packed<16/32/48>` take the direct-load
+    /// kernels in `ffi_packed`.)
     #[test]
     fn packed_groups_take_the_independent_kernel() {
-        use crate::throughput::hash_many;
+        use crate::throughput::{Packed, hash_many};
         let platform = Platform::detect();
         if lanes(platform) == 0 {
             return;
         }
         let entry = if lanes(platform) == 16 { entry() } else { entry8() } as usize;
-        for (count, reached) in [(lanes(platform), true), (2 * lanes(platform), true), (lanes(platform) - 1, false)] {
+        let wide_min = if lanes(platform) == 16 { 9 } else { 4 };
+        for (count, reached) in [(lanes(platform), true), (2 * lanes(platform), true), (lanes(platform) - 1, true), (wide_min - 1, false), (3, false)] {
             let mut out = std::vec![[0u8; OUT_LEN]; count];
             for len in [1, 33, 63] {
                 let mut batch = crate::throughput::Batch::new(len, count);
@@ -372,10 +375,48 @@ mod tests {
                 if reached {
                     assert_eq!(ran.len(), 1, "{count} batch messages of {len} bytes on the group kernel alone: {ran:?}");
                 }
+                if count == 3 {
+                    assert!(!ran.contains(&(entry8() as usize)), "3 batch messages stay scalar");
+                } else if count == 8 && lanes(platform) == 16 {
+                    assert!(ran.contains(&(entry8() as usize)), "8 batch messages on AVX-512 use 8-lane AVX2");
+                }
                 for i in 0..count {
                     assert_eq!(out[i], *crate::convenience::hash(&std::vec![i as u8; len]).as_bytes(), "{len} bytes, message {i}");
                 }
             }
+        }
+        // Verify Packed<32> tails (`n % 8` in `4..=7`, e.g. 4, 7, 15 = 8+7,
+        // 20 = 16+4) hit padded 8-lane `output8` while `n % 8 < 4` stays scalar.
+        for count in [3, 4, 7, 15, 20] {
+            let mut leaves = Packed::<32>::new(count);
+            for (i, leaf) in leaves.iter_mut().enumerate() {
+                leaf.fill((i as u8).wrapping_add(11));
+            }
+            let mut out = std::vec![[0u8; OUT_LEN]; count];
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            hash_many(crate::Mode::Plain, &leaves, &mut out);
+            let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+            if count == 3 {
+                assert!(!ran.contains(&entry) && !ran.contains(&(entry8() as usize)), "3 packed messages stay scalar");
+            } else {
+                assert!(ran.contains(&(entry8() as usize)), "{count} packed messages must hit padded 8-lane output8 tail");
+            }
+            for i in 0..count {
+                assert_eq!(out[i], *crate::convenience::hash(&[(i as u8).wrapping_add(11); 32]).as_bytes(), "packed {count}, message {i}");
+            }
+        }
+        let mixed_n = lanes(platform) + if lanes(platform) == 16 { 8 } else { 4 };
+        let mut batch = crate::throughput::Batch::new(33, mixed_n);
+        for i in 0..mixed_n {
+            batch.message_mut(i).fill((i as u8).wrapping_add(37));
+        }
+        let mut out_m = std::vec![[0u8; OUT_LEN]; mixed_n];
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        hash_many(crate::Mode::Plain, &batch, &mut out_m);
+        let ran_m = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+        assert!(ran_m.contains(&entry) && ran_m.contains(&(entry8() as usize)), "mixed {mixed_n} batch must run both full group and 8-lane tail");
+        for i in 0..mixed_n {
+            assert_eq!(out_m[i], *crate::convenience::hash(&[(i as u8).wrapping_add(37); 33]).as_bytes());
         }
     }
 
