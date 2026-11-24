@@ -98,9 +98,10 @@
 //! calling thread). As a current heuristic (not a frozen contract),
 //! [`throughput::hash_multithreaded`] and
 //! [`throughput::hash_many_multithreaded`] stay on the calling thread
-//! below 512 KiB of stored input bytes — raw input length for single
-//! messages, `count × max(64, round_up(message_len, 64))` for a
-//! [`throughput::Batch`], and `count × N` for a [`throughput::Packed<N>`] —
+//! below 512 KiB of compression-block bytes — raw input length for single
+//! messages, and `count × max(64, round_up(message_len, 64))` for both
+//! [`throughput::Batch`] and [`throughput::Packed<N>`] (so 8,192 messages
+//! of 16, 32, or 64 bytes all equal 8,192 compressions and qualify) —
 //! and at or above 512 KiB are eligible to use available worker threads
 //! (batches also require at least two messages).
 //!
@@ -550,15 +551,15 @@ pub mod throughput {
     /// assert!(hashes.iter().all(|h| h == blake3_servil::convenience::hash(&[7u8; 256]).as_bytes()));
     /// ```
     ///
-    /// **Speed**: below 512 KiB of stored input bytes (`count × max(64,
-    /// round_up(message_len, 64))` for a [`Batch`], so a `Batch` of
-    /// 4,096 × 36 B stays serial while 8,192 × 36 B qualifies; `count × N`
-    /// for a [`Packed<N>`], so `Packed<32>` qualifies at 16,384 messages; an
-    /// implementation heuristic, not a frozen contract), or with fewer than
-    /// two messages, it runs on the calling thread at [`hash_many`]'s speed.
-    /// Larger batches are eligible to use available worker threads (on an
-    /// Apple M4 Max, 64-byte messages from about 10 down to 3 ns each). It
-    /// shares the cores with other callers as [`hash_multithreaded`] does.
+    /// **Speed**: below 512 KiB of compression-block bytes (`count × max(64,
+    /// round_up(message_len, 64))` for both [`Batch`] and [`Packed<N>`], so
+    /// 4,096 × 36 B stays serial while 8,192 × 16 B, 32 B, 36 B, or 64 B all
+    /// qualify; an implementation heuristic, not a frozen contract), or with
+    /// fewer than two messages, it runs on the calling thread at
+    /// [`hash_many`]'s speed. Larger batches are eligible to use available
+    /// worker threads (on an Apple M4 Max, 64-byte messages from about 10
+    /// down to 3 ns each). It shares the cores with other callers as
+    /// [`hash_multithreaded`] does.
     // Inlined, so a constant mode folds to its constants (as
     // convenience::hash is: no mode stored for the call to read).
     #[inline(always)]
@@ -566,8 +567,10 @@ pub mod throughput {
         crate::lanes::require();
         // The short path first and inline, so a small batch costs what
         // hash_many costs (which checks its length against the digests);
-        // everything the pool needs is behind the call after.
-        if out.len() < 2 || batch.bytes().len() < crate::lanes::MIN_SPLIT_LEN {
+        // everything the pool needs is behind the call after. Each message
+        // takes at least one 64-byte compression, so Packed<16>/Packed<32>
+        // count 64 bytes per message toward MIN_SPLIT_LEN just as Batch does.
+        if out.len() < 2 || out.len().saturating_mul(batch.slot().max(crate::BLOCK_LEN)) < crate::lanes::MIN_SPLIT_LEN {
             return hash_many(mode, batch, out);
         }
         // Check the output count against the whole batch before taking

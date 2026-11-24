@@ -425,9 +425,10 @@ pub(crate) fn hash_many_over_pool(tree: &TreeHasher, batch: crate::throughput::P
         return tree.hash_many(&batch, outputs);
     };
     let count = outputs.len();
-    let plan = pool.plan(places::Kind::Messages, input.len());
+    let work_slot = slot.max(crate::BLOCK_LEN);
+    let plan = pool.plan(places::Kind::Messages, count.saturating_mul(work_slot));
     with_scratch(
-        |pieces| cut_messages(pieces, count, slot, plan.threads),
+        |pieces| cut_messages(pieces, count, work_slot, plan.threads),
         |(), pieces, _| {
             let work = Work::Messages { batch, tree: tree.clone().on_this_core(), pieces, outputs: outputs.as_mut_ptr() };
             pool.run_job(work, pieces.len(), 0, plan.threads, plan.near());
@@ -4190,6 +4191,30 @@ mod test {
                 hash_mt(&input[..MIN_SPLIT_LEN], crate::Mode::Plain);
             }),
             "at MIN_SPLIT_LEN: the pool"
+        );
+        // Packed<16> and Packed<32> take one 64-byte compression per message,
+        // so both cross MIN_SPLIT_LEN at MIN_SPLIT_LEN / BLOCK_LEN messages.
+        let min_packed = MIN_SPLIT_LEN / crate::BLOCK_LEN;
+        let mut packed_out = std::vec![[0u8; crate::OUT_LEN]; min_packed];
+        let p16_under = crate::throughput::Packed::<16>::new(min_packed - 1);
+        let p16_at = crate::throughput::Packed::<16>::new(min_packed);
+        let p32_under = crate::throughput::Packed::<32>::new(min_packed - 1);
+        let p32_at = crate::throughput::Packed::<32>::new(min_packed);
+        assert!(
+            !went_to_pool(&mut || crate::throughput::hash_many_multithreaded(crate::Mode::Plain, &p16_under, &mut packed_out[..min_packed - 1])),
+            "Packed<16> under MIN_SPLIT_LEN compressions: serial"
+        );
+        assert!(
+            went_to_pool(&mut || crate::throughput::hash_many_multithreaded(crate::Mode::Plain, &p16_at, &mut packed_out)),
+            "Packed<16> at MIN_SPLIT_LEN compressions: the pool"
+        );
+        assert!(
+            !went_to_pool(&mut || crate::throughput::hash_many_multithreaded(crate::Mode::Plain, &p32_under, &mut packed_out[..min_packed - 1])),
+            "Packed<32> under MIN_SPLIT_LEN compressions: serial"
+        );
+        assert!(
+            went_to_pool(&mut || crate::throughput::hash_many_multithreaded(crate::Mode::Plain, &p32_at, &mut packed_out)),
+            "Packed<32> at MIN_SPLIT_LEN compressions: the pool"
         );
     }
 
