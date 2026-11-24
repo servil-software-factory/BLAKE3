@@ -131,6 +131,8 @@ pub(crate) const CASES: &[(Case, &str)] = &[
     (Incremental { len: 2 * KIB, piece: 63 }, "a Hasher fed less than a block at a time"),
     (Xof { len: 100, skip: 37, out: 300 }, "extended output of several blocks, from an unaligned position"),
     (Xof { len: 1500, skip: 64, out: 1600 }, "extended output of twenty-five blocks: SME2's sixteen, then x8 and x1"),
+    (Many { offset: 0, len: 128, count: 6 }, "six two-block messages: pn6"),
+    (Many { offset: 0, len: 128, count: 7 }, "seven two-block messages: p7"),
 ];
 
 /// The cases elsewhere (x86-64 and portable builds), each kernel
@@ -235,7 +237,7 @@ pub(crate) fn chain(mut outputs: impl FnMut(Case, &[u8], &[u8; 32], &mut [u8]) -
 /// `self_test_matches_official_blake3` checks them, and prints this table
 /// when it differs).
 #[cfg(target_arch = "aarch64")]
-const EXPECTED: [u64; 42] = [
+const EXPECTED: [u64; 44] = [
     0x90e4e563714f7c48,
     0x80003c83df0cf1a6,
     0xf4ffcff9e99d31ba,
@@ -278,6 +280,8 @@ const EXPECTED: [u64; 42] = [
     0x86659376d6731ca2,
     0xeb7d3b584a6ab00f,
     0x4ec390a6848cb5f5,
+    0xdb33ad7dfec2aa99,
+    0x2b19320bb05ac58a,
 ];
 
 #[cfg(not(target_arch = "aarch64"))]

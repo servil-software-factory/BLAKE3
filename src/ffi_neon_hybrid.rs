@@ -281,18 +281,21 @@ const CHUNK_KERNELS: [Option<Kernel>; 11] = [
 const CHUNK_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[8, 3], &[9, 3], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
 
-/// Parent kernel per exact input count.
-const PARENT_KERNELS: [Option<Kernel>; 10] = [
+/// Parent kernel per exact input count. Zero-spill sequential scalars (#523)
+/// let `pn6` (4+2) and `pn10` (8+2) win on both Apple P-cores and E-cores as
+/// well as AmpereOne without extra stack spills.
+const PARENT_KERNELS: [Option<Kernel>; 11] = [
     None,
     Some(asm::blake3_servil_hybrid_k1),
     Some(asm::blake3_servil_hybrid_p2),
     Some(asm::blake3_servil_hybrid_p3),
     Some(asm::blake3_servil_hybrid_p4),
     Some(asm::blake3_servil_hybrid_p5),
-    None,
+    Some(asm::blake3_servil_hybrid_pn6),
     Some(asm::blake3_servil_hybrid_p7),
     Some(asm::blake3_servil_hybrid_p8),
     Some(asm::blake3_servil_hybrid_p9),
+    Some(asm::blake3_servil_hybrid_pn10),
 ];
 
 /// The l kernels (#247), per exact input count, beside the parent plans
@@ -328,6 +331,11 @@ const LAST_KERNELS: [Option<LastKernel>; 10] = [
 /// of this machine's work, and four messages were the last batch where
 /// BLAKE3 official led (P -12%, E +30% in cycles per call).
 const PARENT_PLANS: [&[usize]; 17] =
+    [&[], &[1], &[2], &[3], &[4], &[5], &[6], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[10, 6]];
+
+/// Kernel sizes for the `l` kernels (`l2..l9`, which have no `l6` or `l10`).
+#[cfg(feature = "std")]
+const LAST_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[3, 3], &[7], &[8], &[9], &[7, 3], &[9, 2], &[9, 3], &[9, 4], &[9, 5], &[8, 7], &[8, 8]];
 
 /// The kernels without SHA-3 per exact input count: scalars and quads
@@ -430,9 +438,11 @@ mod ends {
         pub static blake3_servil_hybrid_p3_end: u8;
         pub static blake3_servil_hybrid_p4_end: u8;
         pub static blake3_servil_hybrid_p5_end: u8;
+        pub static blake3_servil_hybrid_pn6_end: u8;
         pub static blake3_servil_hybrid_p7_end: u8;
         pub static blake3_servil_hybrid_p8_end: u8;
         pub static blake3_servil_hybrid_p9_end: u8;
+        pub static blake3_servil_hybrid_pn10_end: u8;
         pub static blake3_servil_hybrid_k1_end: u8;
         pub static blake3_servil_hybrid_k2_end: u8;
         pub static blake3_servil_hybrid_k3_end: u8;
@@ -525,9 +535,11 @@ fn parent_code(n: usize) -> (usize, usize) {
         3 => code!(blake3_servil_hybrid_p3, blake3_servil_hybrid_p3_end),
         4 => code!(blake3_servil_hybrid_p4, blake3_servil_hybrid_p4_end),
         5 => code!(blake3_servil_hybrid_p5, blake3_servil_hybrid_p5_end),
+        6 => code!(blake3_servil_hybrid_pn6, blake3_servil_hybrid_pn6_end),
         7 => code!(blake3_servil_hybrid_p7, blake3_servil_hybrid_p7_end),
         8 => code!(blake3_servil_hybrid_p8, blake3_servil_hybrid_p8_end),
         9 => code!(blake3_servil_hybrid_p9, blake3_servil_hybrid_p9_end),
+        10 => code!(blake3_servil_hybrid_pn10, blake3_servil_hybrid_pn10_end),
         _ => unreachable!("no parent kernel for {n} parents"),
     }
 }
@@ -1065,7 +1077,7 @@ pub unsafe fn hash_last_lanes(
         return;
     }
     let mut done = 0;
-    for &size in PARENT_PLANS[count] {
+    for &size in LAST_PLANS[count] {
         let kernel = LAST_KERNELS[size].expect("an l kernel for every size a plan of two or more names");
         // Sound: the caller's contract, for items done..done + size.
         unsafe {
