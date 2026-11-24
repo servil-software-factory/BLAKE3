@@ -70,16 +70,14 @@ header, the tool's README.
 
 ## Build and test
 
-The supported C compilers are those of supported operating systems: GCC
-12 or later (Debian 12's, the oldest; CI builds and tests with it) and
-Clang as current releases ship it; official BLAKE3 serves older ones.
-
-On AArch64 Linux and macOS the build includes the SME2 kernel when the C
-compiler assembles SME2: Clang 17 or later (Xcode 15 or later), or GCC 14
-or later with binutils 2.41. With an older compiler it builds without the
-kernel and warns (`CC=clang-19 cargo build` adds it on Debian 12, for
-example). On a
-CPU with SME2, the check stops when the build lacks the kernel.
+The Rust library crates (`blake3-servil-core` and `blake3-servil`) assemble all
+x86-64 and AArch64 (including NEON SHA-3 and SME2) kernels directly via
+`rustc`'s `core::arch::global_asm!`, with zero third-party runtime or build
+dependencies and no external C compiler required to assemble the libraries
+(a platform linker is still needed for executables, and C/dev tooling such as
+`capi/`, official `blake3` test oracles, and `tools/verify/` use a C compiler).
+On AArch64 Linux and macOS every build includes both NEON and SME2 kernels and
+selects SME2 at runtime on CPUs with 512-bit SME2.
 
 The tests run under [cargo-nextest](https://nexte.st), each in its own
 process (`cargo test` stops at once and says so); the doc examples run

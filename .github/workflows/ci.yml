@@ -171,33 +171,9 @@ jobs:
     - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests
     - name: threads
       run: sh tools/ci-locked.sh nextest run -p blake3-servil -P ci --lib --tests --no-fail-fast
-    # Both suites once more on a build without the SME2 unit, as a C
-    # compiler that cannot assemble SME2 makes it (GCC 13 and older: this
-    # image's cc, Debian 12's, Raspberry Pi OS's). There the kernels take
-    # 16 inputs a call (MAX_SIMD_DEGREE), where every other AArch64 build
-    # tested takes 128 and x86-64 Linux 32. x86-64 off Linux takes 16
-    # too, and no test runs there. A change that asked the kernels for
-    # 32 parents in one call passed every other test (BLAKE3 #472). The
-    # compiler here is a wrapper that refuses the SME2 flag whatever cc
-    # becomes (the flag alone: a path may hold the word), and the step
-    # fails unless the build says that it left the kernel out.
-    - name: without the SME2 unit (16 inputs a call)
-      run: |
-        printf '#!/bin/sh\ncase " $* " in *" -march=armv9-a+sme2 "*) exit 1;; esac\nexec cc "$@"\n' > "$RUNNER_TEMP/cc-refuses-armv9"
-        chmod +x "$RUNNER_TEMP/cc-refuses-armv9"
-        export CC="$RUNNER_TEMP/cc-refuses-armv9" CARGO_TARGET_DIR="$PWD/target/sixteen"
-        unset BLAKE3_CI
-        for cmd in \
-          "sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features" \
-          "sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests"; do
-          # Each build gets its own transcript and target dir so one build's
-          # fallback notice cannot certify another (review 8dff8004).
-          rm -rf "$CARGO_TARGET_DIR"
-          sh -c "$cmd" > sixteen.log 2>&1 || { cat sixteen.log; exit 1; }
-          cat sixteen.log
-          grep -q "leaves out the SME2 kernel" sixteen.log
-        done
-        sh tools/ci-locked.sh nextest run -p blake3-servil -P ci --lib --tests --no-fail-fast
+    # Assembly is built directly by rustc's LLVM assembler via global_asm! (#487),
+    # so every AArch64 build always includes both NEON and SME2 kernels and selects
+    # NEON vs SME2 at runtime on the CPU (exercised natively on this non-SME2 runner).
     # QEMU 11.1.2, Debian's static build, pinned by its SHA-256 and BLAKE3
     # hashes: the runner's own (Ubuntu's 8.2.2) crashed itself now and then
     # emulating a test's intended panic (#113).

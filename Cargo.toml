@@ -40,9 +40,6 @@ libc = { version = "0.2", default-features = false }
 # co-linking test checks its native symbols never replace ours.
 blake3 = { version = "=1.8.7", default-features = false, features = ["std"] }
 
-[build-dependencies]
-cc = "1.1.12"
-
 # Tests built as users' release build is (opt-level 3, 16 codegen units,
 # no incremental compilation, no debug info), with its checks on: debug
 # assertions and overflow checks, which name a broken assumption where

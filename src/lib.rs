@@ -208,9 +208,10 @@
 //! the [`Read`] and [`Seek`] implementations for [`OutputReader`], owned
 //! `Batch`/`Packed` builders, and the `hash_each`/`update_each` calls.
 //!
-//! The build needs a C compiler that assembles the kernels (GCC 12 or
-//! later, or Clang); without one it stops and says so. This crate runs its
-//! assembly or not at all: for portable Rust, use official BLAKE3.
+//! All kernels are assembled directly by `rustc` via
+//! `core::arch::global_asm!` (no external C compiler or `cc` build dependency
+//! is required for the Rust libraries). This crate runs its assembly or not at
+//! all: for portable Rust or other targets, use official BLAKE3.
 //!
 //! [BLAKE3]: https://blake3.io
 //! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
@@ -231,6 +232,7 @@ mod test;
 #[cfg(test)]
 mod test_support;
 
+mod asm;
 mod block;
 pub mod convenience;
 mod ct;

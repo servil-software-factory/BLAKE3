@@ -74,7 +74,6 @@ version = "0.10.0+dev"
 dependencies = [
  "blake3",
  "blake3-servil-core",
- "cc",
  "libc",
  "shuttle",
 ]
@@ -93,7 +92,6 @@ version = "0.10.0+dev"
 dependencies = [
  "blake3",
  "blake3-servil-version",
- "cc",
  "libc",
 ]
 

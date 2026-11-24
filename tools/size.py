@@ -256,22 +256,38 @@ def is_kernel_object(name):
 def machine_code(tree, target):
     """(the assembly kernels' bytes, the compiled Rust's): the text of
     each object in each crate's release library, the kernels' by their
-    file names."""
+    file names (legacy cc builds) or `blake3_servil_*` symbols (`global_asm!`)."""
     env = dict(os.environ, CARGO_TARGET_DIR=target)
     kernels = rust = 0
     for crate, _ in crate_dirs(tree):
+        rlib = os.path.join(target, "release", f"lib{lib_name(crate)}.rlib")
         try:
             subprocess.run(["cargo", "build", "--release", "--lib", "--quiet"], cwd=crate, env=env, capture_output=True, text=True, check=True)
-            out = subprocess.run(["size", os.path.join(target, "release", f"lib{lib_name(crate)}.rlib")], capture_output=True, text=True, check=True).stdout
+            out = subprocess.run(["size", rlib], capture_output=True, text=True, check=True).stdout
         except (OSError, subprocess.CalledProcessError, StopIteration):
             return None, None
+        crate_kernels = crate_rust = 0
         for line in out.splitlines()[1:]:
             fields = line.split()
             if len(fields) >= 6 and fields[0].isdigit():
                 if is_kernel_object(fields[5]):
-                    kernels += int(fields[0])
+                    crate_kernels += int(fields[0])
                 else:
-                    rust += int(fields[0])
+                    crate_rust += int(fields[0])
+        if crate_kernels == 0 and lib_name(crate) == "blake3_servil_core":
+            # global_asm! places kernels in `.text.blake3_servil_asm` inside the
+            # Rust CGU object on ELF; sum that section directly via `size -A`.
+            try:
+                out_a = subprocess.run(["size", "-A", rlib], capture_output=True, text=True, check=True).stdout
+                for line in out_a.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] == ".text.blake3_servil_asm" and parts[1].isdigit():
+                        crate_kernels += int(parts[1])
+                crate_rust = max(0, crate_rust - crate_kernels)
+            except (OSError, subprocess.CalledProcessError, ValueError):
+                pass
+        kernels += crate_kernels
+        rust += crate_rust
     return (kernels, rust) if kernels and rust else (None, None)
 
 

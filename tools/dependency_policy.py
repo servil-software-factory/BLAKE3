@@ -339,7 +339,11 @@ def cli_selects_unapproved_version(stage):
         (stage / "release" / "checkout" / "Cargo.toml", stage / "release", syn3_ver),
         (stage / "cli" / "Cargo.toml", stage / "cli" / "b3sum", syn2_ver),
     ):
-        edit(manifest, r"^\[build-dependencies\]\n", f'[build-dependencies]\nsyn = "={pinned}"\n')
+        text = manifest.read_text()
+        if re.search(r"^\[build-dependencies\]\n", text, re.MULTILINE):
+            edit(manifest, r"^\[build-dependencies\]\n", f'[build-dependencies]\nsyn = "={pinned}"\n')
+        else:
+            manifest.write_text(text + f'\n[build-dependencies]\nsyn = "={pinned}"\n')
         subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1"], cwd=workdir,
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         edit(manifest, rf'^syn = "={re.escape(pinned)}"\n', 'syn = ">=2, <4"\n')

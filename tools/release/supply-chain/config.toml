@@ -100,7 +100,7 @@ criteria = "agent-safe-to-run"
 
 [[exemptions.cc]]
 version = "1.4.3"
-criteria = "agent-safe-to-deploy"
+criteria = "agent-safe-to-run"
 
 [[exemptions.constant_time_eq]]
 version = "0.4.2"
@@ -108,7 +108,7 @@ criteria = "agent-safe-to-run"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.11"
-criteria = "agent-safe-to-deploy"
+criteria = "agent-safe-to-run"
 
 [[exemptions.funty]]
 version = "2.0.0"

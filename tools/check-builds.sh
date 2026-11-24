@@ -4,9 +4,9 @@
 # without std, tested; the library on one CPU without SME2, tested;
 # warnings as errors for the library and b3sum;
 # the C API, tested from Rust and from C;
-# compile-only checks for x86-64 (default features: its C and assembly
-# with the clang here); and the stop for every other target. Each failure stops the
-# script.
+# compile/codegen checks for x86-64 and macOS AArch64 (via rustc's
+# global_asm!, with no external C compiler); and the stop for every other
+# target. Each failure stops the script.
 #
 #     sh tools/check-builds.sh
 set -eu
@@ -71,9 +71,10 @@ RUSTFLAGS="-D warnings" step cargo check -q --tests --target x86_64-unknown-linu
 for target in x86_64-pc-windows-msvc wasm32-unknown-unknown x86_64-unknown-linux-gnux32; do
 	step sh -c "cargo check -q --keep-going --target $target 2>&1 | grep -q 'for $target, use official BLAKE3'"
 done
-# A C compiler that cannot assemble the x86-64 kernels stops the build,
-# naming official BLAKE3; the builds above are the control.
-step sh -c "CC=/nonexistent/cc cargo check -q 2>&1 | grep -q 'use official BLAKE3 for a build without assembly'"
+# Assembly is built directly by rustc via core::arch::global_asm! (#487),
+# so building both shipped library crates (default, no_std, and macOS
+# AArch64 Mach-O codegen) requires no external C compiler at all.
+step sh -c 'no_cc="$CARGO_TARGET_DIR/no-cc"; rm -rf "$no_cc"; CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib --no-default-features && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --manifest-path threads/Cargo.toml --lib && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib --target aarch64-apple-darwin && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib --no-default-features --target aarch64-apple-darwin && rm -rf "$no_cc"'
 # Every generated kernel file is its generator's output.
 step sh -c 'python3 tools/gen_neon_hybrid.py | cmp - c/blake3_neon_hybrid_aarch64.S && python3 tools/gen_sme2_hybrid.py | cmp - c/blake3_sme2_hybrid_aarch64.S'
 step sh -c 'python3 tools/gen_x86.py | cmp - c/blake3_partial_x86-64_unix.S'

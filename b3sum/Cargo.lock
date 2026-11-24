@@ -55,7 +55,6 @@ name = "blake3-servil"
 version = "0.10.0+dev"
 dependencies = [
  "blake3-servil-core",
- "cc",
 ]
 
 [[package]]
@@ -63,7 +62,6 @@ name = "blake3-servil-core"
 version = "0.10.0+dev"
 dependencies = [
  "blake3-servil-version",
- "cc",
 ]
 
 [[package]]

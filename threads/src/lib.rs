@@ -247,9 +247,10 @@
 //! This crate needs the standard library; the core alone builds without
 //! it.
 //!
-//! The build needs a C compiler that assembles the kernels (GCC 12 or
-//! later, or Clang); without one it stops and says so. This crate runs its
-//! assembly or not at all: for portable Rust, use official BLAKE3.
+//! All kernels are assembled directly by `rustc` via
+//! `core::arch::global_asm!` (no external C compiler or `cc` build dependency
+//! is required for the Rust libraries). This crate runs its assembly or not at
+//! all: for portable Rust or other targets, use official BLAKE3.
 //!
 //! [BLAKE3]: https://blake3.io
 
