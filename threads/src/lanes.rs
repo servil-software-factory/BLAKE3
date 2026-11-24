@@ -124,6 +124,9 @@ use std::sync::{Mutex, OnceLock};
 /// with the workers awake (256 KiB x0.81); a rule splitting from 256 KiB
 /// when workers are awake never triggered (calls that do not split wake
 /// none), so it went.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const MIN_SPLIT_LEN: usize = 256 * 1024;
+#[cfg(not(target_arch = "x86_64"))]
 pub(crate) const MIN_SPLIT_LEN: usize = 512 * 1024;
 
 /// The shortest piece: eight chunks, a hybrid kernel's worth.
@@ -1260,26 +1263,36 @@ pub(crate) mod places {
     pub(crate) struct Plan {
         /// The threads the job is cut for and wakes, its caller among them.
         pub(crate) threads: usize,
+        near_only: bool,
         learning: Option<(Kind, usize, Reach, std::time::Instant)>,
     }
 
     impl Plan {
         /// The plan for a job of `len` bytes of `kind` in a pool of `all`
         /// threads: all of them, where the workers have no places, where
-        /// the caller's place has none, and from FAR_LEN up.
+        /// the caller's place has none, and from FAR_LEN up. Below 512 KiB
+        /// (x86 256..512 KiB splits, #490), stay strictly within the caller's
+        /// own cache/socket and cap concurrency to at least 64 KiB per thread.
         pub(crate) fn new(kind: Kind, len: usize, all: usize) -> Plan {
-            let Some(near) = near_workers() else { return Plan { threads: all, learning: None } };
+            if len < 512 * 1024 {
+                let cap = (len / (64 * 1024)).max(1);
+                let Some(near) = near_workers() else {
+                    return Plan { threads: all.min(cap), near_only: false, learning: None };
+                };
+                return Plan { threads: (near + 1).min(all).min(cap), near_only: true, learning: None };
+            }
+            let Some(near) = near_workers() else { return Plan { threads: all, near_only: false, learning: None } };
             if len >= FAR_LEN {
-                return Plan { threads: all, learning: None };
+                return Plan { threads: all, near_only: false, learning: None };
             }
             let reach = LEARNED.with(|l| l.get()[kind as usize][class(len)].choose());
             let threads = if reach == Reach::Near { (near + 1).min(all) } else { all };
-            Plan { threads, learning: Some((kind, len, reach, now())) }
+            Plan { threads, near_only: false, learning: Some((kind, len, reach, now())) }
         }
 
         /// Whether the job stays with the caller's place.
         pub(crate) fn near(&self) -> bool {
-            matches!(self.learning, Some((_, _, Reach::Near, _)))
+            self.near_only || matches!(self.learning, Some((_, _, Reach::Near, _)))
         }
 
         /// The job is done: the thread learns from it.
@@ -4664,7 +4677,7 @@ mod test {
     /// that piece's size must keep the aligned portion of the prefix.
     #[test]
     fn the_prefix_cut_keeps_the_aligned_prefix_after_rounding_again() {
-        let (pieces, own) = cut_with_prefix_vec(MIN_SPLIT_LEN, 2, sme2_prefix(MIN_SPLIT_LEN, 2));
+        let (pieces, own) = cut_with_prefix_vec(512 * 1024, 2, sme2_prefix(512 * 1024, 2));
         assert_eq!(own, 1);
         assert_eq!(pieces[0].len, 256 * 1024);
     }
