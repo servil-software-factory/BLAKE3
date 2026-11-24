@@ -105,10 +105,13 @@ https://github.com/servil-software-factory/BLAKE3/blob/main/b3sum/README.md
 
 By default, `b3sum` uses all the CPU cores it is allowed: it hashes multiple
 files in parallel and splits large files across threads. On a Linux machine
-with several memory nodes it keeps to one of them, the one that holds the most
-of the CPUs it is allowed (the library's README says more). Pass
-`--num-threads 1` to use a single thread. On Linux, `taskset -c LIST b3sum ...`
-pins `b3sum` to specific CPUs.
+with several memory nodes, runs that use multiple threads (or pass
+`--num-threads` > 1) keep to one node, the one that holds the most of the CPUs
+the process is allowed (the library's README says more); single-threaded runs
+(`--num-threads 1` or single-threaded paths such as one small regular file)
+skip topology discovery and bind nothing. Pass `--num-threads 1` to use a
+single thread. On Linux, `taskset -c LIST b3sum ...` pins `b3sum` to specific
+CPUs.
 
 See [What `--check` does](what_does_check_do.md) for checkfile rules.
 

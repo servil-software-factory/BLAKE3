@@ -490,3 +490,75 @@ fn record_oriented_sockets_and_packet_pipes_are_rejected() {
         assert_eq!(f.stream_position().unwrap(), 1, "/dev/fd/N must not advance the underlying fd cursor");
     }
 }
+
+#[test]
+fn single_small_file_skips_thread_discovery_and_numa_confinement() {
+    blake3::initialize();
+    let dir = crate::tempfile::tempdir().unwrap();
+    let path = dir.path().join("small_16k.bin");
+    let data = vec![0x5Au8; 16 * 1024];
+    std::fs::write(&path, &data).unwrap();
+    let args = crate::Args::for_test_plain(vec![path]);
+    let stdin_ctx = crate::file_end::StdinContext::current();
+    crate::configure_threads(&args);
+    let mut out = crate::OutBuf::new();
+    let failed = crate::hash_inputs(&args, &stdin_ctx, &mut out);
+    assert_eq!(failed, 0);
+    assert!(crate::THREADS.get().is_none(), "single 16 KiB file must not trigger thread discovery (#469)");
+    #[cfg(target_os = "linux")]
+    assert_eq!(crate::CONFINEMENT_CALLS.load(std::sync::atomic::Ordering::Relaxed), 0, "single 16 KiB file must not invoke NUMA confinement (#469)");
+    assert!(crate::threads().get() >= 1);
+    #[cfg(target_os = "linux")]
+    assert_eq!(crate::CONFINEMENT_CALLS.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn multi_file_path_triggers_numa_confinement_once() {
+    blake3::initialize();
+    let dir = crate::tempfile::tempdir().unwrap();
+    let p1 = dir.path().join("a.bin");
+    let p2 = dir.path().join("b.bin");
+    std::fs::write(&p1, b"alpha").unwrap();
+    std::fs::write(&p2, b"beta").unwrap();
+    let args = crate::Args::for_test_plain(vec![p1, p2]);
+    let stdin_ctx = crate::file_end::StdinContext::current();
+    crate::configure_threads(&args);
+    let mut out = crate::OutBuf::new();
+    let failed = crate::hash_inputs(&args, &stdin_ctx, &mut out);
+    assert_eq!(failed, 0);
+    assert!(crate::THREADS.get().is_some());
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        crate::CONFINEMENT_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "multi-file hashing must confine to one NUMA node once before spawning workers"
+    );
+}
+
+#[test]
+fn num_threads_one_skips_confinement() {
+    blake3::initialize();
+    let crate::args::ParseOutcome::Parsed(raw) = crate::args::parse_from(["b3sum", "--num-threads", "1", "a"]).unwrap() else {
+        panic!("expected parsed");
+    };
+    let args =
+        crate::Args { inner: raw, mode: blake3::Mode::Plain, base_hasher: blake3::convenience::Hasher::new(blake3::Mode::Plain, None), file_args: Vec::new() };
+    crate::configure_threads(&args);
+    assert_eq!(crate::threads().get(), 1);
+    #[cfg(target_os = "linux")]
+    assert_eq!(crate::CONFINEMENT_CALLS.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn num_threads_two_confines_eagerly() {
+    blake3::initialize();
+    let crate::args::ParseOutcome::Parsed(raw) = crate::args::parse_from(["b3sum", "--num-threads", "2", "a"]).unwrap() else {
+        panic!("expected parsed");
+    };
+    let args =
+        crate::Args { inner: raw, mode: blake3::Mode::Plain, base_hasher: blake3::convenience::Hasher::new(blake3::Mode::Plain, None), file_args: Vec::new() };
+    crate::configure_threads(&args);
+    assert_eq!(crate::threads().get(), 2);
+    #[cfg(target_os = "linux")]
+    assert_eq!(crate::CONFINEMENT_CALLS.load(std::sync::atomic::Ordering::Relaxed), 1);
+}

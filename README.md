@@ -24,7 +24,8 @@ We measure and tune on one memory node. On Linux, the library keeps its
 workers on one node, within the CPUs the initializing thread is allowed:
 that thread's node or, where another node holds at least twice as many
 of those CPUs, the node that holds the most. `b3sum` keeps its calling thread and workers
-within the same node. The
+within the same node when a run uses multiple threads (deferred until
+default thread-count discovery is needed, eager for `--num-threads` > 1). The
 application still controls its own threads and buffer placement. This is
 for speed, and no hash depends on it. On a machine with several memory
 nodes it needs the node topology under `/sys/devices/system` to be
@@ -32,8 +33,9 @@ readable and `sched_setaffinity` to be allowed: where a sandbox hides the
 one, no node is chosen, and where it refuses the other for a thread, that
 thread runs on the CPUs it has. (A pool of one thread asked for by
 number, `initialize_multithreaded(NonZeroUsize::new(1))`, has no workers,
-so it reads no topology and binds nothing; `b3sum` tries to bind its own
-thread at any thread count.)
+so it reads no topology and binds nothing; `b3sum` likewise skips
+topology discovery and binding for `--num-threads 1` and single-threaded
+paths that never ask for workers, such as hashing one small regular file.)
 
 ## How it is checked
 

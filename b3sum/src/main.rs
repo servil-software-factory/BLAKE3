@@ -566,6 +566,10 @@ pub(crate) fn hash_open_file_ex(args: &Args, mut file: File) -> err::Result<Hash
             #[cfg(all(test, target_os = "linux"))]
             let warm = warm && !linux_pipe::force_miss();
             if warm {
+                // Release the open file descriptor once the mapping is known
+                // warm so tight FD limits (e.g. RLIMIT_NOFILE=4) still have a
+                // spare FD if `hash_slice_32` triggers lazy NUMA sysfs reads.
+                drop(file);
                 let h = hash_slice_32(args.mode, &map);
                 let map_len = map.len() as u64;
                 hold(map);
@@ -826,8 +830,44 @@ thread_local! {
 
 static THREADS: std::sync::OnceLock<std::num::NonZeroUsize> = std::sync::OnceLock::new();
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static CONFINEMENT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(target_os = "linux")]
+fn confine_cli_once() {
+    static CONFINED: std::sync::Once = std::sync::Once::new();
+    CONFINED.call_once(|| {
+        #[cfg(test)]
+        CONFINEMENT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        blake3::__confine_cli_to_one_node();
+    });
+}
+
+/// Apply `--num-threads` before hashing begins. Runs with `--num-threads > 1`
+/// confine to one Linux memory node eagerly before `available_parallelism()`
+/// caps the request; `--num-threads 1` and default runs defer confinement to
+/// the first `threads()` demand (so single-threaded paths that never ask for
+/// workers skip `/sys/devices/system` NUMA discovery: BLAKE3 #469).
+pub(crate) fn configure_threads(args: &Args) {
+    if let Some(requested) = args.num_threads() {
+        #[cfg(target_os = "linux")]
+        if requested.get() > 1 {
+            confine_cli_once();
+        }
+        THREADS.set(cap_requested_threads(requested)).expect("main sets the threads first");
+        lock_budget().strict = true;
+    }
+}
+
 pub(crate) fn threads() -> std::num::NonZeroUsize {
-    *THREADS.get_or_init(|| std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN))
+    *THREADS.get_or_init(|| {
+        // Confine lazily on the first default `threads()` demand so single-
+        // threaded paths that never query worker count skip per-process
+        // `/sys/devices/system` NUMA discovery on multi-socket Linux hosts (#469).
+        #[cfg(target_os = "linux")]
+        confine_cli_once();
+        std::thread::available_parallelism().unwrap_or(std::num::NonZeroUsize::MIN)
+    })
 }
 
 /// Scoped accounting for active file-worker threads under `--num-threads`.
@@ -1994,12 +2034,7 @@ fn main() -> err::Result<()> {
     explain_sigbus();
     blake3::initialize();
     let args = Args::parse()?;
-    #[cfg(target_os = "linux")]
-    blake3::__confine_cli_to_one_node();
-    if let Some(requested) = args.num_threads() {
-        THREADS.set(cap_requested_threads(requested)).expect("main sets the threads first");
-        lock_budget().strict = true;
-    }
+    configure_threads(&args);
     let stdin_ctx = StdinContext::current();
     let mut out = OutBuf::new();
     let mut files_failed = 0u64;
