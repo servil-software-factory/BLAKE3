@@ -133,6 +133,12 @@ MAX_INPUTS = 10
 F_REMAIN = F_PTR + 8 * MAX_INPUTS     # blocks remaining, for kernels whose x1 carries a pointer
 F_PART = F_REMAIN + 8                 # a partial lane's blocks (byte 0) and final block length (byte 1)
 FRAME = F_REMAIN + 16
+# Sequential zero-spill scalars (`seq_scalars` in `kernel()`, #523): 2 x 32 B
+# running chaining values and 8 B [block_flags, block_len], disjoint from FRAME.
+F_SEQ_CV = FRAME
+F_SEQ_FL = F_SEQ_CV + 64
+FRAME_SEQ = F_SEQ_FL + 16
+assert FRAME_SEQ % 16 == 0, FRAME_SEQ
 # The l kernels' frame (#247), past the others', so theirs is unchanged:
 # each input's last block pointer, each unit's last lengths (four words, in
 # the unit's layout), four 64s, and each scalar's last length.
@@ -1012,7 +1018,7 @@ def xof1_kernel(name, sc):
 ROLLED_K1 = True
 
 
-def kernel(name, scalars, units, partial=False, xof=False, last=False):
+def kernel(name, scalars, units, partial=False, xof=False, last=False, seq_scalars=()):
     """A kernel over whole chunks. With `partial`, the last scalar hashes a
     partial chunk: its block count and final block length arrive in x6 as
     `blocks | last_len << 8` (blocks in 1..=the others' count, last_len in
@@ -1023,19 +1029,23 @@ def kernel(name, scalars, units, partial=False, xof=False, last=False):
     rows with the key, lane j's at out + 64 * slot. With `last` (#247), each
     lane's last block comes from its own pointer, x7[i], and records its own
     length, x6[i] (32-bit words, 0..=64), in place of the input's last block
-    and the packed length."""
+    and the packed length. With `seq_scalars` (#523), multiple scalar lanes
+    share the single zero-spill 16-register file (`w6..w17, w19..w22`, temp
+    `w23`, ptr `x24`) sequentially within each block, interleaved across the
+    NEON units' 7 rounds."""
     assert not partial or not xof
+    assert not seq_scalars or (not scalars and not partial and not xof and not last and len(seq_scalars) <= 2)
     assert not last or (not partial and not xof and (units or len(scalars) > 1)), "an l kernel has two lanes or more"
-    frame = FRAME_LAST if last else FRAME
+    frame = FRAME_LAST if last else (FRAME_SEQ if seq_scalars else FRAME)
     if xof and scalars:
         assert len(scalars) == 1 and not units
         return xof1_kernel(name, scalars[0])
     if not units and len(scalars) == 1:
         assert not partial
         return lean_kernel(name, scalars[0], last="x25")
-    n_inputs = len(scalars) + sum(len(u.slots) for u in units)
+    n_inputs = len(scalars) + len(seq_scalars) + sum(len(u.slots) for u in units)
     assert n_inputs <= MAX_INPUTS
-    x_pairs, d_pairs = callee_saved(scalars, units)
+    x_pairs, d_pairs = callee_saved(scalars + ([seq_scalars[0]] if seq_scalars else []), units)
     L = []
     e = L.append
     e(f"{name}:")
@@ -1113,6 +1123,15 @@ def kernel(name, scalars, units, partial=False, xof=False, last=False):
                 e("dup v0.4s, v0.s[0]")
     for sc in scalars:
         L += sc.prologue()
+    for sc in seq_scalars:
+        assert not sc.spill_d and sc.preg == "x24"
+        e(f"add x4, sp, #{F_SEQ_CV + 32 * sc.index}")
+        for i in range(0, 8, 2):
+            e(f"ldp {sc.r(i)}, {sc.r(i + 1)}, [x2, #{4 * i}]")
+            e(f"stp {sc.r(i)}, {sc.r(i + 1)}, [x4, #{4 * i}]")
+        offset = sc.slot * sc.ctr_step
+        e(f"add x4, x3, #{offset}")
+        e(f"str x4, [sp, #{sc.tpl}]")
     x1_is_pointer = "x1" in pregs.values()
     if x1_is_pointer:
         e(f"str x1, [sp, #{F_REMAIN}]")
@@ -1179,53 +1198,121 @@ def kernel(name, scalars, units, partial=False, xof=False, last=False):
             e("csel w3, w3, w4, eq")
         for u in units:
             L.extend(u.start_rows("w2", "w3", rem if last else None))
-        for sc in lanes:
-            if last:
-                # This scalar's own length on the last block, 64 before.
-                e(f"ldr w3, [sp, #{F_SCLEN + 4 * sc.index}]")
-                e("mov w4, #64")
-                e(f"cmp {rem}, #1")
-                e("csel w3, w3, w4, eq")
-            if sc is part:
-                # The partial lane's own flags and length, into w2 and w3:
-                # start on the first block as for the others, end and the
-                # final length on its own last block, where the blocks done
-                # so far (total - remaining) are one short of its count.
-                e(f"ldr w3, [sp, #{F_PACKED}]")
-                e("and w2, w3, #0xff")
-                e(f"ldr x4, [sp, #{F_TOTAL}]")
-                if x1_is_pointer:
-                    e(f"ldr x5, [sp, #{F_REMAIN}]")
-                e(f"cmp {rem}, x4")
-                e("ubfx w4, w3, #8, #8")
-                e("csel w4, w4, wzr, eq")
-                e("orr w2, w2, w4")
-                e(f"ldrb w4, [sp, #{F_PART}]")
-                e(f"add x4, x4, {rem}")
-                e(f"ldr x5, [sp, #{F_TOTAL}]")
-                e("add x5, x5, #1")
-                e("cmp x4, x5")
-                e("ubfx w4, w3, #16, #8")
-                e("csel w4, w4, wzr, eq")
-                e("orr w2, w2, w4")
-                e(f"ldrb w4, [sp, #{F_PART + 1}]")
-                e("mov w5, #64")
-                e("csel w3, w4, w5, eq")
-            L.extend(sc.block_start("w2", "w3"))
-        for r in range(7):
-            for quads, base in ((COLS, 0), (DIAGS, 8)):
-                lists = [sc.half_step(quads, SCHEDULE[r], base) for sc in lanes]
-                vec = []
-                for u in units:
-                    vec += u.half_step(quads, SCHEDULE[r], base)
-                if vec:
-                    lists.append(vec)
-                L.extend(interleave(lists))
-        for sc in lanes:
-            L.extend(sc.block_end())
+        if seq_scalars:
+            assert len(seq_scalars) == 2
+            e(f"str w2, [sp, #{F_SEQ_FL}]")
+            e(f"str w3, [sp, #{F_SEQ_FL + 4}]")
+
+            def weight(ins):
+                # Macro calls expand to multiple instructions; weight them by
+                # their real instruction count so proportional interleaving
+                # spreads zero-spill scalar rounds evenly across every NEON
+                # half-step instead of front-loading them into round 0.
+                op = ins.split()[0]
+                if op in ("SGA_R", "SGB_R", "SGA", "SGB"):
+                    return 8
+                if op in ("PG_L", "PG_S"):
+                    return 16
+                if op in ("QG_L", "QG_S"):
+                    return 19
+                return 1
+
+            def prop_interleave(a, b):
+                if not a:
+                    return list(b)
+                if not b:
+                    return list(a)
+                wa = sum(weight(x) for x in a)
+                wb = sum(weight(x) for x in b)
+                out = []
+                ia = ib = ca = cb = 0
+                while ia < len(a) or ib < len(b):
+                    if ia < len(a) and (ib == len(b) or ca * wb <= cb * wa):
+                        out.append(a[ia])
+                        ca += weight(a[ia])
+                        ia += 1
+                    else:
+                        out.append(b[ib])
+                        cb += weight(b[ib])
+                        ib += 1
+                return out
+
+            # 14 NEON half-steps <-> 14 scalar rounds (7 for lane 0, 7 for lane 1).
+            step_idx = 0
+            for r in range(7):
+                for quads, base in ((COLS, 0), (DIAGS, 8)):
+                    sc_idx = step_idx // 7
+                    sc_round = step_idx % 7
+                    sc = seq_scalars[sc_idx]
+                    sc_step = []
+                    if sc_round == 0:
+                        sc_step.append(f"ldr {sc.preg}, [sp, #{F_PTR + 8 * sc.slot}]")
+                        sc_step.append(f"add x4, sp, #{F_SEQ_CV + 32 * sc.index}")
+                        for i in range(0, 8, 2):
+                            sc_step.append(f"ldp {sc.r(i)}, {sc.r(i + 1)}, [x4, #{4 * i}]")
+                        sc_step.append(f"ldr w2, [sp, #{F_SEQ_FL}]")
+                        sc_step.append(f"ldr w3, [sp, #{F_SEQ_FL + 4}]")
+                        sc_step += sc.block_start("w2", "w3")
+                    sc_step += sc.half_step(COLS, SCHEDULE[sc_round], 0)
+                    sc_step += sc.half_step(DIAGS, SCHEDULE[sc_round], 8)
+                    if sc_round == 6:
+                        sc_step += sc.block_end()
+                        sc_step.append(f"add x4, sp, #{F_SEQ_CV + 32 * sc.index}")
+                        for i in range(0, 8, 2):
+                            sc_step.append(f"stp {sc.r(i)}, {sc.r(i + 1)}, [x4, #{4 * i}]")
+                    vec_step = []
+                    for u in units:
+                        vec_step += u.half_step(quads, SCHEDULE[r], base)
+                    L.extend(prop_interleave(sc_step, vec_step))
+                    step_idx += 1
+        else:
+            for sc in lanes:
+                if last:
+                    # This scalar's own length on the last block, 64 before.
+                    e(f"ldr w3, [sp, #{F_SCLEN + 4 * sc.index}]")
+                    e("mov w4, #64")
+                    e(f"cmp {rem}, #1")
+                    e("csel w3, w3, w4, eq")
+                if sc is part:
+                    # The partial lane's own flags and length, into w2 and w3:
+                    # start on the first block as for the others, end and the
+                    # final length on its own last block, where the blocks done
+                    # so far (total - remaining) are one short of its count.
+                    e(f"ldr w3, [sp, #{F_PACKED}]")
+                    e("and w2, w3, #0xff")
+                    e(f"ldr x4, [sp, #{F_TOTAL}]")
+                    if x1_is_pointer:
+                        e(f"ldr x5, [sp, #{F_REMAIN}]")
+                    e(f"cmp {rem}, x4")
+                    e("ubfx w4, w3, #8, #8")
+                    e("csel w4, w4, wzr, eq")
+                    e("orr w2, w2, w4")
+                    e(f"ldrb w4, [sp, #{F_PART}]")
+                    e(f"add x4, x4, {rem}")
+                    e(f"ldr x5, [sp, #{F_TOTAL}]")
+                    e("add x5, x5, #1")
+                    e("cmp x4, x5")
+                    e("ubfx w4, w3, #16, #8")
+                    e("csel w4, w4, wzr, eq")
+                    e("orr w2, w2, w4")
+                    e(f"ldrb w4, [sp, #{F_PART + 1}]")
+                    e("mov w5, #64")
+                    e("csel w3, w4, w5, eq")
+                L.extend(sc.block_start("w2", "w3"))
+            for r in range(7):
+                for quads, base in ((COLS, 0), (DIAGS, 8)):
+                    lists = [sc.half_step(quads, SCHEDULE[r], base) for sc in lanes]
+                    vec = []
+                    for u in units:
+                        vec += u.half_step(quads, SCHEDULE[r], base)
+                    if vec:
+                        lists.append(vec)
+                    L.extend(interleave(lists))
+            for sc in lanes:
+                L.extend(sc.block_end())
         for u in units:
             L.extend(u.block_end())
-        advanced = [sc.slot for sc in lanes] + [slot for u in units for slot in u.slots]
+        advanced = [sc.slot for sc in lanes] + [sc.slot for sc in seq_scalars] + [slot for u in units for slot in u.slots]
         for i in sorted(advanced):
             if i in pregs:
                 e(f"add {pregs[i]}, {pregs[i]}, #64")
@@ -1263,6 +1350,11 @@ def kernel(name, scalars, units, partial=False, xof=False, last=False):
         e(f"{name}_done:")
     e(f"ldr x2, [sp, #{F_OUT}]")
     for sc in (scalars[:-1] if partial else scalars):
+        L += sc.store("x2")
+    for sc in seq_scalars:
+        e(f"add x4, sp, #{F_SEQ_CV + 32 * sc.index}")
+        for i in range(0, 8, 2):
+            e(f"ldp {sc.r(i)}, {sc.r(i + 1)}, [x4, #{4 * i}]")
         L += sc.store("x2")
     if xof:
         e(f"ldr x3, [sp, #{F_PART}]")
@@ -1313,6 +1405,9 @@ def build():
     # A parent (or one-block message) on the integer units beside NEON parents.
     psc1 = lambda slot: [Scalar(0, slot, one, "w23", preg="x24", ctr_step=0)]
     psc2 = lambda s0, s1: [Scalar(0, s0, two_a, "w2", "w3", preg="x0", ctr_step=0), Scalar(1, s1, two_b, "w4", "w5", preg="x1", ctr_step=0)]
+    # Zero-spill sequential scalars sharing the single 16-register file (#523).
+    seq2 = lambda s0, s1: [Scalar(0, s0, one, "w23", preg="x24"), Scalar(1, s1, one, "w23", preg="x24")]
+    pseq2 = lambda s0, s1: [Scalar(0, s0, one, "w23", preg="x24", ctr_step=0), Scalar(1, s1, one, "w23", preg="x24", ctr_step=0)]
     return {
         "p2": kernel("blake3_servil_hybrid_p2", [], [plone((0, 1))]),
         "p4": kernel("blake3_servil_hybrid_p4", psc2(0, 1), [plone((2, 3))]),
@@ -1337,11 +1432,11 @@ def build():
         "k3": kernel("blake3_servil_hybrid_k3", sc1(0), [lone_pair((1, 2))]),
         "k4": kernel("blake3_servil_hybrid_k4", sc2(0, 1), [lone_pair((2, 3))]),
         "k5": kernel("blake3_servil_hybrid_k5", sc1(0), [pair(0, (1, 2)), pair(1, (3, 4))]),
-        "k6": kernel("blake3_servil_hybrid_k6", sc2(0, 1), [pair(0, (2, 3)), pair(1, (4, 5))]),
+        "k6": kernel("blake3_servil_hybrid_k6", [], [pair(0, (2, 3)), pair(1, (4, 5))], seq_scalars=seq2(0, 1)),
         "k7": kernel("blake3_servil_hybrid_k7", sc1(0), [quad(0, (1, 2, 3, 4)), pair(1, (5, 6))]),
-        "k8": kernel("blake3_servil_hybrid_k8", sc2(0, 1), [quad(0, (2, 3, 4, 5)), pair(1, (6, 7))]),
+        "k8": kernel("blake3_servil_hybrid_k8", [], [quad(0, (2, 3, 4, 5)), pair(1, (6, 7))], seq_scalars=seq2(0, 1)),
         "k9": kernel("blake3_servil_hybrid_k9", sc1(0), [quad(0, (1, 2, 3, 4)), quad(1, (5, 6, 7, 8))]),
-        "k10": kernel("blake3_servil_hybrid_k10", sc2(0, 1), [quad(0, (2, 3, 4, 5)), quad(1, (6, 7, 8, 9))]),
+        "k10": kernel("blake3_servil_hybrid_k10", [], [nquad(0, (2, 3, 4, 5)), quad(1, (6, 7, 8, 9))], seq_scalars=seq2(0, 1)),
         # q<n>: n whole chunks and, in the last slot, a partial chunk on the
         # scalar side, which finishes early; the others run on alone.
         # q1: one whole chunk on a NEON pair (its second lane, slot 2, a
@@ -1361,13 +1456,13 @@ def build():
         "kn2": kernel("blake3_servil_hybrid_kn2", sc2(0, 1), []),
         "kn4": kernel("blake3_servil_hybrid_kn4", [], [nquad(0, (0, 1, 2, 3))]),
         "kn5": kernel("blake3_servil_hybrid_kn5", sc1(0), [nquad(0, (1, 2, 3, 4))]),
-        "kn6": kernel("blake3_servil_hybrid_kn6", sc2(0, 1), [nquad(0, (2, 3, 4, 5))]),
+        "kn6": kernel("blake3_servil_hybrid_kn6", [], [nquad(0, (2, 3, 4, 5))], seq_scalars=seq2(0, 1)),
         "kn8": kernel("blake3_servil_hybrid_kn8", [], [nquad(0, (0, 1, 2, 3)), nquad(1, (4, 5, 6, 7))]),
         "pn2": kernel("blake3_servil_hybrid_pn2", psc2(0, 1), []),
         "pn4": kernel("blake3_servil_hybrid_pn4", [], [npquad(0, (0, 1, 2, 3))]),
         "pn5": kernel("blake3_servil_hybrid_pn5", psc1(0), [npquad(0, (1, 2, 3, 4))]),
-        "pn6": kernel("blake3_servil_hybrid_pn6", psc2(0, 1), [npquad(0, (2, 3, 4, 5))]),
-        "pn10": kernel("blake3_servil_hybrid_pn10", psc2(0, 1), [npquad(0, (2, 3, 4, 5)), npquad(1, (6, 7, 8, 9))]),
+        "pn6": kernel("blake3_servil_hybrid_pn6", [], [npquad(0, (2, 3, 4, 5))], seq_scalars=pseq2(0, 1)),
+        "pn10": kernel("blake3_servil_hybrid_pn10", [], [npquad(0, (2, 3, 4, 5)), npquad(1, (6, 7, 8, 9))], seq_scalars=pseq2(0, 1)),
         # x<n>: extended output, n blocks of one block's output at counters
         # counter + i (every table entry the same block), both halves; x1
         # on the integer units, x4 and x8 on NEON quads.
