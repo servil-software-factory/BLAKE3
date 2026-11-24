@@ -255,7 +255,7 @@ impl Park {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     #[cfg(not(shuttle))]
     use super::Park;
     use super::split;
@@ -268,7 +268,7 @@ mod test {
     /// is compiled again under Shuttle's threads and the test thread has no
     /// handle to register.
     #[cfg(not(shuttle))]
-    fn park_with(workers: usize, fanout: usize, parked: &[usize]) -> Park {
+    pub(crate) fn park_with(workers: usize, fanout: usize, parked: &[usize]) -> Park {
         let park = Park::new(workers, fanout);
         for me in 0..workers {
             park.register(me);

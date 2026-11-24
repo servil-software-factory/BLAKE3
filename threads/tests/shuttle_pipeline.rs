@@ -212,6 +212,26 @@ mod lanes {
         shuttle::thread::yield_now();
     }
 
+    pub(crate) mod places {
+        #[derive(Clone, Copy)]
+        pub(crate) enum Kind {
+            PipelineBatch,
+        }
+        #[derive(Clone, Copy)]
+        pub(crate) struct Plan {
+            pub(crate) in_flight: usize,
+        }
+        impl Plan {
+            pub(crate) fn new(_kind: Kind, _work_bytes: usize, _all: usize) -> Self {
+                Self { in_flight: 1 }
+            }
+            pub(crate) fn near(&self) -> bool {
+                false
+            }
+            pub(crate) fn done(&self) {}
+        }
+    }
+
     pub(crate) mod sources {
         use super::*;
 
@@ -254,7 +274,7 @@ mod lanes {
             pub(crate) fn unregister(slot: usize) {
                 REGISTERED.lock().unwrap().retain(|&at| at != slot);
             }
-            pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64]) {
+            pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64], _near: bool) {
                 let mut waiting = self.waiting.lock().unwrap();
                 assert!(waiting.len() + args.len() <= self.actions, "more actions than the Source was made for");
                 waiting.extend(args.iter().map(|&arg| (run, context as usize, arg)));

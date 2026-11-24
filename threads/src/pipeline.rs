@@ -14,6 +14,7 @@
 //! written or read by one worker core are reused only after a full lap of
 //! the ring rather than immediately bounced to another core.
 
+use crate::lanes::places::{Kind as PlaceKind, Plan};
 use crate::lanes::sources::{ACTION_SME2, Source};
 use crate::lanes::{MEMBERS, Member, OwnLine, TASK_LEN, Task, pool_platform};
 use crate::throughput::{Batch, Cv, LastCv, Prepared, TreeHasher, level_of};
@@ -1105,6 +1106,10 @@ pub struct Pipeline<T, B = (), P = Batch<'static>> {
     room_streams: Box<[RoomStream]>,
     owners: RawSlots<B>,
     batches: RawSlots<(P, Box<[[u8; OUT_LEN]]>)>,
+    /// Per-slot adaptive locality plan for split `Pipeline::batch` submissions
+    /// (`[TASK_LEN, places::FAR_LEN)`).
+    batch_plans: Box<[Option<Plan>]>,
+    batches_in_flight: usize,
     /// FIFO ring of free message slots: slots cycle around the full ring
     /// before reuse so worker-written cache lines cool before another worker writes them.
     free_slots: Ring<u32>,
@@ -1355,7 +1360,17 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
                 let sme2 = piece_n.saturating_mul(work_slot) >= SME2_MIN_LEN;
                 self.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32"), sme2);
             }
-            self.dispatch_many(pieces);
+            let near = if self.source_slot.is_some() {
+                self.batches_in_flight += 1;
+                let mut plan = Plan::new(PlaceKind::PipelineBatch, work_bytes, 1);
+                plan.in_flight = self.batches_in_flight;
+                let near = plan.near();
+                self.batch_plans[s] = Some(plan);
+                near
+            } else {
+                false
+            };
+            self.dispatch_many(pieces, near);
         }
         self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
     }
@@ -1489,6 +1504,8 @@ impl<T, B, P> Pipeline<T, B, P> {
             room_streams: vec![RoomStream::EMPTY; m].into_boxed_slice(),
             owners: RawSlots::new(m),
             batches: RawSlots::new(m),
+            batch_plans: vec![None; m].into_boxed_slice(),
+            batches_in_flight: 0,
             free_slots,
             open_messages: 0,
             end_queue: Ring::new(m),
@@ -2035,7 +2052,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         for p in 0..pieces {
             self.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32"), true);
         }
-        self.dispatch_many(pieces);
+        self.dispatch_many(pieces, false);
     }
 
     fn flush_sealed_short_rooms(&mut self) {
@@ -2162,17 +2179,17 @@ impl<T, B, P> Pipeline<T, B, P> {
         match self.source_slot {
             // Sound: this Pipeline exclusively publishes to its own action
             // source, and `ctx` stays valid for the lifetime of `Shared`.
-            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, core::slice::from_ref(&arg)) },
+            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, core::slice::from_ref(&arg), false) },
             // Sound: `ctx` is this Pipeline's Shared, as run_action requires.
             None => unsafe { Shared::run_action(ctx, arg, pool_platform()) },
         }
     }
 
-    fn dispatch_many(&mut self, count: usize) {
+    fn dispatch_many(&mut self, count: usize, near: bool) {
         let ctx = self.shared as *const Shared as *const ();
         match self.source_slot {
             // Sound: as dispatch_one's.
-            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, &self.action_buf[..count]) },
+            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, &self.action_buf[..count], near) },
             None => {
                 for i in 0..count {
                     let arg = self.action_buf[i];
@@ -2306,6 +2323,10 @@ impl<T, B, P> Pipeline<T, B, P> {
                 Event::Hashed { tag, hash, owner: None }
             }
             SlotKind::WaitBatch { .. } => {
+                if let Some(plan) = self.batch_plans[s].take() {
+                    self.batches_in_flight -= 1;
+                    plan.done();
+                }
                 // Sound: a WaitBatch slot holds its batch and digests (batch
                 // wrote them), read out here once.
                 let (batch, digests) = unsafe { (*self.batches.slot(s)).assume_init_read() };
@@ -5125,5 +5146,72 @@ mod test {
             let stdout = std::string::String::from_utf8_lossy(&out.stdout);
             assert!(out.status.success() && stdout.contains("1 passed"), "fork wait case {case} failed: status={:?}\n{stdout}", out.status);
         }
+    }
+
+    #[cfg(not(shuttle))]
+    #[test]
+    fn batch_plans_and_non_batch_dispatch_locality_contract() {
+        crate::initialize();
+        let mut pipe = Pipeline::<u32, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 2 });
+        let drain_one = |pipe: &mut Pipeline<u32, Vec<u8>>| loop {
+            if let Some(ev) = pipe.next_event() {
+                return ev;
+            }
+            block_on(pipe.ready());
+        };
+        let is_registered = pipe.source_slot.is_some();
+
+        // Split batch (>= TASK_LEN = 64 KiB) records a BatchPlan when
+        // registered, decrements batches_in_flight on reap, and produces
+        // exact digests.
+        let split_count = TASK_LEN / 64; // 1,024 x 64 B = 64 KiB
+        let mut batch = Batch::new(64, split_count);
+        for i in 0..split_count {
+            batch.message_mut(i).fill((i & 0xff) as u8);
+        }
+        let msg = block_on(pipe.message(1, None));
+        pipe.batch(msg, batch, vec![[0u8; OUT_LEN]; split_count].into_boxed_slice());
+        let recorded_in_flight = pipe.batches_in_flight;
+        let ev = drain_one(&mut pipe);
+        assert_eq!(recorded_in_flight, usize::from(is_registered));
+        assert_eq!(pipe.batches_in_flight, 0);
+        let Event::Batch { batch, digests, .. } = ev else { panic!("expected Batch event") };
+        assert_eq!(digests[0], *crate::convenience::hash(&batch.bytes()[..64]).as_bytes());
+
+        // Short group (KIND_GROUP), full room piece (KIND_ROOM_PIECE), and
+        // split non-batch owned message (128 KiB) never set batch_plans and
+        // never mark their queued actions near.
+        let mut m_short = block_on(pipe.message(2, Some(64)));
+        let mut room = block_on(pipe.room());
+        room.bytes_mut()[..64].fill(0x33);
+        pipe.commit(&mut m_short, &mut room, 64);
+        drop(room);
+        pipe.end(m_short);
+        let short_front_near = pipe.shared().storage.source.front_action_near();
+        let _ = drain_one(&mut pipe);
+        assert!(!short_front_near);
+        assert_eq!(pipe.batches_in_flight, 0);
+
+        let mut m_room = block_on(pipe.message(3, Some((ROOM_LEN * 2) as u64)));
+        let mut r1 = block_on(pipe.room());
+        r1.bytes_mut().fill(0x44);
+        pipe.commit(&mut m_room, &mut r1, ROOM_LEN);
+        drop(r1);
+        let room_front_near = pipe.shared().storage.source.front_action_near();
+        let mut r2 = block_on(pipe.room());
+        r2.bytes_mut().fill(0x55);
+        pipe.commit(&mut m_room, &mut r2, ROOM_LEN);
+        drop(r2);
+        pipe.end(m_room);
+        let _ = drain_one(&mut pipe);
+        assert!(!room_front_near);
+        assert_eq!(pipe.batches_in_flight, 0);
+
+        let m_owned = block_on(pipe.message(4, Some((TASK_LEN * 2) as u64)));
+        pipe.owned(m_owned, vec![0x66u8; TASK_LEN * 2]);
+        let owned_front_near = pipe.shared().storage.source.front_action_near();
+        let _ = drain_one(&mut pipe);
+        assert!(!owned_front_near);
+        assert_eq!(pipe.batches_in_flight, 0);
     }
 }

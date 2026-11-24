@@ -1061,12 +1061,14 @@ pub(crate) mod places {
     }
 
     /// A job's kind: one message's tree, a batch of equal messages, a
-    /// collection. A thread learns for each apart.
+    /// collection, or a split `Pipeline::batch` submission. A thread learns
+    /// for each apart.
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub(crate) enum Kind {
         Tree = 0,
         Messages = 1,
         Each = 2,
+        PipelineBatch = 3,
     }
 
     /// What a thread has learned about one kind of job in one size class:
@@ -1180,12 +1182,24 @@ pub(crate) mod places {
         }
 
         /// The job [`Learned::choose`] gave its reach took `nanos` for `len` bytes.
+        #[cfg(test)]
         pub(crate) fn record(&mut self, nanos: u64, len: usize) {
+            self.record_for(self.stands().0, nanos, len);
+        }
+
+        /// Record a completed job that ran with `reach` in `nanos` for `len`
+        /// bytes. Under pipelined submission (`Pipeline::batch`), completions
+        /// submitted under the previous reach can finish after a phase flip;
+        /// ignoring mismatched reaches keeps each reach's measured rate pure.
+        pub(crate) fn record_for(&mut self, reach: Reach, nanos: u64, len: usize) {
+            let (expected, first) = self.stands();
+            if reach != expected {
+                return;
+            }
             let rate = u32::try_from(nanos.saturating_mul(1024) / len.max(1) as u64).unwrap_or(u32::MAX);
             // The fastest since the first of the measured jobs. (What the
             // jobs before it add is forgotten at that job, before the
             // rates are next compared, at a round's end.)
-            let (reach, first) = self.stands();
             // A round's trial ends at a hopeless job: a measured one (not
             // the trial's first, which pays for the other reach's
             // leavings) more than HOPELESS times as slow as the round's
@@ -1214,10 +1228,10 @@ pub(crate) mod places {
         }
     }
 
-    /// The size classes a thread learns in: jobs of 2^19 to 2^27 bytes
-    /// and over, by their length's highest bit; shorter jobs with the
+    /// The size classes a thread learns in: jobs of 2^16 (64 KiB) to 2^27
+    /// bytes and over, by their length's highest bit; shorter jobs with the
     /// first, and jobs of FAR_LEN or more are every thread's unasked.
-    const CLASSES: usize = 9;
+    const CLASSES: usize = 12;
 
     /// A job of this many bytes or more is every thread's: 256 MiB, more
     /// than any cache holds, where the caller's place alone was never the
@@ -1225,11 +1239,11 @@ pub(crate) mod places {
     pub(crate) const FAR_LEN: usize = 1 << 28;
 
     fn class(len: usize) -> usize {
-        ((usize::BITS - 1 - len.max(1).leading_zeros()) as usize).clamp(19, 19 + CLASSES - 1) - 19
+        ((usize::BITS - 1 - len.max(1).leading_zeros()) as usize).clamp(16, 16 + CLASSES - 1) - 16
     }
 
     std::thread_local! {
-        static LEARNED: core::cell::Cell<[[Learned; CLASSES]; 3]> = const { core::cell::Cell::new([[Learned { job: 0, rate: [0; 2], round: None, longer: 0 }; CLASSES]; 3]) };
+        static LEARNED: core::cell::Cell<[[Learned; CLASSES]; 4]> = const { core::cell::Cell::new([[Learned { job: 0, rate: [0; 2], round: None, longer: 0 }; CLASSES]; 4]) };
         /// The thread's last learning job: its kind and class, and when it ended.
         static LAST: core::cell::Cell<Option<(Kind, usize, std::time::Instant)>> = const { core::cell::Cell::new(None) };
     }
@@ -1238,13 +1252,19 @@ pub(crate) mod places {
     /// time and `cycle` the time since the thread's last job of its kind
     /// and class ended, if that was the thread's last learning job. The
     /// cycle, where the jobs follow closely (it is under CLOSE times the
-    /// job's own time); else the job's own time: what the caller did in a
-    /// long gap says nothing of the reach.
-    fn cost(job: std::time::Duration, cycle: Option<std::time::Duration>) -> u64 {
+    /// job's own time) and is not a burst drain of already-completed
+    /// pipelined batches (`cycle * in_flight * 4 < job`); else the job's own
+    /// time.
+    fn cost(job: std::time::Duration, cycle: Option<std::time::Duration>, in_flight: usize) -> u64 {
         let nanos = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        let job_ns = nanos(job);
         match cycle {
-            Some(cycle) if nanos(cycle) < CLOSE.saturating_mul(nanos(job)) => nanos(cycle),
-            _ => nanos(job),
+            Some(cycle) => {
+                let cycle_ns = nanos(cycle);
+                let burst_drain = in_flight > 1 && cycle_ns.saturating_mul(in_flight as u64).saturating_mul(4) < job_ns;
+                if !burst_drain && cycle_ns < CLOSE.saturating_mul(job_ns) { cycle_ns } else { job_ns }
+            }
+            None => job_ns,
         }
     }
 
@@ -1257,9 +1277,12 @@ pub(crate) mod places {
     const CLOSE: u64 = 64;
 
     /// A job's plan, and its clock where the thread is learning.
+    #[derive(Clone, Copy)]
     pub(crate) struct Plan {
         /// The threads the job is cut for and wakes, its caller among them.
         pub(crate) threads: usize,
+        /// Active batches in flight when this plan was created (`1` for sync calls).
+        pub(crate) in_flight: usize,
         learning: Option<(Kind, usize, Reach, std::time::Instant)>,
     }
 
@@ -1268,13 +1291,13 @@ pub(crate) mod places {
         /// threads: all of them, where the workers have no places, where
         /// the caller's place has none, and from FAR_LEN up.
         pub(crate) fn new(kind: Kind, len: usize, all: usize) -> Plan {
-            let Some(near) = near_workers() else { return Plan { threads: all, learning: None } };
+            let Some(near) = near_workers() else { return Plan { threads: all, in_flight: 1, learning: None } };
             if len >= FAR_LEN {
-                return Plan { threads: all, learning: None };
+                return Plan { threads: all, in_flight: 1, learning: None };
             }
             let reach = LEARNED.with(|l| l.get()[kind as usize][class(len)].choose());
             let threads = if reach == Reach::Near { (near + 1).min(all) } else { all };
-            Plan { threads, learning: Some((kind, len, reach, now())) }
+            Plan { threads, in_flight: 1, learning: Some((kind, len, reach, now())) }
         }
 
         /// Whether the job stays with the caller's place.
@@ -1284,17 +1307,18 @@ pub(crate) mod places {
 
         /// The job is done: the thread learns from it.
         pub(crate) fn done(&self) {
-            if let Some((kind, len, _, started)) = self.learning {
+            if let Some((kind, len, reach, started)) = self.learning {
                 let ended = now();
                 let nanos = cost(
                     ended - started,
                     LAST.with(|l| l.replace(Some((kind, class(len), ended))))
                         .filter(|&(k, c, _)| k == kind && c == class(len))
                         .map(|(_, _, last)| ended - last),
+                    self.in_flight.max(1),
                 );
                 LEARNED.with(|l| {
                     let mut all = l.get();
-                    all[kind as usize][class(len)].record(nanos, len);
+                    all[kind as usize][class(len)].record_for(reach, nanos, len);
                     l.set(all);
                 });
             }
@@ -2277,6 +2301,15 @@ pub(crate) mod places {
             plan.done();
             assert_eq!(LEARNED.with(|l| l.get()), before);
             assert!(Plan::new(Kind::Tree, FAR_LEN - 1, all).learning.is_some());
+            // Split Pipeline::batch learns its own kind (Kind::PipelineBatch).
+            for job in 0..2 * TRIAL {
+                let mut bp = Plan::new(Kind::PipelineBatch, len, all);
+                bp.in_flight = 2;
+                assert_eq!(bp.near(), job >= TRIAL, "PipelineBatch job {job}");
+                bp.done();
+            }
+            assert_eq!(learned(Kind::PipelineBatch, len).rate, [651, 651]);
+            assert!(!Plan::new(Kind::PipelineBatch, FAR_LEN, all).near());
             TEST_CLOCK.with(|c| c.set(None));
             // Real jobs, of both reaches: the digests are right, and a
             // near job asks for no more workers than its place has.
@@ -2513,12 +2546,12 @@ pub(crate) mod places {
         #[test]
         fn a_jobs_cost_is_its_cycle_where_jobs_follow_closely() {
             let us = std::time::Duration::from_micros;
-            assert_eq!(cost(us(100), None), 100_000);
-            assert_eq!(cost(us(100), Some(us(150))), 150_000);
-            assert_eq!(cost(us(100), Some(us(6399))), 6_399_000);
-            assert_eq!(cost(us(100), Some(us(6400))), 100_000, "CLOSE times the job: a gap");
-            assert_eq!(cost(us(100), Some(us(5_000_000))), 100_000);
-            assert_eq!(cost(us(0), Some(us(0))), 0);
+            assert_eq!(cost(us(100), None, 1), 100_000);
+            assert_eq!(cost(us(100), Some(us(150)), 1), 150_000);
+            assert_eq!(cost(us(100), Some(us(6399)), 1), 6_399_000);
+            assert_eq!(cost(us(100), Some(us(6400)), 1), 100_000, "CLOSE times the job: a gap");
+            assert_eq!(cost(us(100), Some(us(5_000_000)), 1), 100_000);
+            assert_eq!(cost(us(0), Some(us(0)), 1), 0);
         }
 
         /// On every system the pool settles (with places or without), and
@@ -2545,18 +2578,57 @@ pub(crate) mod places {
             for (len, want) in [
                 (0usize, 0),
                 (1, 0),
-                (1 << 19, 0),
-                ((1 << 20) - 1, 0),
-                (1 << 20, 1),
-                (3 << 20, 2),
-                (1 << 26, 7),
-                ((1 << 27) - 1, 7),
-                (1 << 27, 8),
-                (1 << 30, 8),
-                (usize::MAX, 8),
+                (1 << 16, 0),
+                ((1 << 17) - 1, 0),
+                (1 << 17, 1),
+                (1 << 18, 2),
+                (1 << 19, 3),
+                (1 << 20, 4),
+                (3 << 20, 5),
+                (1 << 26, 10),
+                ((1 << 27) - 1, 10),
+                (1 << 27, 11),
+                (1 << 30, 11),
+                (usize::MAX, 11),
             ] {
                 assert_eq!(class(len), want, "len={len}");
             }
+        }
+
+        #[test]
+        fn pipelined_learning_ignores_stale_reach_and_burst_drains() {
+            let mut l = Learned::default();
+            for _ in 0..TRIAL {
+                assert_eq!(l.choose(), Reach::All);
+                l.record_for(Reach::All, 200, 1024);
+            }
+            assert_eq!(l.choose(), Reach::Near);
+            // A stale in-flight All completion after flipping to Near must not
+            // advance or corrupt Near's measurement.
+            l.record_for(Reach::All, 5, 1024);
+            assert_eq!(l.choose(), Reach::Near);
+            for _ in 0..TRIAL {
+                l.record_for(Reach::Near, 100, 1024);
+            }
+            assert_eq!(l.choose(), Reach::Near, "Near won (100 < 200 ns/KiB)");
+
+            let mut reuse = Learned::default();
+            for _ in 0..TRIAL {
+                reuse.record_for(Reach::All, 50, 1024);
+            }
+            for _ in 0..TRIAL {
+                reuse.record_for(Reach::Near, 250, 1024);
+            }
+            assert_eq!(reuse.choose(), Reach::All, "All won (50 < 250 ns/KiB)");
+
+            let job = std::time::Duration::from_micros(800);
+            let burst = std::time::Duration::from_nanos(99_999);
+            let edge = std::time::Duration::from_micros(100); // 100 * 2 * 4 == 800
+            let steady = std::time::Duration::from_micros(400);
+            assert_eq!(cost(job, Some(burst), 2), 800_000, "burst drain falls back to job time");
+            assert_eq!(cost(job, Some(edge), 2), 100_000, "exact cycle*in_flight*4 == job is kept");
+            assert_eq!(cost(job, Some(steady), 2), 400_000, "steady pipelined cycle is kept");
+            assert_eq!(cost(job, Some(burst), 1), 99_999, "sequential in_flight=1 preserves cost");
         }
 
         /// Where the workers have no places (this machine's tests: none
@@ -2918,14 +2990,17 @@ pub(crate) mod sources {
     /// the SME2 turn (a subtree of 16 KiB or more) rather than on NEON.
     pub(crate) const ACTION_SME2: u64 = 1 << 63;
 
-    /// A pipeline's item in a source: three atomic words read before the
-    /// claimer's CAS (`take_claimed`) and rewritten only after `claimed`
-    /// has passed it (`publish_actions`), so no claimer copies non-atomic
-    /// memory after its claim (BLAKE3 #302).
+    /// A pipeline's item in a source: atomic fields read before the claimer's
+    /// CAS (`take`) and rewritten only after `claimed` has passed it
+    /// (`publish_actions`), so no claimer copies non-atomic memory after its
+    /// claim (BLAKE3 #302). Each slot carries its own `near` wake-preference
+    /// hint so mixed publications in one queue never overwrite earlier items'
+    /// wake policy.
     struct Action {
         run: AtomicPtr<()>,
         context: AtomicPtr<()>,
         arg: AtomicU64,
+        near: core::sync::atomic::AtomicBool,
     }
 
     #[repr(align(128))]
@@ -2973,7 +3048,12 @@ pub(crate) mod sources {
             Source {
                 claimed: OwnLine(AtomicUsize::new(0)),
                 actions: (0..actions)
-                    .map(|_| Action { run: AtomicPtr::new(core::ptr::null_mut()), context: AtomicPtr::new(core::ptr::null_mut()), arg: AtomicU64::new(0) })
+                    .map(|_| Action {
+                        run: AtomicPtr::new(core::ptr::null_mut()),
+                        context: AtomicPtr::new(core::ptr::null_mut()),
+                        arg: AtomicU64::new(0),
+                        near: core::sync::atomic::AtomicBool::new(false),
+                    })
                     .collect(),
                 job: AtomicPtr::new(core::ptr::null_mut()),
                 base: AtomicUsize::new(0),
@@ -3012,7 +3092,7 @@ pub(crate) mod sources {
         /// This source must be an action source with a single publisher at a
         /// time, and every `(run, context, arg)` tuple published must be safe
         /// for a worker (or caller) to invoke once with the assigned `Platform`.
-        pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64]) {
+        pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64], near: bool) {
             debug_assert!(!args.is_empty());
             let p = self.finish.published.load(Ordering::Relaxed);
             let next = p.checked_add(args.len()).expect("Source action ticket counter exhausted");
@@ -3023,6 +3103,7 @@ pub(crate) mod sources {
                 slot.run.store(run as *mut (), Ordering::Relaxed);
                 slot.context.store(context as *mut (), Ordering::Relaxed);
                 slot.arg.store(arg, Ordering::Relaxed);
+                slot.near.store(near, Ordering::Relaxed);
             }
             self.finish.published.store(next, Ordering::Release);
             core::sync::atomic::fence(Ordering::SeqCst);
@@ -3031,9 +3112,16 @@ pub(crate) mod sources {
                 wake_sme2();
             }
             if self.waiting() >= 2 {
-                noted(Noted::WakeTry);
-                pool.park.wake_one();
+                wake_speculative(&pool.park, self.front_action_near());
             }
+        }
+
+        /// Whether the action currently at the head of this source's waiting
+        /// ring prefers local-cache speculative wakes.
+        pub(crate) fn front_action_near(&self) -> bool {
+            let c = self.claimed.load(Ordering::Acquire);
+            let p = self.finish.published.load(Ordering::Acquire);
+            c < p && self.actions[c % self.actions.len()].near.load(Ordering::Relaxed)
         }
 
         /// Run one unclaimed action from this source on the calling thread,
@@ -3131,7 +3219,10 @@ pub(crate) mod sources {
         /// waiting, expecting the caller to take a lone one, and a caller
         /// that only collects never does (it waited forever, the workers
         /// asleep: the C API's stream test on an i7-12700K and on GitHub's
-        /// 4-CPU runners; Devon Jonte, #99).
+        /// 4-CPU runners; Devon Jonte, #99). Always calls `wake_one()` (which
+        /// tries the caller's place first and still wakes a remote parked
+        /// worker if local workers are busy) so sleeping external executors
+        /// always make progress.
         pub(crate) fn wake_for_waiting(&self) {
             let pool = pool();
             if self.waiting() > 0 {
@@ -3315,16 +3406,28 @@ pub(crate) mod sources {
         true
     }
 
+    /// Speculative publication / worker-chain wake: prefers the waker's own
+    /// place when `near` is set without spilling to remote caches; spills
+    /// across places when `near` is false. Progress waits (`wake_for_waiting`)
+    /// never call this and always call `Park::wake_one()`.
+    fn wake_speculative(park: &crate::park::Park, near: bool) {
+        noted(Noted::WakeTry);
+        if near {
+            park.wake_one_near();
+        } else {
+            park.wake_one();
+        }
+    }
+
     /// Hash `item` of `source` on this thread, waking the next worker first
     /// when two or more wait and one is parked.
     fn serve(source: &'static Source, item: Item) {
         if source.waiting() >= 2 {
-            noted(Noted::WakeTry);
-            if source.near.load(Ordering::Relaxed) {
-                pool().park.wake_one_near();
-            } else {
-                pool().park.wake_one();
-            }
+            let near = match item {
+                Item::Action { .. } => source.front_action_near(),
+                Item::Pieces(..) => source.near.load(Ordering::Relaxed),
+            };
+            wake_speculative(&pool().park, near);
         }
         match item {
             Item::Action { run, context, arg } => {
@@ -3380,7 +3483,7 @@ pub(crate) mod sources {
             unsafe fn noop(_: *const (), _: u64, _: Platform) {}
             let source: &'static Source = &*Box::leak(Box::new(Source::with_actions(4)));
             let slot = source.register().expect("a free slot");
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[77]) };
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[77], false) };
             let item = take_stream_item();
             Source::unregister(slot);
             assert!(matches!(item, Some(Item::Action { arg: 77, .. })));
@@ -3434,9 +3537,88 @@ pub(crate) mod sources {
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
             let source = Source::with_actions(2);
             unsafe {
-                source.publish_actions(noop, core::ptr::null(), &[1, 2]);
-                source.publish_actions(noop, core::ptr::null(), &[3]);
+                source.publish_actions(noop, core::ptr::null(), &[1, 2], false);
+                source.publish_actions(noop, core::ptr::null(), &[3], false);
             }
+        }
+
+        #[test]
+        #[cfg(not(shuttle))]
+        fn action_near_hint_is_per_ticket_across_mixed_publications() {
+            unsafe fn noop(_: *const (), _: u64, _: Platform) {}
+            let _ = pool();
+            let source = Source::with_actions(8);
+            assert!(!source.front_action_near(), "empty source has no front action");
+
+            // Near batch followed by a far room/group action: earlier near
+            // items keep near=true until all of them are claimed, then the
+            // trailing far item observes near=false.
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[101, 102, 103], true) };
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[200], false) };
+            assert!(source.front_action_near(), "head 101 stays near after trailing far publish");
+            assert!(source.take().is_some());
+            assert!(source.front_action_near(), "head 102 stays near");
+            assert!(source.take().is_some());
+            assert!(source.front_action_near(), "head 103 stays near");
+            assert!(source.take().is_some());
+            assert!(!source.front_action_near(), "head 200 is far");
+            assert!(source.take().is_some());
+            assert!(!source.front_action_near(), "drained source is false");
+
+            // Far large batch followed by a near batch: earlier far items keep
+            // near=false until drained, then the trailing near item sees true.
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[301, 302], false) };
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[400], true) };
+            assert!(!source.front_action_near(), "head 301 stays far after trailing near publish");
+            assert!(source.take().is_some());
+            assert!(!source.front_action_near(), "head 302 stays far");
+            assert!(source.take().is_some());
+            assert!(source.front_action_near(), "head 400 is near");
+            assert!(source.take().is_some());
+            assert!(!source.front_action_near());
+
+            // Fill a full ring of near=true items and drain all of them so
+            // slot `claimed % len` still holds `near == true` from the prior
+            // lap: an empty source (`c == p`) must still return false.
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[1, 2, 3, 4, 5, 6, 7, 8], true) };
+            for _ in 0..8 {
+                assert!(source.front_action_near());
+                assert!(source.take().is_some());
+            }
+            assert!(!source.front_action_near(), "drained ring with stale near slot returns false");
+
+            // Behavioral wake test on a synthetic two-place Park where the
+            // caller's local place (place 0) has NO parked worker (e.g., busy
+            // in an application waker callback) while place 1 has parked
+            // workers: speculative near wake leaves remote parked, speculative
+            // far wake spills to remote, and a progress wake (`wake_one`)
+            // always wakes remote even while the front action is near.
+            std::thread_local! {
+                static PLACE_HERE: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+            }
+            let park = crate::park::test::park_with(4, 4, &[2, 3]);
+            // Place 0 = workers {0, 1} (busy), Place 1 = workers {2, 3} (parked).
+            park.set_places(
+                vec![vec![0b0011u64].into_boxed_slice(), vec![0b1100u64].into_boxed_slice()].into_boxed_slice(),
+                vec![vec![0b1111u64].into_boxed_slice(), vec![0b1111u64].into_boxed_slice()].into_boxed_slice(),
+                || PLACE_HERE.with(|p| p.get()),
+            );
+            PLACE_HERE.with(|p| p.set(0));
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[1, 2], true) };
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[3], false) };
+            assert_eq!(park.parked_count(), 2);
+            wake_speculative(&park, source.front_action_near());
+            assert_eq!(park.parked_count(), 2, "speculative near wake keeps remote workers parked");
+            // Progress wake (as wake_for_waiting calls) wakes a remote worker
+            // even while the front waiting action is near.
+            assert!(park.wake_one(), "progress wake reaches remote worker when local place is busy");
+            assert_eq!(park.parked_count(), 1);
+            // Claim the two near items; head is now the trailing far item.
+            assert!(source.take().is_some() && source.take().is_some());
+            assert!(!source.front_action_near());
+            wake_speculative(&park, source.front_action_near());
+            assert_eq!(park.parked_count(), 0, "speculative far wake spills to remote worker");
+            assert!(source.take().is_some());
         }
 
         #[test]
@@ -3449,7 +3631,7 @@ pub(crate) mod sources {
             assert_eq!(source.actions_len(), 3);
             assert!(!source.run_waiting_action());
             let flag = AtomicU64::new(0);
-            unsafe { source.publish_actions(set_val, (&flag as *const AtomicU64).cast(), &[42 | ACTION_SME2]) };
+            unsafe { source.publish_actions(set_val, (&flag as *const AtomicU64).cast(), &[42 | ACTION_SME2], false) };
             assert!(source.run_waiting_action());
             assert_eq!(flag.load(Ordering::SeqCst), 42, "ACTION_SME2 bit stripped before running");
             assert!(!source.run_waiting_action());
@@ -4289,7 +4471,7 @@ mod test {
         let _ = pool();
         unsafe fn noop(_: *const (), _: u64, _: Platform) {}
         let source: &'static sources::Source = Box::leak(Box::new(sources::Source::with_actions(8)));
-        let pub1 = || unsafe { source.publish_actions(noop, core::ptr::null(), &[0]) };
+        let pub1 = || unsafe { source.publish_actions(noop, core::ptr::null(), &[0], false) };
         counts();
         pub1();
         assert_eq!(counts()[Noted::WakeTry as usize], 0, "one task waiting: the caller's");
