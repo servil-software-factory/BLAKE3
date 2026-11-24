@@ -159,8 +159,8 @@ def neon_quad_g(base_reg, spill_d, ai, bi, ci, di, msg_base, mx, my, nwords):
 
 
 def neon_transpose_quad(slots, stride, msg_base, nwords):
-    """Transpose 4 lanes (`slots`) of `nwords` words (4, 8, or 16) into [sp, #msg_base]."""
-    assert nwords in (4, 8, 16)
+    """Transpose 4 lanes (`slots`) of `nwords` words (4, 8, 12, or 16) into [sp, #msg_base]."""
+    assert nwords in (4, 8, 12, 16)
     L = []
     e = L.append
     # Use v0..v7 as temps (key is loaded after transpose).
@@ -319,6 +319,8 @@ KERNELS = [
     ("probe_p11_64", 3, None, 16),
     ("probe_p10_packed32", 2, 32, 8),
     ("probe_p11_packed32", 3, 32, 8),
+    ("probe_p10_packed48", 2, 48, 12),
+    ("probe_p11_packed48", 3, 48, 12),
     ("probe_p11_packed16", 3, 16, 4),
     ("probe_p11_packed64", 3, 64, 16),
 ]
