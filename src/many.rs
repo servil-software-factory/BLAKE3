@@ -596,13 +596,9 @@ pub(crate) fn try_whole_group<'a>(
     }
     match input(0).len() {
         BLOCK_LEN => run::<BLOCK_LEN>(count, input, key, flags, platform, output),
-        #[cfg(target_arch = "x86_64")]
         128 => run::<128>(count, input, key, flags, platform, output),
-        #[cfg(target_arch = "x86_64")]
         256 => run::<256>(count, input, key, flags, platform, output),
-        #[cfg(target_arch = "x86_64")]
         512 => run::<512>(count, input, key, flags, platform, output),
-        #[cfg(target_arch = "x86_64")]
         CHUNK_LEN => run::<CHUNK_LEN>(count, input, key, flags, platform, output),
         _ => false,
     }
