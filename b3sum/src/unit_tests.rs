@@ -319,3 +319,129 @@ fn direct_permits_enforce_shared_budget() {
     let c = crate::DirectPermits::acquire(1);
     assert_eq!(c.extra, 1, "permits return to the shared pool on drop");
 }
+
+#[test]
+fn direct_permits_subtract_existing_pool_workers_and_pool_threads_respects_leases() {
+    let total = crate::threads().get();
+    if total < 4 {
+        return;
+    }
+    // Save/restore simulated pool_threads around this accounting unit test.
+    let prev_pool = {
+        let mut b = crate::lock_budget();
+        core::mem::replace(&mut b.pool_threads, 3)
+    };
+    let _guard = crate::FileThreadsGuard::enter(1);
+    // total budget T, file_threads = 1, pool_background = 2 -> spare = T - 3.
+    let expected_spare = total.saturating_sub(3);
+    let leased = crate::DirectPermits::acquire(total);
+    assert_eq!(leased.extra, expected_spare, "direct permits must subtract existing pool background workers");
+    // While `leased` holds `expected_spare` permits, pool_threads() must account for them.
+    let p_while_leased = crate::pool_threads().get();
+    assert!(
+        1 + leased.extra + p_while_leased.saturating_sub(1) <= total,
+        "file_workers(1) + leased_direct({}) + pool_bg({}) must not exceed total({})",
+        leased.extra,
+        p_while_leased.saturating_sub(1),
+        total
+    );
+    drop(leased);
+    crate::lock_budget().pool_threads = prev_pool;
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cloning_ptmx_is_not_classified_as_stream_alias() {
+    use std::os::fd::FromRawFd;
+    // Open a fresh PTY master via posix_openpt (same dev/ino as /dev/ptmx).
+    // Sound: standard POSIX call returning a new fd or -1.
+    let fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    if fd < 0 {
+        return;
+    }
+    // Sound: `fd` is a newly opened owned descriptor.
+    let _owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    let meta = crate::file_end::fstat_fd(fd).expect("fstat PTY master");
+    assert_eq!(meta.kind, crate::file_end::FileKind::Other, "cloning PTY master must not be classified as FileKind::Stream");
+    assert!(!crate::file_end::path_matches_stream(std::path::Path::new("/dev/ptmx"), meta.id), "/dev/ptmx must never match as a reopenable stream alias");
+}
+
+#[cfg(unix)]
+#[test]
+fn record_oriented_sockets_and_packet_pipes_are_rejected() {
+    use std::os::fd::FromRawFd;
+    // SOCK_STREAM must be accepted.
+    let mut sv = [-1 as libc::c_int; 2];
+    // Sound: `sv` is a valid 2-element stack array.
+    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) } == 0 {
+        let _a = unsafe { std::os::fd::OwnedFd::from_raw_fd(sv[0]) };
+        let _b = unsafe { std::os::fd::OwnedFd::from_raw_fd(sv[1]) };
+        let meta = crate::file_end::fstat_fd(sv[0]).unwrap();
+        assert!(crate::file_end::ensure_byte_stream_fd(sv[0], meta.mode_type).is_ok());
+    }
+    // SOCK_DGRAM (and on Linux SOCK_SEQPACKET) must be rejected cleanly.
+    let mut dv = [-1 as libc::c_int; 2];
+    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, dv.as_mut_ptr()) } == 0 {
+        let _a = unsafe { std::os::fd::OwnedFd::from_raw_fd(dv[0]) };
+        let _b = unsafe { std::os::fd::OwnedFd::from_raw_fd(dv[1]) };
+        let meta = crate::file_end::fstat_fd(dv[0]).unwrap();
+        assert!(crate::file_end::ensure_byte_stream_fd(dv[0], meta.mode_type).is_err());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut qv = [-1 as libc::c_int; 2];
+        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, qv.as_mut_ptr()) } == 0 {
+            let _a = unsafe { std::os::fd::OwnedFd::from_raw_fd(qv[0]) };
+            let _b = unsafe { std::os::fd::OwnedFd::from_raw_fd(qv[1]) };
+            let meta = crate::file_end::fstat_fd(qv[0]).unwrap();
+            assert!(crate::file_end::ensure_byte_stream_fd(qv[0], meta.mode_type).is_err());
+        }
+        // Linux packet-mode pipe (`pipe2(O_DIRECT)`): a full 4096-byte packet must
+        // be read completely by `read_stream_to_end` (not truncated at 32 bytes).
+        let mut pv = [-1 as libc::c_int; 2];
+        if unsafe { libc::pipe2(pv.as_mut_ptr(), libc::O_DIRECT) } == 0 {
+            let mut r = unsafe { std::fs::File::from_raw_fd(pv[0]) };
+            let mut w = unsafe { std::fs::File::from_raw_fd(pv[1]) };
+            let payload: Vec<u8> = (0..4096usize).map(|i| (i & 0xff) as u8).collect();
+            use std::io::Write;
+            w.write_all(&payload).unwrap();
+            drop(w);
+            let mut got = Vec::new();
+            crate::file_end::read_stream_to_end(&mut r, &mut got).unwrap();
+            assert_eq!(got, payload, "read_stream_to_end must preserve full PIPE_BUF packet-mode pipe writes");
+        }
+        // Packet-mode pipe across a 4 MiB piece boundary (`fill()`): 1 byte +
+        // 1024 x 4096-byte packets must never truncate the final byte.
+        let mut pv2 = [-1 as libc::c_int; 2];
+        if unsafe { libc::pipe2(pv2.as_mut_ptr(), libc::O_DIRECT) } == 0 {
+            let r = unsafe { std::fs::File::from_raw_fd(pv2[0]) };
+            let mut w = unsafe { std::fs::File::from_raw_fd(pv2[1]) };
+            let writer = std::thread::spawn(move || {
+                use std::io::Write;
+                w.write_all(&[0x5Au8]).unwrap();
+                let pkt = [0xA5u8; 4096];
+                for _ in 0..1024 {
+                    w.write_all(&pkt).unwrap();
+                }
+            });
+            let mut hasher = {
+                blake3::initialize();
+                blake3::convenience::Hasher::new(blake3::Mode::Plain, None)
+            };
+            crate::update_from(&mut hasher, r).unwrap();
+            writer.join().unwrap();
+            let mut expected = blake3::convenience::Hasher::new(blake3::Mode::Plain, None);
+            expected.update(&[0x5Au8]);
+            expected.update(&vec![0xA5u8; 1024 * 4096]);
+            assert_eq!(hasher.finalize(), expected.finalize(), "fill() must preserve full 4 KiB packets across piece boundaries");
+        }
+        // `hash_open_file_ex` must also reject an owned SOCK_DGRAM socket.
+        let mut dv2 = [-1 as libc::c_int; 2];
+        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, dv2.as_mut_ptr()) } == 0 {
+            let f = unsafe { std::fs::File::from_raw_fd(dv2[0]) };
+            let _peer = unsafe { std::os::fd::OwnedFd::from_raw_fd(dv2[1]) };
+            let args = crate::Args::for_test_plain(Vec::new());
+            assert!(crate::hash_open_file_ex(&args, f).is_err(), "hash_open_file_ex must reject SOCK_DGRAM");
+        }
+    }
+}

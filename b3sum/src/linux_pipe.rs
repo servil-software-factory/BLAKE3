@@ -528,22 +528,18 @@ fn try_pread_cached(fd: RawFd, dst: &mut [MaybeUninit<u8>], at: usize) -> io::Re
     if force_miss() {
         return Ok(CacheRead::NeedMore(at));
     }
-    let dst_ptr = dst.as_mut_ptr().cast::<u8>();
     let dst_cap = dst.len();
-    file_end::cached_then_plain(dst_cap, at, |pos, flags| {
-        // Sound: `pos <= dst_cap` inside `dst`, which is exclusively borrowed here.
-        let iov = libc::iovec { iov_base: unsafe { dst_ptr.add(pos).cast() }, iov_len: dst_cap - pos };
-        preadv2_asked(fd, &iov, pos, flags)
-    })
+    file_end::cached_then_plain(dst_cap, at, |pos, flags| preadv2_asked(fd, &mut dst[pos..], pos, flags))
 }
 
-/// One `preadv2` with `flags`; the tests keep what was asked.
+/// One `preadv2` into `dst` with `flags`; the tests keep what was asked.
 #[inline]
-fn preadv2_asked(fd: RawFd, iov: &libc::iovec, at: usize, flags: libc::c_int) -> isize {
+fn preadv2_asked(fd: RawFd, dst: &mut [MaybeUninit<u8>], at: usize, flags: libc::c_int) -> isize {
     #[cfg(test)]
     ASKED.with(|asked| asked.borrow_mut().push(flags));
-    // Sound: the caller's one iovec over writable bytes.
-    unsafe { libc::preadv2(fd, iov, 1, at as libc::off_t, flags) }
+    let iov = libc::iovec { iov_base: dst.as_mut_ptr().cast(), iov_len: dst.len() };
+    // Sound: `iov` points directly into the exclusively borrowed `dst` slice.
+    unsafe { libc::preadv2(fd, &iov, 1, at as libc::off_t, flags) }
 }
 
 #[cfg(test)]

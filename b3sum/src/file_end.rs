@@ -73,6 +73,70 @@ impl FdMeta {
     }
 }
 
+/// Whether `rdev` is Linux's cloning PTY master multiplexor `/dev/ptmx` (5, 2).
+#[cfg(target_os = "linux")]
+#[inline]
+fn is_ptmx_rdev(rdev: u64) -> bool {
+    rdev == libc::makedev(5, 2)
+}
+
+/// Whether `fd` is a non-cloning terminal whose pathname reopens the same
+/// stream (excludes cloning PTY masters such as `/dev/ptmx` / `posix_openpt`).
+#[cfg(unix)]
+fn is_reopenable_tty_fd(fd: RawFd, rdev: libc::dev_t) -> bool {
+    // Sound: `isatty` queries an open fd without touching memory.
+    if unsafe { libc::isatty(fd) } != 1 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    if is_ptmx_rdev(rdev as u64) {
+        return false;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = rdev;
+    // A real terminal or PTY slave has a tty device name (`/dev/pts/N`,
+    // `/dev/ttysNNN`, etc.), whereas a cloning PTY master has none.
+    let mut name = [0 as libc::c_char; 256];
+    // Sound: `name` is valid writable storage of length `name.len()`.
+    unsafe { libc::ttyname_r(fd, name.as_mut_ptr(), name.len()) == 0 }
+}
+
+/// Refuse record-oriented sockets (non-`SOCK_STREAM` sockets such as
+/// `SOCK_SEQPACKET` / `SOCK_DGRAM`) whose short reads silently discard record
+/// tails instead of behaving like byte streams (#515).
+#[cfg(unix)]
+pub(crate) fn ensure_byte_stream_fd(fd: RawFd, mode_type: libc::mode_t) -> crate::err::Result<()> {
+    if mode_type == libc::S_IFSOCK {
+        let mut sock_type: libc::c_int = 0;
+        let mut len = libc::socklen_t::try_from(core::mem::size_of::<libc::c_int>()).expect("c_int size fits in socklen_t");
+        // Sound: `sock_type` and `len` are valid writable stack variables.
+        let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE, (&mut sock_type as *mut libc::c_int).cast(), &mut len) };
+        if rc == 0 && sock_type != libc::SOCK_STREAM {
+            crate::bail!("record-oriented socket input is not supported; use a byte-stream socket or pipe");
+        }
+    }
+    Ok(())
+}
+
+/// Read a stream completely into `out` using fixed 64 KiB read requests
+/// (`>= PIPE_BUF`), avoiding `Read::read_to_end`'s initial 32-byte probe that
+/// silently truncates Linux `pipe2(O_DIRECT)` packet-mode pipes, and using
+/// fallible `try_reserve` so OOM returns an I/O error instead of aborting (#515).
+pub(crate) fn read_stream_to_end(reader: &mut impl Read, out: &mut Vec<u8>) -> io::Result<()> {
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                out.try_reserve(n).map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "out of memory"))?;
+                out.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Query `(dev, ino, kind, len)` directly on `fd` using `fstat`, without
 /// duplicating the descriptor.
 #[cfg(unix)]
@@ -89,8 +153,7 @@ pub(crate) fn fstat_fd(fd: RawFd) -> io::Result<FdMeta> {
     let kind = match mode_type {
         libc::S_IFREG => FileKind::Regular,
         libc::S_IFIFO | libc::S_IFSOCK => FileKind::Stream,
-        // Sound: `isatty` queries an open fd without touching memory.
-        libc::S_IFCHR if unsafe { libc::isatty(fd) } == 1 => FileKind::Stream,
+        libc::S_IFCHR if is_reopenable_tty_fd(fd, st.st_rdev) => FileKind::Stream,
         _ => FileKind::Other,
     };
     Ok(FdMeta { id: StreamId { dev: st.st_dev as u64, ino: st.st_ino as u64 }, kind, mode_type, len: st.st_size.max(0) as u64 })
@@ -160,11 +223,20 @@ impl StdinContext {
     #[cfg(unix)]
     fn might_be_dev_or_proc(&self, path: &Path) -> bool {
         let has_parent_dir = path.components().any(|c| matches!(c, Component::ParentDir));
-        let needs_check = if path.is_absolute() {
-            path.starts_with("/dev") || path.starts_with("/proc") || has_parent_dir
+        let mentions_dev_or_proc = path.components().any(|c| matches!(c, Component::Normal(p) if p == "dev" || p == "proc"));
+        let starts_dev_or_proc = if path.is_absolute() {
+            path.starts_with("/dev") || path.starts_with("/proc")
         } else {
-            self.cwd_in_dev_or_proc || has_parent_dir || (self.cwd_is_root && (path.starts_with("dev") || path.starts_with("proc")))
+            self.cwd_in_dev_or_proc || (self.cwd_is_root && (path.starts_with("dev") || path.starts_with("proc")))
         };
+        // Paths touching `/dev` or `/proc` with `..` (e.g. `/dev/fd/../../self/fd/0`
+        // or `/tmp/../dev/fd/../../self/fd/0`, where `/dev/fd` symlinks to
+        // `/proc/self/fd`) must be verified by the OS rather than rejected by
+        // lexical `..` cancellation.
+        if has_parent_dir && (starts_dev_or_proc || mentions_dev_or_proc) {
+            return true;
+        }
+        let needs_check = starts_dev_or_proc || has_parent_dir;
         if !needs_check {
             return false;
         }
@@ -270,22 +342,31 @@ fn is_verified_darwin_fd0(path: &Path, stdin: FdMeta) -> bool {
 
 /// Whether `path` currently resolves via OS `stat` to the exact same `(dev, ino)`
 /// AND file type (`S_IFMT`) as `target` (preserving symlinks, `..`, and trailing
-/// directory requirements).
+/// directory requirements), excluding cloning PTY master devices.
 #[cfg(unix)]
 pub(crate) fn path_matches_fd_meta(path: &Path, target: FdMeta) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|meta| {
         let mode_type = meta.mode() & u32::from(libc::S_IFMT);
+        #[cfg(target_os = "linux")]
+        if mode_type == u32::from(libc::S_IFCHR) && is_ptmx_rdev(meta.rdev()) {
+            return false;
+        }
         mode_type == u32::from(target.mode_type) && StreamId { dev: meta.dev(), ino: meta.ino() } == target.id
     })
 }
 
-/// Whether `path` currently resolves via OS `stat` to a stream matching `stream`.
+/// Whether `path` currently resolves via OS `stat` to a stream matching `stream`
+/// (excluding cloning PTY master devices).
 #[cfg(unix)]
 pub(crate) fn path_matches_stream(path: &Path, stream: StreamId) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|meta| {
         let mode_type = meta.mode() & u32::from(libc::S_IFMT);
+        #[cfg(target_os = "linux")]
+        if mode_type == u32::from(libc::S_IFCHR) && is_ptmx_rdev(meta.rdev()) {
+            return false;
+        }
         (mode_type == u32::from(libc::S_IFIFO) || mode_type == u32::from(libc::S_IFSOCK) || mode_type == u32::from(libc::S_IFCHR))
             && StreamId { dev: meta.dev(), ino: meta.ino() } == stream
     })
@@ -489,6 +570,11 @@ pub(crate) struct PreadReader {
 impl PreadReader {
     pub(crate) fn new(fd: RawFd, offset: u64) -> Self {
         Self { fd, offset }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
     }
 }
 
