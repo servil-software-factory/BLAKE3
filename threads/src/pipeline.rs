@@ -1026,22 +1026,24 @@ process_static! {
 ///
 /// # Panics
 ///
-/// Each call says what it refuses. A call that panics has taken the
-/// [`Message`] it was given, and the Pipeline is then good only for
-/// dropping: used further, it may refuse later calls or wait for ever.
-/// (A `Message` given by value and refused because it is another Pipeline's is lost to
-/// that other Pipeline, which is the one good only for dropping: the
-/// message stays open there, with no `Message` left to name it. The
-/// Pipeline that refused it goes on as it was.)
+/// Each call says what it refuses. When `owned`, `lent`, or `batch` panics
+/// on a [`Message`] of this Pipeline (bytes given two ways, a batch of the
+/// wrong shape, or an owner's `as_ref` panicking), the rejected message's
+/// slot is aborted cleanly (releasing any Room credit, dropping any
+/// unwritten owner, and queuing [`Event::Aborted`]) so the Pipeline stays
+/// usable and later [`message`](Pipeline::message) calls do not hang.
+/// A `Message` given by value to another Pipeline is refused before that
+/// Pipeline touches its own slots (so the refusing Pipeline goes on as it
+/// was, while the other Pipeline's slot remains open with no `Message` left
+/// to name it, and that other Pipeline is good only for dropping).
 /// ([`commit`](Pipeline::commit) borrows its `Message`: after its panic
 /// the `Message` is still the program's, and its drop panics as any open
 /// Message's does, unless the thread is unwinding already.)
-/// The same holds after a panic in the program's own code that a call
-/// here runs: an owner's `as_ref`, or a [`Waker`](core::task::Waker)
-/// that panics when it is cloned or dropped. A waker that panics when
-/// it is woken ends the process, on whichever thread it is woken: the
-/// wake comes in the middle of other work, which a panic would leave
-/// half done.
+/// A [`Waker`](core::task::Waker) that panics when it is cloned or dropped
+/// may leave the Pipeline usable only for dropping; a waker that panics
+/// when it is woken ends the process, on whichever thread it is woken: the
+/// wake comes in the middle of other work, which a panic would leave half
+/// done.
 ///
 /// ```
 /// # blake3_servil::initialize_multithreaded(None);
@@ -1229,39 +1231,47 @@ impl<T, B: AsRef<[u8]> + 'static, P> Pipeline<T, B, P> {
     /// Room already, even one of no bytes: a message's bytes come one way.
     #[inline]
     pub fn owned(&mut self, message: Message, owner: B) {
-        let (pid, s) = message.take();
-        assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
-        self.assert_uncommitted(s);
-        self.open_messages -= 1;
+        assert_eq!(message.pipeline_id, self.id, "Message belongs to a different Pipeline");
+        let (_, s) = message.take();
+        self.require_uncommitted(s);
 
-        // Sound: the slot is open and has no owner yet (assert_uncommitted);
+        // Sound: the slot is open and has no owner yet (require_uncommitted);
         // the owner stays in the move-insensitive raw slot, where its bytes
         // cannot move or be retagged by moving `Pipeline`, until the slot's
         // event reads it out or the Pipeline's drop drops it.
         let slot: *mut B = unsafe { (*self.owners.slot(s)).write(owner) };
+        let pipe: *mut Self = self;
         // `as_ref` is the program's code. Until the slice is submitted
         // nothing records that the slot holds an owner, so if `as_ref`
-        // unwinds, the owner is dropped here, where it lies (the
-        // Pipeline's drop would never have found it). The guard holds
-        // the slot by a raw pointer: an owner may hold its bytes inside
-        // itself (`[u8; 8]`), and a `&mut` to it moved into `forget`
-        // after the bytes' pointer was taken would end that pointer's
-        // right to them (a reviewer's Miri run, November 20).
-        struct Unrecorded<B>(*mut B);
-        impl<B> Drop for Unrecorded<B> {
+        // unwinds, drop the owner in place and abort slot `s` cleanly so
+        // `open_messages` stays exact and the Pipeline remains usable (#465).
+        // Both fields are raw pointers: an owner may hold its bytes inside
+        // itself (`[u8; 8]`), and forgetting a guard holding `&mut` would
+        // retag it after the bytes' pointer was taken (Miri, November 20).
+        struct Unrecorded<T, B, P> {
+            pipe: *mut Pipeline<T, B, P>,
+            slot: *mut B,
+            s: usize,
+        }
+        impl<T, B, P> Drop for Unrecorded<T, B, P> {
             fn drop(&mut self) {
                 // Sound: the owner was written just above and nothing else
-                // holds or records it; this runs only while `as_ref`
-                // unwinds (the guard is forgotten once it has returned).
-                unsafe { core::ptr::drop_in_place(self.0) };
+                // holds or records it; `self.pipe` points to this live
+                // Pipeline; this runs only while `as_ref` unwinds (the guard
+                // is forgotten once `as_ref` returns).
+                unsafe {
+                    core::ptr::drop_in_place(self.slot);
+                    (*self.pipe).abort_slot(self.s);
+                }
             }
         }
-        let unrecorded = Unrecorded(slot);
+        let unrecorded = Unrecorded { pipe, slot, s };
         // Sound: the owner just written, in its slot, read through a
         // shared borrow; nothing else names it.
         let bytes: &[u8] = unsafe { &*slot }.as_ref();
         let (ptr, len) = (bytes.as_ptr(), bytes.len());
         core::mem::forget(unrecorded);
+        self.open_messages -= 1;
         self.submit_slice(s, ptr, len, true);
         self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
     }
@@ -1282,13 +1292,24 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
     /// Room already (even one of no bytes); or if `digests` has not one place
     /// for each message of `batch`.
     pub fn batch(&mut self, message: Message, batch: P, digests: Box<[[u8; OUT_LEN]]>) {
-        let (pid, s) = message.take();
-        assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
-        self.assert_uncommitted(s);
+        assert_eq!(message.pipeline_id, self.id, "Message belongs to a different Pipeline");
+        let (_, s) = message.take();
+        self.require_uncommitted(s);
+        struct AbortOnUnwind<'a, T, B, P> {
+            pipe: &'a mut Pipeline<T, B, P>,
+            s: usize,
+        }
+        impl<T, B, P> Drop for AbortOnUnwind<'_, T, B, P> {
+            fn drop(&mut self) {
+                self.pipe.abort_slot(self.s);
+            }
+        }
+        let guard = AbortOnUnwind { pipe: self, s };
         crate::assert_slots(batch.bytes(), batch.message_len(), batch.slot(), digests.len());
+        core::mem::forget(guard);
         self.open_messages -= 1;
 
-        // Sound: the slot is open and holds no batch (assert_uncommitted); the
+        // Sound: the slot is open and holds no batch (require_uncommitted); the
         // batch and digests stay in the move-insensitive raw slot until its
         // event reads them out or the Pipeline's drop drops them.
         let hold = unsafe { (*self.batches.slot(s)).write((batch, digests)) };
@@ -1773,6 +1794,7 @@ impl<T, B, P> Pipeline<T, B, P> {
                 return p;
             }
             if !self.shared().storage.source.run_waiting_action() {
+                crate::lanes::require();
                 core::hint::spin_loop();
             }
         }
@@ -1785,8 +1807,8 @@ impl<T, B, P> Pipeline<T, B, P> {
     /// If `message` is another Pipeline's.
     #[inline(always)]
     pub fn end(&mut self, message: Message) {
-        let (pid, s) = message.take();
-        assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
+        assert_eq!(message.pipeline_id, self.id, "Message belongs to a different Pipeline");
+        let (_, s) = message.take();
         self.open_messages -= 1;
 
         match self.slots[s].kind {
@@ -1832,8 +1854,12 @@ impl<T, B, P> Pipeline<T, B, P> {
     ///
     /// If `message` is another Pipeline's.
     pub fn abort(&mut self, message: Message) {
-        let (pid, s) = message.take();
-        assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
+        assert_eq!(message.pipeline_id, self.id, "Message belongs to a different Pipeline");
+        let (_, s) = message.take();
+        self.abort_slot(s);
+    }
+
+    fn abort_slot(&mut self, s: usize) {
         self.open_messages -= 1;
 
         match self.slots[s].kind {
@@ -1879,9 +1905,9 @@ impl<T, B, P> Pipeline<T, B, P> {
     /// Room already, even one of no bytes: a message's bytes come one way.
     #[inline(always)]
     pub unsafe fn lent<'a>(&mut self, message: Message, bytes: &'a [u8]) -> Lent<'a> {
-        let (pid, s) = message.take();
-        assert_eq!(pid, self.id, "Message belongs to a different Pipeline");
-        self.assert_uncommitted(s);
+        assert_eq!(message.pipeline_id, self.id, "Message belongs to a different Pipeline");
+        let (_, s) = message.take();
+        self.require_uncommitted(s);
         self.open_messages -= 1;
 
         let (completed, epoch) = if bytes.len() <= TASK_LEN {
@@ -1959,10 +1985,11 @@ impl<T, B, P> Pipeline<T, B, P> {
     }
 
     #[inline(always)]
-    fn assert_uncommitted(&self, s: usize) {
+    fn require_uncommitted(&mut self, s: usize) {
         match self.slots[s].kind {
             SlotKind::OpenEmpty => {}
             SlotKind::OpenShort { .. } | SlotKind::OpenShortDispatched { .. } | SlotKind::OpenRooms { .. } => {
+                self.abort_slot(s);
                 panic!("bytes given two ways: Message already has committed room bytes")
             }
             _ => unreachable!("Message token refers to a non-open slot"),
@@ -2043,6 +2070,7 @@ impl<T, B, P> Pipeline<T, B, P> {
                 }
             }
             if !self.shared().storage.source.run_waiting_action() {
+                crate::lanes::require();
                 core::hint::spin_loop();
             }
         }
@@ -4135,12 +4163,10 @@ mod test {
             // serialized across shards) from inspecting a deliberate
             // SIGABRT under the mutation profile's 15 s clock.
             #[cfg(target_os = "linux")]
-            // Sound: PR_SET_DUMPABLE(0) affects only this child process.
-            unsafe {
-                unsafe extern "C" {
-                    fn prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> i32;
-                }
-                prctl(4, 0, 0, 0, 0);
+            {
+                // Sound: PR_SET_DUMPABLE(0) affects only this child process.
+                let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong) };
+                assert_eq!(rc, 0, "prctl(PR_SET_DUMPABLE, 0) failed");
             }
             match which.as_str() {
                 "lent" => {
@@ -4898,6 +4924,162 @@ mod test {
         };
         for i in 0..600 {
             assert_eq!(digests[i], *blake3_servil_core::convenience::hash(&batch[i]).as_bytes());
+        }
+    }
+
+    /// Panicking inside an owner's `AsRef::as_ref` drops the owner in place,
+    /// aborts the slot cleanly, keeps `open_messages` exact, and lets the
+    /// single-slot Pipeline keep serving subsequent messages (#465).
+    #[test]
+    fn panicking_as_ref_aborts_slot_and_keeps_pipeline_usable() {
+        struct MaybePanicOwner {
+            bytes: [u8; 16],
+            drops: Arc<AtomicUsize>,
+            panic: bool,
+        }
+        impl AsRef<[u8]> for MaybePanicOwner {
+            fn as_ref(&self) -> &[u8] {
+                if self.panic {
+                    panic!("deliberate as_ref panic");
+                }
+                &self.bytes
+            }
+        }
+        impl Drop for MaybePanicOwner {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut p = Pipeline::<u32, MaybePanicOwner>::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 });
+        let m1 = block_on(p.message(1, None));
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            p.owned(m1, MaybePanicOwner { bytes: [0xaa; 16], drops: Arc::clone(&drops), panic: true });
+        }));
+        assert!(res.is_err(), "panicking as_ref must unwind");
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "owner must be dropped on as_ref unwind");
+        assert_eq!(p.open_messages, 0, "open_messages must reflect aborted slot");
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 1, owner: None })), "aborted slot must yield Event::Aborted");
+
+        // Slot must be back on free_slots so a subsequent message succeeds without hanging.
+        let m2 = block_on(p.message(2, None));
+        p.owned(m2, MaybePanicOwner { bytes: [0x55; 16], drops: Arc::clone(&drops), panic: false });
+        let Event::Hashed { tag: 2, hash, owner } = drain_all(&mut p, 1).pop().unwrap() else {
+            panic!("expected Event::Hashed");
+        };
+        assert_eq!(hash, blake3_servil_core::convenience::hash(&[0x55; 16]));
+        drop(owner);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    /// Rejected `owned`, `lent`, and `batch` calls (bytes given two ways or
+    /// mismatched batch digest count) abort the slot and release any Room
+    /// credit so a 1-message / 1-room Pipeline stays usable after `catch_unwind` (#465).
+    #[test]
+    fn rejected_owned_lent_and_batch_abort_slot_and_release_room() {
+        let mut p = Pipeline::<u32, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 1, rooms: 1 });
+
+        // 1. owned after Room commit releases room and aborts slot.
+        let mut m1 = block_on(p.message(1, None));
+        let mut r1 = block_on(p.room());
+        r1.bytes_mut()[..8].copy_from_slice(b"12345678");
+        p.commit(&mut m1, &mut r1, 8);
+        drop(r1);
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            p.owned(m1, vec![1, 2, 3]);
+        }));
+        assert!(res.is_err(), "owned after commit must panic");
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 1, owner: None })));
+
+        // 2. lent after Room commit releases room and aborts slot.
+        let mut m2 = block_on(p.message(2, None));
+        let mut r2 = block_on(p.room());
+        r2.bytes_mut()[..4].copy_from_slice(b"abcd");
+        p.commit(&mut m2, &mut r2, 4);
+        drop(r2);
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            let _ = unsafe { p.lent(m2, b"efgh") };
+        }));
+        assert!(res.is_err(), "lent after commit must panic");
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 2, owner: None })));
+
+        // 3. batch with mismatched digest count aborts slot cleanly.
+        let m3 = block_on(p.message(3, None));
+        let bad_batch = Batch::new(2, 64);
+        let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+            p.batch(m3, bad_batch, vec![[0u8; 32]; 1].into_boxed_slice());
+        }));
+        assert!(res.is_err(), "batch with wrong digest len must panic");
+        block_on(p.ready());
+        assert!(matches!(p.next_event(), Some(Event::Aborted { tag: 3, owner: None })));
+
+        // 4. Both the single message slot and single room must now work end to end.
+        let mut m4 = block_on(p.message(4, None));
+        let mut r4 = block_on(p.room());
+        r4.bytes_mut()[..5].copy_from_slice(b"hello");
+        p.commit(&mut m4, &mut r4, 5);
+        drop(r4);
+        p.end(m4);
+        let Event::Hashed { tag: 4, hash, .. } = drain_all(&mut p, 1).pop().unwrap() else {
+            panic!("expected Event::Hashed");
+        };
+        assert_eq!(hash, blake3_servil_core::convenience::hash(b"hello"));
+    }
+
+    /// Forked children entering `acquire_free_group` or `alloc_piece_node`
+    /// while waiting on work must stop via `lanes::require()` instead of
+    /// spinning forever (#465).
+    #[cfg(unix)]
+    #[test]
+    fn forked_child_stops_in_acquire_free_group_and_alloc_piece_node() {
+        const ENV: &str = "BLAKE3_PIPELINE_FORK_WAIT_CASE";
+        if let Ok(which) = std::env::var(ENV) {
+            let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
+            // Mark every group / piece unavailable before simulating a forked child.
+            if which == "group" {
+                for slot in &mut p.assigned_group_epoch {
+                    *slot = u64::MAX;
+                }
+            } else {
+                while p.free_pieces.pop_front().is_some() {}
+            }
+            // Sound: test runs in an isolated child process and triggers the
+            // fork flag so `acquire_free_group`/`alloc_piece_node` hits `require()`.
+            unsafe {
+                let pid = libc::fork();
+                assert!(pid >= 0, "fork failed");
+                if pid == 0 {
+                    let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                        if which == "group" {
+                            let _ = p.acquire_free_group();
+                        } else {
+                            let _ = p.alloc_piece_node(0);
+                        }
+                    }));
+                    libc::_exit(if res.is_err() { 0 } else { 1 });
+                }
+                let mut status: libc::c_int = 0;
+                assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+                // Clear synthetic busy state before parent drops `p`.
+                for slot in &mut p.assigned_group_epoch {
+                    *slot = 0;
+                }
+                assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child failed: status={status}");
+            }
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        for case in ["group", "piece"] {
+            let out = std::process::Command::new(&exe)
+                .env(ENV, case)
+                .args(["--exact", "pipeline::test::forked_child_stops_in_acquire_free_group_and_alloc_piece_node", "--nocapture"])
+                .output()
+                .unwrap();
+            let stdout = std::string::String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && stdout.contains("1 passed"), "fork wait case {case} failed: status={:?}\n{stdout}", out.status);
         }
     }
 }
