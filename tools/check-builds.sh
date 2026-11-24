@@ -88,6 +88,8 @@ step sh -c 'python3 tools/gen_packed_neon.py | cmp - c/blake3_packed_neon_aarch6
 step sh -c 'python3 tools/gen_counter_x86.py | cmp - c/blake3_counter_x86-64_unix.S'
 step sh -c 'python3 tools/gen_counter_sme2.py | cmp - c/blake3_counter_sme2_aarch64.S'
 step sh -c 'python3 tools/gen_counter_neon.py | cmp - c/blake3_counter_neon_aarch64.S'
+step sh -c 'python3 tools/gen_output_sme2.py | cmp - c/blake3_output_sme2_aarch64.S'
+step sh -c 'python3 tools/gen_output_neon.py | cmp - c/blake3_output_neon_aarch64.S'
 # Both crates document their traits and account for their lifecycle
 # operations: with every feature on, so that a trait implementation
 # behind a feature (as 0.9's Zeroize was) is one of those accounted for.

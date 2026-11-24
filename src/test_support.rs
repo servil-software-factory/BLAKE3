@@ -162,7 +162,7 @@ pub(crate) mod guard {
         }
 
         /// Build shared views first; after this call the body is read-only.
-        #[cfg(all(target_os = "linux", blake3_avx512_ffi))]
+        #[cfg(any(all(target_os = "linux", blake3_avx512_ffi), blake3_neon))]
         pub(crate) fn read_only(&mut self) {
             let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
             assert_eq!(unsafe { libc::mprotect(self.base.add(page).cast(), self.total - 2 * page, libc::PROT_READ) }, 0);

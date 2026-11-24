@@ -135,7 +135,7 @@ def main():
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     objs = [prove_sme2.assemble()]
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    for extra in ("blake3_packed_sme2_aarch64.S", "blake3_counter_sme2_aarch64.S"):
+    for extra in ("blake3_packed_sme2_aarch64.S", "blake3_counter_sme2_aarch64.S", "blake3_output_sme2_aarch64.S"):
         src = os.path.join(root, "c", extra)
         if os.path.exists(src):
             obj = os.path.join(tempfile.mkdtemp(), extra + ".o")

@@ -259,6 +259,9 @@ mod chunk_root;
 mod ffi_counter;
 #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
 mod ffi_output;
+#[cfg(all(feature = "std", blake3_neon))]
+#[path = "ffi_output_aarch64.rs"]
+mod ffi_output;
 mod ffi_packed;
 #[cfg(blake3_neon)]
 #[path = "ffi_neon_hybrid.rs"]

@@ -144,7 +144,7 @@ mod stage {
         /// a block or less and whole in the stage. An empty stage's is a block
         /// of zeros apart (a new Hasher's stage is unwritten, and a reset one's
         /// holds the last message).
-        #[cfg(blake3_sse41_ffi)]
+        #[cfg(any(blake3_sse41_ffi, all(blake3_neon, feature = "std")))]
         #[inline(always)]
         pub(crate) fn first_block(&self) -> &[u8; BLOCK_LEN] {
             static EMPTY: [u8; BLOCK_LEN] = [0; BLOCK_LEN];
@@ -392,19 +392,19 @@ impl Hasher {
         self.core.chunk_state.set_platform(platform);
     }
 
-    #[cfg(any(all(test, feature = "std"), all(blake3_avx512_ffi, target_os = "linux", feature = "std")))]
+    #[cfg(any(all(test, feature = "std"), all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))))]
     #[inline(always)]
     pub(crate) fn staged_len(&self) -> usize {
         self.stage.len()
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux", feature = "std"))]
+    #[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
     #[inline(always)]
     pub(crate) fn chunk_state(&self) -> &ChunkState {
         &self.core.chunk_state
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux", feature = "std"))]
+    #[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
     #[inline(always)]
     pub(crate) fn stage_first_block(&self) -> &[u8; BLOCK_LEN] {
         self.stage.first_block()

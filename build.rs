@@ -299,6 +299,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage_asm(&out_dir, "c/blake3_packed_sme2_aarch64.S", "blake3_packed_sme2.s", is_apple, "packed_sme2");
         stage_asm(&out_dir, "c/blake3_counter_sme2_aarch64.S", "blake3_counter_sme2.s", is_apple, "counter_sme2");
         stage_asm(&out_dir, "c/blake3_sme2_hybrid_aarch64.S", "blake3_sme2_hybrid.s", is_apple, "sme2_hybrid");
+        if env::var_os("CARGO_FEATURE_STD").is_some() {
+            stage_asm(&out_dir, "c/blake3_output_neon_aarch64.S", "blake3_output_neon.s", is_apple, "output_neon");
+            stage_asm(&out_dir, "c/blake3_output_sme2_aarch64.S", "blake3_output_sme2.s", is_apple, "output_sme2");
+        }
     }
 
     println!("cargo::rerun-if-changed=build.rs");

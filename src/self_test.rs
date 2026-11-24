@@ -457,7 +457,7 @@ fn run() -> usize {
         // wrapper checks its bounds, and builds all arguments on the stack.
         checked += unsafe { crate::avx512_32::self_test(&previous) };
     }
-    #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
     {
         checked += crate::ffi_output::self_test(platform);
     }
@@ -777,6 +777,22 @@ mod test {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
         }
+        #[cfg(all(feature = "std", blake3_neon))]
+        let expected = {
+            let mut expected = expected;
+            for (name, entry) in crate::ffi_output::entries_neon() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+                expected += 1;
+            }
+            #[cfg(blake3_sme2)]
+            if matches!(Platform::detect_unchecked(), Platform::SME2) {
+                for (name, entry) in crate::ffi_output::entries_sme2() {
+                    assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+                    expected += 1;
+                }
+            }
+            expected
+        };
         let expected = expected + 4;
         assert_eq!(checked, expected);
     }
@@ -853,12 +869,16 @@ mod test {
         want.extend(crate::neon_hybrid::entries());
         want.extend(crate::ffi_packed::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_counter::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
+        #[cfg(feature = "std")]
+        want.extend(crate::ffi_output::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         #[cfg(blake3_sme2)]
         if crate::platform::sme2_detected() {
             assert!(!crate::sme2::entries().is_empty(), "SME2's entries");
             want.extend(crate::sme2::entries().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_packed::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_counter::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
+            #[cfg(feature = "std")]
+            want.extend(crate::ffi_output::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
         }
         let ran = loop {
             RAN.with(|r| r.set(0));

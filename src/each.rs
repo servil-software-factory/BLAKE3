@@ -144,46 +144,85 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         marked.active = false;
         return;
     }
-    // AArch64: the messages of up to a chunk that a turn left whole in
-    // their stages (`Hasher::gather_part`) hash side by side by their
-    // blocks, as a collection's small items do (`hash_by_blocks`: the NEON
-    // lanes, or one SME2 call for a table of equal whole blocks). The
-    // plain ones only: their key is the IV, the same for all, and a keyed
-    // hasher's key is its own and secret, so it finishes alone (BLAKE3
-    // #312). Which hashers qualify is their public shape: mode and length.
+    // AArch64: partition each 128-hasher slice in a single pass into plain
+    // staged first chunks (`hash_by_blocks` when >= 2), remaining counter-zero
+    // single-chunk hashers (keyed/derived/mixed `<= 64 B` staged or ChunkState-
+    // resident -> NEON `output8` when >= 8, #336), and general hashers. Key
+    // values never select grouping or dispatch.
     #[cfg(blake3_neon)]
     {
-        let whole_in_stage = |h: &Hasher| h.is_plain_single_chunk_staged();
-        if which.iter().filter(|&&i| whole_in_stage(&hashers[i])).nth(1).is_some() {
-            let platform = Platform::detect();
-            // BY_BLOCKS_AT_ONCE of them at a time, their places on the
-            // stack: a finish allocates nothing.
-            let mut small = (0..which.len()).filter(|&k| whole_in_stage(&hashers[which[k]])).peekable();
-            while small.peek().is_some() {
-                let part: crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE> = small.by_ref().take(BY_BLOCKS_AT_ONCE).collect();
-                let bytes: crate::stack_vec::StackVec<&[u8], BY_BLOCKS_AT_ONCE> = part.iter().map(|&k| hashers[which[k]].staged_bytes()).collect();
-                let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
-                hash_by_blocks(&bytes, crate::IV, 0, &mut digests[..part.len()], platform);
-                for (&k, digest) in part.iter().zip(&digests) {
-                    out[k] = *digest;
+        const FINALIZE_BATCH: usize = 128;
+        const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
+        let platform = Platform::detect();
+        for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
+            let mut plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+            let mut keyed = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+            let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+            for (k, &i) in w_chunk.iter().enumerate() {
+                let k = k.to_le_bytes()[0];
+                if hashers[i].is_plain_single_chunk_staged() {
+                    plain.push(k);
+                } else if crate::ffi_output::input(&hashers[i]).is_some() {
+                    keyed.push(k);
+                } else {
+                    rest.push(k);
                 }
             }
-            for (&i, out) in which.iter().zip(out.iter_mut()) {
-                if !whole_in_stage(&hashers[i]) {
-                    *out = *hashers[i].take_root_hash().as_bytes();
+            if plain.len() >= 2 {
+                for part in plain.as_slice().chunks(BY_BLOCKS_AT_ONCE) {
+                    let bytes: crate::stack_vec::StackVec<&[u8], BY_BLOCKS_AT_ONCE> =
+                        part.iter().map(|&k| hashers[w_chunk[usize::from(k)]].staged_bytes()).collect();
+                    let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
+                    hash_by_blocks(&bytes, crate::IV, 0, &mut digests[..part.len()], platform);
+                    for (&k, digest) in part.iter().zip(&digests) {
+                        o_chunk[usize::from(k)] = *digest;
+                    }
                 }
+            } else {
+                for &k in plain.as_slice() {
+                    let k = usize::from(k);
+                    o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
+                }
+            }
+            let done = if keyed.len() >= 8 {
+                let mut inputs = crate::stack_vec::StackVec::<crate::ffi_output::Input<'_>, FINALIZE_BATCH>::new();
+                for &k in keyed.as_slice() {
+                    inputs.push(crate::ffi_output::input(&hashers[w_chunk[usize::from(k)]]).unwrap());
+                }
+                let mut digests = [[0u8; OUT_LEN]; FINALIZE_BATCH];
+                let done = crate::ffi_output::hash_groups_arm(inputs.as_slice(), &mut digests[..keyed.len()]);
+                for (&k, digest) in keyed.as_slice()[..done].iter().zip(&digests[..done]) {
+                    o_chunk[usize::from(k)] = *digest;
+                }
+                done
+            } else {
+                0
+            };
+            for &k in &keyed.as_slice()[done..] {
+                let k = usize::from(k);
+                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
+            }
+            for &k in rest.as_slice() {
+                let k = usize::from(k);
+                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
+            }
+            for &i in w_chunk {
                 hashers[i].reset();
             }
-            marked.active = false;
-            return;
         }
+        marked.active = false;
+        return;
     }
-    finish_each(hashers, which, out);
-    marked.active = false;
+    #[cfg(not(blake3_neon))]
+    {
+        finish_each(hashers, which, out);
+        marked.active = false;
+    }
 }
 
 /// Each hasher `which` names finished in place and reset, its digest into
 /// `out`: the path every message takes but a sixteen-lane group.
+#[cfg(not(blake3_neon))]
 fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     for (&i, out) in which.iter().zip(out) {
         *out = *hashers[i].take_root_hash().as_bytes();
@@ -286,7 +325,7 @@ fn drain<'a>(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usize
 /// messages in 4 KiB pieces, November 10, 2026), and from eight up they
 /// gain 2-3% there and 7-11% on an EPYC 9255. The count is public; no
 /// key decides the route.
-#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+#[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
 const INDEPENDENT_MIN: usize = 3;
 
 /// Hash every queued stage after detaching the table so an unwind inside
@@ -305,17 +344,22 @@ std::thread_local! {
     static HELD_GROUPS: core::cell::RefCell<Vec<Vec<usize>>> = const { core::cell::RefCell::new(Vec::new()) };
 }
 
-/// On x86-64 Linux, hash the held stages with an independent key per
-/// parent lane, when any of them is keyed and there are enough of them,
-/// and say so. The mode, the count and the platform, all public, choose;
-/// key values never determine grouping, allocation or dispatch. Every
-/// other target compiles `hash_held` as it was.
-#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+/// On x86-64 Linux and AArch64, hash the held stages with an independent key
+/// per parent lane (and on SME2, one multi-group keyed leaf entry), when any
+/// of them is keyed and there are enough of them, and say so. The mode, the
+/// count and the platform, all public, choose; key values never determine
+/// grouping, allocation or dispatch. Every other target compiles `hash_held`
+/// as it was.
+#[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
 fn independent_lanes(hashers: &mut [Hasher], held: &[usize]) -> bool {
     let Some(&first) = held.first() else { return false };
     let platform = hashers[first].platform();
+    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    if !matches!(platform, Platform::AVX2 | Platform::AVX512) {
+        return false;
+    }
     // Public plain mode fixes every key to the IV: those share one pass.
-    if held.len() < INDEPENDENT_MIN || !matches!(platform, Platform::AVX2 | Platform::AVX512) || held.iter().all(|&i| hashers[i].is_plain()) {
+    if held.len() < INDEPENDENT_MIN || held.iter().all(|&i| hashers[i].is_plain()) {
         return false;
     }
     crate::ffi_output::held_groups(hashers, held, platform);
@@ -338,7 +382,7 @@ std::thread_local! {
 /// (BLAKE3 #312): the mode alone, public, groups them.
 #[cfg(feature = "std")]
 fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     if independent_lanes(hashers, held) {
         return;
     }
@@ -1521,9 +1565,9 @@ mod test {
             }
             passes
         };
-        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+        #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
         let independent = crate::ffi_output::lanes(Platform::detect()) != 0;
-        #[cfg(not(all(blake3_avx512_ffi, target_os = "linux")))]
+        #[cfg(not(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
         let independent = false;
         assert_eq!(passes(&[Mode::Plain; 3]), 1, "plain hashers hash together");
         assert_eq!(passes(&[Mode::Plain, Mode::Keyed(&a), Mode::Plain]), if independent { 1 } else { 2 }, "public mixed-mode route");
@@ -1654,7 +1698,7 @@ mod test {
 
     /// Keyed and mixed-mode turns use independent parent lanes; plain
     /// turns share the fixed IV. Key values never select a different route.
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     #[test]
     fn test_held_key_groups_take_one_partition_pass() {
         let entry = |width| if width == 8 { crate::ffi_output::entry8() } else { crate::ffi_output::entry() };
@@ -1717,14 +1761,29 @@ mod test {
                     // Below INDEPENDENT_MIN a keyed hasher hashes alone, and the plain ones together.
                     let lanes = flavor != 0 && n >= INDEPENDENT_MIN;
                     assert_eq!(partitions, if flavor != 0 && !lanes { n as u64 } else { 1 }, "held partitions: {platform:?} n={n} flavor={flavor}");
-                    assert_eq!(parent_entries.contains(&(entry(width) as usize)), lanes, "independent parent entry: {platform:?} n={n}");
-                    if lanes && platform == crate::platform::Platform::AVX512 && crate::platform::avx2_detected() {
-                        let eight_needed = (1..=4).any(|shift| ((n * (crate::STAGE_LEN / crate::CHUNK_LEN)) >> shift) % 16 >= 8);
-                        assert_eq!(
-                            parent_entries.contains(&(entry(8) as usize)),
-                            eight_needed,
-                            "eight-wide parent remainder: {platform:?} n={n} flavor={flavor}"
-                        );
+                    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+                    {
+                        assert_eq!(parent_entries.contains(&(entry(width) as usize)), lanes, "independent parent entry: {platform:?} n={n}");
+                        if lanes && platform == crate::platform::Platform::AVX512 && crate::platform::avx2_detected() {
+                            let eight_needed = (1..=4).any(|shift| ((n * (crate::STAGE_LEN / crate::CHUNK_LEN)) >> shift) % 16 >= 8);
+                            assert_eq!(
+                                parent_entries.contains(&(entry(8) as usize)),
+                                eight_needed,
+                                "eight-wide parent remainder: {platform:?} n={n} flavor={flavor}"
+                            );
+                        }
+                    }
+                    #[cfg(blake3_neon)]
+                    {
+                        #[cfg(blake3_sme2)]
+                        if matches!(platform, crate::platform::Platform::SME2) {
+                            assert_eq!(
+                                parent_entries.contains(&(crate::ffi_output::entry_chunks_keyed() as usize)),
+                                lanes,
+                                "SME2 chunks_keyed entry: n={n} flavor={flavor}"
+                            );
+                        }
+                        assert_eq!(parent_entries.contains(&(entry(8) as usize)), lanes, "NEON output8 parent entry: {platform:?} n={n} flavor={flavor}");
                     }
                 }
             }
@@ -1746,9 +1805,9 @@ mod test {
             })
             .collect();
         for platform in crate::test::every_platform() {
-            #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-            let independent = matches!(platform, Platform::AVX2 | Platform::AVX512);
-            #[cfg(not(all(blake3_avx512_ffi, target_os = "linux")))]
+            #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
+            let independent = crate::ffi_output::lanes(platform) != 0;
+            #[cfg(not(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
             let independent = false;
             for n in [3, 600] {
                 for flavor in 0..3 {

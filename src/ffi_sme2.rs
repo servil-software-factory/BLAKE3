@@ -1279,5 +1279,54 @@ mod test {
         );
         tmpl_bytes[48..52].copy_from_slice(&7u32.to_le_bytes());
         assert_eq!(out_18[0], *blake3::hash(&tmpl_bytes[..52]).as_bytes());
+
+        // Multi-group keyed SME2 chunk kernel (#336): blake3_servil_sme2_chunks_keyed.
+        let keyed_keys: [[u32; 8]; 1] = [[0x2468_ace0, 0x1357_9bdf, 0xfedc_ba98, 0x7654_3210, 0x89ab_cdef, 0x0123_4567, 0x55aa_33cc, 0xaa55_cc33]];
+        let keyed_flags = [crate::KEYED_HASH];
+        let keyed_counters = [0x0000_0001_ffff_fff8u64];
+        out_18.fill([0u8; OUT_LEN]);
+        assert_eq!(
+            run_with_dormant_za([0, 0, 0, 0, 1, 0], false, &mut || unsafe {
+                crate::ffi_output::call_sme2_chunks_keyed(
+                    chunk_ptrs.as_ptr(),
+                    keyed_counters.as_ptr(),
+                    keyed_keys.as_ptr(),
+                    keyed_flags.as_ptr(),
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            0
+        );
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                crate::ffi_output::call_sme2_chunks_keyed(
+                    chunk_ptrs.as_ptr(),
+                    keyed_counters.as_ptr(),
+                    keyed_keys.as_ptr(),
+                    keyed_flags.as_ptr(),
+                    out_18.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            16
+        );
+        for lane in 0..16 {
+            let mut cv = keyed_keys[0];
+            let ctr = keyed_counters[0] + lane as u64;
+            for blk in 0..16 {
+                let f = keyed_flags[0]
+                    | if blk == 0 {
+                        crate::CHUNK_START
+                    } else if blk == 15 {
+                        crate::CHUNK_END
+                    } else {
+                        0
+                    };
+                let b: &[u8; BLOCK_LEN] = chunks_buf[lane * CHUNK_LEN + blk * BLOCK_LEN..][..BLOCK_LEN].try_into().unwrap();
+                crate::platform::Platform::NEON.compress_in_place(&mut cv, b, 64, ctr, f);
+            }
+            assert_eq!(out_18[lane], crate::hasher::le_bytes(&cv), "chunks_keyed dormant-ZA lane {lane}");
+        }
     }
 }

@@ -53,3 +53,9 @@ global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_counter_sme2.s")), op
 
 #[cfg(blake3_sme2)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_sme2_hybrid.s")), options(raw));
+
+#[cfg(all(feature = "std", blake3_neon))]
+global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_output_neon.s")), options(raw));
+
+#[cfg(all(feature = "std", blake3_sme2))]
+global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_output_sme2.s")), options(raw));
