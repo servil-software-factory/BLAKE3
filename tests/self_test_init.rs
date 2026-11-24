@@ -10,6 +10,9 @@ fn fast_path_initialize_publishes_platform_to_preexisting_worker() {
     use core::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    // Empty `finalize_each` must return cleanly even before `initialize()`.
+    blake3_servil_core::throughput::finalize_each(&mut [], &[], &mut []);
+
     let expected = blake3::hash(b"fast-path-publication");
     let worker_ready = Arc::new(AtomicBool::new(false));
     let init_done = Arc::new(AtomicBool::new(false));

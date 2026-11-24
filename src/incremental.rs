@@ -411,15 +411,15 @@ impl Hasher {
     }
 
     /// True when the whole message is plain mode, at most one chunk, and
-    /// sits completely in the stage (AArch64 `finalize_each` batching).
-    #[cfg(all(blake3_neon, feature = "std"))]
+    /// sits completely in the stage (`finalize_each` batching).
+    #[cfg(feature = "std")]
     #[inline(always)]
     pub(crate) fn is_plain_single_chunk_staged(&self) -> bool {
         self.stage.len() <= CHUNK_LEN && self.core.count() == 0 && self.core.domain.is_plain()
     }
 
     /// The bytes gathered in the stage.
-    #[cfg(all(blake3_neon, feature = "std"))]
+    #[cfg(feature = "std")]
     pub(crate) fn staged_bytes(&self) -> &[u8] {
         self.stage.as_bytes()
     }
@@ -447,16 +447,19 @@ impl Hasher {
     pub(crate) fn gather_part<'a>(&mut self, mut input: &'a [u8], pooled: Option<&Pool<'_>>, hold: bool) -> &'a [u8] {
         check_input_room(self.count(), input.len());
         while !input.is_empty() {
-            // Whole groups skip the stage. So does a fresh hasher's first
-            // chunk in a turn of many hashers (`hold`) on x86-64, where
-            // `finalize_each` finishes the messages still in their chunk
-            // states side by side (ffi_output::input). Everywhere else the
-            // first chunk is staged: `finalize` then finds a short message
-            // whole in the stage, on AArch64 `finalize_each` hashes those
-            // side by side (each.rs), and a longer message's first chunk
-            // joins its group of sixteen.
-            let first_chunk_to_core = hold && !cfg!(blake3_neon) && self.core.count() + input.len() as u64 <= CHUNK_LEN as u64;
-            if self.stage.is_empty() && first_chunk_to_core {
+            // Whole groups skip the stage. So does a fresh keyed/derived hasher's
+            // first chunk in a turn of many hashers (`hold`) on x86-64, where
+            // `finalize_each` finishes its final block side by side via
+            // `ffi_output::input` whenever 16 eligible descriptors pack together.
+            // Everywhere else (including plain mode in `update_each` on x86-64
+            // and all modes on AArch64) the first chunk is staged so
+            // `finalize_each` batches 1 KiB chunks via `hash_many_rounded` and
+            // AVX2/AVX-512 multi-block prefixes via `hash_by_blocks` (with
+            // scalar final blocks), while longer messages keep exact 16 KiB
+            // group boundaries (#404). Non-consuming mid-chunk `finalize()` on a
+            // staged plain first chunk rehashes that prefix fresh.
+            #[cfg(blake3_sse41_ffi)]
+            if crate::ffi_partial::first_chunk_to_core(self.stage.is_empty(), hold, self.core.domain.is_plain(), self.core.count(), input.len()) {
                 self.core.update_pooled(input, pooled);
                 return &[];
             }
@@ -1342,13 +1345,23 @@ mod test {
                 if (65..=CHUNK_LEN).contains(&len) {
                     let mut turn = Hasher::new(mode, None);
                     turn.gather_part(message, None, true);
-                    assert_ne!(
-                        entries_run(&mut || {
-                            turn.finalize();
-                        }),
-                        one_shot,
-                        "the control: from a chunk state, len={len}"
-                    );
+                    if matches!(mode, Mode::Plain) {
+                        assert_eq!(
+                            entries_run(&mut || {
+                                turn.finalize();
+                            }),
+                            one_shot,
+                            "plain turn stages first chunk, len={len}"
+                        );
+                    } else {
+                        assert_ne!(
+                            entries_run(&mut || {
+                                turn.finalize();
+                            }),
+                            one_shot,
+                            "the control: from a chunk state, len={len}"
+                        );
+                    }
                 }
             }
         }
@@ -1443,12 +1456,14 @@ mod test {
     fn finalize_after_a_turn_that_left_a_chunk_in_the_core() {
         crate::initialize();
         let input = painted();
-        let mut hashers = [Hasher::new(Mode::Plain, None), Hasher::new(Mode::Plain, None)];
+        let key = [0x53u8; 32];
+        let mode = Mode::Keyed(&key);
+        let mut hashers = [Hasher::new(mode, None), Hasher::new(mode, None)];
         crate::throughput::update_each(&mut hashers, &[(0, &input[..700]), (1, &input[..64])]);
         crate::throughput::update_each(&mut hashers, &[(0, &input[700..2500]), (1, &input[64..65])]);
         crate::COUNTED.with(|c| c[crate::Counted::TailApart as usize].set(0));
         for (h, len) in hashers.iter().zip([2500, 65]) {
-            assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(Mode::Plain, &input[..len]), "{len} bytes");
+            assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(mode, &input[..len]), "{len} bytes");
         }
         if !cfg!(blake3_neon) {
             assert!(hashers[0].core.chunk_state.count() > 0 && hashers[0].stage.len() > 0, "a chunk in the core, bytes in the stage");
