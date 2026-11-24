@@ -663,7 +663,7 @@ fn hash_run_short<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, out
 /// fast (jobs 291-294), 24 10.6 / 13.3 (official 21.0-21.7). The VM, in
 /// the plans' fast state, 22, 24, 26 12-16% slower (their slow state is
 /// twice as slow). The worst case halves; the fast case pays up to 25%.
-pub(crate) const ONE_BLOCK_PAD_MIN: usize = 11;
+pub(crate) const ONE_BLOCK_PAD_MIN: usize = 16;
 #[cfg_attr(not(blake3_sme2), allow(dead_code))]
 pub(crate) const ONE_BLOCK_PAD_AFTER_GROUPS: usize = 5;
 
