@@ -59,8 +59,8 @@ FAULTS = [
     ),
     (
         "a finished task wakes no one",
-        "    publish();\n    storage.waker.notify_after_seqcst();\n",
-        "    publish();\n",
+        "    publish();\n    storage.waker.take_after_seqcst()\n",
+        "    publish();\n    None\n",
     ),
     (
         "a room piece is published done before it is hashed",
@@ -71,7 +71,7 @@ FAULTS = [
     (
         "a room piece gives its room back before it has read it",
         "        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };",
-        "        self.storage.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };",
+        "        self.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };",
 
     ),
     (
@@ -80,9 +80,14 @@ FAULTS = [
         "        if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) != 0 {\n            // Sound: this is the slot's last task",
     ),
     (
-        "a storage goes back on the free list while a Room still holds it",
-        "        if st.holders.fetch_sub(n, Ordering::AcqRel) == n {",
-        "        if st.holders.fetch_sub(n, Ordering::AcqRel) >= n {",
+        "a storage leaks instead of freeing when its last holder drops",
+        "            if prev == 1 {",
+        "            if prev == 0 {",
+    ),
+    (
+        "a storage is freed while a Room still holds it",
+        "        storage.holders.fetch_add(1, Ordering::Relaxed);\n        Room { pipeline_id: self.id,",
+        "        Room { pipeline_id: self.id,",
     ),
     (
         "a Room's drop gives back one credit more than it has",
@@ -91,18 +96,18 @@ FAULTS = [
     ),
     (
         "a Room's drop wakes no one",
-        "        } else if prev == unused {\n            // Even if Pipeline::drop races right after our `fetch_sub` and\n            // recycles `&'static PipeStorage`, waking a WakerSlot is benign.\n            self.storage.waker.notify_after_seqcst();\n        }",
-        "        }",
+        "        if prev == unused {\n            storage.waker.notify_after_seqcst();\n        }",
+        "        let _ = prev;",
     ),
     (
         "a loan's event comes before the loan is marked complete",
-        "            if desc.loan_epoch != 0 {\n                self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);\n            }\n            finished(storage, || {\n                self.slot_done[slot].swap(true, Ordering::SeqCst);\n            });",
-        "            finished(storage, || {\n                self.slot_done[slot].swap(true, Ordering::SeqCst);\n            });\n            if desc.loan_epoch != 0 {\n                self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);\n            }",
+        "            if desc.loan_epoch != 0 {\n                self.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);\n            }\n            return finished(self, || {\n                self.slot_done[slot].swap(true, Ordering::SeqCst);\n            });",
+        "            let waker = finished(self, || {\n                self.slot_done[slot].swap(true, Ordering::SeqCst);\n            });\n            if desc.loan_epoch != 0 {\n                self.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);\n            }\n            return waker;",
     ),
     (
         "a batch's tasks are published done before the last has hashed",
-        "            if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {\n                finished(storage, || {",
-        "            if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) != 0 {\n                finished(storage, || {",
+        "            if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {\n                return finished(self, || {",
+        "            if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) != 0 {\n                return finished(self, || {",
     ),
 ]
 
@@ -417,6 +422,11 @@ def controls(copy):
         with open(source, "wb") as f:
             f.write(original.replace(find, replace).encode())
         passes, said = model_passes(copy)
+        # Early-release control must be caught cleanly by the model-only
+        # retirement assertion, never by an allocator crash or signal.
+        if name == "a storage is freed while a Room still holds it" and not passes and "PipeStorage used after release" not in said:
+            passes = True
+            said += "\npipeline_model_controls: expected deterministic 'PipeStorage used after release' assertion\n"
         # What the run said, whole, beside the copy: the line below is a
         # reading of it.
         with open(os.path.join(home(), "logs", f"{len(os.listdir(os.path.join(home(), 'logs'))):02}.log"), "w") as f:

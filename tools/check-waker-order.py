@@ -31,7 +31,7 @@ mod park_sync {
     pub use std::thread;
 }
 mod park;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 #[unsafe(no_mangle)]
 pub(crate) fn register_then_recheck(
@@ -53,24 +53,39 @@ pub(crate) fn sme2_then_recheck(flag: &AtomicBool, published: &AtomicUsize) -> b
     // SME2_ADVERTISEMENT
     published.load(Ordering::Acquire) != 0
 }
+
+#[unsafe(no_mangle)]
+pub(crate) fn reader_guard_then_load(cell: &AtomicU64, seq: u64, reg: &AtomicPtr<()>) -> *mut () {
+    // READER_GUARD_HANDSHAKE
+}
+
+#[unsafe(no_mangle)]
+pub(crate) fn drain_store_then_load(reg: &AtomicPtr<()>, draining: *mut (), cell: &AtomicU64) -> u64 {
+    // DRAIN_HANDSHAKE
+}
 """
 
 
-def compile_probe(sources, directory):
+def compile_probe(sources, directory, target="aarch64-apple-darwin"):
     for name, source in sources.items():
         (directory / name).write_text(source)
-    asm = directory / "probe.s"
+    asm = directory / f"probe-{target}.s"
     subprocess.run([
         "rustc", "--edition", "2024", "--crate-type", "lib", "-O", "-C", "panic=abort",
-        "--target", "aarch64-apple-darwin", "--emit", "asm", "-o", str(asm),
+        "--target", target, "--emit", "asm", "-o", str(asm),
         str(directory / "probe.rs"),
     ], check=True)
     return asm.read_text()
 
 
-def function_body(asm, function):
-    body = asm.split(f"\n_{function}:\n", 1)[1]
-    return re.split(r"^[ \t]*\.(?:cfi_endproc|globl|subsections_via_symbols)\b", body, maxsplit=1, flags=re.M)[0]
+def function_body(asm, function, target="aarch64-apple-darwin"):
+    prefix = "_" if "apple-darwin" in target else ""
+    sym = f"{prefix}{function}"
+    alias = re.search(rf"^[ \t]*{re.escape(sym)}[ \t]*=[ \t]*([A-Za-z0-9_.$]+)$", asm, re.M)
+    if alias:
+        sym = alias.group(1)
+    body = asm.split(f"\n{sym}:\n", 1)[1]
+    return re.split(r"^[ \t]*\.(?:cfi_endproc|globl|subsections_via_symbols|size)\b", body, maxsplit=1, flags=re.M)[0]
 
 
 def ordered(asm, function, announce):
@@ -149,31 +164,69 @@ def ordered_cfg(asm, function, announce):
     return seen_ldapr > 0 and seen_fenced > 0
 
 
+def ordered_x86_store_load(asm, function):
+    """Verify on x86-64 that the store-then-load Dekker pair contains a full
+    hardware barrier (`xchg*`, `lock`, or `mfence`) before the final load so a
+    plain `Release` store without `fence(SeqCst)` fails."""
+    body = function_body(asm, function, target="x86_64-unknown-linux-gnu")
+    barriers = list(re.finditer(r"^[ \t]+(?:xchg[bwlq]?|lock\b|mfence)\b[^\n]*\n", body, re.M))
+    if not barriers:
+        return False
+    after = body[barriers[0].end():]
+    return re.search(r"^[ \t]+mov(?:q|l|b|zb|zw)?\b[^\n]*\(", after, re.M) is not None
+
+
 def main():
     src = Path(__file__).resolve().parents[1] / "threads/src"
     sources = {name: (src / name).read_text() for name in ("waker.rs", "park.rs")}
-    # Reuse the actual SME2 announcement; compile only this prelude, not
-    # the hardware-dependent worker loop (which needs the Apple SDK).
+    # Reuse the actual SME2 announcement and ReaderGuard/unregister_and_drain
+    # Dekker handshakes from lanes.rs, requiring Release/SeqCst store +
+    # fence(SeqCst) + Acquire load on both Arm64 and x86-64.
     lanes = (src / "lanes.rs").read_text()
     advertisement = re.search(
         r"(SME2_PARKED\.store\(true, Ordering::SeqCst\);\s+"
-        r"core::sync::atomic::fence\(Ordering::SeqCst\);)\s+if sources::visible\(true\)", lanes
+        r"core::sync::atomic::fence\(Ordering::SeqCst\);)\s+if \{\s+"
+        r"let guard = sources::ReaderGuard::enter\(reader, &mut seq\);\s+"
+        r"sources::visible\(&guard, true\)", lanes
     )
     if advertisement is None:
         raise SystemExit("sleep ordering: SME2 must order its announcement before the work re-check")
-    probe = PROBE.replace("// SME2_ADVERTISEMENT", advertisement[1].replace("SME2_PARKED", "flag"))
+    guard_enter = re.search(
+        r"pub\(crate\) fn enter\(cell: &'a AtomicU64, seq: &mut u64\) -> Self \{[\s\S]*?"
+        r"(cell\.store\(\*seq, Ordering::(?:Release|SeqCst)\);\s+core::sync::atomic::fence\(Ordering::SeqCst\);)", lanes
+    )
+    guard_load = re.search(
+        r"fn find_from\(_guard: &ReaderGuard<'_>, start: usize,[\s\S]*?"
+        r"let ptr = (REGISTERED\[slot\]\.load\(Ordering::Acquire\));", lanes
+    )
+    drain_store = re.search(
+        r"fn unregister_and_drain\(slot: usize\) \{[\s\S]*?"
+        r"(REGISTERED\[slot\]\.store\(DRAINING, Ordering::(?:Release|SeqCst)\);\s+core::sync::atomic::fence\(Ordering::SeqCst\);)", lanes
+    )
+    drain_load = re.search(
+        r"fn unregister_and_drain\(slot: usize\) \{[\s\S]*?"
+        r"let initial = (reader\.0\.load\(Ordering::Acquire\));", lanes
+    )
+    if not all((guard_enter, guard_load, drain_store, drain_load)):
+        raise SystemExit("sleep ordering: could not locate fenced ReaderGuard / unregister_and_drain Dekker handshake in lanes.rs")
+    reader_body = f"{guard_enter[1].replace('*seq', 'seq')}\n    {guard_load[1].replace('REGISTERED[slot]', 'reg')}"
+    drain_body = f"{drain_store[1].replace('REGISTERED[slot]', 'reg').replace('DRAINING', 'draining')}\n    {drain_load[1].replace('reader.0', 'cell')}"
+    probe = (
+        PROBE.replace("// SME2_ADVERTISEMENT", advertisement[1].replace("SME2_PARKED", "flag"))
+        .replace("// READER_GUARD_HANDSHAKE", reader_body)
+        .replace("// DRAIN_HANDSHAKE", drain_body)
+    )
     paths = {
         "waker.rs": [("register_then_recheck", "stlr", ordered_cfg)],
         "park.rs": [("park_then_recheck", "ldsetal", ordered)],
-        "probe.rs": [("sme2_then_recheck", "stlrb", ordered)],
     }
     with tempfile.TemporaryDirectory(prefix="sleep-order-") as tmp:
         directory = Path(tmp)
         sources["probe.rs"] = probe
-        asm = compile_probe(sources, directory)
+        asm = compile_probe(sources, directory, target="aarch64-apple-darwin")
+        asm_x86 = compile_probe(sources, directory, target="x86_64-unknown-linux-gnu")
         for name, checks in paths.items():
-            prefix = "core::sync::atomic::" if name == "probe.rs" else ""
-            fence = prefix + "fence(Ordering::SeqCst);"
+            fence = "fence(Ordering::SeqCst);"
             if sources[name].count(fence) != 1:
                 raise SystemExit(f"sleep ordering: expected one SeqCst fence in {name}")
             unfenced = compile_probe({**sources, name: sources[name].replace(fence, "")}, directory)
@@ -183,6 +236,35 @@ def main():
                 if check(unfenced, function, announce):
                     raise SystemExit(f"sleep ordering: negative control retained a barrier in {function}")
                 print(f"sleep ordering: {function} has {announce}/dmb ish/ldapr; unfenced control rejected")
+        for function, announce, snippet in (
+            ("sme2_then_recheck", "stlrb", advertisement[1].replace("SME2_PARKED", "flag")),
+            ("reader_guard_then_load", "stlr", reader_body),
+            ("drain_store_then_load", "stlr", drain_body),
+        ):
+            fence = "core::sync::atomic::fence(Ordering::SeqCst);"
+            if snippet.count(fence) != 1:
+                raise SystemExit(f"sleep ordering: expected one SeqCst fence in {function}")
+            if not ordered(asm, function, announce):
+                raise SystemExit(f"sleep ordering: missing {announce}/dmb ish/ldapr in {function}")
+            unfenced = compile_probe({**sources, "probe.rs": probe.replace(snippet, snippet.replace(fence, ""))}, directory)
+            if ordered(unfenced, function, announce):
+                raise SystemExit(f"sleep ordering: negative unfenced control still passed {function}")
+            print(f"sleep ordering: {function} has {announce}/dmb ish/ldapr; unfenced control rejected")
+        for function, snippet in (
+            ("reader_guard_then_load", reader_body),
+            ("drain_store_then_load", drain_body),
+        ):
+            fence = "core::sync::atomic::fence(Ordering::SeqCst);"
+            if not ordered_x86_store_load(asm_x86, function):
+                raise SystemExit(f"sleep ordering: missing x86-64 hardware barrier in {function}")
+            unfenced_x86 = compile_probe(
+                {**sources, "probe.rs": probe.replace(snippet, snippet.replace(fence, ""))},
+                directory,
+                target="x86_64-unknown-linux-gnu",
+            )
+            if ordered_x86_store_load(unfenced_x86, function):
+                raise SystemExit(f"sleep ordering: negative x86-64 unfenced control still passed {function}")
+            print(f"sleep ordering: {function} has x86-64 hardware store-load barrier; unfenced control rejected")
 
 
 if __name__ == "__main__":

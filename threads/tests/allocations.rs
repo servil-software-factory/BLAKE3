@@ -665,16 +665,16 @@ fn prepare_after_pooled_job_allocates_nothing() {
     assert_eq!(prep, Counts::default(), "already-sufficient pool scratch must not reallocate after pooled job: {prep:?}");
 }
 
-/// Dropping a quiescent `Pipeline` holding an unreaped pending `Batch` must
-/// deallocate every per-Pipeline allocation (including `RawSlots` backing and
-/// both the pending `Batch` and digest box) with zero leaked allocations.
+/// Dropping a quiescent `Pipeline` (including across varying `Limits.rooms`,
+/// unreaped pending `Batch`es, and late-dropped `Room`s) must deallocate
+/// every allocation with zero leaked or globally retained memory (#465).
 #[test]
-fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
+fn dropping_pipeline_frees_all_storage_and_pending_batches() {
     use blake3_servil::throughput::{Limits, Pipeline, block_on};
     pool_ready(2);
-    // Warm up reusable storage and FREE_STORAGES capacity first.
-    let warm = Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 });
-    drop(warm);
+    // Initialize the calling thread's one-time `block_on` waker first; the
+    // very first Pipeline itself must free 100% of its allocations on drop.
+    block_on(async {});
     let mut pipe = None;
     let create = counts(|| {
         pipe = Some(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
@@ -689,12 +689,28 @@ fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
         (c, out.unwrap())
     };
     // Short batch stays buffered locally in open_group, so Pipeline::drop drops
-    // it quietly and frees both allocations alongside RawSlots.
+    // it quietly and frees both allocations alongside PipeStorage and RawSlots.
     pipe.batch(msg, batch, digests);
     let dropped = counts(|| drop(pipe));
     assert_eq!(
         dropped.deallocations,
         create.allocations + batch_allocs.allocations,
-        "Pipeline::drop must free every per-Pipeline allocation (create={create:?}, batch={batch_allocs:?}, dropped={dropped:?})"
+        "Pipeline::drop must free every allocation (create={create:?}, batch={batch_allocs:?}, dropped={dropped:?})"
     );
+
+    // Varying room counts (0..=8) + a surviving Room dropped after Pipeline:
+    // every allocation is returned to the system allocator.
+    for rooms in 0..=8 {
+        let mut p = None;
+        let c = counts(|| {
+            p = Some(Pipeline::<u32>::new(Mode::Plain, Limits { messages: 4, rooms }));
+        });
+        let mut p = p.unwrap();
+        let survivor = if rooms > 0 { Some(block_on(p.room())) } else { None };
+        let d = counts(|| {
+            drop(p);
+            drop(survivor);
+        });
+        assert_eq!(d.deallocations, c.allocations, "rooms={rooms}: Pipeline + surviving Room drop must free every allocation (create={c:?}, drop={d:?})");
+    }
 }

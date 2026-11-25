@@ -107,35 +107,46 @@ impl WakerSlot {
         }
     }
 
+    /// Take the registered waker, if any, after a `SeqCst` completion store.
+    /// Callers holding a worker `ReaderGuard` or `PipeStorage` reference must
+    /// drop those guards BEFORE calling [`wake_or_abort`] on the returned
+    /// waker so an inline executor or lock-acquiring waker cannot deadlock with
+    /// `Pipeline::drop`.
     #[inline(always)]
-    pub(crate) fn notify_after_seqcst(&self) {
-        if self.state.0.load(Ordering::SeqCst) == REGISTERED {
-            self.wake_slow();
-        }
+    pub(crate) fn take_after_seqcst(&self) -> Option<Waker> {
+        if self.state.0.load(Ordering::SeqCst) == REGISTERED { self.take_slow() } else { None }
     }
 
     #[cold]
     #[inline(never)]
-    fn wake_slow(&self) {
+    fn take_slow(&self) -> Option<Waker> {
         if self.state.0.compare_exchange(REGISTERED, WAKING, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             // Sound: this thread's compare-and-swap made the state
             // WAKING, which keeps `register` and `clear` out of the cell
             // (they spin) until the store below.
             let waker = unsafe { with_mut(&self.waker, Option::take) };
             self.state.0.store(IDLE, Ordering::SeqCst);
-            if let Some(w) = waker {
-                // The waker is the program's code, and it runs here in the
-                // middle of whatever gave the notice: a worker's task, or
-                // a call of the Pipeline's owner that has just freed a
-                // room and not yet recorded what it freed. A panic out of
-                // it would leave that half done for the program to find (a
-                // room's credit given back twice, a room handed out while
-                // in use). It ends the process, on whichever thread, as a
-                // panic on a worker does; the panic's own words come first.
-                let ends = EndOnUnwind;
-                w.wake();
-                core::mem::forget(ends);
-            }
+            waker
+        } else {
+            None
         }
     }
+
+    #[inline(always)]
+    pub(crate) fn notify_after_seqcst(&self) {
+        if let Some(w) = self.take_after_seqcst() {
+            wake_or_abort(w);
+        }
+    }
+}
+
+/// Invoke a taken user `Waker` outside all library guards/locks; a panic out
+/// of a waker aborts the process so it never unwinds through a worker or
+/// leaves half-updated Pipeline state.
+#[cold]
+#[inline(never)]
+pub(crate) fn wake_or_abort(w: Waker) {
+    let ends = EndOnUnwind;
+    w.wake();
+    core::mem::forget(ends);
 }
