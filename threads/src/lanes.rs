@@ -3954,6 +3954,7 @@ pub(crate) mod sources {
             use core::sync::atomic::AtomicBool;
             struct State {
                 low: &'static Source,
+                publish_lock: std::sync::Mutex<()>,
                 stop: AtomicBool,
                 low_runs: AtomicU64,
                 high_ran: AtomicBool,
@@ -3962,9 +3963,12 @@ pub(crate) mod sources {
                 // Sound: `ctx` points to a leaked `'static State`.
                 let st = unsafe { &*(ctx as *const State) };
                 st.low_runs.fetch_add(1, Ordering::Relaxed);
+                // Serialize republishing: on SME2 CPUs `blake3-sme2` runs beside
+                // worker 0, and `Source::publish_actions` is single-publisher.
+                let _guard = st.publish_lock.lock().unwrap();
                 if !st.stop.load(Ordering::Acquire) {
-                    // Sound: `run_low` matches `unsafe fn(*const (), u64, Platform)` and
-                    // `low` has capacity 4 with at most 2 items in flight.
+                    // Sound: serialized by `publish_lock`; `low` has capacity 4
+                    // with at most 3 circulating tickets (1..=3 unclaimed).
                     unsafe { st.low.publish_actions(run_low, ctx, &[1], false) };
                 }
             }
@@ -3975,29 +3979,37 @@ pub(crate) mod sources {
                 st.high_ran.store(true, Ordering::Release);
             }
 
-            // Two threads (1 caller + 1 worker): only the single worker serves
-            // these sources, so if `Pool::serve` reset `Turn` each iteration
-            // `low` would monopolize it forever and `high` would never run.
+            // Two threads (1 caller + 1 ordinary worker, plus `blake3-sme2` on
+            // SME2 CPUs): `blake3-sme2` scans from slot 0 without a `Turn`, so
+            // while `low` stays continuously nonempty only `Pool::serve`'s
+            // persistent `Turn` lets the ordinary worker rotate to `high`.
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
-            if pool().workers() == 0 {
-                return;
-            }
             let low: &'static Source = Box::leak(Box::new(Source::with_actions(4)));
             let high: &'static Source = Box::leak(Box::new(Source::with_actions(2)));
+            let state: &'static State = Box::leak(Box::new(State {
+                low,
+                publish_lock: std::sync::Mutex::new(()),
+                stop: AtomicBool::new(false),
+                low_runs: AtomicU64::new(0),
+                high_ran: AtomicBool::new(false),
+            }));
+            let ctx = (state as *const State).cast::<()>();
+            // Seed both sources BEFORE registering them so:
+            // (a) no worker can scan past an empty `low` slot and hit `high` on
+            //     its first walk without taking a fair turn;
+            // (b) initial publication completes before any worker callback can
+            //     call `low.publish_actions`, satisfying single-publisher
+            //     exclusion literally.
+            // 3 circulating tickets keep `low` nonempty even when worker 0 and
+            // `blake3-sme2` both hold a callback concurrently.
+            // Sound: `run_low` / `run_high` match the action ABI and `ctx` is `'static`.
+            unsafe {
+                low.publish_actions(run_low, ctx, &[1, 2, 3], false);
+                high.publish_actions(run_high, ctx, &[9], false);
+            }
             let low_slot = low.register().expect("low slot");
             let high_slot = high.register().expect("high slot");
             assert!(low_slot < high_slot, "low slot ({low_slot}) must precede high slot ({high_slot})");
-            let state: &'static State =
-                Box::leak(Box::new(State { low, stop: AtomicBool::new(false), low_runs: AtomicU64::new(0), high_ran: AtomicBool::new(false) }));
-            let ctx = (state as *const State).cast::<()>();
-            // Seed `low` with 2 items so it stays continuously nonempty as the
-            // worker drains one and immediately republishes another, plus 1
-            // item on `high`.
-            // Sound: `run_low` / `run_high` match the action ABI and `ctx` is `'static`.
-            unsafe {
-                low.publish_actions(run_low, ctx, &[1, 2], false);
-                high.publish_actions(run_high, ctx, &[9], false);
-            }
             pool().park.wake_one();
             let deadline = now() + std::time::Duration::from_secs(5);
             while !state.high_ran.load(Ordering::Acquire) {
