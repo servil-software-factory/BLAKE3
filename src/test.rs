@@ -340,16 +340,31 @@ fn test_the_paths_chosen_exactly() {
         let sse41_entry = crate::ffi_partial::entry_sse41() as usize;
         assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&sse41_entry)), "SSE4.1 3+partial must run partial_sse41");
     }
+    #[cfg(all(feature = "std", blake3_avx2_ffi))]
+    if crate::platform::avx2_detected() {
+        let input = [0x5au8; 5 * crate::CHUNK_LEN + 500];
+        let mut out = [0u8; 6 * crate::OUT_LEN];
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        let n = crate::compress_chunks_parallel(&input, crate::IV, 0, 0, Platform::AVX2, &mut out);
+        assert_eq!(n, 6);
+        let avx2_entry = crate::ffi_partial::entry_avx2() as usize;
+        assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&avx2_entry)), "AVX2 5+partial must run partial_avx2");
+    }
     #[cfg(all(feature = "std", blake3_avx512_ffi))]
     if crate::platform::avx512_detected() {
-        let entries: std::vec::Vec<usize> = crate::ffi_partial::entries_avx512().iter().map(|&(_, p)| p as usize).collect();
-        for (len, expect_partial) in [(2304usize, false), (2305, true), (4470, false), (4929, true)] {
+        let [(_, p4), (_, p8), (_, p16)] = crate::ffi_partial::entries_avx512();
+        let all_partial = [crate::ffi_partial::entry_sse41() as usize, crate::ffi_partial::entry_avx2() as usize, p4 as usize, p8 as usize, p16 as usize];
+        for (len, expect_cvs, expect_entry) in
+            [(2304usize, 3usize, None), (2305, 3, Some(p4 as usize)), (4470, 5, None), (4928, 5, None), (4929, 5, Some(p8 as usize))]
+        {
             let input = std::vec![0x5au8; len];
             let mut out = [0u8; 8 * crate::OUT_LEN];
             crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
-            let _ = crate::compress_chunks_parallel(&input, crate::IV, 0, 0, Platform::AVX512, &mut out);
-            let hit = crate::RAN_ENTRIES.with(|r| r.borrow().iter().any(|e| entries.contains(e)));
-            assert_eq!(hit, expect_partial, "AVX-512 partial dispatch mismatch for {len} B");
+            let n = crate::compress_chunks_parallel(&input, crate::IV, 0, 0, Platform::AVX512, &mut out);
+            assert_eq!(n, expect_cvs, "AVX-512 CV count mismatch for {len} B");
+            let hits: std::vec::Vec<usize> = crate::RAN_ENTRIES.with(|r| r.borrow().iter().copied().filter(|e| all_partial.contains(e)).collect());
+            let want: std::vec::Vec<usize> = expect_entry.into_iter().collect();
+            assert_eq!(hits, want, "AVX-512 partial entry mismatch for {len} B");
         }
     }
     // rounded_lanes(platform, whole inputs): the width that takes the count

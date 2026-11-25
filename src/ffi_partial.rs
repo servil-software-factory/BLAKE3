@@ -281,6 +281,13 @@ pub(crate) fn entry_sse41() -> *const () {
     blake3_servil_partial_sse41 as *const ()
 }
 
+/// Exported entry point of the 8-lane AVX2 partial-chunk kernel for tests
+/// checking exact partial-kernel dispatch boundaries (#557).
+#[cfg(all(test, feature = "std"))]
+pub(crate) fn entry_avx2() -> *const () {
+    blake3_servil_partial_avx2 as *const ()
+}
+
 /// Exported entry points of the AVX-512 partial-chunk kernels for
 /// `self_test::test_self_test_run_checks_every_case`.
 #[cfg(all(test, feature = "std"))]
