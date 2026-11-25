@@ -55,34 +55,32 @@ FAULTS = [
     (
         "a group is published done before its members are hashed",
         "        unsafe { task.run_members(tree, platform) };\n",
-        "        group.completed_epoch.swap(epoch, Ordering::SeqCst);\n        unsafe { task.run_members(tree, platform) };\n",
+        "        self.slot.get().group_completed[group_idx].swap(epoch, Ordering::SeqCst);\n        unsafe { task.run_members(tree, platform) };\n",
     ),
     (
         "a finished task wakes no one",
-        "    publish();\n    storage.waker.notify_after_seqcst();\n",
+        "    publish();\n    waker.notify_after_seqcst();\n",
         "    publish();\n",
     ),
     (
         "a room piece is published done before it is hashed",
-        "        unsafe { *pnode.out.0.get() = value };",
-        "        pnode.done.swap(true, Ordering::SeqCst);\n        unsafe { *pnode.out.0.get() = value };",
-
+        "        let slot = unsafe { *pnode.slot.get() } as usize;",
+        "        pnode.done.swap(true, Ordering::SeqCst);\n        let slot = unsafe { *pnode.slot.get() } as usize;",
     ),
     (
         "a room piece gives its room back before it has read it",
-        "        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };",
-        "        self.storage.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };",
-
+        "        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        let tree = self.tree_for(slot, custom);\n        let value = if index == 0 {\n            RoomValue::First(tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))\n        } else if len == ROOM_LEN {\n            RoomValue::Whole(tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))\n        } else {\n            RoomValue::Last(tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))\n        };\n        // Sound: this piece's output is its worker's alone until `done`.\n        unsafe { *pnode.out.0.get() = value };\n        self.rooms.release_n(room_idx, 1);",
+        "        self.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        let tree = self.tree_for(slot, custom);\n        let value = if index == 0 {\n            RoomValue::First(tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))\n        } else if len == ROOM_LEN {\n            RoomValue::Whole(tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))\n        } else {\n            RoomValue::Last(tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))\n        };\n        unsafe { *pnode.out.0.get() = value };",
     ),
     (
         "a message's pieces are published done before the last is hashed",
-        "        if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {\n            // Sound: this is the slot's last task",
-        "        if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) != 0 {\n            // Sound: this is the slot's last task",
+        "                if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 1 {",
+        "                if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } != 0 {",
     ),
     (
-        "a storage goes back on the free list while a Room still holds it",
-        "        if st.holders.fetch_sub(n, Ordering::AcqRel) == n {",
-        "        if st.holders.fetch_sub(n, Ordering::AcqRel) >= n {",
+        "a storage is freed while a Room still holds it",
+        "        if unsafe { (*st).holders.fetch_sub(n, Ordering::AcqRel) } == n {",
+        "        if unsafe { (*st).holders.fetch_sub(n, Ordering::AcqRel) } >= n {",
     ),
     (
         "a Room's drop gives back one credit more than it has",
@@ -91,18 +89,53 @@ FAULTS = [
     ),
     (
         "a Room's drop wakes no one",
-        "        } else if prev == unused {\n            // Even if Pipeline::drop races right after our `fetch_sub` and\n            // recycles `&'static PipeStorage`, waking a WakerSlot is benign.\n            self.storage.waker.notify_after_seqcst();\n        }",
+        "        } else if prev == unused {\n            // Even if `Pipeline::drop` raced right after `fetch_sub` and freed\n            // `PipeStorage`, `waker` lives in `&'static PipeSlot` and waking it\n            // is benign.\n            waker.notify_after_seqcst();\n        }",
         "        }",
     ),
     (
         "a loan's event comes before the loan is marked complete",
-        "            if desc.loan_epoch != 0 {\n                self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);\n            }\n            finished(storage, || {\n                self.slot_done[slot].swap(true, Ordering::SeqCst);\n            });",
-        "            finished(storage, || {\n                self.slot_done[slot].swap(true, Ordering::SeqCst);\n            });\n            if desc.loan_epoch != 0 {\n                self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);\n            }",
+        "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(a, is_batch, custom);\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }\n                    finished(waker, || {\n                        // Sound: `done_ptr` points to `slot_done[a]` inside `*st`,\n                        // live until this `SeqCst` swap completes.\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });",
+        "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(a, is_batch, custom);\n                    finished(waker, || {\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }",
     ),
     (
         "a batch's tasks are published done before the last has hashed",
-        "            if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {\n                finished(storage, || {",
-        "            if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) != 0 {\n                finished(storage, || {",
+        "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(a, (b32 & !MULTI_CUSTOM_BIT) as usize, custom, platform);",
+        "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(a, (b32 & !MULTI_CUSTOM_BIT) as usize, custom, platform);\n                if is_batch && unsafe { (&*(&*st).multi[a].get()).pieces } >= 2 {\n                    if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 2 {\n                        let (waker, done_ptr, _) = unsafe { &*st }.finish_multi_slot(a, true, custom);\n                        finished(waker, || { unsafe { (*done_ptr).swap(true, Ordering::SeqCst) }; });\n                    }\n                    return;\n                }",
+    ),
+    (
+        "a storage retirement is omitted when its last holder drops",
+        "            crate::pipeline_sync::retire_storage!(st);",
+        "            let _ = st;",
+    ),
+    (
+        "a worker reads PipeSlot from storage after publishing completion",
+        "                let (waker, completed, epoch) = unsafe { &*st }.run_group(a, u32::try_from(b).expect(\"group slot fits u32\"), platform);\n                finished(waker, || {\n                    completed.swap(epoch, Ordering::SeqCst);\n                });",
+        "                let (_, completed, epoch) = unsafe { &*st }.run_group(a, u32::try_from(b).expect(\"group slot fits u32\"), platform);\n                completed.swap(epoch, Ordering::SeqCst);\n                unsafe { &*st }.slot.get().waker.notify_after_seqcst();",
+    ),
+    (
+        "a worker loads a storage atomic after publishing completion",
+        "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(a, b != 0, platform);\n                finished(waker, || {\n                    // Sound: `done_ptr` points to `pieces[a].done` inside `*st`,\n                    // live until this `SeqCst` swap completes.\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                });",
+        "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(a, b != 0, platform);\n                finished(waker, || {\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    let _ = unsafe { (*done_ptr).load(Ordering::Acquire) };\n                });",
+    ),
+    (
+        "Room::drop reads storage after releasing its credits",
+        "        let (waker, ref_ptr) = {\n            let st = self.storage();\n            (&st.slot.get().waker, core::ptr::addr_of!(st.rooms.refs[self.index as usize]))\n        };\n        // Sound: `ref_ptr` points to `rooms.refs[self.index]` inside `*self.storage`,\n        // which stays live until this `SeqCst` subtraction completes.\n        let prev = unsafe { (*ref_ptr).fetch_sub(unused, Ordering::SeqCst) };",
+        "        let ref_ptr = core::ptr::addr_of!(self.storage().rooms.refs[self.index as usize]);\n        let prev = unsafe { (*ref_ptr).fetch_sub(unused, Ordering::SeqCst) };\n        let waker = &self.storage().slot.get().waker;",
+    ),
+    (
+        "a reused PipeSlot drops its saved group epoch",
+        "push(FreeSlot { slot, next_group_epoch,",
+        "push(FreeSlot { slot, next_group_epoch: 1,",
+    ),
+    (
+        "a reused PipeSlot drops its saved loan epoch",
+        "next_loan_epoch });",
+        "next_loan_epoch: 1 });",
+    ),
+    (
+        "a non-last multi-piece worker reads storage after tasks_left decrement",
+        "                }\n            }\n            _ => unreachable!(),",
+        "                } else {\n                    let _ = unsafe { (*tasks_left_ptr).load(Ordering::Acquire) };\n                }\n            }\n            _ => unreachable!(),",
     ),
 ]
 
@@ -421,8 +454,18 @@ def controls(copy):
         # reading of it.
         with open(os.path.join(home(), "logs", f"{len(os.listdir(os.path.join(home(), 'logs'))):02}.log"), "w") as f:
             f.write(f"{name}\n\n{said}")
-        print(f"MISSED  {name}" if passes else f"caught  {name} ({how_it_failed(said)})", flush=True)
-        if passes:
+        reason = how_it_failed(said)
+        # Control #10 tests premature publication of a multi-piece batch before
+        # the last worker finishes hashing; a deadlock is not evidence of that.
+        false_deadlock = (
+            not passes
+            and name == "a batch's tasks are published done before the last has hashed"
+            and "deadlock" in reason
+        )
+        failed = passes or false_deadlock
+        tag = f"MISSED  {name} (wrong failure: {reason})" if false_deadlock else (f"MISSED  {name}" if passes else f"caught  {name} ({reason})")
+        print(tag, flush=True)
+        if failed:
             missed.append(name)
     if missed:
         sys.exit(f"pipeline_model_controls: the model passes {len(missed)} planted faults")

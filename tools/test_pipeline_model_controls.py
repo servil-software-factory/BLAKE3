@@ -59,6 +59,11 @@ allocator)
     echo "error: test failed (signal: 6, SIGABRT: process abort signal)" >&2
     exit 101
     ;;
+deadlock)
+    echo "test batches_are_whole_when_their_events_come ... FAILED"
+    echo "thread 'batches_are_whole_when_their_events_come' panicked: deadlock!" >&2
+    exit 101
+    ;;
 saves)
     # Someone saves the tree's source while a fault's model runs.
     echo "// saved during the run" >> "$CONTROLS_TREE/threads/src/pipeline.rs"
@@ -477,6 +482,13 @@ class Controls(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("takes no argument", run.stderr)
         self.assertFalse(os.path.exists(self.ran_in))
+
+    def test_batch_ordering_control_rejects_a_deadlock(self):
+        run = self.run_script("deadlock")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("MISSED  a batch's tasks are published done before the last has hashed (wrong failure:", run.stdout)
+        self.assertIn("passes 1 planted faults", run.stderr)
+        self.assert_untouched()
 
 
 if __name__ == "__main__":

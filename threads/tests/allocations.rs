@@ -20,54 +20,72 @@ struct Counting;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Counts {
     allocations: usize,
+    failed_allocations: usize,
     reallocations: usize,
     deallocations: usize,
     bytes: usize,
+    freed_bytes: usize,
 }
 
 impl Counts {
     fn since(self, before: Self) -> Self {
         Self {
             allocations: self.allocations - before.allocations,
+            failed_allocations: self.failed_allocations - before.failed_allocations,
             reallocations: self.reallocations - before.reallocations,
             deallocations: self.deallocations - before.deallocations,
             bytes: self.bytes - before.bytes,
+            freed_bytes: self.freed_bytes - before.freed_bytes,
         }
     }
     fn plus(self, other: Self) -> Self {
         Self {
             allocations: self.allocations + other.allocations,
+            failed_allocations: self.failed_allocations + other.failed_allocations,
             reallocations: self.reallocations + other.reallocations,
             deallocations: self.deallocations + other.deallocations,
             bytes: self.bytes + other.bytes,
+            freed_bytes: self.freed_bytes + other.freed_bytes,
         }
     }
 }
 
 struct AtomicCounts {
     allocations: AtomicUsize,
+    failed_allocations: AtomicUsize,
     reallocations: AtomicUsize,
     deallocations: AtomicUsize,
     bytes: AtomicUsize,
+    freed_bytes: AtomicUsize,
 }
 impl AtomicCounts {
     fn get(&self) -> Counts {
         Counts {
             allocations: self.allocations.load(Ordering::Relaxed),
+            failed_allocations: self.failed_allocations.load(Ordering::Relaxed),
             reallocations: self.reallocations.load(Ordering::Relaxed),
             deallocations: self.deallocations.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
+            freed_bytes: self.freed_bytes.load(Ordering::Relaxed),
         }
     }
     fn add(&self, c: Counts) {
         self.allocations.fetch_add(c.allocations, Ordering::Relaxed);
+        self.failed_allocations.fetch_add(c.failed_allocations, Ordering::Relaxed);
         self.reallocations.fetch_add(c.reallocations, Ordering::Relaxed);
         self.deallocations.fetch_add(c.deallocations, Ordering::Relaxed);
         self.bytes.fetch_add(c.bytes, Ordering::Relaxed);
+        self.freed_bytes.fetch_add(c.freed_bytes, Ordering::Relaxed);
     }
 }
-static WORKER_COUNTS: AtomicCounts =
-    AtomicCounts { allocations: AtomicUsize::new(0), reallocations: AtomicUsize::new(0), deallocations: AtomicUsize::new(0), bytes: AtomicUsize::new(0) };
+static WORKER_COUNTS: AtomicCounts = AtomicCounts {
+    allocations: AtomicUsize::new(0),
+    failed_allocations: AtomicUsize::new(0),
+    reallocations: AtomicUsize::new(0),
+    deallocations: AtomicUsize::new(0),
+    bytes: AtomicUsize::new(0),
+    freed_bytes: AtomicUsize::new(0),
+};
 
 unsafe extern "C" {
     fn pthread_self() -> RawPthread;
@@ -89,8 +107,15 @@ fn library_worker() -> bool {
 // Count the calling thread separately from the harness's other threads.
 thread_local! {
     static COUNTS: Cell<Counts> = const { Cell::new(Counts {
-        allocations: 0, reallocations: 0, deallocations: 0, bytes: 0,
+        allocations: 0, failed_allocations: 0, reallocations: 0, deallocations: 0, bytes: 0, freed_bytes: 0,
     }) };
+    // Test hook: when true on the calling thread, the next GlobalAlloc request
+    // declines and returns null without calling System (safe under ASan).
+    static DECLINE_NEXT: Cell<bool> = const { Cell::new(false) };
+}
+
+fn take_decline() -> bool {
+    DECLINE_NEXT.try_with(|flag| flag.replace(false)).unwrap_or(false)
 }
 
 fn record(change: impl FnOnce(&mut Counts)) {
@@ -106,31 +131,52 @@ fn record(change: impl FnOnce(&mut Counts)) {
     });
 }
 
-// Sound: each allocator operation forwards its arguments to System unchanged.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record(|c| {
+fn account_alloc(out: *mut u8, size: usize) {
+    record(|c| {
+        if out.is_null() {
+            c.failed_allocations += 1;
+        } else {
             c.allocations += 1;
-            c.bytes += layout.size();
-        });
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record(|c| {
-            c.allocations += 1;
-            c.bytes += layout.size();
-        });
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record(|c| {
+            c.bytes += size;
+        }
+    });
+}
+
+fn account_realloc(out: *mut u8, old_size: usize, new_size: usize) {
+    record(|c| {
+        if out.is_null() {
+            c.failed_allocations += 1;
+        } else {
             c.reallocations += 1;
             c.bytes += new_size;
-        });
-        unsafe { System.realloc(ptr, layout, new_size) }
+            c.freed_bytes += old_size;
+        }
+    });
+}
+
+// Sound: each allocator operation forwards its arguments to System unchanged
+// unless the test-only DECLINE_NEXT flag returns null.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let out = if take_decline() { core::ptr::null_mut() } else { unsafe { System.alloc(layout) } };
+        account_alloc(out, layout.size());
+        out
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let out = if take_decline() { core::ptr::null_mut() } else { unsafe { System.alloc_zeroed(layout) } };
+        account_alloc(out, layout.size());
+        out
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let out = if take_decline() { core::ptr::null_mut() } else { unsafe { System.realloc(ptr, layout, new_size) } };
+        account_realloc(out, layout.size(), new_size);
+        out
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        record(|c| c.deallocations += 1);
+        record(|c| {
+            c.deallocations += 1;
+            c.freed_bytes += layout.size();
+        });
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -162,10 +208,13 @@ fn allocated(call: impl FnOnce()) -> usize {
 
 #[test]
 fn allocation_counter_sees_a_callers_allocation() {
-    assert_eq!(counts(|| drop(std::hint::black_box(vec![0u8; 4096]))), Counts { allocations: 1, deallocations: 1, bytes: 4096, ..Counts::default() });
+    assert_eq!(
+        counts(|| drop(std::hint::black_box(vec![0u8; 4096]))),
+        Counts { allocations: 1, deallocations: 1, bytes: 4096, freed_bytes: 4096, ..Counts::default() }
+    );
     let mut buffer = vec![0u8; 8];
-    assert_eq!(counts(|| buffer.reserve_exact(4096)), Counts { reallocations: 1, bytes: 4104, ..Counts::default() });
-    assert_eq!(counts(|| drop(buffer)), Counts { deallocations: 1, ..Counts::default() });
+    assert_eq!(counts(|| buffer.reserve_exact(4096)), Counts { reallocations: 1, bytes: 4104, freed_bytes: 8, ..Counts::default() });
+    assert_eq!(counts(|| drop(buffer)), Counts { deallocations: 1, freed_bytes: 4104, ..Counts::default() });
 }
 
 #[test]
@@ -198,7 +247,7 @@ fn worker_counter_sees_an_owned_background_allocation() {
     });
     flags[3].store(true, Ordering::Release);
     worker.join().unwrap();
-    assert_eq!(work, Counts { allocations: 1, deallocations: 1, bytes: 4096, ..Counts::default() });
+    assert_eq!(work, Counts { allocations: 1, deallocations: 1, bytes: 4096, freed_bytes: 4096, ..Counts::default() });
 }
 
 /// Only key bytes vary: caller preparation stays outside the allocator
@@ -664,36 +713,96 @@ fn prepare_after_pooled_job_allocates_nothing() {
     assert_eq!(prep, Counts::default(), "already-sufficient pool scratch must not reallocate after pooled job: {prep:?}");
 }
 
-/// Dropping a quiescent `Pipeline` holding an unreaped pending `Batch` must
-/// deallocate every per-Pipeline allocation (including `RawSlots` backing and
-/// both the pending `Batch` and digest box) with zero leaked allocations.
+/// Dropping `Pipeline`s across varied `Limits.rooms`, with pending batches,
+/// surviving `Room`s, and surviving `Lent`s, must free every per-Pipeline
+/// `PipeStorage` allocation (including `Rooms`, `groups`, `pieces`, `slots`,
+/// and pending `Batch`/digest boxes) cleanly with zero leaked allocations
+/// beyond the reused `PipeSlot`.
 #[test]
-fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
+fn dropping_pipeline_frees_storage_and_pending_batches_across_varied_limits() {
     use blake3_servil::throughput::{Limits, Pipeline, block_on};
     pool_ready(2);
-    // Warm up reusable storage and FREE_STORAGES capacity first.
-    let warm = Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 });
-    drop(warm);
-    let mut pipe = None;
-    let create = counts(|| {
-        pipe = Some(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
+    // Warm up one reusable PipeSlot (1024-action bucket).
+    drop(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
+
+    // 1. Pending batch + per-Pipeline storage freed completely across one
+    //    whole create -> submit -> drop window, with zero allocations in Drop.
+    let mut drop_counts = Counts::default();
+    let lifecycle = counts(|| {
+        let mut pipe = Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 2 });
+        let msg = block_on(pipe.message(1, None));
+        let (batch, digests) = (Batch::new(64, 2), vec![[0u8; 32]; 2].into_boxed_slice());
+        pipe.batch(msg, batch, digests);
+        drop_counts = counts(|| drop(pipe));
     });
-    let mut pipe = pipe.unwrap();
-    let msg = block_on(pipe.message(1, None));
-    let (batch_allocs, (batch, digests)) = {
-        let mut out = None;
-        let c = counts(|| {
-            out = Some((Batch::new(64, 2), vec![[0u8; 32]; 2].into_boxed_slice()));
-        });
-        (c, out.unwrap())
-    };
-    // Short batch stays buffered locally in open_group, so Pipeline::drop drops
-    // it quietly and frees both allocations alongside RawSlots.
-    pipe.batch(msg, batch, digests);
-    let dropped = counts(|| drop(pipe));
-    assert_eq!(
-        dropped.deallocations,
-        create.allocations + batch_allocs.allocations,
-        "Pipeline::drop must free every per-Pipeline allocation (create={create:?}, batch={batch_allocs:?}, dropped={dropped:?})"
-    );
+    assert!(lifecycle.allocations > 0 && lifecycle.bytes > 0, "expected per-Pipeline + batch allocations: {lifecycle:?}");
+    assert_eq!(drop_counts.allocations, 0, "Pipeline::drop must not allocate once PipeSlot is warmed: {drop_counts:?}");
+    assert_eq!(drop_counts.reallocations, 0, "Pipeline::drop must not reallocate once PipeSlot is warmed: {drop_counts:?}");
+    assert_eq!(lifecycle.deallocations, lifecycle.allocations, "whole create->submit->drop window must balance allocations and deallocations: {lifecycle:?}");
+    assert_eq!(lifecycle.freed_bytes, lifecycle.bytes, "whole create->submit->drop window must free every allocated byte: {lifecycle:?}");
+
+    // 2. Varying Limits.rooms (1..=40) reuses the single PipeSlot and frees every
+    //    PipeStorage / Rooms allocation immediately on drop (#465). Completed
+    //    `Lent` guards outliving their `Pipeline` pin zero `PipeStorage` bytes.
+    let loan_buf = [0x3Cu8; 64];
+    let mut surviving_lents = Vec::with_capacity(40);
+    let varied = counts(|| {
+        for rooms in 1..=40 {
+            let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms });
+            let mut m = block_on(p.message(rooms as u32, None));
+            let mut r = block_on(p.room());
+            r.bytes_mut()[..64].fill(rooms as u8);
+            p.commit(&mut m, &mut r, 64);
+            p.end(m);
+            let m_lent = block_on(p.message(100 + rooms as u32, None));
+            // Sound: `loan_buf` outlives every guard in `surviving_lents`.
+            let guard = unsafe { p.lent(m_lent, &loan_buf) };
+            let mut seen = 0;
+            while seen < 2 {
+                match p.next_event() {
+                    Some(_) => seen += 1,
+                    None => block_on(p.ready()),
+                }
+            }
+            // Let `r` and `guard` outlive `p`; dropping `r` frees `PipeStorage`
+            // immediately while `guard` remains alive.
+            drop(p);
+            drop(r);
+            surviving_lents.push(guard);
+        }
+    });
+    drop(surviving_lents);
+    assert!(varied.allocations > 0 && varied.bytes > 0, "expected PipeStorage allocations across varied limits");
+    assert_eq!(varied.failed_allocations, 0, "varied Limits.rooms should see zero failed allocations: {varied:?}");
+    assert_eq!(varied.deallocations, varied.allocations, "varied Limits.rooms must free every PipeStorage allocation cleanly: {varied:?}");
+    assert_eq!(varied.freed_bytes, varied.bytes, "varied Limits.rooms must free every PipeStorage byte while Lent guards survive: {varied:?}");
+}
+
+#[test]
+fn failed_allocator_results_are_not_charged_as_live_memory() {
+    // Exercise the GlobalAlloc implementation end-to-end: a declined fallible
+    // allocation must still register in `failed_allocations` (so zero-alloc
+    // assertions reject it) without charging live `allocations` or `bytes`.
+    let mut v: Vec<u8> = Vec::new();
+    let fail_alloc = counts(|| {
+        DECLINE_NEXT.with(|f| f.set(true));
+        assert!(v.try_reserve_exact(4096).is_err(), "declined alloc must fail try_reserve_exact");
+    });
+    assert_eq!(fail_alloc, Counts { failed_allocations: 1, ..Counts::default() }, "declined alloc must record failed_allocations without charging live memory");
+
+    // Exercise a declined realloc through GlobalAlloc::realloc.
+    let mut growing: Vec<u8> = Vec::with_capacity(64);
+    let fail_realloc = counts(|| {
+        DECLINE_NEXT.with(|f| f.set(true));
+        assert!(growing.try_reserve_exact(8192).is_err(), "declined realloc must fail try_reserve_exact");
+    });
+    assert_eq!(fail_realloc, Counts { failed_allocations: 1, ..Counts::default() }, "declined realloc must record failed_allocations without moving bytes");
+    drop(growing);
+
+    let mut sentinel = 0u8;
+    let non_null = core::ptr::addr_of_mut!(sentinel);
+    let ok_alloc = counts(|| account_alloc(non_null, 4096));
+    assert_eq!(ok_alloc, Counts { allocations: 1, bytes: 4096, ..Counts::default() });
+    let ok_realloc = counts(|| account_realloc(non_null, 4096, 8192));
+    assert_eq!(ok_realloc, Counts { reallocations: 1, bytes: 8192, freed_bytes: 4096, ..Counts::default() });
 }

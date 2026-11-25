@@ -16,6 +16,33 @@ figure names its machine.
   must not link `std` should use official `blake3` with `default-features =
   false`.
 
+## Memory and lifecycle
+
+- **`Pipeline` frees per-pipeline storage on drop** (`#465`): dropping a
+  `Pipeline` (and any surviving `Room`s) now frees its `PipeStorage`
+  (64 KiB `Room` buffers, short-message groups, piece nodes, slots, and
+  completion buffers) back to the allocator instead of retaining it on a
+  room-count-matched process free list. Creating and dropping `Pipeline`s
+  across 40 distinct `Limits.rooms` values (`1..=40`) no longer retains
+  51.25+ MiB of room buffers, and `PipeStorage` is deallocated immediately
+  on drop even while completed `Lent` guards survive (dropping a `Pipeline`
+  with dispatched work still unfinished continues to abort, as documented).
+  Only the worker-facing `PipeSlot` (power-of-two action ring, waker slot,
+  and monotonic completion lines) is retained for reuse in per-tier free
+  lists.
+- **Slower (short-lived equal-limits `Pipeline` churn):** freeing
+  per-pipeline storage on drop means creating and dropping a fresh
+  `Pipeline` per short message with identical `Limits` now allocates and
+  frees `PipeStorage` each time instead of reusing a cached arena. On
+  Ryzen 7 9700X (`x86-9700x`, `Limits { messages: 4, rooms: 8 }`, 64 B
+  room hash, 1 thread): creating and dropping a `Pipeline` per message
+  takes `2,205–2,256 ns` vs `295–304 ns` previously (~7.4×), whereas
+  reusing one `Pipeline` across requests stays unchanged at `165 ns` vs
+  `164–167 ns` (and steady-state `bench-hashes --cells all` shows no
+  regression on Ryzen 7 9700X or Apple M6). Keep a `Pipeline` alive
+  across requests rather than creating and dropping one per short
+  message.
+
 # blake3-servil 0.11.0+2c43b150bd18c89b6c08a133446c51a3fe6981bc, against blake3-servil 0.10.0
 
 What changed since `0.10.0`, each item with its issue or commit. Every
