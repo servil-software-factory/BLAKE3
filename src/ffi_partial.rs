@@ -426,16 +426,16 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
     const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
     let platform = crate::platform::Platform::detect();
     let block_lanes = crate::pair::takes_platform(platform);
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-    let output16_lanes = matches!(platform, crate::platform::Platform::AVX512);
-    #[cfg(all(test, blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    let output_width = crate::ffi_output::lanes(platform);
+    #[cfg(all(test, feature = "std", blake3_avx512_ffi, target_os = "linux"))]
     let mut counted_output_turn = false;
     for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
         let mut full_chunks = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut short_plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut short_plain_max_len = 0usize;
-        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-        let mut output16 = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+        #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+        let mut output_slots = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         for (k, &i) in w_chunk.iter().enumerate() {
             let k = k.to_le_bytes()[0];
@@ -451,9 +451,9 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                     continue;
                 }
             }
-            #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-            if output16_lanes && crate::ffi_output::input(&hashers[i]).is_some() {
-                output16.push(k);
+            #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+            if output_width != 0 && crate::ffi_output::input(&hashers[i]).is_some() {
+                output_slots.push(k);
                 continue;
             }
             rest.push(k);
@@ -503,28 +503,19 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                 o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
             }
         }
-        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+        #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
         {
-            let mut chunks = output16.as_slice().chunks_exact(16);
-            if output16.len() >= 16 {
+            let done = if output_slots.len() >= 4 {
                 #[cfg(test)]
                 if !counted_output_turn {
                     crate::counted(crate::Counted::OutputGroupTurn);
                     counted_output_turn = true;
                 }
-                for slots in chunks.by_ref() {
-                    let inputs: crate::stack_vec::StackVec<_, 16> =
-                        slots.iter().map(|&k| crate::ffi_output::input(&hashers[w_chunk[usize::from(k)]]).unwrap()).collect();
-                    let mut digests = [[0u8; OUT_LEN]; 16];
-                    // Sound: `output16` is only populated when `platform` is `Platform::AVX512`;
-                    // borrowed descriptors keep every block/CV readable and `digests` holds 16 slots.
-                    unsafe { crate::ffi_output::hash_group::<16>(inputs.as_slice().try_into().unwrap(), &mut digests) };
-                    for (&k, digest) in slots.iter().zip(&digests) {
-                        o_chunk[usize::from(k)] = *digest;
-                    }
-                }
-            }
-            for &k in chunks.remainder() {
+                crate::ffi_output::finalize_output_slots(hashers, w_chunk, output_slots.as_slice(), o_chunk, output_width)
+            } else {
+                0
+            };
+            for &k in &output_slots.as_slice()[done..] {
                 let ku = usize::from(k);
                 o_chunk[ku] = *hashers[w_chunk[ku]].take_root_hash().as_bytes();
             }
