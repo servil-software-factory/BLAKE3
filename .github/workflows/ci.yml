@@ -379,13 +379,30 @@ jobs:
     # llvm-objdump): what the check installs is the same on every run.
     # ca-certificates comes first, from the archive of the day, as in
     # tools/b3sum-release-container.sh: the snapshot is served over HTTPS.
+    # Cache the downloaded .deb archives and z3 wheel across runs so slow
+    # snapshot.ubuntu.com fetches do not push this job near its 30-minute
+    # timeout. apt still verifies every cached .deb against the signed
+    # snapshot Packages index, and pip --require-hashes verifies the wheel.
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          /tmp/x86-model-apt
+          /tmp/x86-model-pip
+        key: x86-model-v1-${{ hashFiles('tools/b3sum-release.toolchain') }}-z3-5.4.1.0
     - run: |
+        mkdir -p /tmp/x86-model-apt /tmp/x86-model-pip
         printf '%s\n' \
           'z3-solver==5.4.1.0 \' \
           '  --hash=sha256:e680ce083683abca5d07c3e55c2f620ff9a29cb91c548eeeea27ae29e8060522 \' \
           '  --hash=sha256:f2c745d1623128400c208d875fba741ccd88f061cb89b5661a9f2169eb24b110' \
           > /tmp/z3.req
-        docker run --rm -v "$PWD":/src -v /tmp/z3.req:/tmp/z3.req:ro -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh -euc '
+        docker run --rm \
+          -v "$PWD":/src \
+          -v /tmp/z3.req:/tmp/z3.req:ro \
+          -v /tmp/x86-model-apt:/var/cache/apt/archives \
+          -v /tmp/x86-model-pip:/root/.cache/pip \
+          -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh -euc '
+          rm -f /etc/apt/apt.conf.d/docker-clean
           snapshot=$(sed -n "s/^apt-snapshot //p" tools/b3sum-release.toolchain)
           export DEBIAN_FRONTEND=noninteractive
           apt="apt-get -q -o Acquire::Retries=5 -o Acquire::http::Timeout=30"
@@ -403,6 +420,8 @@ jobs:
           retry $apt update --snapshot "$snapshot"
           retry $apt install -y --no-install-recommends --snapshot "$snapshot" python3 python3-pip gcc libc6-dev llvm-18 lld-18 clang-18
           pip install --break-system-packages --require-hashes -r /tmp/z3.req
+          rm -rf /var/cache/apt/archives/partial /var/cache/apt/archives/lock
+          chmod -R a+rX /var/cache/apt/archives /root/.cache/pip
           python3 tools/verify/cross_check_x86.py'
 
   b3sum_release_build:
