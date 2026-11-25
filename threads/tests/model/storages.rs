@@ -2,20 +2,38 @@
 //! (tests/shuttle_pipeline.rs): it reaches the Pipeline's private storage
 //! list to free a run's storages at the run's end.
 
-use super::{FREE_STORAGES, MODEL_OWNED_STORAGES, Ordering, OwnedStoragePtr, PipeStorage, STORAGES_MADE};
+use super::{FREE_STORAGES, MODEL_OWNED_STORAGES, MODEL_RETIRED_SHAREDS, Ordering, OwnedSharedPtr, OwnedStoragePtr, STORAGES_MADE, Shared};
+
+/// Record a replaced `Shared` pointer so `free_storages_for_model` frees it
+/// after Shuttle's workers have joined (#465). Kept in this model-only file so
+/// non-Shuttle mutation builds do not see a cfg-gated conditional branch.
+pub(super) fn record_retired_shared(held: *mut Shared) {
+    if !held.is_null() {
+        MODEL_RETIRED_SHAREDS.lock().unwrap().push(OwnedSharedPtr(held));
+    }
+}
 
 /// At the end of one run of the model, every storage made in it is free
 /// again (returned: how many made, how many free), and is freed here through
 /// its original owning `*mut PipeStorage` allocation pointer (never casting a
-/// shared `&PipeStorage` reference back to `*mut`). A program never frees one;
-/// a model that ran thousands of schedules without freeing would hold them all,
-/// and Shuttle's atomics must not pass from one run to the next.
+/// shared `&PipeStorage` reference back to `*mut`). Any `Shared` replaced when
+/// `messages` grew on a reused storage is freed here too (#465). A program
+/// never frees one; a model that ran thousands of schedules without freeing
+/// would hold them all, and Shuttle's atomics must not pass from one run to
+/// the next.
 pub(crate) fn free_storages_for_model() -> (usize, usize) {
-    let free: Vec<&'static PipeStorage> = FREE_STORAGES.lock().unwrap().drain(..).collect();
+    let mut map = FREE_STORAGES.lock().unwrap();
+    let back: usize = map.values().map(Vec::len).sum();
+    map.clear();
+    drop(map);
     let owned: Vec<OwnedStoragePtr> = MODEL_OWNED_STORAGES.lock().unwrap().drain(..).collect();
+    let retired_shareds: Vec<OwnedSharedPtr> = MODEL_RETIRED_SHAREDS.lock().unwrap().drain(..).collect();
     let made = STORAGES_MADE.swap(0, Ordering::SeqCst);
-    let back = free.len();
-    drop(free);
+    for OwnedSharedPtr(shared_ptr) in retired_shareds {
+        // Sound: the model's threads have all ended, and `shared_ptr` is the
+        // original owning pointer from `Box::into_raw` retired in `create`.
+        unsafe { drop(Box::from_raw(shared_ptr)) };
+    }
     for OwnedStoragePtr(st_ptr) in owned {
         // Sound: the model's threads have all ended, nothing holds a storage
         // that was on the free list, and `st_ptr` is the original owning

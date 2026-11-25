@@ -529,18 +529,21 @@ fn owned_messages_complete_and_wake_the_caller() {
     });
 }
 
-/// One Pipeline after another of the same size: the second takes the
-/// first's storage, with the first's workers perhaps still on their way
-/// out of its last tasks.
+/// One Pipeline after another in the same room size class (varying `rooms`
+/// 5 -> 6 -> 5 and growing `messages` 2 -> 3 -> 2): later Pipelines reuse the
+/// first's storage while its workers may still be returning from its last
+/// tasks, and the `Shared` growth retires the first `Shared` for model cleanup.
 fn a_pipeline_after_another_reuses_its_storage_soundly() {
     check(|| {
         with_workers(2, || {
-            for round in 0..3u8 {
-                let lens = [1usize + round as usize, 2 * ROOM_LEN, 64, 300];
-                let inputs: Vec<Vec<u8>> = lens.iter().enumerate().map(|(i, &len)| input(len, round * 16 + i as u8)).collect();
+            let configs = [Limits { messages: 2, rooms: 5 }, Limits { messages: 3, rooms: 6 }, Limits { messages: 2, rooms: 5 }];
+            for (round, limits) in configs.into_iter().enumerate() {
+                let r = round as u8;
+                let lens = [1usize + round, 2 * ROOM_LEN, 64, 300];
+                let inputs: Vec<Vec<u8>> = lens.iter().enumerate().map(|(i, &len)| input(len, r * 16 + i as u8)).collect();
                 let want: Vec<Hash> = inputs.iter().map(|b| reference(b)).collect();
-                let mut pipe = Pipeline::<usize, ()>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
-                through_rooms(&mut pipe, 2, &inputs, &want);
+                let mut pipe = Pipeline::<usize, ()>::new(Mode::Plain, limits);
+                through_rooms(&mut pipe, limits.messages, &inputs, &want);
             }
         });
     });
