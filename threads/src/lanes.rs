@@ -3954,6 +3954,7 @@ pub(crate) mod sources {
             use core::sync::atomic::AtomicBool;
             struct State {
                 low: &'static Source,
+                publish_lock: std::sync::Mutex<()>,
                 stop: AtomicBool,
                 low_runs: AtomicU64,
                 high_ran: AtomicBool,
@@ -3962,9 +3963,12 @@ pub(crate) mod sources {
                 // Sound: `ctx` points to a leaked `'static State`.
                 let st = unsafe { &*(ctx as *const State) };
                 st.low_runs.fetch_add(1, Ordering::Relaxed);
+                // Serialize republishing: on SME2 CPUs `blake3-sme2` runs beside
+                // worker 0, and `Source::publish_actions` is single-publisher.
+                let _guard = st.publish_lock.lock().unwrap();
                 if !st.stop.load(Ordering::Acquire) {
-                    // Sound: `run_low` matches `unsafe fn(*const (), u64, Platform)` and
-                    // `low` has capacity 4 with at most 2 items in flight.
+                    // Sound: serialized by `publish_lock`; `low` has capacity 8
+                    // with at most 3 items in flight.
                     unsafe { st.low.publish_actions(run_low, ctx, &[1], false) };
                 }
             }
@@ -3982,20 +3986,25 @@ pub(crate) mod sources {
             if pool().workers() == 0 {
                 return;
             }
-            let low: &'static Source = Box::leak(Box::new(Source::with_actions(4)));
+            let low: &'static Source = Box::leak(Box::new(Source::with_actions(8)));
             let high: &'static Source = Box::leak(Box::new(Source::with_actions(2)));
             let low_slot = low.register().expect("low slot");
             let high_slot = high.register().expect("high slot");
             assert!(low_slot < high_slot, "low slot ({low_slot}) must precede high slot ({high_slot})");
-            let state: &'static State =
-                Box::leak(Box::new(State { low, stop: AtomicBool::new(false), low_runs: AtomicU64::new(0), high_ran: AtomicBool::new(false) }));
+            let state: &'static State = Box::leak(Box::new(State {
+                low,
+                publish_lock: std::sync::Mutex::new(()),
+                stop: AtomicBool::new(false),
+                low_runs: AtomicU64::new(0),
+                high_ran: AtomicBool::new(false),
+            }));
             let ctx = (state as *const State).cast::<()>();
-            // Seed `low` with 2 items so it stays continuously nonempty as the
-            // worker drains one and immediately republishes another, plus 1
-            // item on `high`.
+            // Seed `low` with 3 items so even when worker 0 and `blake3-sme2`
+            // both claim from `low` concurrently it stays nonempty until
+            // `run_low` republishes, plus 1 item on `high`.
             // Sound: `run_low` / `run_high` match the action ABI and `ctx` is `'static`.
             unsafe {
-                low.publish_actions(run_low, ctx, &[1, 2], false);
+                low.publish_actions(run_low, ctx, &[1, 2, 3], false);
                 high.publish_actions(run_high, ctx, &[9], false);
             }
             pool().park.wake_one();
