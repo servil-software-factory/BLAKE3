@@ -316,6 +316,13 @@ mod pipeline_sync {
         };
     }
     pub(crate) use process_static;
+    macro_rules! retire_storage {
+        ($st:expr) => {{
+            // Sound: caller released the final holder reference; free cleanly.
+            unsafe { drop(Box::from_raw($st)) };
+        }};
+    }
+    pub(crate) use retire_storage;
 }
 mod lanes;
 mod park;

@@ -665,19 +665,22 @@ fn prepare_after_pooled_job_allocates_nothing() {
     assert_eq!(prep, Counts::default(), "already-sufficient pool scratch must not reallocate after pooled job: {prep:?}");
 }
 
-/// Dropping a quiescent `Pipeline` holding an unreaped pending `Batch` must
-/// deallocate every per-Pipeline allocation (including `RawSlots` backing and
-/// both the pending `Batch` and digest box) with zero leaked allocations.
+/// Dropping `Pipeline`s across varied `Limits.rooms`, with pending batches,
+/// surviving `Room`s, and surviving `Lent`s, must free every per-Pipeline
+/// `PipeStorage` allocation (including `Rooms`, `groups`, `pieces`, `slots`,
+/// and pending `Batch`/digest boxes) cleanly with zero leaked allocations
+/// beyond the reused `PipeSlot`.
 #[test]
-fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
+fn dropping_pipeline_frees_storage_and_pending_batches_across_varied_limits() {
     use blake3_servil::throughput::{Limits, Pipeline, block_on};
     pool_ready(2);
-    // Warm up reusable storage and FREE_STORAGES capacity first.
-    let warm = Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 });
-    drop(warm);
+    // Warm up one reusable PipeSlot (1024-action bucket).
+    drop(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
+
+    // 1. Pending batch + per-Pipeline storage freed completely.
     let mut pipe = None;
     let create = counts(|| {
-        pipe = Some(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
+        pipe = Some(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 2 }));
     });
     let mut pipe = pipe.unwrap();
     let msg = block_on(pipe.message(1, None));
@@ -688,8 +691,6 @@ fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
         });
         (c, out.unwrap())
     };
-    // Short batch stays buffered locally in open_group, so Pipeline::drop drops
-    // it quietly and frees both allocations alongside RawSlots.
     pipe.batch(msg, batch, digests);
     let dropped = counts(|| drop(pipe));
     assert_eq!(
@@ -697,4 +698,24 @@ fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
         create.allocations + batch_allocs.allocations,
         "Pipeline::drop must free every per-Pipeline allocation (create={create:?}, batch={batch_allocs:?}, dropped={dropped:?})"
     );
+
+    // 2. Varying Limits.rooms (1..=8) reuses the single PipeSlot and frees every
+    //    PipeStorage / Rooms allocation immediately on drop (#465).
+    let varied = counts(|| {
+        for rooms in 1..=8 {
+            let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms });
+            let mut m = block_on(p.message(rooms as u32, None));
+            let mut r = block_on(p.room());
+            r.bytes_mut()[..64].fill(rooms as u8);
+            p.commit(&mut m, &mut r, 64);
+            p.end(m);
+            block_on(p.ready());
+            assert!(p.next_event().is_some());
+            // Let `r` outlive `p`, then drop `r` to free `PipeStorage`.
+            drop(p);
+            drop(r);
+        }
+    });
+    assert!(varied.allocations > 0, "expected PipeStorage allocations across varied limits");
+    assert_eq!(varied.deallocations, varied.allocations, "varied Limits.rooms must free every PipeStorage allocation cleanly: {varied:?}");
 }

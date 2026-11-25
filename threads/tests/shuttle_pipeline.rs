@@ -79,6 +79,30 @@ mod pipeline_sync {
     }
     pub(crate) use process_static;
 
+    shuttle::lazy_static! {
+        static ref QUARANTINED_STORAGES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    }
+
+    pub(crate) fn quarantine_storage(st: *mut crate::pipeline::PipeStorage) {
+        QUARANTINED_STORAGES.lock().unwrap().push(st as usize);
+    }
+
+    macro_rules! retire_storage {
+        ($st:expr) => {
+            crate::pipeline_sync::quarantine_storage($st)
+        };
+    }
+    pub(crate) use retire_storage;
+
+    pub(crate) fn drain_quarantined_storages() {
+        let ptrs: Vec<usize> = core::mem::take(&mut *QUARANTINED_STORAGES.lock().unwrap());
+        for addr in ptrs {
+            // Sound: all Shuttle worker threads have joined and `addr` came
+            // from `Box::into_raw` in `PipeStorage::alloc`.
+            unsafe { drop(Box::from_raw(addr as *mut crate::pipeline::PipeStorage)) };
+        }
+    }
+
     #[repr(transparent)]
     pub struct UnsafeCell<T>(core::cell::UnsafeCell<T>);
     impl<T> UnsafeCell<T> {
@@ -430,10 +454,12 @@ fn with_workers(workers: usize, caller: impl FnOnce()) {
     for t in threads {
         t.join().unwrap();
     }
-    // Every storage made in this run is free again: none is lost, and
-    // none is held by a Pipeline or a Room that is gone.
-    let (made, back) = pipeline::model_storages::free_storages_for_model();
-    assert_eq!(made, back, "storages made in this run, and those free at its end");
+    // Every PipeStorage allocated in this run was freed, and every PipeSlot
+    // returned to FREE_PIPE_SLOTS.
+    let (made, back, live) = pipeline::model_storages::free_storages_for_model();
+    pipeline_sync::drain_quarantined_storages();
+    assert_eq!(live, 0, "all PipeStorages freed at end of run");
+    assert_eq!(made, back, "PipeSlots made in this run, and those free at its end");
 }
 
 fn input(len: usize, salt: u8) -> Vec<u8> {
