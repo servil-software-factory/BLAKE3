@@ -104,11 +104,12 @@ impl Drop for Marked<'_> {
 /// on x86-64, staged plain 1 KiB chunks via `hash_many_rounded` (ceiling
 /// 32 lanes on Zen 5 / 16 on AVX-512 / 8 on AVX2 / 4 on SSE4.1), staged
 /// plain multi-block `65..=1023 B` messages on AVX2/AVX-512 via
-/// `hash_by_blocks` (equal-prefix-length blocks batched in SIMD, each
-/// message's final block compressed individually; SSE4.1 finishes staged
-/// `< 1 KiB` messages individually), and 16-lane `output16` for every 16
-/// eligible counter-zero final blocks packed from remaining hashers on Linux
-/// AVX-512; on AArch64, staged plain messages of up to 1024 bytes via
+/// `hash_by_blocks` (equal-prefix-length blocks batched in SIMD, and on Linux
+/// x86-64 AVX-512/AVX2 their final blocks compressed in `output16`/`output8`
+/// SIMD lanes for chunks of four or more; SSE4.1 finishes staged `< 1 KiB`
+/// messages individually), and `output16`/`output8` for every 4+ eligible
+/// counter-zero final blocks packed from remaining hashers on Linux
+/// AVX-512/AVX2; on AArch64, staged plain messages of up to 1024 bytes via
 /// `hash_by_blocks` and counter-zero final blocks via NEON `output8`.
 ///
 /// # Key-dependent timing
@@ -727,14 +728,19 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         }
         if k > 0 {
             for group in same_blocks.chunks(GROUP) {
-                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                #[cfg_attr(not(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux")), allow(unused_mut))]
+                let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                #[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+                let padded = crate::ffi_output::pad_by_blocks_inputs(&mut inputs, platform);
+                #[cfg(all(target_arch = "x86_64", not(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))))]
+                let padded = group.len();
                 let mut lanes = [0u8; GROUP * OUT_LEN];
                 crate::counted(crate::Counted::ByBlocksCall);
                 // Sound: each item holds more than k whole blocks; the
                 // caller selected this platform's block-group path.
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
-                    crate::pair::hash_many_blocks(platform, &inputs, k, key, counter, false, flags, CHUNK_START, 0, &mut lanes[..group.len() * OUT_LEN])
+                    crate::pair::hash_many_blocks(platform, &inputs, k, key, counter, false, flags, CHUNK_START, 0, &mut lanes[..padded * OUT_LEN])
                 };
                 #[cfg(blake3_neon)]
                 unsafe {
@@ -760,7 +766,11 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     if last_lanes {
         return;
     }
-    for &i in &order {
+    #[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    let serial_start = crate::ffi_output::finish_last_blocks_order(&order, items, &cvs, counter, flags, flags_end, out, platform);
+    #[cfg(not(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux")))]
+    let serial_start = 0usize;
+    for &i in &order[serial_start..] {
         let item = items[i];
         let k = whole(item);
         let mut cv = cvs[i];
@@ -1211,7 +1221,8 @@ mod test {
     fn finalize_each_groups_only_full_output_lanes() {
         crate::initialize();
         let expected = crate::test::official::hash(Mode::Plain, b"output selector");
-        for n in [0, 1, 2, 15, 16, 17, 31, 32, 33] {
+        let width = crate::ffi_output::lanes(Platform::detect());
+        for n in [0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33] {
             let mut hashers: Vec<_> = (0..n)
                 .map(|_| {
                     let mut h = Hasher::new(Mode::Plain, None);
@@ -1224,10 +1235,146 @@ mod test {
             crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].set(0));
             finalize_each(&mut hashers, &which, &mut out);
             let turns = crate::COUNTED.with(|c| c[crate::Counted::OutputGroupTurn as usize].get());
-            let expected_turns = u64::from(n >= 16 && matches!(Platform::detect(), Platform::AVX512));
-            assert_eq!(turns, expected_turns, "full output group dispatch n={n}");
+            let expected_turns = u64::from(width != 0 && n >= 4);
+            assert_eq!(turns, expected_turns, "output group dispatch n={n}");
             assert!(out.iter().all(|digest| *digest == expected));
             assert!(hashers.iter().all(|h| h.count() == 0));
+        }
+        // Pin by_blocks_prefix_padded boundaries and observe real (blocks, padded)
+        // calls at pair::hash_many_blocks plus exact output16/output8 call counts
+        // across every platform (including count=2, 2+ groups, and AVX2 13..=15 -> 16).
+        for (n, w, want) in [
+            (2, 0, 2),
+            (5, 0, 5),
+            (4, 8, 4),
+            (5, 8, 8),
+            (7, 8, 8),
+            (8, 8, 8),
+            (12, 8, 12),
+            (13, 8, 16),
+            (15, 8, 16),
+            (16, 8, 16),
+            (4, 16, 4),
+            (5, 16, 8),
+            (8, 16, 8),
+            (9, 16, 16),
+            (15, 16, 16),
+            (16, 16, 16),
+        ] {
+            assert_eq!(crate::ffi_output::by_blocks_prefix_padded(n, w), want, "by_blocks_prefix_padded({n}, {w})");
+        }
+        let lens = [0usize, 1, 24, 48, 63, 64, 65, 96, 128, 192, 255, 384, 512, 768, 1000, 1024];
+        for plat in crate::test::every_platform() {
+            let pw = crate::ffi_output::lanes(plat);
+            // Verify actual prefix padding passed to pair::hash_many_blocks.
+            for n in [2usize, 4, 5, 7, 8, 9, 12, 13, 15, 16] {
+                let bufs: Vec<Vec<u8>> = (0..n).map(|i| vec![(i as u8).wrapping_mul(17); 256]).collect();
+                let slices: Vec<&[u8]> = bufs.iter().map(Vec::as_slice).collect();
+                let mut out = vec![[0u8; OUT_LEN]; n];
+                crate::pair::BLOCKS_CALLS.with(|c| c.borrow_mut().clear());
+                hash_by_blocks(&slices, crate::IV, 0, &mut out, plat);
+                let calls = crate::pair::BLOCKS_CALLS.with(|c| c.borrow().clone());
+                assert_eq!(calls, vec![(3, crate::ffi_output::by_blocks_prefix_padded(n, pw))], "prefix padding {plat:?} n={n}");
+                for (i, buf) in bufs.iter().enumerate() {
+                    assert_eq!(out[i], *blake3::hash(buf).as_bytes(), "prefix {plat:?} n={n} item {i}");
+                }
+            }
+            for count in [2usize, 3, 4, 7, 8, 9, 12, 13, 15, 16, 19, 24, 33] {
+                let bufs: Vec<Vec<u8>> = (0..count)
+                    .map(|i| {
+                        let len = lens[i % lens.len()];
+                        (0..len).map(|j| ((i * 37 + j * 13 + len) & 0xff) as u8).collect()
+                    })
+                    .collect();
+                let slices: Vec<&[u8]> = bufs.iter().map(Vec::as_slice).collect();
+                let mut out = vec![[0u8; OUT_LEN]; count];
+                crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow_mut().clear());
+                hash_by_blocks(&slices, crate::IV, 0, &mut out, plat);
+                let calls = crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow().clone());
+                let mut want_calls = Vec::new();
+                if pw > 0 {
+                    let mut rem = count;
+                    while rem >= 4 {
+                        let c = rem.min(pw);
+                        want_calls.push(if c <= 8 { 8 } else { 16 });
+                        rem -= c;
+                    }
+                }
+                assert_eq!(calls, want_calls, "hash_by_blocks output calls {plat:?} count={count}");
+                for (i, buf) in bufs.iter().enumerate() {
+                    assert_eq!(out[i], *blake3::hash(buf).as_bytes(), "{plat:?} count={count} item {i}");
+                }
+            }
+            // Non-zero counter (partial last chunks from hash_each_middle) must
+            // NOT enter counter-zero output16/output8 kernels.
+            let bufs: Vec<Vec<u8>> = (0..8).map(|i| vec![i as u8; 200]).collect();
+            let slices: Vec<&[u8]> = bufs.iter().map(Vec::as_slice).collect();
+            let mut out = [[0u8; OUT_LEN]; 8];
+            crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow_mut().clear());
+            by_blocks_at_once(&slices, crate::IV, 3, 0, CHUNK_END, &mut out, plat);
+            assert!(crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow().is_empty()), "counter != 0 skips output16/output8");
+        }
+
+        // Exercise finalize_output_slots directly across every supported width
+        // (including width=8 on AVX-512 hosts) and exact call counts.
+        let mut widths = vec![0usize];
+        if width >= 8 {
+            widths.push(8);
+        }
+        if width == 16 {
+            widths.push(16);
+        }
+        for &w in &widths {
+            for n in [2usize, 3, 4, 7, 8, 9, 15, 16, 19, 20, 24, 25, 32] {
+                let mut hashers: Vec<_> = (0..n)
+                    .map(|i| {
+                        let mut h = Hasher::new(if i % 3 == 1 { Mode::Keyed(&[0x55; 32]) } else { Mode::Plain }, None);
+                        h.update(&vec![i as u8; 32 + (i % 32)]);
+                        h
+                    })
+                    .collect();
+                let which: Vec<usize> = (0..n).collect();
+                let slots: Vec<u8> = (0..n).map(|i| i as u8).collect();
+                let mut out = vec![[0u8; OUT_LEN]; n];
+                crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow_mut().clear());
+                let done = crate::ffi_output::finalize_output_slots(&hashers, &which, &slots, &mut out, w);
+                for &k in &slots[done..] {
+                    let ku = usize::from(k);
+                    out[ku] = *hashers[ku].take_root_hash().as_bytes();
+                }
+                let calls = crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow().clone());
+                let mut want = Vec::new();
+                let mut want_done = 0usize;
+                if w > 0 {
+                    let mut rem = n;
+                    if w == 16 {
+                        while rem >= 16 {
+                            want.push(16);
+                            rem -= 16;
+                            want_done += 16;
+                        }
+                        if rem >= 9 {
+                            want.push(16);
+                            want_done += rem;
+                            rem = 0;
+                        }
+                    }
+                    while rem >= 8 {
+                        want.push(8);
+                        rem -= 8;
+                        want_done += 8;
+                    }
+                    if rem >= 4 {
+                        want.push(8);
+                        want_done += rem;
+                    }
+                }
+                assert_eq!((done, calls), (want_done, want), "finalize_output_slots w={w} n={n}");
+                for i in 0..n {
+                    let mode = if i % 3 == 1 { Mode::Keyed(&[0x55; 32]) } else { Mode::Plain };
+                    assert_eq!(out[i], crate::test::official::hash(mode, &vec![i as u8; 32 + (i % 32)]), "w={w} n={n} item {i}");
+                }
+            }
         }
     }
 

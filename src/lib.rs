@@ -363,7 +363,8 @@ pub(crate) enum Counted {
     RootBlock = 1,
     /// One group of short collection items hashed together by blocks.
     ByBlocksCall = 2,
-    /// One AVX-512 finalize_each dispatch turn, requiring a full group.
+    /// One x86-64 AVX-512/AVX2 finalize_each output dispatch turn (four or
+    /// more eligible counter-zero hashers).
     OutputGroupTurn = 3,
     /// One pass of update_each's held groups hashed together.
     HeldPass = 4,
