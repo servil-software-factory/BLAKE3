@@ -261,24 +261,35 @@ impl Drop for Message {
 /// - `Drop` stops the process (an abort, not a panic) while the loan's
 ///   hashing has not finished, even where no worker has been given it yet
 ///   or its Pipeline is gone; once it has finished, the guard may be
-///   dropped before its event is taken. The guard reads a count of its
-///   storage's finished work: after its Pipeline was dropped with the
-///   loan still not handed to a worker, and a later Pipeline has used the
-///   same storage, the drop may pass though the loan was never hashed,
-///   and no worker reads its bytes then either.
+///   dropped before its event is taken, releasing its hold on the
+///   Pipeline's backing storage.
 #[must_use = "hold the guard until the message's event; dropping an active loan aborts the process"]
 pub struct Lent<'a> {
-    completed: &'static AtomicU64,
+    completed: *const AtomicU64,
     epoch: u64,
+    storage: *mut PipeStorage,
     _bytes: PhantomData<&'a [u8]>,
 }
+
+// Sound: `Lent` holds a `PipeStorage::holders` reference keeping `*storage`
+// (and `*completed` inside it) live until `Lent::drop`, and only loads from
+// the atomic `*completed` (no interior-mutable state exposed across unwinds).
+unsafe impl Send for Lent<'_> {}
+unsafe impl Sync for Lent<'_> {}
+impl core::panic::UnwindSafe for Lent<'_> {}
+impl core::panic::RefUnwindSafe for Lent<'_> {}
 
 impl Drop for Lent<'_> {
     #[inline]
     fn drop(&mut self) {
-        if self.completed.load(Ordering::Acquire) < self.epoch {
+        // Sound: this `Lent` holds a `PipeStorage::holders` reference keeping
+        // `*self.storage` (and `*self.completed` inside it) live until
+        // `PipeStorage::release` below.
+        let done = unsafe { (*self.completed).load(Ordering::Acquire) >= self.epoch };
+        if !done {
             stop_process("blake3-servil: a Pipeline Lent guard was dropped before its message finished hashing\n");
         }
+        PipeStorage::release(self.storage);
     }
 }
 
@@ -298,59 +309,62 @@ use crate::waker::WakerSlot;
 /// Aligned to its own 128-byte cache-line pair.
 #[repr(align(128))]
 struct Rooms {
+    /// 64-byte-aligned start of the `count * ROOM_LEN` room bytes inside `raw`
+    /// (`null` when `count == 0`), kept as a raw pointer so callers and workers
+    /// alias disjoint sub-slices without violating `Box`'s uniqueness.
     buf: *mut u8,
-    /// The model's alone (tests/shuttle_pipeline.rs): the allocation, to
-    /// free at a run's end.
-    #[cfg(shuttle)]
-    #[allow(dead_code)]
-    backing: (*mut u8, usize),
+    /// Original `alloc_zeroed` (`align = 1`) allocation freed in `Drop`. Using
+    /// 1-byte alignment routes through `calloc` / OS lazy demand-zero pages
+    /// rather than `posix_memalign` + eager `memset`, keeping construction fast
+    /// and RSS near zero for unused rooms.
+    raw: *mut u8,
+    layout: std::alloc::Layout,
     count: usize,
     refs: Box<[AtomicUsize]>,
 }
 
-// Sound: `buf` points into the rooms' own allocation, which is never freed or
-// moved; what may touch which bytes is the credits' matter (Room,
-// Shared::run_room_piece), not the pointer's.
+// Sound: `raw` owns the `alloc_zeroed(layout)` buffer (with `buf` pointing to
+// the 64-byte-aligned `count * ROOM_LEN` slice inside it) until `Rooms::drop`
+// runs (after `PipeStorage`'s final holder drops and every worker task has
+// published completion); what may touch which bytes is governed by `refs`.
 unsafe impl Send for Rooms {}
 unsafe impl Sync for Rooms {}
 
+impl Drop for Rooms {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            // Sound: `raw` came from `std::alloc::alloc_zeroed(self.layout)`
+            // with nonzero size, and `Rooms::drop` runs only once `PipeStorage`
+            // has zero live holders and zero in-flight worker tasks.
+            unsafe { std::alloc::dealloc(self.raw, self.layout) };
+        }
+    }
+}
+
 impl Rooms {
     fn new(count: usize) -> Self {
-        // The rooms' bytes are given away for good, as the storage that
-        // holds them is (PipeStorage::acquire), and kept as a pointer
-        // alone: callers and workers write and read them through pointers
-        // made from this one, which a Box held beside it would claim to
-        // own alone.
-        #[cfg(shuttle)]
-        let mut whole = (core::ptr::null_mut(), 0);
-        let buf = if count == 0 {
-            core::ptr::NonNull::<u8>::dangling().as_ptr()
+        let (buf, raw, layout) = if count == 0 {
+            (core::ptr::null_mut(), core::ptr::null_mut(), std::alloc::Layout::new::<u8>())
         } else {
-            let backing: &'static mut [u8] = Box::leak(vec![0u8; count * ROOM_LEN + 64].into_boxed_slice());
-            #[cfg(shuttle)]
-            {
-                whole = (backing.as_mut_ptr(), backing.len());
+            let size = count.checked_mul(ROOM_LEN).and_then(|n| n.checked_add(64)).expect("rooms byte size fits usize");
+            let layout = std::alloc::Layout::from_size_align(size, 1).expect("rooms layout fits isize::MAX");
+            // Sound: `layout.size() > 0` because `count > 0` and `ROOM_LEN > 0`.
+            let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+            if raw.is_null() {
+                std::alloc::handle_alloc_error(layout);
             }
-            let align = backing.as_ptr().align_offset(64);
-            // Sound: the allocation has 64 spare bytes, so the first 64-byte
-            // boundary and `count` rooms after it are inside it.
-            unsafe { backing.as_mut_ptr().add(align) }
+            // Sound: `align_offset(64) < 64`, and `raw` has `count * ROOM_LEN + 64` bytes.
+            let buf = unsafe { raw.add(raw.align_offset(64)) };
+            (buf, raw, layout)
         };
-        Rooms {
-            buf,
-            #[cfg(shuttle)]
-            backing: whole,
-            count,
-            refs: (0..count).map(|_| AtomicUsize::new(0)).collect(),
-        }
+        Rooms { buf, raw, layout, count, refs: (0..count).map(|_| AtomicUsize::new(0)).collect() }
     }
 
     #[inline(always)]
     fn room_ptr(&self, index: usize) -> *mut u8 {
         debug_assert!(index < self.count);
-        // Sound: `index` is a room of this storage (the callers take it from a
-        // Room, a piece or a group of this Pipeline), so the offset is inside
-        // the rooms' allocation.
+        // Sound: `index < self.count`, so `index * ROOM_LEN` lies inside the
+        // `count * ROOM_LEN`-byte allocation at `self.buf`.
         unsafe { self.buf.add(index * ROOM_LEN) }
     }
 
@@ -378,115 +392,162 @@ struct MemberGroup {
     completed_epoch: OwnLine<AtomicU64>,
 }
 
-/// Recycled `'static` backing storage: worker source, rooms, short-message
-/// groups, and multi-piece loan-completion lines. Never freed, so [`Room`]
-/// and [`Lent`] hold plain `'static` references with zero `Arc` traffic.
-struct PipeStorage {
+/// Recycled `'static` worker-facing slot (`Source` + `WakerSlot`).
+///
+/// Pool workers only ever touch `source` (while scanning `REGISTERED`) and
+/// `waker` (after publishing task completion or when `Room::drop` wakes a
+/// waiter). Keeping this handle alive for the process lets per-`Pipeline`
+/// [`PipeStorage`] (`Rooms`, groups, pieces, slots, and hashes) be freed
+/// cleanly on drop with zero worker-side epoch fences and zero blocking in
+/// `Pipeline::drop` (#465). Matched solely by `actions_len() >= actions`
+/// (rounded up to a power of two, minimum 1,024 = 32 KiB), so ascending
+/// `Limits` retain less than `2x` the largest slot tier per concurrently
+/// live `Pipeline`.
+struct PipeSlot {
     source: Source,
     waker: WakerSlot,
-    rooms: Rooms,
-    groups: Box<[MemberGroup]>,
-    /// Used only by multi-piece (`> TASK_LEN`) `lent` messages; short `lent`
-    /// messages piggyback directly on `groups[g].completed_epoch`.
-    loan_completed: Box<[OwnLine<AtomicU64>]>,
-    saved_loan_epoch: UnsafeCell<u64>,
-    saved_group_epoch: UnsafeCell<u64>,
-    /// The workers' view of the Pipeline that holds this storage, kept for
-    /// the next one (the owner's alone to read and write: `create`).
-    shared: UnsafeCell<*mut Shared>,
-    /// Who holds this storage: its Pipeline while alive, plus teardown
-    /// reservations and any surviving Rooms stamped with `ROOM_CLOSING_BIT`.
-    holders: OwnLine<AtomicUsize>,
 }
 
-// Sound: the UnsafeCells here are the owner's alone to write, and only between
-// tasks: `groups[g]` while group g is not in flight (acquire_free_group), the
-// saved epochs and `shared` while no Pipeline holds the storage or in its own
-// create and drop. Workers read a group's cells only from its dispatch to its
-// `completed_epoch`.
-unsafe impl Send for PipeStorage {}
-unsafe impl Sync for PipeStorage {}
-
 process_static! {
-    /// Every storage no Pipeline or Room holds, for the next Pipeline: all of
-    /// them, however many. A storage is never freed (workers may still read
-    /// one), so one that is not kept here is lost for good: a list of 16 lost
-    /// every storage past the sixteenth, and a server with a Pipeline per
-    /// connection grew by one at each connection beyond 16 at once (BLAKE3
-    /// #427). The process now holds, for Pipelines of the same Limits, as
-    /// many as its most such Pipelines at once (`acquire` gives a storage
-    /// only to a Pipeline of as many rooms whose actions, messages and
-    /// groups all fit in it: one of another size takes a new storage. A
-    /// storage is made with 1,024 actions, 64 messages and 64 groups at
-    /// the least, and the actions bind first: with one Room, 15 messages
-    /// fit a storage made for one, and 16 do not).
-    static FREE_STORAGES: Mutex<Vec<&'static PipeStorage>> = Mutex::new(Vec::new());
+    /// Recycled `'static` worker-facing `PipeSlot`s no live `Pipeline` holds.
+    static FREE_PIPE_SLOTS: Mutex<Vec<&'static PipeSlot>> = Mutex::new(Vec::new());
 }
 
 #[cfg(any(test, shuttle))]
 process_static! {
-    /// The storages made so far in this process.
-    static STORAGES_MADE: AtomicUsize = AtomicUsize::new(0);
+    /// The `PipeSlot`s made so far in this process (or Shuttle run).
+    static PIPE_SLOTS_MADE: AtomicUsize = AtomicUsize::new(0);
+}
+
+#[cfg(any(test, shuttle))]
+process_static! {
+    /// Live `PipeStorage` allocations not yet freed (tests and Shuttle leak checks).
+    static LIVE_STORAGES: AtomicUsize = AtomicUsize::new(0);
 }
 
 #[cfg(shuttle)]
-struct OwnedStoragePtr(*mut PipeStorage);
+struct OwnedPipeSlotPtr(*mut PipeSlot);
 
 #[cfg(shuttle)]
 // Sound: only pushed at creation and drained in `free_storages_for_model`
 // after all Shuttle worker threads have joined.
-unsafe impl Send for OwnedStoragePtr {}
+unsafe impl Send for OwnedPipeSlotPtr {}
 
 #[cfg(shuttle)]
 process_static! {
     /// Original `Box::into_raw` owning pointers for model teardown so
-    /// `free_storages_for_model` never casts `&'static PipeStorage` to `*mut`.
-    static MODEL_OWNED_STORAGES: Mutex<Vec<OwnedStoragePtr>> = Mutex::new(Vec::new());
+    /// `free_storages_for_model` frees the run's `PipeSlot`s without casting
+    /// `&'static PipeSlot` back to `*mut`.
+    static MODEL_OWNED_PIPE_SLOTS: Mutex<Vec<OwnedPipeSlotPtr>> = Mutex::new(Vec::new());
 }
 
-/// The model's alone (tests/shuttle_pipeline.rs): frees a run's storages
-/// at its end. In a file of its own, outside the files the mutation
-/// check changes: no build that check tests holds this code.
+/// The model's alone (tests/shuttle_pipeline.rs): verifies all `PipeStorage`s
+/// were freed and frees the run's `PipeSlot`s at its end.
 #[cfg(shuttle)]
 #[allow(dead_code)]
 #[path = "../tests/model/storages.rs"]
 pub(crate) mod model_storages;
 
+impl PipeSlot {
+    fn acquire(actions: usize) -> &'static PipeSlot {
+        let chosen = {
+            let mut free = FREE_PIPE_SLOTS.lock().unwrap();
+            let at = free.iter().enumerate().filter(|(_, s)| s.source.actions_len() >= actions).min_by_key(|(_, s)| s.source.actions_len()).map(|(at, _)| at);
+            at.map(|at| free.swap_remove(at))
+        };
+        if let Some(slot) = chosen {
+            return slot;
+        }
+        let cap = actions.max(1024).checked_next_power_of_two().unwrap_or(actions);
+        #[cfg(any(test, shuttle))]
+        PIPE_SLOTS_MADE.fetch_add(1, Ordering::Relaxed);
+        let raw = Box::into_raw(Box::new(PipeSlot { source: Source::with_actions(cap), waker: WakerSlot::new() }));
+        #[cfg(shuttle)]
+        MODEL_OWNED_PIPE_SLOTS.lock().unwrap().push(OwnedPipeSlotPtr(raw));
+        // Sound: `raw` stays live for the process (freed only after all Shuttle
+        // worker threads join in `model_storages::free_storages_for_model`).
+        unsafe { &*raw }
+    }
+
+    fn release(slot: &'static PipeSlot) {
+        FREE_PIPE_SLOTS.lock().unwrap().push(slot);
+    }
+}
+
+/// Per-`Pipeline` heap-allocated backing storage (`Rooms`, short-message
+/// groups, piece nodes, per-slot buffers, and completion flags), freed cleanly
+/// when its last holder (`Pipeline`, surviving [`Room`], or surviving [`Lent`])
+/// drops (#465).
+pub(crate) struct PipeStorage {
+    slot: crate::pipeline_sync::SlotRef<PipeSlot>,
+    tree: TreeHasher,
+    rooms: Rooms,
+    groups: Box<[MemberGroup]>,
+    /// Used only by multi-piece (`> TASK_LEN`) `lent` messages; short `lent`
+    /// messages piggyback directly on `groups[g].completed_epoch`.
+    loan_completed: Box<[OwnLine<AtomicU64>]>,
+    /// Per-slot prepared mode, written by the owner only when a slot opens via
+    /// `message_with` (`MessageWithFut::poll`) and read-only by workers until
+    /// the slot finishes. Default `message()` slots leave this untouched.
+    slot_trees: Box<[UnsafeCell<TreeHasher>]>,
+    /// Whether `slot_trees[slot]` overrides `self.tree` for the active message
+    /// in `slot` (written when a slot opens, read-only while tasks run).
+    slot_custom: Box<[UnsafeCell<bool>]>,
+    hashes: Box<[UnsafeCell<[u8; OUT_LEN]>]>,
+    cvs: Box<[UnsafeCell<PieceValues>]>,
+    slot_done: Box<[OwnLine<AtomicBool>]>,
+    tasks_left: Box<[OwnLine<AtomicUsize>]>,
+    multi: Box<[UnsafeCell<MultiDesc>]>,
+    pieces: Box<[PieceNode]>,
+    /// Who holds this storage: its `Pipeline` while alive (1), plus any live
+    /// [`Lent`] guards (+1 each), plus teardown reservations for surviving
+    /// [`Room`]s stamped with `ROOM_CLOSING_BIT`.
+    holders: OwnLine<AtomicUsize>,
+}
+
+// Sound: each `UnsafeCell` here has one writer at a time governed by its slot,
+// group, or piece state: the owner before dispatch, the worker until the
+// release/SeqCst completion store, and the owner again after observing it.
+// `PipeStorage` stays live at its heap address until every task has published
+// completion and `holders` reaches 0.
+unsafe impl Send for PipeStorage {}
+unsafe impl Sync for PipeStorage {}
+
 impl PipeStorage {
-    /// Give up `n` holds on `st` (its Pipeline's teardown holds, or a
-    /// surviving Room's): the last hold puts it on the free list. A Room may
-    /// outlive its Pipeline, so either may be the last.
-    fn release_n(st: &'static PipeStorage, n: usize) {
-        if st.holders.fetch_sub(n, Ordering::AcqRel) == n {
-            FREE_STORAGES.lock().unwrap().push(st);
+    /// Give up `n` holds on `st` (`Pipeline::drop`, surviving `Room::drop`, or
+    /// `Lent::drop`): when `holders` reaches 0, free `PipeStorage` cleanly.
+    #[inline(never)]
+    fn release_n(st: *mut PipeStorage, n: usize) {
+        // Sound: the caller holds `n` references in `holders`, keeping `*st`
+        // live until this `fetch_sub`. When `fetch_sub(n, AcqRel)` returns `n`,
+        // every worker task has already published completion (leaving zero
+        // references into `*st`), and no `Pipeline`, `Room`, or `Lent` retains
+        // any pointer to `*st`.
+        if unsafe { (*st).holders.fetch_sub(n, Ordering::AcqRel) } == n {
+            // Sound: `holders` reached 0, so no other holder or worker retains
+            // access to `*st`. Under Shuttle, poison `slot` before quarantine so
+            // any late worker access panics deterministically.
+            unsafe { (*st).slot.poison() };
+            #[cfg(any(test, shuttle))]
+            LIVE_STORAGES.fetch_sub(1, Ordering::Relaxed);
+            crate::pipeline_sync::retire_storage!(st);
         }
     }
 
-    fn release(st: &'static PipeStorage) {
+    #[inline]
+    fn release(st: *mut PipeStorage) {
         Self::release_n(st, 1);
     }
 
-    fn acquire(actions: usize, messages: usize, rooms: usize, groups: usize) -> &'static PipeStorage {
-        let chosen = {
-            let mut free = FREE_STORAGES.lock().unwrap();
-            let fits = |st: &&'static PipeStorage| {
-                st.source.actions_len() >= actions && st.loan_completed.len() >= messages && st.rooms.count == rooms && st.groups.len() >= groups
-            };
-            free.iter().position(fits).map(|at| free.swap_remove(at))
-        };
-        if let Some(st) = chosen {
-            st.holders.store(1, Ordering::Release);
-            return st;
-        }
-        let actions = actions.max(1024);
-        let messages = messages.max(64);
-        let groups = groups.max(64);
+    fn alloc(slot: &'static PipeSlot, tree: TreeHasher, messages: usize, rooms: usize, pieces: usize, groups: usize) -> *mut PipeStorage {
         let dummy = GroupMemberMeta { room: NONE };
         #[cfg(any(test, shuttle))]
-        STORAGES_MADE.fetch_add(1, Ordering::Relaxed);
-        let raw = Box::into_raw(Box::new(PipeStorage {
-            source: Source::with_actions(actions),
-            waker: WakerSlot::new(),
+        LIVE_STORAGES.fetch_add(1, Ordering::Relaxed);
+        Box::into_raw(Box::new(PipeStorage {
+            slot: crate::pipeline_sync::SlotRef::new(slot),
+            slot_trees: (0..messages).map(|_| UnsafeCell::new(tree.clone())).collect(),
+            slot_custom: (0..messages).map(|_| UnsafeCell::new(false)).collect(),
+            tree,
             rooms: Rooms::new(rooms),
             groups: (0..groups)
                 .map(|_| MemberGroup {
@@ -498,16 +559,37 @@ impl PipeStorage {
                 })
                 .collect(),
             loan_completed: (0..messages).map(|_| OwnLine(AtomicU64::new(0))).collect(),
-            saved_loan_epoch: UnsafeCell::new(1),
-            saved_group_epoch: UnsafeCell::new(1),
-            shared: UnsafeCell::new(core::ptr::null_mut()),
+            hashes: (0..messages).map(|_| UnsafeCell::new([0u8; OUT_LEN])).collect(),
+            cvs: (0..messages).map(|_| UnsafeCell::new(PieceValues { whole: [Cv::unset(); MAX_SLOT_PIECES], last: None })).collect(),
+            slot_done: (0..messages).map(|_| OwnLine(AtomicBool::new(true))).collect(),
+            tasks_left: (0..messages).map(|_| OwnLine(AtomicUsize::new(0))).collect(),
+            multi: (0..messages)
+                .map(|_| {
+                    UnsafeCell::new(MultiDesc {
+                        input: core::ptr::null(),
+                        total_len: 0,
+                        piece_level: level_of(TASK_LEN as u64),
+                        pieces: 0,
+                        batch: None,
+                        digests: core::ptr::null_mut(),
+                        loan_epoch: 0,
+                    })
+                })
+                .collect(),
+            pieces: (0..pieces)
+                .map(|_| PieceNode {
+                    slot: UnsafeCell::new(0),
+                    room: UnsafeCell::new(0),
+                    offset: UnsafeCell::new(0),
+                    len: UnsafeCell::new(0),
+                    index: UnsafeCell::new(0),
+                    out: OwnLine(UnsafeCell::new(RoomValue::Whole(Cv::unset()))),
+                    done: OwnLine(AtomicBool::new(true)),
+                    next: UnsafeCell::new(NONE),
+                })
+                .collect(),
             holders: OwnLine(AtomicUsize::new(1)),
-        }));
-        #[cfg(shuttle)]
-        MODEL_OWNED_STORAGES.lock().unwrap().push(OwnedStoragePtr(raw));
-        // Sound: `raw` is a valid leaked allocation (freed only after all
-        // Shuttle workers join in `model_storages::free_storages_for_model`).
-        unsafe { &*raw }
+        }))
     }
 }
 
@@ -528,16 +610,24 @@ pub struct Room {
     offset: u32,
     commits: u32,
     ptr: *mut u8,
-    storage: &'static PipeStorage,
+    storage: *mut PipeStorage,
 }
 
 // Sound: a Room is the only way to its uncommitted bytes, and its other fields
-// are plain values; `storage` is shared and Sync.
+// are plain values; `*storage` stays live until `Room::drop` releases its
+// credits (or its `ROOM_CLOSING_BIT` hold).
 unsafe impl Send for Room {}
 unsafe impl Sync for Room {}
 
 #[allow(clippy::len_without_is_empty)]
 impl Room {
+    #[inline(always)]
+    fn storage(&self) -> &PipeStorage {
+        // Sound: this Room's live credit (or `ROOM_CLOSING_BIT` hold after
+        // `Pipeline::drop`) keeps `*self.storage` live until `Room::drop`.
+        unsafe { &*self.storage }
+    }
+
     /// Remaining writable bytes in this room, starting on a 64-byte boundary.
     #[inline(always)]
     pub fn bytes_mut(&mut self) -> &mut [u8] {
@@ -572,7 +662,7 @@ impl Room {
     #[inline(always)]
     fn take_credit(&mut self) {
         if self.commits as usize == ROOM_CREDITS - 1 {
-            self.storage.rooms.refs[self.index as usize].fetch_add(ROOM_CREDITS - 1, Ordering::Relaxed);
+            self.storage().rooms.refs[self.index as usize].fetch_add(ROOM_CREDITS - 1, Ordering::Relaxed);
             self.commits = 0;
         }
         self.commits += 1;
@@ -585,7 +675,7 @@ impl Room {
     /// ROOM_CREDITS commits would.
     fn spend_all_but(&mut self, left: u32) {
         let spent = ROOM_CREDITS as u32 - left;
-        self.storage.rooms.release_n(self.index, spent as usize);
+        self.storage().rooms.release_n(self.index, spent as usize);
         self.commits += spent;
     }
 }
@@ -594,20 +684,28 @@ impl Drop for Room {
     #[inline]
     fn drop(&mut self) {
         let unused = ROOM_CREDITS - (self.commits as usize);
-        let prev = self.storage.rooms.refs[self.index as usize].fetch_sub(unused, Ordering::SeqCst);
+        // End the `&PipeStorage` borrow strictly BEFORE `fetch_sub`: once
+        // `fetch_sub` drops `refs[i]` to 0, a concurrent `Pipeline::drop` may
+        // immediately free `*self.storage`. Only the `&'static WakerSlot`
+        // (living in the recycled `PipeSlot`) is touched afterwards.
+        let (waker, ref_ptr) = {
+            let st = self.storage();
+            (&st.slot.get().waker, core::ptr::addr_of!(st.rooms.refs[self.index as usize]))
+        };
+        // Sound: `ref_ptr` points to `rooms.refs[self.index]` inside `*self.storage`,
+        // which stays live until this `SeqCst` subtraction completes.
+        let prev = unsafe { (*ref_ptr).fetch_sub(unused, Ordering::SeqCst) };
         if prev & ROOM_CLOSING_BIT != 0 {
-            // Pipeline::drop stamped ROOM_CLOSING_BIT after observing all
-            // dispatched work complete and reserved a `holders` ref for this
-            // Room; clear the slot back to 0 before releasing that hold
-            // (`AcqRel` establishes happens-before with the storage returning
-            // to FREE_STORAGES).
+            // `Pipeline::drop` stamped `ROOM_CLOSING_BIT` after all worker
+            // tasks finished and reserved a `holders` ref for this Room; drop
+            // that hold so the last survivor frees `PipeStorage` cleanly.
             assert_eq!(prev & !ROOM_CLOSING_BIT, unused, "surviving room ref count");
-            self.storage.rooms.refs[self.index as usize].store(0, Ordering::Release);
             PipeStorage::release(self.storage);
         } else if prev == unused {
-            // Even if Pipeline::drop races right after our `fetch_sub` and
-            // recycles `&'static PipeStorage`, waking a WakerSlot is benign.
-            self.storage.waker.notify_after_seqcst();
+            // Even if `Pipeline::drop` raced right after `fetch_sub` and freed
+            // `PipeStorage`, `waker` lives in `&'static PipeSlot` and waking it
+            // is benign.
+            waker.notify_after_seqcst();
         }
     }
 }
@@ -648,95 +746,88 @@ struct MultiDesc {
 }
 
 /// The last thing a worker does for a task: `publish` stores the task's
-/// completion, then the owner is woken. From that store on the owner may
-/// see every task done and drop the Pipeline, and its storage and its
-/// `Shared` may serve the next Pipeline: so the worker writes nothing
-/// after the store, and reads only the storage, taken before it. Neither
-/// is ever freed (a `Shared` that was, once, was read after: #399), so a
-/// late read finds memory; a late write would land in another Pipeline's
-/// work. A wake that reaches the next Pipeline is a wake one may get at
-/// any time (tests/shuttle_waker.rs has the slot under late finishers).
+/// completion, then `waker` (living in `&'static PipeSlot`) wakes the owner.
+/// Every reference into `PipeStorage` ends BEFORE `publish` runs so that once
+/// `publish` completes, `Pipeline::drop` may immediately free `PipeStorage`
+/// without any worker holding a dangling reference or touching freed memory.
+/// A wake that reaches a later `Pipeline` reusing the same `PipeSlot` is a
+/// benign spurious wake (tests/shuttle_waker.rs checks `WakerSlot` under late
+/// finishers).
 #[inline(always)]
-fn finished(storage: &'static PipeStorage, publish: impl FnOnce()) {
+fn finished(waker: &'static WakerSlot, publish: impl FnOnce()) {
     publish();
-    storage.waker.notify_after_seqcst();
+    waker.notify_after_seqcst();
 }
 
-/// Worker-visible per-pipeline state. Never freed: it stays with its
-/// storage for the next Pipeline of its size (`create`), as the storage
-/// does, so nothing a worker can reach is memory an owner gives back.
-struct Shared {
-    /// This Pipeline's default mode. In a cell: the next Pipeline to take this
-    /// `Shared` writes its own mode here (`create`), and a worker of the
-    /// Pipeline before may still be returning from its last task, its
-    /// `&Shared` alive. Workers read per-slot or per-group modes only while
-    /// hashing, before they publish a task done.
-    tree: UnsafeCell<TreeHasher>,
-    /// Per-slot prepared mode, written by the owner only when a slot opens via
-    /// `message_with` (`MessageWithFut::poll`) and read-only by workers until
-    /// the slot finishes. Default `message()` slots leave this untouched.
-    slot_trees: Box<[UnsafeCell<TreeHasher>]>,
-    /// Whether `slot_trees[slot]` overrides `self.tree` for the active message
-    /// in `slot` (written when a slot opens, read-only while tasks run).
-    slot_custom: Box<[UnsafeCell<bool>]>,
-    storage: &'static PipeStorage,
-    hashes: Box<[UnsafeCell<[u8; OUT_LEN]>]>,
-    cvs: Box<[UnsafeCell<PieceValues>]>,
-    slot_done: Box<[OwnLine<AtomicBool>]>,
-    tasks_left: Box<[OwnLine<AtomicUsize>]>,
-    multi: Box<[UnsafeCell<MultiDesc>]>,
-    pieces: Box<[PieceNode]>,
-}
-
-// Sound: each UnsafeCell here has one writer at a time, by the slot's or
-// piece's state: the owner before it dispatches the work, the workers of that
-// work until they publish it done, the owner again after. The mode's cell
-// (`tree`) has its own rule, at `Shared::tree`: written by `create` alone,
-// between Pipelines. Nothing here is ever freed.
-unsafe impl Send for Shared {}
-unsafe impl Sync for Shared {}
-
-impl Shared {
-    /// The Pipeline's default mode, copied into new slots opened with `message`.
-    #[inline(always)]
-    fn tree(&self) -> &TreeHasher {
-        // Sound: `create` alone writes the default mode, when every task of the
-        // Pipeline before is published done; the owner reads it while its
-        // Pipeline lives.
-        unsafe { &*self.tree.get() }
-    }
-
+impl PipeStorage {
     /// Slot `slot`'s prepared mode, for hashing its bytes or folding its values.
     #[inline(always)]
     fn slot_tree(&self, slot: usize) -> &TreeHasher {
         // Sound: the owner writes `slot_custom[slot]` (and `slot_trees[slot]`
         // when true) when `slot` opens, before dispatching any task for `slot`,
         // and does not write them again until `slot` returns to `free_slots`.
-        if unsafe { *self.slot_custom[slot].get() } { unsafe { &*self.slot_trees[slot].get() } } else { self.tree() }
+        if unsafe { *self.slot_custom[slot].get() } { unsafe { &*self.slot_trees[slot].get() } } else { &self.tree }
     }
 
     unsafe fn run_action(ctx: *const (), arg: u64, platform: Platform) {
-        // Sound: `ctx` is the `*const Shared` its Pipeline dispatched with
-        // (dispatch_one, dispatch_many), and a Shared is never freed.
-        let shared = unsafe { &*(ctx as *const Shared) };
+        // Sound: `ctx` is the `*const PipeStorage` its Pipeline dispatched
+        // with, valid until this task publishes completion below. Every
+        // `&PipeStorage` borrow passed to `run_group`, `run_room_piece`,
+        // `run_multi_piece`, and `finish_multi_slot` ends strictly BEFORE the
+        // worker executes its completion atomic (`swap` or `tasks_left.fetch_sub`)
+        // so `Pipeline::drop` may immediately free `*st` once the final
+        // completion store executes.
+        let st = ctx as *const PipeStorage;
         let (kind, a, b) = unpack_arg(arg);
         match kind {
-            KIND_GROUP => shared.run_group(a, platform),
-            KIND_ROOM_PIECE => shared.run_room_piece(a, platform),
-            KIND_MULTI => shared.run_multi_piece(a, b, platform),
+            KIND_GROUP => {
+                // Sound: `*st` stays live until `completed_epoch.swap(SeqCst)` below.
+                let (waker, completed_ptr, epoch) = unsafe { &*st }.run_group(a, platform);
+                finished(waker, || {
+                    // Sound: `completed_ptr` points to `groups[a].completed_epoch`
+                    // inside `*st`, live until this `SeqCst` swap completes.
+                    unsafe { (*completed_ptr).swap(epoch, Ordering::SeqCst) };
+                });
+            }
+            KIND_ROOM_PIECE => {
+                // Sound: `*st` stays live until `pnode.done.swap(SeqCst)` below.
+                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(a, platform);
+                finished(waker, || {
+                    // Sound: `done_ptr` points to `pieces[a].done` inside `*st`,
+                    // live until this `SeqCst` swap completes.
+                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };
+                });
+            }
+            KIND_MULTI => {
+                // Sound: `*st` stays live until `tasks_left.fetch_sub(AcqRel)` below.
+                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(a, b, platform);
+                // `&*st` borrow has ended; non-last pieces touch nothing in `*st`
+                // during or after this decrement.
+                // Sound: `tasks_left_ptr` points to `tasks_left[a]` inside `*st`,
+                // live until this `AcqRel` decrement completes.
+                if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 1 {
+                    // Sound: returning 1 means this worker is the last piece of
+                    // slot `a`, so `*st` remains live until `slot_done.swap(SeqCst)` below.
+                    let (waker, done_ptr) = unsafe { &*st }.finish_multi_slot(a, is_batch);
+                    finished(waker, || {
+                        // Sound: `done_ptr` points to `slot_done[a]` inside `*st`,
+                        // live until this `SeqCst` swap completes.
+                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };
+                    });
+                }
+            }
             _ => unreachable!(),
         }
     }
 
-    fn run_group(&self, group_idx: usize, platform: Platform) {
-        let storage = self.storage;
-        let group = &storage.groups[group_idx];
+    fn run_group(&self, group_idx: usize, platform: Platform) -> (&'static WakerSlot, *const AtomicU64, u64) {
+        let group = &self.groups[group_idx];
         // Sound: the owner wrote this group's task, custom_tree, epoch and
         // metas before it dispatched the group (publish_open), keeping every
         // member's input and output valid until `completed_epoch` reaches this
         // epoch.
         let task = unsafe { &*group.task.get() };
-        let tree = unsafe { (*group.custom_tree.get()).as_ref() }.unwrap_or_else(|| self.tree());
+        let tree = unsafe { (*group.custom_tree.get()).as_ref() }.unwrap_or(&self.tree);
         let count = task.members;
         let epoch = unsafe { *group.epoch.get() };
         unsafe { task.run_members(tree, platform) };
@@ -752,7 +843,7 @@ impl Shared {
                     cur_n += 1;
                 } else {
                     if cur_room != NONE {
-                        self.storage.rooms.release_n(cur_room, cur_n);
+                        self.rooms.release_n(cur_room, cur_n);
                     }
                     cur_room = meta.room;
                     cur_n = 1;
@@ -760,26 +851,23 @@ impl Shared {
             }
         }
         if cur_room != NONE {
-            self.storage.rooms.release_n(cur_room, cur_n);
+            self.rooms.release_n(cur_room, cur_n);
         }
-
-        // Single SeqCst swap completes all 64 events AND all 64 short `Lent` guards!
-        finished(storage, || {
-            group.completed_epoch.swap(epoch, Ordering::SeqCst);
-        });
+        // Caller publishes `completed_epoch` after `&self` drops.
+        (&self.slot.get().waker, core::ptr::addr_of!(group.completed_epoch.0), epoch)
     }
 
-    fn run_room_piece(&self, pnode_idx: usize, platform: Platform) {
+    fn run_room_piece(&self, pnode_idx: usize, platform: Platform) -> (&'static WakerSlot, *const AtomicBool) {
         let pnode = &self.pieces[pnode_idx];
         // Sound: the owner wrote the piece's fields before dispatching it
         // (commit_multi), and touches the node again only once `done` is set,
-        // which is this function's last store.
+        // which is the caller's last store after `&self` drops.
         let slot = unsafe { *pnode.slot.get() } as usize;
         let room_idx = unsafe { *pnode.room.get() };
         let offset = unsafe { *pnode.offset.get() } as usize;
         let len = unsafe { *pnode.len.get() } as usize;
         let index = unsafe { *pnode.index.get() };
-        let rooms = &self.storage.rooms;
+        let rooms = &self.rooms;
         assert!((room_idx as usize) < rooms.count && offset <= ROOM_LEN && len <= ROOM_LEN - offset, "a piece stays within its room");
         // Sound: these are just the committed bytes. The Room's credit keeps
         // them from being written again until this task releases them below.
@@ -795,14 +883,11 @@ impl Shared {
         };
         // Sound: this piece's output is its worker's alone until `done`.
         unsafe { *pnode.out.0.get() = value };
-        let storage = self.storage;
-        storage.rooms.release_n(room_idx, 1);
-        finished(storage, || {
-            pnode.done.swap(true, Ordering::SeqCst);
-        });
+        self.rooms.release_n(room_idx, 1);
+        (&self.slot.get().waker, core::ptr::addr_of!(pnode.done.0))
     }
 
-    fn run_multi_piece(&self, slot: usize, piece_idx: usize, platform: Platform) {
+    fn run_multi_piece(&self, slot: usize, piece_idx: usize, platform: Platform) -> (*const AtomicUsize, bool) {
         // Sound: the owner wrote the description before dispatching the slot's
         // tasks (batch, submit_multi_slice), and writes it again only after
         // `slot_done`.
@@ -822,13 +907,7 @@ impl Shared {
             // in `Pipeline::batches[slot]` until `slot_done`.
             let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot_len) };
             self.slot_tree(slot).hash_many_on(platform, &part, digests);
-            let storage = self.storage;
-            if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {
-                finished(storage, || {
-                    self.slot_done[slot].swap(true, Ordering::SeqCst);
-                });
-            }
-            return;
+            return (core::ptr::addr_of!(self.tasks_left[slot].0), true);
         }
 
         // Sound: the owner, or the Lent guard, keeps all the message's
@@ -849,23 +928,24 @@ impl Shared {
             // limits the count); form no borrow of other workers' slots.
             unsafe { core::ptr::addr_of_mut!((*values).whole).cast::<Cv>().add(piece_idx).write(value) };
         }
+        (core::ptr::addr_of!(self.tasks_left[slot].0), false)
+    }
 
-        let storage = self.storage;
-        if self.tasks_left[slot].fetch_sub(1, Ordering::AcqRel) == 1 {
+    fn finish_multi_slot(&self, slot: usize, is_batch: bool) -> (&'static WakerSlot, *const AtomicBool) {
+        if !is_batch {
             // Sound: this is the slot's last task (`tasks_left` reached zero),
             // so every piece's value is written and no one else reads or
             // writes the slot's values or hash until `slot_done` below.
-            let values = unsafe { &mut *values };
+            let desc = unsafe { *self.multi[slot].get() };
+            let values = unsafe { &mut *self.cvs[slot].get() };
             let last = values.last.take().expect("the last piece supplied its value");
-            let hash = fold_multi_cvs(tree, &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
+            let hash = fold_multi_cvs(self.slot_tree(slot), &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
             unsafe { *self.hashes[slot].get() = *hash.as_bytes() };
             if desc.loan_epoch != 0 {
-                self.storage.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);
+                self.loan_completed[slot].0.store(desc.loan_epoch, Ordering::Release);
             }
-            finished(storage, || {
-                self.slot_done[slot].swap(true, Ordering::SeqCst);
-            });
         }
+        (&self.slot.get().waker, core::ptr::addr_of!(self.slot_done[slot].0))
     }
 }
 
@@ -987,24 +1067,24 @@ process_static! {
 ///
 /// # Memory
 ///
-/// A Pipeline's storage (its Rooms, about 64 KiB each, and what it
-/// shares with the pool's workers) is never returned to the system. It
-/// is in use while its Pipeline or any [`Room`] of that Pipeline is
-/// alive, and is then kept for a later Pipeline. A process whose
-/// Pipelines all have the same [`Limits`] so holds as many storages as
-/// it has had in use at once: a Room kept past its Pipeline's drop keeps
-/// that Pipeline's storage, and the next Pipeline takes another. No
-/// more than that is promised. A kept storage serves a Pipeline of
-/// other Limits only where it has as many Rooms and room in each of its
-/// queues for that Pipeline's messages, which a small change of
-/// `messages` may or may not leave it (and what the storage shares with
-/// the workers may then be made anew, the old kept beside it); any
-/// other Pipeline is given new storage, and the old is kept. So a
-/// process that varies its Limits holds more than its most in use at
-/// once. The storage is not cleared: a keyed Pipeline's key and the
-/// bytes last written to its Rooms stay in the process's memory until
-/// another Pipeline writes over them, and no call of this crate wipes
-/// them.
+/// A Pipeline allocates its per-pipeline storage (`Rooms` — 64 KiB each,
+/// allocated zeroed via `alloc_zeroed` so unused rooms keep lazy OS
+/// demand-zero pages — plus its groups, piece nodes, slots, and completion
+/// buffers) at construction and frees all of it cleanly once the Pipeline
+/// and any surviving [`Room`]s and [`Lent`] guards from it have dropped.
+/// Keep a Pipeline alive across requests (as `# Giving up a message`
+/// recommends) rather than creating and dropping one per short message.
+///
+/// Only the worker-facing action ring and waker slot (`PipeSlot`) is
+/// retained for reuse by later Pipelines: 32 bytes per action, at least
+/// 1,024 actions (32 KiB), with capacity rounded up to a power of two
+/// (`actions = messages * 64 + rooms + messages + 1 + clamp(messages, 4, 256)`,
+/// roughly 2 KiB per message of `Limits.messages`). Because slots round to
+/// powers of two and match best-fit by `actions_len() >= actions`,
+/// ascending `Limits` retain less than twice the largest slot tier per
+/// concurrently live Pipeline, and varying `Limits.rooms` within a
+/// power-of-two action tier reuses the same slot. As before, no call of
+/// this crate wipes freed memory or keys.
 ///
 /// # Giving up a message
 ///
@@ -1094,8 +1174,9 @@ process_static! {
 /// - `Drop` stops the process (an abort) if work it has handed to the
 ///   pool is unfinished, whether a worker is hashing it or it still waits
 ///   for one; otherwise it drops quietly, with the messages not yet handed
-///   over, the events not taken and their owners, and keeps its buffers
-///   for a later Pipeline.
+///   over, the events not taken and their owners, frees its per-pipeline
+///   storage (once any surviving [`Room`]s and [`Lent`] guards also drop),
+///   and returns its small worker-facing slot for reuse.
 /// - `Send` lets a pipeline move between threads when its tags, owners, and
 ///   batches are `Send`, keeping the same messages and tokens.
 pub struct Pipeline<T, B = (), P = Batch<'static>> {
@@ -1103,7 +1184,7 @@ pub struct Pipeline<T, B = (), P = Batch<'static>> {
     limits: Limits,
     group_count: usize,
     source_slot: Option<usize>,
-    shared: *mut Shared,
+    storage: *mut PipeStorage,
     slots: Box<[SlotMeta<T>]>,
     room_streams: Box<[RoomStream]>,
     owners: RawSlots<B>,
@@ -1144,8 +1225,9 @@ pub struct Pipeline<T, B = (), P = Batch<'static>> {
 }
 
 // Sound: the Pipeline owns its tags, owners, and batches (hence
-// `T: Send, B: Send, P: Send`); the raw pointers are to its never-freed Shared
-// and into buffers it holds, which workers read only through tasks it dispatched.
+// `T: Send, B: Send, P: Send`); `storage` points to its owned `PipeStorage`
+// (freed only once all tasks publish completion and all holders drop), and the
+// other pointers reach buffers it holds.
 unsafe impl<T: Send, B: Send, P: Send> Send for Pipeline<T, B, P> {}
 
 impl<T> Pipeline<T, (), Batch<'static>> {
@@ -1333,7 +1415,7 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
         let work_bytes = count.saturating_mul(work_slot);
 
         if count == 0 {
-            self.shared().slot_done[s].store(true, Ordering::Relaxed);
+            self.storage().slot_done[s].store(true, Ordering::Relaxed);
             self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
         } else if work_bytes < TASK_LEN {
             let (group, epoch) = self.push_member(s, bytes.as_ptr(), bytes.len(), digests_ptr as *mut u8, NONE, Some((msg_len, slot_len)));
@@ -1343,12 +1425,12 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
             let per_part = (TASK_LEN / work_slot).max(1).max(count.div_ceil(MAX_SLOT_PIECES));
             let pieces = count.div_ceil(per_part);
             debug_assert!((1..=MAX_SLOT_PIECES).contains(&pieces));
-            self.shared().slot_done[s].store(false, Ordering::Relaxed);
-            self.shared().tasks_left[s].store(pieces, Ordering::Relaxed);
+            self.storage().slot_done[s].store(false, Ordering::Relaxed);
+            self.storage().tasks_left[s].store(pieces, Ordering::Relaxed);
             // Sound: no task of this slot is in flight (it was open), so its
             // description is the owner's to write before the dispatch below.
             unsafe {
-                *self.shared().multi[s].get() = MultiDesc {
+                *self.storage().multi[s].get() = MultiDesc {
                     input: bytes.as_ptr(),
                     total_len: count,
                     piece_level: 0,
@@ -1383,9 +1465,10 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
 
 impl<T, B, P> Pipeline<T, B, P> {
     #[inline(always)]
-    fn shared(&self) -> &Shared {
-        // Sound: `shared` is this Pipeline's Shared (create), never freed.
-        unsafe { &*self.shared }
+    fn storage(&self) -> &PipeStorage {
+        // Sound: this `Pipeline` holds a `PipeStorage::holders` reference
+        // keeping `*self.storage` live until `Pipeline::drop`.
+        unsafe { &*self.storage }
     }
 
     fn create(mode: Mode, limits: Limits) -> Self {
@@ -1413,82 +1496,19 @@ impl<T, B, P> Pipeline<T, B, P> {
             }
         };
 
-        let storage = PipeStorage::acquire(actions_cap, m, limits.rooms, g_cap);
-        // Sound: this Pipeline now holds the storage alone
-        // (PipeStorage::acquire), and these cells are its holder's.
-        let next_loan_epoch = unsafe { *storage.saved_loan_epoch.get() };
-        let next_group_epoch = unsafe { *storage.saved_group_epoch.get() };
+        let pipe_slot = PipeSlot::acquire(actions_cap);
+        let storage = PipeStorage::alloc(pipe_slot, tree, m, limits.rooms, p_cap, g_cap);
         // A pool of one thread has no worker to take a published action,
         // and only this crate's block_on would run it: an outside executor
         // waited for ever. Unregistered, every action runs where it is
         // dispatched, as when no slot is free.
-        let source_slot = if crate::lanes::pool_has_workers() { storage.source.register() } else { None };
+        let source_slot = if crate::lanes::pool_has_workers() { pipe_slot.source.register() } else { None };
         crate::lanes::sources::opened();
 
         let mut local_free_rooms = Ring::new(limits.rooms.max(1));
         for i in 0..limits.rooms {
             local_free_rooms.push_back(u32::try_from(i).expect("room index fits u32"));
         }
-        // The storage's `Shared`, where it has one of this size: every task
-        // of the Pipeline before is done (its drop saw to that), and only
-        // the mode is this Pipeline's own.
-        // Sound: as the saved epochs above. A Shared the storage keeps was the
-        // Pipeline before's, whose every task is published done (its drop saw
-        // to that), so reading its lengths races with no worker.
-        let held = unsafe { *storage.shared.get() };
-        let shared: *mut Shared = if !held.is_null() && unsafe { (&(*held).hashes).len() >= m } {
-            // A storage has one count of rooms, so pieces enough too.
-            assert!(unsafe { (&(*held).pieces).len() } >= p_cap, "a Shared of as many messages has as many pieces");
-            // Sound: nor does writing its mode. A worker may still be
-            // returning from that last task with its `&Shared`: the mode is
-            // in a cell, and the worker's borrow of it ended before it
-            // published the task (Shared::tree).
-            unsafe {
-                *(*held).tree.get() = tree;
-            }
-            held
-        } else {
-            // One it replaces stays allocated: a worker of an earlier
-            // Pipeline may still be reading it.
-            let new = Box::into_raw(Box::new(Shared {
-                tree: UnsafeCell::new(tree.clone()),
-                slot_trees: (0..m).map(|_| UnsafeCell::new(tree.clone())).collect(),
-                slot_custom: (0..m).map(|_| UnsafeCell::new(false)).collect(),
-                storage,
-                hashes: (0..m).map(|_| UnsafeCell::new([0u8; OUT_LEN])).collect(),
-                cvs: (0..m).map(|_| UnsafeCell::new(PieceValues { whole: [Cv::unset(); MAX_SLOT_PIECES], last: None })).collect(),
-                slot_done: (0..m).map(|_| OwnLine(AtomicBool::new(true))).collect(),
-                tasks_left: (0..m).map(|_| OwnLine(AtomicUsize::new(0))).collect(),
-                multi: (0..m)
-                    .map(|_| {
-                        UnsafeCell::new(MultiDesc {
-                            input: core::ptr::null(),
-                            total_len: 0,
-                            piece_level: level_of(TASK_LEN as u64),
-                            pieces: 0,
-                            batch: None,
-                            digests: core::ptr::null_mut(),
-                            loan_epoch: 0,
-                        })
-                    })
-                    .collect(),
-                pieces: (0..p_cap)
-                    .map(|_| PieceNode {
-                        slot: UnsafeCell::new(0),
-                        room: UnsafeCell::new(0),
-                        offset: UnsafeCell::new(0),
-                        len: UnsafeCell::new(0),
-                        index: UnsafeCell::new(0),
-                        out: OwnLine(UnsafeCell::new(RoomValue::Whole(Cv::unset()))),
-                        done: OwnLine(AtomicBool::new(true)),
-                        next: UnsafeCell::new(NONE),
-                    })
-                    .collect(),
-            }));
-            // Sound: as above; the Shared is kept for the next Pipeline.
-            unsafe { *storage.shared.get() = new };
-            new
-        };
 
         let mut free_slots = Ring::new(m);
         for i in 0..m {
@@ -1504,7 +1524,7 @@ impl<T, B, P> Pipeline<T, B, P> {
             limits,
             group_count: g_cap,
             source_slot,
-            shared,
+            storage,
             slots: (0..m).map(|_| SlotMeta { tag: None, kind: SlotKind::Free, mode: SlotMode::Default }).collect(),
             room_streams: vec![RoomStream::EMPTY; m].into_boxed_slice(),
             owners: RawSlots::new(m),
@@ -1528,8 +1548,8 @@ impl<T, B, P> Pipeline<T, B, P> {
             local_custom_tree: None,
             local_members: Box::new([Member { input: core::ptr::null(), len: 0, out: core::ptr::null_mut() }; MEMBERS]),
             local_rooms: Box::new([NONE; MEMBERS]),
-            next_loan_epoch,
-            next_group_epoch,
+            next_loan_epoch: 1,
+            next_group_epoch: 1,
             assigned_group_epoch: vec![0u64; g_cap].into_boxed_slice(),
             seen_group_epoch: vec![0u64; g_cap].into_boxed_slice(),
             action_buf: [0; MAX_SLOT_PIECES],
@@ -1583,22 +1603,22 @@ impl<T, B, P> Pipeline<T, B, P> {
             self.publish_open();
         }
         if in_block_on() {
-            while self.shared().storage.source.run_waiting_action() {
+            while self.storage().slot.get().source.run_waiting_action() {
                 self.reap();
                 if let Some(slot) = self.free_slots.pop_front() {
                     return Poll::Ready(slot);
                 }
             }
         }
-        self.shared().storage.waker.register(cx);
+        self.storage().slot.get().waker.register(cx);
         self.reap();
         if let Some(slot) = self.free_slots.pop_front() {
-            self.shared().storage.waker.clear();
+            self.storage().slot.get().waker.clear();
             return Poll::Ready(slot);
         }
         self.assert_message_can_progress();
         if self.source_slot.is_some() {
-            self.shared().storage.source.wake_for_waiting();
+            self.storage().slot.get().source.wake_for_waiting();
         }
         Poll::Pending
     }
@@ -1636,20 +1656,20 @@ impl<T, B, P> Pipeline<T, B, P> {
     fn pop_cached_room(&mut self) -> Option<Room> {
         let idx = self.local_free_rooms.pop_front()?;
         self.room_cursor = (idx as usize + 1) % self.limits.rooms;
-        self.shared().storage.rooms.init_taken(idx);
+        self.storage().rooms.init_taken(idx);
         Some(self.make_room(idx))
     }
 
     #[inline]
     fn try_take_room(&mut self) -> Option<Room> {
         if self.local_free_rooms.is_empty() {
-            // Sound: as `shared()`.
-            let shared = unsafe { &*self.shared };
-            let count = shared.storage.rooms.count;
+            // Sound: as `storage()`.
+            let st = unsafe { &*self.storage };
+            let count = st.rooms.count;
             let start = self.room_cursor;
             for step in 0..count {
                 let i = (start + step) % count;
-                if shared.storage.rooms.refs[i].load(Ordering::Acquire) == 0 {
+                if st.rooms.refs[i].load(Ordering::Acquire) == 0 {
                     self.local_free_rooms.push_back(u32::try_from(i).expect("room index fits u32"));
                 }
             }
@@ -1669,28 +1689,27 @@ impl<T, B, P> Pipeline<T, B, P> {
         }
         self.assert_room_can_progress();
         if in_block_on() {
-            while self.shared().storage.source.run_waiting_action() {
+            while self.storage().slot.get().source.run_waiting_action() {
                 if let Some(r) = self.try_take_room() {
                     return Poll::Ready(r);
                 }
             }
         }
-        self.shared().storage.waker.register(cx);
+        self.storage().slot.get().waker.register(cx);
         if let Some(r) = self.try_take_room() {
-            self.shared().storage.waker.clear();
+            self.storage().slot.get().waker.clear();
             return Poll::Ready(r);
         }
         self.assert_room_can_progress();
         if self.source_slot.is_some() {
-            self.shared().storage.source.wake_for_waiting();
+            self.storage().slot.get().source.wake_for_waiting();
         }
         Poll::Pending
     }
 
     #[inline(always)]
     fn make_room(&self, index: u32) -> Room {
-        let storage = self.shared().storage;
-        Room { pipeline_id: self.id, index, offset: 0, commits: 0, ptr: storage.rooms.room_ptr(index as usize), storage }
+        Room { pipeline_id: self.id, index, offset: 0, commits: 0, ptr: self.storage().rooms.room_ptr(index as usize), storage: self.storage }
     }
 
     /// A Pipeline with no Rooms has none to wait for. One whose Rooms are
@@ -1767,11 +1786,11 @@ impl<T, B, P> Pipeline<T, B, P> {
 
         self.drain_slot_pieces(s);
         let pnode = self.alloc_piece_node(s);
-        // Sound: as `shared()`. The node came off the free list, so no task
+        // Sound: as `storage()`. The node came off the free list, so no task
         // uses it: its fields are the owner's to write before the dispatch
         // below.
-        let shared = unsafe { &*self.shared };
-        let node = &shared.pieces[pnode as usize];
+        let st = unsafe { &*self.storage };
+        let node = &st.pieces[pnode as usize];
         unsafe {
             *node.slot.get() = u32::try_from(s).expect("slot fits u32");
             *node.room.get() = room_idx;
@@ -1790,7 +1809,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         } else {
             // Sound: `next` is the owner's alone (workers read a node's other
             // fields).
-            unsafe { *shared.pieces[rs.tail_piece as usize].next.get() = pnode };
+            unsafe { *st.pieces[rs.tail_piece as usize].next.get() = pnode };
         }
         rs.tail_piece = pnode;
 
@@ -1821,7 +1840,7 @@ impl<T, B, P> Pipeline<T, B, P> {
                 return p;
             }
             crate::lanes::require();
-            if !self.shared().storage.source.run_waiting_action() {
+            if !self.storage().slot.get().source.run_waiting_action() {
                 core::hint::spin_loop();
             }
         }
@@ -1842,8 +1861,8 @@ impl<T, B, P> Pipeline<T, B, P> {
             SlotKind::OpenShort { room: room_idx, offset, len } => {
                 // Sound: the offset is within the room (commit checked
                 // `written` against what was left).
-                let ptr = unsafe { self.shared().storage.rooms.room_ptr(room_idx as usize).add(offset as usize) };
-                let out = self.shared().hashes[s].get() as *mut u8;
+                let ptr = unsafe { self.storage().rooms.room_ptr(room_idx as usize).add(offset as usize) };
+                let out = self.storage().hashes[s].get() as *mut u8;
                 let (group, epoch) = self.push_member(s, ptr, len as usize, out, room_idx, None);
                 self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group, epoch };
                 self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
@@ -1856,17 +1875,17 @@ impl<T, B, P> Pipeline<T, B, P> {
     fn end_slow(&mut self, s: usize) {
         match self.slots[s].kind {
             SlotKind::OpenEmpty => {
-                let empty_hash = self.shared().slot_tree(s).hash(&[]);
+                let empty_hash = self.storage().slot_tree(s).hash(&[]);
                 // Sound: no task runs for an empty message, so the slot's hash
                 // is the owner's to write.
-                unsafe { *self.shared().hashes[s].get() = *empty_hash.as_bytes() };
+                unsafe { *self.storage().hashes[s].get() = *empty_hash.as_bytes() };
                 self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group: NONE, epoch: 0 };
             }
             SlotKind::OpenShortDispatched { group, epoch } => {
                 self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group, epoch };
             }
             SlotKind::OpenRooms { .. } => {
-                self.shared().slot_done[s].store(false, Ordering::Relaxed);
+                self.storage().slot_done[s].store(false, Ordering::Relaxed);
                 self.slots[s].kind = SlotKind::WaitRoomMulti;
                 self.drain_slot_pieces(s);
             }
@@ -1902,8 +1921,8 @@ impl<T, B, P> Pipeline<T, B, P> {
                 // back a second time.)
                 self.slots[s].kind = SlotKind::WaitAborted { group: NONE, epoch: 0 };
                 self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
-                if self.shared().storage.rooms.release_n(room_idx, 1) {
-                    self.shared().storage.waker.notify_after_seqcst();
+                if self.storage().rooms.release_n(room_idx, 1) {
+                    self.storage().slot.get().waker.notify_after_seqcst();
                 }
                 return;
             }
@@ -1937,19 +1956,20 @@ impl<T, B, P> Pipeline<T, B, P> {
         self.require_uncommitted(s);
         self.open_messages -= 1;
 
-        let (completed, epoch) = if bytes.len() <= TASK_LEN {
-            let out = self.shared().hashes[s].get() as *mut u8;
+        let (completed, epoch): (*const AtomicU64, u64) = if bytes.len() <= TASK_LEN {
+            let out = self.storage().hashes[s].get() as *mut u8;
             let (group, epoch) = self.push_member(s, bytes.as_ptr(), bytes.len(), out, NONE, None);
             self.slots[s].kind = SlotKind::WaitSingle { has_owner: false, group, epoch };
-            (&self.shared().storage.groups[group as usize].completed_epoch.0, epoch)
+            (core::ptr::addr_of!(self.storage().groups[group as usize].completed_epoch.0), epoch)
         } else {
             let epoch = self.next_loan_epoch;
             self.next_loan_epoch = epoch.checked_add(1).expect("Pipeline loan epoch counter exhausted");
             self.submit_multi_slice(s, bytes.as_ptr(), bytes.len(), false, epoch);
-            (&self.shared().storage.loan_completed[s].0, epoch)
+            (core::ptr::addr_of!(self.storage().loan_completed[s].0), epoch)
         };
+        self.storage().holders.fetch_add(1, Ordering::Relaxed);
         self.end_queue.push_back(u32::try_from(s).expect("slot fits u32"));
-        Lent { completed, epoch, _bytes: PhantomData }
+        Lent { completed, epoch, storage: self.storage, _bytes: PhantomData }
     }
 
     /// Pull the next finished [`Event`], if one is ready.
@@ -1992,21 +2012,21 @@ impl<T, B, P> Pipeline<T, B, P> {
             }
         }
         if in_block_on() {
-            while self.shared().storage.source.run_waiting_action() {
+            while self.storage().slot.get().source.run_waiting_action() {
                 self.reap();
                 if !self.events.is_empty() {
                     return Poll::Ready(());
                 }
             }
         }
-        self.shared().storage.waker.register(cx);
+        self.storage().slot.get().waker.register(cx);
         self.reap();
         if !self.events.is_empty() {
-            self.shared().storage.waker.clear();
+            self.storage().slot.get().waker.clear();
             return Poll::Ready(());
         }
         if self.source_slot.is_some() {
-            self.shared().storage.source.wake_for_waiting();
+            self.storage().slot.get().source.wake_for_waiting();
         }
         Poll::Pending
     }
@@ -2026,7 +2046,7 @@ impl<T, B, P> Pipeline<T, B, P> {
     #[inline]
     fn submit_slice(&mut self, s: usize, ptr: *const u8, len: usize, has_owner: bool) {
         if len <= TASK_LEN {
-            let out = self.shared().hashes[s].get() as *mut u8;
+            let out = self.storage().hashes[s].get() as *mut u8;
             let (group, epoch) = self.push_member(s, ptr, len, out, NONE, None);
             self.slots[s].kind = SlotKind::WaitSingle { has_owner, group, epoch };
             return;
@@ -2042,11 +2062,11 @@ impl<T, B, P> Pipeline<T, B, P> {
         }
         let pieces = len.div_ceil(piece_len);
         assert!((2..=MAX_SLOT_PIECES).contains(&pieces), "a split message fits its piece slots");
-        self.shared().slot_done[s].store(false, Ordering::Relaxed);
-        self.shared().tasks_left[s].store(pieces, Ordering::Relaxed);
+        self.storage().slot_done[s].store(false, Ordering::Relaxed);
+        self.storage().tasks_left[s].store(pieces, Ordering::Relaxed);
         // Sound: as `batch`'s, above.
         unsafe {
-            *self.shared().multi[s].get() = MultiDesc {
+            *self.storage().multi[s].get() = MultiDesc {
                 input: ptr,
                 total_len: len,
                 piece_level: level_of(piece_len as u64),
@@ -2068,8 +2088,8 @@ impl<T, B, P> Pipeline<T, B, P> {
         for s in 0..self.slots.len() {
             if let SlotKind::OpenShort { room: room_idx, offset, len } = self.slots[s].kind {
                 // Sound: as in `end`.
-                let ptr = unsafe { self.shared().storage.rooms.room_ptr(room_idx as usize).add(offset as usize) };
-                let out = self.shared().hashes[s].get() as *mut u8;
+                let ptr = unsafe { self.storage().rooms.room_ptr(room_idx as usize).add(offset as usize) };
+                let out = self.storage().hashes[s].get() as *mut u8;
                 let (group, epoch) = self.push_member(s, ptr, len as usize, out, room_idx, None);
                 self.slots[s].kind = SlotKind::OpenShortDispatched { group, epoch };
             }
@@ -2089,7 +2109,7 @@ impl<T, B, P> Pipeline<T, B, P> {
                     return u32::try_from(g).expect("group fits u32");
                 }
                 if self.seen_group_epoch[g] < assigned {
-                    self.seen_group_epoch[g] = self.shared().storage.groups[g].completed_epoch.load(Ordering::Acquire);
+                    self.seen_group_epoch[g] = self.storage().groups[g].completed_epoch.load(Ordering::Acquire);
                 }
                 if self.seen_group_epoch[g] >= assigned {
                     self.assigned_group_epoch[g] = 0;
@@ -2097,7 +2117,7 @@ impl<T, B, P> Pipeline<T, B, P> {
                 }
             }
             crate::lanes::require();
-            if !self.shared().storage.source.run_waiting_action() {
+            if !self.storage().slot.get().source.run_waiting_action() {
                 core::hint::spin_loop();
             }
         }
@@ -2141,7 +2161,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         self.local_batch = batch;
         let slot_mode = self.slots[slot].mode;
         self.local_group_mode = slot_mode;
-        self.local_custom_tree = if slot_mode == SlotMode::Default { None } else { Some(self.shared().slot_tree(slot).clone()) };
+        self.local_custom_tree = if slot_mode == SlotMode::Default { None } else { Some(self.storage().slot_tree(slot).clone()) };
         self.open_group = Some((g, epoch));
         (g, epoch)
     }
@@ -2160,7 +2180,8 @@ impl<T, B, P> Pipeline<T, B, P> {
     fn publish_open(&mut self) {
         let Some((group_idx, epoch)) = self.open_group.take() else { return };
         let count = self.local_count;
-        let group = &self.shared().storage.groups[group_idx as usize];
+        let custom_tree = self.local_custom_tree.take();
+        let group = &self.storage().groups[group_idx as usize];
         // Sound: the group is not in flight (acquire_free_group gave it), so
         // its task, metas and epoch are the owner's to write before the
         // dispatch below.
@@ -2174,7 +2195,7 @@ impl<T, B, P> Pipeline<T, B, P> {
             for i in 0..count {
                 metas[i] = GroupMemberMeta { room: self.local_rooms[i] };
             }
-            *group.custom_tree.get() = self.local_custom_tree.take();
+            *group.custom_tree.get() = custom_tree;
             *group.epoch.get() = epoch;
         }
         self.assigned_group_epoch[group_idx as usize] = epoch;
@@ -2184,26 +2205,27 @@ impl<T, B, P> Pipeline<T, B, P> {
 
     #[inline]
     fn dispatch_one(&mut self, arg: u64) {
-        let ctx = self.shared as *const Shared as *const ();
+        let ctx = self.storage as *const PipeStorage as *const ();
         match self.source_slot {
-            // Sound: this Pipeline exclusively publishes to its own action
-            // source, and `ctx` stays valid for the lifetime of `Shared`.
-            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, core::slice::from_ref(&arg), false) },
-            // Sound: `ctx` is this Pipeline's Shared, as run_action requires.
-            None => unsafe { Shared::run_action(ctx, arg, pool_platform()) },
+            // Sound: this Pipeline exclusively publishes to its `PipeSlot`'s
+            // source, and `*self.storage` stays live until this action
+            // publishes completion.
+            Some(_) => unsafe { self.storage().slot.get().source.publish_actions(PipeStorage::run_action, ctx, core::slice::from_ref(&arg), false) },
+            // Sound: `ctx` is this Pipeline's `PipeStorage`, as run_action requires.
+            None => unsafe { PipeStorage::run_action(ctx, arg, pool_platform()) },
         }
     }
 
     fn dispatch_many(&mut self, count: usize, near: bool) {
-        let ctx = self.shared as *const Shared as *const ();
+        let ctx = self.storage as *const PipeStorage as *const ();
         match self.source_slot {
             // Sound: as dispatch_one's.
-            Some(_) => unsafe { self.shared().storage.source.publish_actions(Shared::run_action, ctx, &self.action_buf[..count], near) },
+            Some(_) => unsafe { self.storage().slot.get().source.publish_actions(PipeStorage::run_action, ctx, &self.action_buf[..count], near) },
             None => {
                 for i in 0..count {
                     let arg = self.action_buf[i];
                     // Sound: as dispatch_one's.
-                    unsafe { Shared::run_action(ctx, arg, pool_platform()) };
+                    unsafe { PipeStorage::run_action(ctx, arg, pool_platform()) };
                 }
             }
         }
@@ -2218,7 +2240,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         if self.seen_group_epoch[gi] >= epoch {
             return true;
         }
-        let now = self.shared().storage.groups[gi].completed_epoch.load(Ordering::Acquire);
+        let now = self.storage().groups[gi].completed_epoch.load(Ordering::Acquire);
         self.seen_group_epoch[gi] = now;
         now >= epoch
     }
@@ -2231,21 +2253,21 @@ impl<T, B, P> Pipeline<T, B, P> {
     /// being hashed. `keep_last` leaves the newest piece: an open
     /// message may end with it, and the last piece folds as the root.
     fn drain_pieces(&mut self, s: usize, keep_last: bool) {
-        // Sound: as `shared()`.
-        let shared = unsafe { &*self.shared };
-        let tree = shared.slot_tree(s);
+        // Sound: as `storage()`.
+        let st = unsafe { &*self.storage };
+        let tree = st.slot_tree(s);
         let ended = matches!(self.slots[s].kind, SlotKind::WaitRoomMulti);
         let aborted = matches!(self.slots[s].kind, SlotKind::WaitAborted { .. });
 
         loop {
             let head = self.room_streams[s].head_piece;
-            if head == NONE || (keep_last && head == self.room_streams[s].tail_piece) || !shared.pieces[head as usize].done.load(Ordering::Acquire) {
+            if head == NONE || (keep_last && head == self.room_streams[s].tail_piece) || !st.pieces[head as usize].done.load(Ordering::Acquire) {
                 return;
             }
             // Sound: the piece is done (checked above), so its `next` and
             // `out` are the owner's again.
-            let next = unsafe { *shared.pieces[head as usize].next.get() };
-            let out = unsafe { *shared.pieces[head as usize].out.0.get() };
+            let next = unsafe { *st.pieces[head as usize].next.get() };
+            let out = unsafe { *st.pieces[head as usize].out.0.get() };
             self.free_pieces.push_back(head);
 
             let rs = &mut self.room_streams[s];
@@ -2267,7 +2289,7 @@ impl<T, B, P> Pipeline<T, B, P> {
 
             // Sound: the caller alone writes a room message's stack
             // (workers write a slice message's slots, never both for one slot).
-            let cvs = unsafe { &mut (*shared.cvs[s].get()).whole };
+            let cvs = unsafe { &mut (*st.cvs[s].get()).whole };
             if ended && rs.merged_pieces + 1 == rs.len.div_ceil(ROOM_LEN as u64) {
                 let root = match out {
                     RoomValue::First([left, right]) => tree.root_hash(&left, &right.into(), rs.len),
@@ -2275,8 +2297,8 @@ impl<T, B, P> Pipeline<T, B, P> {
                     RoomValue::Last(last) => finish_pieces(tree, cvs, rs.stack_len, rs.merged_pieces, last, rs.len),
                 };
                 // Sound: the room message is done, with no other writer.
-                unsafe { *shared.hashes[s].get() = *root.as_bytes() };
-                shared.slot_done[s].store(true, Ordering::Relaxed);
+                unsafe { *st.hashes[s].get() = *root.as_bytes() };
+                st.slot_done[s].store(true, Ordering::Relaxed);
                 return;
             }
             let cv = match out {
@@ -2296,17 +2318,17 @@ impl<T, B, P> Pipeline<T, B, P> {
 
         let ready = match self.slots[s].kind {
             SlotKind::WaitSingle { group, epoch, .. } => self.group_ready(group, epoch),
-            SlotKind::WaitMulti { .. } => self.shared().slot_done[s].load(Ordering::Acquire),
+            SlotKind::WaitMulti { .. } => self.storage().slot_done[s].load(Ordering::Acquire),
             SlotKind::WaitBatch { group, epoch } => {
                 if group != NONE {
                     self.group_ready(group, epoch)
                 } else {
-                    self.shared().slot_done[s].load(Ordering::Acquire)
+                    self.storage().slot_done[s].load(Ordering::Acquire)
                 }
             }
             SlotKind::WaitRoomMulti => {
                 self.drain_slot_pieces(s);
-                self.shared().slot_done[s].load(Ordering::Acquire)
+                self.storage().slot_done[s].load(Ordering::Acquire)
             }
             SlotKind::WaitAborted { group, epoch } => {
                 self.drain_slot_pieces(s);
@@ -2330,13 +2352,13 @@ impl<T, B, P> Pipeline<T, B, P> {
                 // Sound: the slot's work is done (`ready`), so its hash has no
                 // writer; `has_owner` says the slot holds an owner, read out
                 // here once (the slot is then Free).
-                let hash = Hash::from_bytes(unsafe { *self.shared().hashes[s].get() });
+                let hash = Hash::from_bytes(unsafe { *self.storage().hashes[s].get() });
                 let owner = if has_owner { Some(unsafe { (*self.owners.slot(s)).assume_init_read() }) } else { None };
                 Event::Hashed { tag, hash, owner }
             }
             SlotKind::WaitRoomMulti => {
                 // Sound: as above.
-                let hash = Hash::from_bytes(unsafe { *self.shared().hashes[s].get() });
+                let hash = Hash::from_bytes(unsafe { *self.storage().hashes[s].get() });
                 Event::Hashed { tag, hash, owner: None }
             }
             SlotKind::WaitBatch { .. } => {
@@ -2363,14 +2385,14 @@ impl<T, B, P> Pipeline<T, B, P> {
     }
 
     fn has_in_flight_work(&self) -> bool {
-        let shared = self.shared();
+        let st = self.storage();
         for g in 0..self.group_count {
             let assigned = self.assigned_group_epoch[g];
-            if assigned != 0 && shared.storage.groups[g].completed_epoch.load(Ordering::Acquire) < assigned {
+            if assigned != 0 && st.groups[g].completed_epoch.load(Ordering::Acquire) < assigned {
                 return true;
             }
         }
-        for p in &shared.pieces {
+        for p in &st.pieces {
             if !p.done.load(Ordering::Acquire) {
                 return true;
             }
@@ -2378,7 +2400,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         for s in 0..self.slots.len() {
             match self.slots[s].kind {
                 SlotKind::WaitMulti { .. } | SlotKind::WaitBatch { group: NONE, .. } => {
-                    if !shared.slot_done[s].load(Ordering::Acquire) {
+                    if !st.slot_done[s].load(Ordering::Acquire) {
                         return true;
                     }
                 }
@@ -2398,13 +2420,13 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         // (e.g. during panic unwind after a precondition check failed with zero workers running).
         for s in 0..self.slots.len() {
             if let SlotKind::OpenShort { room: room_idx, .. } = self.slots[s].kind {
-                self.shared().storage.rooms.release_n(room_idx, 1);
+                self.storage().rooms.release_n(room_idx, 1);
             }
         }
         if self.open_group.take().is_some() {
             for &r in &self.local_rooms[..self.local_count] {
                 if r != NONE {
-                    self.shared().storage.rooms.release_n(r, 1);
+                    self.storage().rooms.release_n(r, 1);
                 }
             }
         }
@@ -2412,7 +2434,9 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
             Source::unregister(slot);
         }
         crate::lanes::sources::closed();
-        let storage = self.shared().storage;
+        let storage_ptr = self.storage;
+        let storage = self.storage();
+        let pipe_slot = storage.slot.get();
         // Pre-reserve one hold per room slot before stamping ROOM_CLOSING_BIT so
         // any surviving Room dropped concurrently on another thread cannot drop
         // `storage.holders` to 0 while this loop is still running.
@@ -2423,20 +2447,13 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
             let prev = r.fetch_or(ROOM_CLOSING_BIT, Ordering::SeqCst);
             if prev != 0 {
                 survivors += 1;
-            } else {
-                r.store(0, Ordering::Relaxed);
             }
         }
         let release_holds = (room_count - survivors) + 1;
-        // Sound: the Pipeline still holds the storage; these cells are its
-        // holder's. Save epochs before any user drop (waker or owner) can unwind.
-        unsafe {
-            *storage.saved_loan_epoch.get() = self.next_loan_epoch;
-            *storage.saved_group_epoch.get() = self.next_group_epoch;
-        }
-        struct ReleaseStorage(&'static PipeStorage, usize);
+        struct ReleaseStorage(*mut PipeStorage, usize, &'static PipeSlot);
         impl Drop for ReleaseStorage {
             fn drop(&mut self) {
+                PipeSlot::release(self.2);
                 PipeStorage::release_n(self.0, self.1);
             }
         }
@@ -2468,10 +2485,11 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         }
         // Guards run in LIFO order (`_drain` then `_release`), so even if
         // dropping the saved waker or one owner unwinds, every remaining owner
-        // and batch still drops and the storage returns to FREE_STORAGES.
-        let _release = ReleaseStorage(storage, release_holds);
+        // and batch still drops, `PipeSlot` returns to `FREE_PIPE_SLOTS`, and
+        // `PipeStorage` is released cleanly.
+        let _release = ReleaseStorage(storage_ptr, release_holds, pipe_slot);
         let _drain = DrainPending(self);
-        storage.waker.clear();
+        pipe_slot.waker.clear();
     }
 }
 
@@ -2486,7 +2504,7 @@ impl<T, B, P> Unpin for MessageFut<'_, T, B, P> {}
 impl<T, B, P> Drop for MessageFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
-            self.pipe.shared().storage.waker.clear();
+            self.pipe.storage().slot.get().waker.clear();
         }
     }
 }
@@ -2511,7 +2529,7 @@ impl<T, B, P> Future for MessageFut<'_, T, B, P> {
         this.registered = false;
         // Sound: `slot` just came off `free_slots`, so no worker task reads
         // `slot_custom[slot]` until the owner dispatches work for this slot.
-        unsafe { *this.pipe.shared().slot_custom[slot as usize].get() = false };
+        unsafe { *this.pipe.storage().slot_custom[slot as usize].get() = false };
         let sm = &mut this.pipe.slots[slot as usize];
         sm.tag = this.tag.take();
         sm.kind = SlotKind::OpenEmpty;
@@ -2534,7 +2552,7 @@ impl<T, B, P> Unpin for MessageWithFut<'_, T, B, P> {}
 impl<T, B, P> Drop for MessageWithFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
-            self.pipe.shared().storage.waker.clear();
+            self.pipe.storage().slot.get().waker.clear();
         }
     }
 }
@@ -2561,8 +2579,8 @@ impl<T, B, P> Future for MessageWithFut<'_, T, B, P> {
         // Sound: `slot` just came off `free_slots`, so no worker task reads
         // `slot_trees[slot]` or `slot_custom[slot]` until work is dispatched.
         unsafe {
-            *this.pipe.shared().slot_trees[slot as usize].get() = tree;
-            *this.pipe.shared().slot_custom[slot as usize].get() = true;
+            *this.pipe.storage().slot_trees[slot as usize].get() = tree;
+            *this.pipe.storage().slot_custom[slot as usize].get() = true;
         }
         let sm = &mut this.pipe.slots[slot as usize];
         sm.tag = this.tag.take();
@@ -2584,7 +2602,7 @@ impl<T, B, P> Unpin for RoomFut<'_, T, B, P> {}
 impl<T, B, P> Drop for RoomFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
-            self.pipe.shared().storage.waker.clear();
+            self.pipe.storage().slot.get().waker.clear();
         }
     }
 }
@@ -2624,7 +2642,7 @@ impl<T, B, P> Unpin for ReadyFut<'_, T, B, P> {}
 impl<T, B, P> Drop for ReadyFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
-            self.pipe.shared().storage.waker.clear();
+            self.pipe.storage().slot.get().waker.clear();
         }
     }
 }
@@ -2972,9 +2990,13 @@ mod test {
         });
         assert!(!in_block_on() && !block_on_spinning());
 
-        let p_cap_check = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 255, rooms: 10 });
-        assert_eq!(p_cap_check.shared().storage.source.actions_len(), 16841);
-        drop(p_cap_check);
+        // Exact power-of-two boundary for actions_cap = m*64 + (rooms+m+1) + g_cap:
+        // (248, 15) -> 15872 + 264 + 248 = 16384; (248, 16) -> 16385 -> 32768.
+        let p_cap_exact = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 15 });
+        assert_eq!(p_cap_exact.storage().slot.get().source.actions_len(), 16384);
+        let p_cap_over = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 16 });
+        assert_eq!(p_cap_over.storage().slot.get().source.actions_len(), 32768);
+        drop((p_cap_exact, p_cap_over));
 
         let mut p = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 4, rooms: 2 });
         let Poll::Ready(r_first) = poll_once(p.room()) else { panic!("room 0 ready") };
@@ -2986,8 +3008,8 @@ mod test {
         p.commit(&mut m, &mut r, ROOM_LEN);
         drop(r);
         let pnode = p.room_streams[0].head_piece as usize;
-        let src = &p.shared().storage.source;
-        let pieces_ref = &p.shared().pieces;
+        let src = &p.storage().slot.get().source;
+        let pieces_ref = &p.storage().pieces;
         step_until(src, &|| pieces_ref[pnode].done.load(Ordering::Acquire), "dispatch_one + run_room_piece");
         p.end(m);
         assert_eq!(p.room_streams[0].head_piece, NONE, "end drained room piece");
@@ -3005,8 +3027,8 @@ mod test {
             p_short.publish_open();
             let g = round % 4;
             let ep = (round + 1) as u64;
-            let src = &p_short.shared().storage.source;
-            let groups = &p_short.shared().storage.groups;
+            let src = &p_short.storage().slot.get().source;
+            let groups = &p_short.storage().groups;
             step_until(src, &|| groups[g].completed_epoch.load(Ordering::Acquire) >= ep, "publish_open + run_group");
             assert!(p_short.group_ready(g as u32, ep));
             let Some(Event::Hashed { tag, hash, owner: Some(_) }) = p_short.try_reap_one() else {
@@ -3019,9 +3041,9 @@ mod test {
         let mut p_multi = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 0 });
         let Poll::Ready(mm) = poll_once(p_multi.message(99, None)) else { panic!("multi msg ready") };
         p_multi.owned(mm, vec![0x44; MAX_SLOT_PIECES * TASK_LEN]);
-        assert_eq!(unsafe { (*p_multi.shared().multi[0].get()).piece_level }, level_of(TASK_LEN as u64));
-        let src = &p_multi.shared().storage.source;
-        let sd = &p_multi.shared().slot_done;
+        assert_eq!(unsafe { (*p_multi.storage().multi[0].get()).piece_level }, level_of(TASK_LEN as u64));
+        let src = &p_multi.storage().slot.get().source;
+        let sd = &p_multi.storage().slot_done;
         step_until(src, &|| sd[0].load(Ordering::Acquire), "dispatch_many + run_multi_piece");
         assert!(p_multi.try_reap_one().is_some(), "run_multi_piece completed all pieces");
         drop(p_multi);
@@ -3038,17 +3060,17 @@ mod test {
         p_meta.batch(mb, Batch::new(1024, 128), vec![[0u8; 32]; 128].into_boxed_slice());
         assert_eq!(p_meta.open_messages, 0);
         assert!(matches!(p_meta.slots[1].kind, SlotKind::WaitBatch { group: NONE, .. }));
-        assert_eq!(unsafe { (*p_meta.shared().multi[1].get()).batch.unwrap().2 }, 64);
-        let src = &p_meta.shared().storage.source;
-        let sd = &p_meta.shared().slot_done;
+        assert_eq!(unsafe { (*p_meta.storage().multi[1].get()).batch.unwrap().2 }, 64);
+        let src = &p_meta.storage().slot.get().source;
+        let sd = &p_meta.storage().slot_done;
         step_until(src, &|| sd[1].load(Ordering::Acquire), "batch 128 multi");
         let _ = p_meta.try_reap_one();
 
         let Poll::Ready(mb64) = poll_once(p_meta.message(3, None)) else { panic!() };
         p_meta.batch(mb64, Batch::new(1024, 64), vec![[0u8; 32]; 64].into_boxed_slice());
         assert!(matches!(p_meta.slots[2].kind, SlotKind::WaitBatch { group: NONE, .. }));
-        let src = &p_meta.shared().storage.source;
-        let sd = &p_meta.shared().slot_done;
+        let src = &p_meta.storage().slot.get().source;
+        let sd = &p_meta.storage().slot_done;
         step_until(src, &|| sd[2].load(Ordering::Acquire), "batch 64 multi");
         let _ = p_meta.try_reap_one();
         drop(p_meta);
@@ -3061,8 +3083,8 @@ mod test {
             let Poll::Ready(m1) = poll_once(p_wb.message(1, None)) else { panic!() };
             p_wb.batch(m1, Batch::new(64, 1), vec![[0u8; 32]; 1].into_boxed_slice());
             p_wb.publish_open();
-            let src = &p_wb.shared().storage.source;
-            let groups = &p_wb.shared().storage.groups;
+            let src = &p_wb.storage().slot.get().source;
+            let groups = &p_wb.storage().groups;
             step_until(src, &|| groups[0].completed_epoch.load(Ordering::Acquire) >= 1, "WaitBatch drop setup");
         }
         {
@@ -3376,22 +3398,24 @@ mod test {
         }
     }
 
-    /// What a worker can reach is never given back: a Pipeline's `Shared`
-    /// stays with its storage when the Pipeline is dropped, and the next
-    /// Pipeline of that size takes both and hashes rightly in its own mode
-    /// (a worker that read it late once read freed memory, #399). A
-    /// larger Pipeline on the same storage gets one of its own size.
+    /// A Pipeline frees its per-pipeline `PipeStorage` cleanly on drop while
+    /// reusing its small `'static` `PipeSlot` across Pipelines — even across
+    /// different `Limits.rooms` and `Limits.messages` within the same
+    /// power-of-two action tier — and each Pipeline hashes in its own mode
+    /// (#399, #465).
     #[test]
-    fn a_pipelines_shared_state_outlives_it_and_serves_the_next() {
+    fn a_pipelines_slot_is_reused_while_its_storage_is_freed() {
         crate::initialize_multithreaded(None);
+        let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
         let limits = Limits { messages: 3, rooms: 2 };
         let first = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, limits);
-        let (shared, storage) = (first.shared, first.shared().storage as *const PipeStorage);
+        let slot: *const PipeSlot = first.storage().slot.get();
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before + 1);
         drop(first);
-        assert_eq!(unsafe { *(*storage).shared.get() }, shared, "the storage keeps it");
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before, "first PipeStorage freed on drop");
         let key = [9u8; 32];
         let mut second = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Keyed(&key), limits);
-        assert_eq!((second.shared, second.shared().storage as *const PipeStorage), (shared, storage), "the next Pipeline of this size takes both");
+        assert_eq!(second.storage().slot.get() as *const PipeSlot, slot, "the next Pipeline reuses the PipeSlot");
         let m = block_on(second.message(0, None));
         second.owned(m, vec![5u8; 1 << 20]);
         match drain_all(&mut second, 1).pop().unwrap() {
@@ -3399,11 +3423,11 @@ mod test {
             _ => panic!("expected Hashed"),
         }
         drop(second);
-        // A larger Pipeline that the storage still fits: a Shared of its own
-        // size, which holds every one of its messages.
-        let mut larger = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 10, rooms: 2 });
-        assert_eq!(larger.shared().storage as *const PipeStorage, storage, "the storage serves ten messages too");
-        assert_ne!(larger.shared, shared, "the Shared of three messages does not");
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before, "second PipeStorage freed on drop");
+        // A Pipeline with different rooms and messages in the same action tier
+        // still reuses the same PipeSlot while allocating and freeing its own PipeStorage.
+        let mut larger = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 10, rooms: 5 });
+        assert_eq!(larger.storage().slot.get() as *const PipeSlot, slot, "the PipeSlot serves different Limits in the same action tier");
         for tag in 0..10 {
             let m = block_on(larger.message(tag, None));
             larger.owned(m, vec![tag as u8; 300_000]);
@@ -3414,6 +3438,8 @@ mod test {
                 _ => panic!("expected Hashed"),
             }
         }
+        drop(larger);
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before, "larger PipeStorage freed on drop");
     }
 
     #[test]
@@ -3425,8 +3451,8 @@ mod test {
         }
         block_on(pipe.ready());
         while pipe.events.len() < 2 {
-            if !pipe.shared().storage.source.run_waiting_action() {
-                pipe.shared().storage.source.wake_for_waiting();
+            if !pipe.storage().slot.get().source.run_waiting_action() {
+                pipe.storage().slot.get().source.wake_for_waiting();
                 std::thread::yield_now();
             }
             pipe.reap();
@@ -3437,8 +3463,8 @@ mod test {
         }
         pipe.publish_open();
         while pipe.has_in_flight_work() {
-            if !pipe.shared().storage.source.run_waiting_action() {
-                pipe.shared().storage.source.wake_for_waiting();
+            if !pipe.storage().slot.get().source.run_waiting_action() {
+                pipe.storage().slot.get().source.wake_for_waiting();
                 std::thread::yield_now();
             }
         }
@@ -3599,7 +3625,7 @@ mod test {
                 // Its commits all finished: the pool holds what the Room
                 // has yet to give out, no more and no less (with more, the
                 // Room would never be free again once dropped).
-                let held = room.storage.rooms.refs[room.index as usize].load(Ordering::SeqCst);
+                let held = room.storage().rooms.refs[room.index as usize].load(Ordering::SeqCst);
                 assert_eq!(held, ROOM_CREDITS - room.commits as usize, "after {} empty commits", n + 1);
                 for _ in 0..4 {
                     let (a, b) = (pipe.room().await, pipe.room().await);
@@ -3614,37 +3640,113 @@ mod test {
         });
     }
 
-    /// Multiple Rooms outliving their Pipeline hold `PipeStorage::holders`
-    /// via `ROOM_CLOSING_BIT` until every survivor drops, clear their ref
-    /// slots back to 0, and return the storage to `FREE_STORAGES` cleanly (#494).
+    /// Multiple Rooms and completed `Lent` guards outliving their Pipeline hold
+    /// `PipeStorage::holders` until every survivor drops, then free `PipeStorage`
+    /// cleanly while `PipeSlot` returns immediately on `Pipeline::drop` (#465, #494).
     #[test]
-    fn surviving_rooms_return_storage_after_pipeline_drop() {
+    fn surviving_rooms_and_lent_free_storage_after_pipeline_drop() {
         crate::initialize_multithreaded(None);
-        let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 4 });
-        let storage: *const PipeStorage = pipe.shared().storage;
+        let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
+        let short = [0xABu8; 128];
+        let long = vec![0xCDu8; TASK_LEN + 4096];
+        let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 4, rooms: 4 });
+        let slot: *const PipeSlot = pipe.storage().slot.get();
         let (r0, r1) = block_on(async { (pipe.room().await, pipe.room().await) });
         let (i0, i1) = (r0.index as usize, r1.index as usize);
-        assert_eq!(r0.storage.holders.load(Ordering::SeqCst), 1, "live Rooms do not bump holders while Pipeline lives");
+        assert_eq!(r0.storage().holders.load(Ordering::SeqCst), 1, "live Rooms do not bump holders while Pipeline lives");
+        let m_short = block_on(pipe.message(1, None));
+        let lent_short = unsafe { pipe.lent(m_short, &short) };
+        let m_long = block_on(pipe.message(2, None));
+        let lent_long = unsafe { pipe.lent(m_long, &long) };
+        assert_eq!(r0.storage().holders.load(Ordering::SeqCst), 3, "two live Lent guards bump holders");
+        let _ = drain_all(&mut pipe, 2);
         drop(pipe);
-        assert_eq!(r0.storage.holders.load(Ordering::SeqCst), 2, "two surviving Rooms hold the storage");
+        // `PipeSlot` is already back in `FREE_PIPE_SLOTS` while `PipeStorage`
+        // stays alive for the two surviving `Room`s and two surviving `Lent`s.
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before + 1);
+        assert_eq!(r0.storage().holders.load(Ordering::SeqCst), 4, "two Rooms + two Lent guards hold PipeStorage");
         for i in 0..4 {
-            let v = r0.storage.rooms.refs[i].load(Ordering::SeqCst);
+            let v = r0.storage().rooms.refs[i].load(Ordering::SeqCst);
             if i == i0 || i == i1 {
                 assert_eq!(v, ROOM_CLOSING_BIT | ROOM_CREDITS, "surviving room {i} stamped");
             } else {
-                assert_eq!(v, 0, "idle room {i} cleared to 0");
+                assert_eq!(v, ROOM_CLOSING_BIT, "idle room {i} stamped with closing bit");
             }
         }
-        drop(r0);
-        assert_eq!(r1.storage.holders.load(Ordering::SeqCst), 1);
-        assert_eq!(r1.storage.rooms.refs[i0].load(Ordering::SeqCst), 0);
-        drop(r1);
         let next = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 4 });
-        let next_storage: *const PipeStorage = next.shared().storage;
-        assert_eq!(next_storage, storage, "storage returned to FREE_STORAGES once last surviving Room dropped");
+        assert_eq!(next.storage().slot.get() as *const PipeSlot, slot, "PipeSlot returned on Pipeline::drop");
         for i in 0..4 {
-            assert_eq!(next.shared().storage.rooms.refs[i].load(Ordering::SeqCst), 0);
+            assert_eq!(next.storage().rooms.refs[i].load(Ordering::SeqCst), 0);
         }
+        drop(next);
+        drop(r0);
+        assert_eq!(r1.storage().holders.load(Ordering::SeqCst), 3);
+        drop(lent_short);
+        assert_eq!(r1.storage().holders.load(Ordering::SeqCst), 2);
+        drop(r1);
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before + 1, "last Lent still holds PipeStorage");
+        drop(lent_long);
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before, "PipeStorage freed once last survivor drops");
+    }
+
+    /// Creating and dropping Pipelines across 40 distinct `Limits.rooms` values
+    /// (the #465 reviewer scenario, 820 cumulative Rooms = 51.25 MiB) frees every
+    /// `PipeStorage` cleanly — even while another thread hammers
+    /// `hash_multithreaded` concurrently — and reuses at most one `PipeSlot`
+    /// per power-of-two action tier.
+    #[test]
+    fn varied_room_counts_free_every_storage_and_share_pipe_slots() {
+        crate::initialize_multithreaded(None);
+        let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
+        let slots_before = PIPE_SLOTS_MADE.load(Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_bg = Arc::clone(&stop);
+        let bg_input = crate::test::message(&vec![0x5Au8; 1 << 20]);
+        let expected = convenience::hash(&vec![0x5Au8; 1 << 20]);
+        let worker = std::thread::spawn(move || {
+            while !stop_bg.load(Ordering::Relaxed) {
+                assert_eq!(crate::throughput::hash_multithreaded(Mode::Plain, &bg_input, 1 << 20), expected);
+            }
+        });
+        for rooms in 1usize..=40 {
+            let room_u32 = u32::try_from(rooms).unwrap();
+            let fill = u8::try_from(rooms).unwrap();
+            let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 4, rooms });
+            let mut m = block_on(pipe.message(room_u32, None));
+            let mut r = block_on(pipe.room());
+            r.bytes_mut()[..64].fill(fill);
+            pipe.commit(&mut m, &mut r, 64);
+            drop(r);
+            pipe.end(m);
+            let evs = drain_all(&mut pipe, 1);
+            match &evs[0] {
+                Event::Hashed { hash, .. } => assert_eq!(*hash, convenience::hash(&[fill; 64])),
+                _ => panic!("expected Hashed"),
+            }
+            drop(pipe);
+        }
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before, "all 40 PipeStorages freed");
+        // messages=4, rooms=1..=40 -> actions_cap = 256 + (rooms+5) + 4 <= 305 <= 1024,
+        // so all 40 distinct room counts share a single 1024-action PipeSlot.
+        assert!(PIPE_SLOTS_MADE.load(Ordering::Relaxed) - slots_before <= 1, "single PipeSlot shared across all 40 room counts");
+    }
+
+    #[test]
+    fn public_types_preserve_auto_traits() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        fn assert_unwind<T: core::panic::UnwindSafe + core::panic::RefUnwindSafe>() {}
+        assert_send::<Lent<'_>>();
+        assert_sync::<Lent<'_>>();
+        assert_unwind::<Lent<'_>>();
+        assert_send::<Room>();
+        assert_sync::<Room>();
+        assert_send::<Pipeline<u32>>();
+        assert_send::<Message>();
+        assert_sync::<Message>();
+        assert_send::<Event<u32>>();
     }
 
     /// A commit that finds no piece node free takes back the finished ones
@@ -3673,9 +3775,9 @@ mod test {
                     // A lone action waits for its owner's next await
                     // (publish_actions wakes a worker at two): run it
                     // here, unless a worker that was awake has it.
-                    let done = &pipe.shared().pieces[held as usize].done;
+                    let done = &pipe.storage().pieces[held as usize].done;
                     while !done.load(Ordering::SeqCst) {
-                        if !pipe.shared().storage.source.run_waiting_action() {
+                        if !pipe.storage().slot.get().source.run_waiting_action() {
                             std::thread::yield_now();
                         }
                     }
@@ -3683,7 +3785,7 @@ mod test {
                 }
             }
             assert!(pipe.free_pieces.is_empty(), "the first message holds every node");
-            pipe.shared().pieces[held as usize].done.store(true, Ordering::SeqCst);
+            pipe.storage().pieces[held as usize].done.store(true, Ordering::SeqCst);
             // Two whole rooms: a piece each.
             for part in data[ROOM_LEN - 5..].chunks(ROOM_LEN).take(2) {
                 let mut room = pipe.room().await;
@@ -3698,32 +3800,32 @@ mod test {
         assert_eq!(hashes, [(1, crate::convenience::hash(&data[ROOM_LEN - 5..3 * ROOM_LEN - 5])), (0, crate::convenience::hash(&data[..5 * ROOM_LEN]))]);
     }
 
-    /// Storage is reused however many Pipelines were alive at once, and
-    /// whichever of a Pipeline and its Rooms is dropped last: a second
-    /// wave of as many Pipelines makes no new storage. (BLAKE3 #427: the
-    /// free list kept 16, and a Room dropped after its Pipeline kept its
-    /// storage from the list. Either way the storage was lost for good.)
-    /// The Limits are ones no other test uses, so the storages counted
-    /// are this test's.
+    /// `PipeSlot`s are reused however many Pipelines were alive at once and
+    /// across varying `Limits.rooms`, while every `PipeStorage` is freed when
+    /// the last of its Pipeline and surviving `Room`s drops (#427, #465).
     #[test]
-    fn storage_is_reused_past_sixteen_pipelines_and_after_a_late_room() {
+    fn pipe_slots_are_reused_and_storages_freed_across_waves() {
         crate::initialize_multithreaded(None);
-        let limits = Limits { messages: 3, rooms: 5 };
-        let wave = |late_rooms: bool| {
+        let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
+        let wave = |rooms_count: usize, late_rooms: bool| {
+            let limits = Limits { messages: 3, rooms: rooms_count };
             let mut pipes: Vec<Pipeline<u32>> = (0..40).map(|_| Pipeline::new(Mode::Plain, limits)).collect();
             let rooms: Vec<Room> = if late_rooms { pipes.iter_mut().map(|p| block_on(p.room())).collect() } else { Vec::new() };
             drop(pipes);
+            if late_rooms {
+                assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before + 40, "late Rooms keep PipeStorages alive");
+            }
             drop(rooms);
+            assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before, "every PipeStorage freed after wave");
         };
-        let before = STORAGES_MADE.load(Ordering::Relaxed);
-        wave(false);
-        assert_eq!(STORAGES_MADE.load(Ordering::Relaxed) - before, 40, "one each, the first time");
-        wave(false);
-        wave(true);
-        wave(true);
-        assert_eq!(STORAGES_MADE.load(Ordering::Relaxed) - before, 40, "and none after");
-        // A storage back on the list is whole: its Rooms are all free.
-        let mut pipe = Pipeline::<u32>::new(Mode::Plain, limits);
+        let before = PIPE_SLOTS_MADE.load(Ordering::Relaxed);
+        wave(5, false);
+        assert_eq!(PIPE_SLOTS_MADE.load(Ordering::Relaxed) - before, 40, "one PipeSlot each, the first time");
+        wave(2, false);
+        wave(7, true);
+        wave(1, true);
+        assert_eq!(PIPE_SLOTS_MADE.load(Ordering::Relaxed) - before, 40, "zero new PipeSlots across varying Limits.rooms");
+        let mut pipe = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 3, rooms: 5 });
         let rooms: Vec<Room> = (0..4).map(|_| block_on(pipe.room())).collect();
         let mut seen: Vec<u32> = rooms.iter().map(|r| r.index).collect();
         seen.sort_unstable();
@@ -3756,7 +3858,7 @@ mod test {
         let (_, s) = block_on(p.message(7, None)).take();
         p.open_messages -= 1;
         p.slots[s].kind = SlotKind::WaitMulti { has_owner: false };
-        p.shared().slot_done[s].store(false, Ordering::SeqCst);
+        p.storage().slot_done[s].store(false, Ordering::SeqCst);
         p.end_queue.push_back(s as u32);
         s
     }
@@ -3770,7 +3872,7 @@ mod test {
             }
         }
         fn notify(p: &Pipeline<u32>) {
-            p.shared().storage.waker.notify_after_seqcst();
+            p.storage().slot.get().waker.notify_after_seqcst();
         }
         let wakes = Arc::new(Count(AtomicUsize::new(0)));
         let other = Waker::from(Arc::clone(&wakes));
@@ -3814,7 +3916,7 @@ mod test {
             Poll::Ready(())
         }));
         // The hashing ends, and the Pipeline is as any other.
-        p.shared().slot_done[s].store(true, Ordering::SeqCst);
+        p.storage().slot_done[s].store(true, Ordering::SeqCst);
         assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 7, .. })));
     }
 
@@ -3900,14 +4002,14 @@ mod test {
             assert_eq!(Arc::strong_count(&track), 3, "ready(): track + waker + WakerSlot");
         }
         assert_eq!(Arc::strong_count(&track), 2, "dropping cancelled ready() future must clear WakerSlot");
-        p.shared().slot_done[s].store(true, Ordering::SeqCst);
+        p.storage().slot_done[s].store(true, Ordering::SeqCst);
         assert!(matches!(p.next_event(), Some(Event::Hashed { tag: 7, .. })));
         drop(room);
     }
 
     /// If dropping one unreaped owner panics during `Pipeline::drop`, all
-    /// remaining owners must still drop and `PipeStorage` must still return to
-    /// `FREE_STORAGES`.
+    /// remaining owners must still drop, `PipeStorage` must still be freed,
+    /// and `PipeSlot` must still return to `FREE_PIPE_SLOTS`.
     #[test]
     fn pipeline_drop_cleans_remaining_owners_and_storage_after_panicking_owner() {
         struct DropOwner {
@@ -3929,9 +4031,9 @@ mod test {
             }
         }
         let drops = Arc::new(AtomicUsize::new(0));
+        let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
         let mut p = Pipeline::<u32, DropOwner>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 0 });
-        let st = p.shared().storage;
-        let holders_before = st.holders.load(Ordering::Acquire);
+        let slot: *const PipeSlot = p.storage().slot.get();
         let m1 = block_on(p.message(1, None));
         let m2 = block_on(p.message(2, None));
         // Short messages stay buffered locally in open_group (not dispatched),
@@ -3941,7 +4043,9 @@ mod test {
         let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(p)));
         assert!(res.is_err(), "first owner panic should unwind");
         assert_eq!(drops.load(Ordering::SeqCst), 2, "second owner must still be dropped on unwind");
-        assert_eq!(st.holders.load(Ordering::Acquire), holders_before - 1, "storage must be released back to free list");
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before, "PipeStorage must be freed on unwind");
+        let p2 = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        assert_eq!(p2.storage().slot.get() as *const PipeSlot, slot, "PipeSlot must return to FREE_PIPE_SLOTS on unwind");
     }
 
     /// Polling a completed `Pipeline::message` future a second time panics
@@ -4068,7 +4172,7 @@ mod test {
             let pending = block_on(core::future::poll_fn(|cx| Poll::Ready(p.poll_room(cx).is_pending())));
             assert!(pending, "the only Room is out");
             assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
-            p.shared().storage.waker.notify_after_seqcst();
+            p.storage().slot.get().waker.notify_after_seqcst();
             assert!(own_woken(), "the wait kept no waker, and the outer block_on would sleep on");
             Poll::Ready(())
         }));
@@ -4212,9 +4316,24 @@ mod test {
             }
             match which.as_str() {
                 "lent" => {
-                    let completed = AtomicU64::new(0);
-                    let static_completed: &'static AtomicU64 = Box::leak(Box::new(completed));
-                    let guard = Lent { completed: static_completed, epoch: 1, _bytes: PhantomData };
+                    let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 0 });
+                    let m = block_on(p.message(1, None));
+                    let data = [1u8; 8];
+                    // Buffered locally in open_group (not dispatched); dropping
+                    // Lent before hashing completes must abort the process.
+                    let guard = unsafe { p.lent(m, &data) };
+                    core::mem::forget(p);
+                    drop(guard);
+                }
+                "lent_after_pipeline_drop" => {
+                    let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 0 });
+                    let m = block_on(p.message(1, None));
+                    let data = [1u8; 8];
+                    // Buffered locally in open_group (not dispatched); even
+                    // after Pipeline::drop frees/releases its hold, Lent keeps
+                    // PipeStorage live and must still abort on drop.
+                    let guard = unsafe { p.lent(m, &data) };
+                    drop(p);
                     drop(guard);
                 }
                 "pipeline" => {
@@ -4225,7 +4344,7 @@ mod test {
                 "pipeline_multi" => {
                     let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 0 });
                     p.slots[0].kind = SlotKind::WaitMulti { has_owner: false };
-                    p.shared().slot_done[0].store(false, Ordering::SeqCst);
+                    p.storage().slot_done[0].store(false, Ordering::SeqCst);
                     drop(p);
                 }
                 "abort_on_unwind" => {
@@ -4261,8 +4380,12 @@ mod test {
                 "lent_stderr_locked" => {
                     let _held = std::io::stderr().lock();
                     let breach = || {
-                        let completed: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
-                        drop(Lent { completed, epoch: 1, _bytes: PhantomData });
+                        let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 0 });
+                        let m = block_on(p.message(1, None));
+                        let data = [1u8; 8];
+                        let guard = unsafe { p.lent(m, &data) };
+                        core::mem::forget(p);
+                        drop(guard);
                     };
                     std::thread::spawn(breach).join().unwrap();
                 }
@@ -4279,6 +4402,7 @@ mod test {
 
         for (case, needle) in [
             ("lent", "Lent guard was dropped before its message finished"),
+            ("lent_after_pipeline_drop", "Lent guard was dropped before its message finished"),
             ("lent_stderr_locked", "Lent guard was dropped before its message finished"),
             ("waker_panics", "this waker panics"),
             ("pipeline", "Pipeline dropped while worker tasks are still in flight"),
@@ -4408,29 +4532,41 @@ mod test {
     fn unit_internal_capacities_group_thresholds_aborts_and_drop_cleanup() {
         crate::initialize_multithreaded(None);
 
+        let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
         let p_small = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
         assert_eq!(p_small.free_pieces.buf.len(), 1 + 2 + 1);
         assert_eq!(p_small.group_count, 4);
-        assert!(p_small.shared().storage.source.actions_len() >= 2 * MAX_SLOT_PIECES + 4 + 4);
-        let st_ptr1 = p_small.shared().storage as *const PipeStorage as usize;
+        assert_eq!(p_small.storage().slot.get().source.actions_len(), 1024);
+        let slot_small = p_small.storage().slot.get() as *const PipeSlot as usize;
 
+        // Exact-match reuse (`actions == actions_len()`), off-by-one rejection
+        // (`actions == actions_len() + 1` must NOT reuse a smaller slot), and
+        // best-fit selection across free `PipeSlot` power-of-two tiers.
+        let p_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 200, rooms: 1 });
+        assert_eq!(p_big.storage().slot.get().source.actions_len(), 16384);
+        let slot_big = p_big.storage().slot.get() as *const PipeSlot as usize;
+        assert_ne!(slot_big, slot_small);
+        drop(p_big);
+        drop(p_small);
+        // Free slot has exact capacity 16,384; requesting 16,385 must NOT take it.
+        let p_too_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 16 });
+        assert_eq!(p_too_big.storage().slot.get().source.actions_len(), 32768);
+        assert_ne!(p_too_big.storage().slot.get() as *const PipeSlot as usize, slot_big, "off-by-one larger request must not take 16384 slot");
+        let p_exact_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 15 });
+        assert_eq!(p_exact_big.storage().slot.get() as *const PipeSlot as usize, slot_big, "exact actions_len match reuses PipeSlot");
+        let p_best_fit = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+        assert_eq!(p_best_fit.storage().slot.get() as *const PipeSlot as usize, slot_small, "best-fit reuses smallest fitting PipeSlot across rooms");
+        drop((p_too_big, p_exact_big, p_best_fit));
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before);
+
+        // Surviving Room keeps its PipeStorage alive until the Room drops,
+        // while PipeSlot is returned immediately on Pipeline::drop.
         let mut p_held = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 3 });
-        let held_ptr = p_held.shared().storage as *const PipeStorage as usize;
         let held_room = block_on(p_held.room());
         drop(p_held);
-        let p_held2 = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 3 });
-        assert_ne!(p_held2.shared().storage as *const PipeStorage as usize, held_ptr);
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before + 1);
         drop(held_room);
-        drop(p_held2);
-
-        drop(p_small);
-        let p_same = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-        assert_eq!(p_same.shared().storage as *const PipeStorage as usize, st_ptr1);
-        let p_diff_rooms = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
-        assert_ne!(p_diff_rooms.shared().storage as *const PipeStorage as usize, st_ptr1);
-        let p_big_msgs = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 200, rooms: 1 });
-        assert_ne!(p_big_msgs.shared().storage as *const PipeStorage as usize, st_ptr1);
-        drop((p_same, p_diff_rooms, p_big_msgs));
+        assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before);
 
         let mut pipe = Pipeline::new(Mode::Plain, Limits { messages: 4, rooms: 2 });
         block_on(async {
@@ -4537,8 +4673,8 @@ mod test {
             p_drop.owned(m1, Arc::clone(&owner_arc));
             p_drop.publish_open();
             while p_drop.has_in_flight_work() {
-                if !p_drop.shared().storage.source.run_waiting_action() {
-                    p_drop.shared().storage.source.wake_for_waiting();
+                if !p_drop.storage().slot.get().source.run_waiting_action() {
+                    p_drop.storage().slot.get().source.wake_for_waiting();
                     std::thread::yield_now();
                 }
             }
@@ -4549,17 +4685,17 @@ mod test {
         {
             let mut p_ab = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
             let pnode = p_ab.free_pieces.pop_front().unwrap();
-            p_ab.shared().pieces[pnode as usize].done.store(false, Ordering::SeqCst);
-            unsafe { *p_ab.shared().pieces[pnode as usize].next.get() = NONE };
+            p_ab.storage().pieces[pnode as usize].done.store(false, Ordering::SeqCst);
+            unsafe { *p_ab.storage().pieces[pnode as usize].next.get() = NONE };
             p_ab.room_streams[0] = RoomStream { len: ROOM_LEN as u64, head_piece: pnode, tail_piece: pnode, piece_slot_pos: 0, stack_len: 0, merged_pieces: 0 };
             p_ab.piece_slots.push(0);
             p_ab.slots[0] = SlotMeta { tag: Some(77), kind: SlotKind::WaitAborted { group: 0, epoch: 5 }, mode: SlotMode::Default };
             p_ab.free_slots.pop_front();
             p_ab.end_queue.push_back(0);
             assert!(p_ab.try_reap_one().is_none());
-            p_ab.shared().pieces[pnode as usize].done.store(true, Ordering::SeqCst);
+            p_ab.storage().pieces[pnode as usize].done.store(true, Ordering::SeqCst);
             assert!(p_ab.try_reap_one().is_none());
-            p_ab.shared().storage.groups[0].completed_epoch.store(5, Ordering::SeqCst);
+            p_ab.storage().groups[0].completed_epoch.store(5, Ordering::SeqCst);
             assert!(matches!(p_ab.try_reap_one(), Some(Event::Aborted { tag: 77, owner: None })));
         }
     }
@@ -4785,7 +4921,7 @@ mod test {
             fn wake(self: Arc<Self>) {}
         }
         let mut p1 = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 1, rooms: 0 });
-        let cur_epoch = p1.shared().storage.groups[0].completed_epoch.load(Ordering::SeqCst);
+        let cur_epoch = p1.storage().groups[0].completed_epoch.load(Ordering::SeqCst);
         let pending_epoch = cur_epoch + 1;
         p1.slots[0] = SlotMeta { tag: Some(0), kind: SlotKind::WaitAborted { group: 0, epoch: pending_epoch }, mode: SlotMode::Default };
         p1.free_slots.pop_front();
@@ -4801,7 +4937,7 @@ mod test {
             drop(fut);
         }
         assert_eq!(Arc::strong_count(&wake_arc), 1, "Dropping Pending MessageWithFut must clear waker");
-        p1.shared().storage.groups[0].completed_epoch.store(pending_epoch, Ordering::SeqCst);
+        p1.storage().groups[0].completed_epoch.store(pending_epoch, Ordering::SeqCst);
         assert!(matches!(p1.try_reap_one(), Some(Event::Aborted { tag: 0, owner: None })));
     }
 
@@ -4837,7 +4973,7 @@ mod test {
             let m = block_on(p32_pipe.message_with(mode, tag, None));
             let slot_idx = m.slot as usize;
             p32_pipe.batch(m, batch, digests);
-            let got_pieces = if count >= 1024 { unsafe { (*p32_pipe.shared().multi[slot_idx].get()).pieces } } else { 0 };
+            let got_pieces = if count >= 1024 { unsafe { (*p32_pipe.storage().multi[slot_idx].get()).pieces } } else { 0 };
             let tail_sme2 = if count == 1025 { Some((p32_pipe.action_buf[0] & ACTION_SME2 != 0, p32_pipe.action_buf[1] & ACTION_SME2 != 0)) } else { None };
             let ev = loop {
                 if let Some(ev) = p32_pipe.next_event() {
@@ -5265,7 +5401,7 @@ mod test {
         pipe.commit(&mut m_short, &mut room, 64);
         drop(room);
         pipe.end(m_short);
-        let short_front_near = pipe.shared().storage.source.front_action_near();
+        let short_front_near = pipe.storage().slot.get().source.front_action_near();
         let _ = drain_one(&mut pipe);
         assert!(!short_front_near);
         assert_eq!(pipe.batches_in_flight, 0);
@@ -5275,7 +5411,7 @@ mod test {
         r1.bytes_mut().fill(0x44);
         pipe.commit(&mut m_room, &mut r1, ROOM_LEN);
         drop(r1);
-        let room_front_near = pipe.shared().storage.source.front_action_near();
+        let room_front_near = pipe.storage().slot.get().source.front_action_near();
         let mut r2 = block_on(pipe.room());
         r2.bytes_mut().fill(0x55);
         pipe.commit(&mut m_room, &mut r2, ROOM_LEN);
@@ -5287,7 +5423,7 @@ mod test {
 
         let m_owned = block_on(pipe.message(4, Some((TASK_LEN * 2) as u64)));
         pipe.owned(m_owned, vec![0x66u8; TASK_LEN * 2]);
-        let owned_front_near = pipe.shared().storage.source.front_action_near();
+        let owned_front_near = pipe.storage().slot.get().source.front_action_near();
         let _ = drain_one(&mut pipe);
         assert!(!owned_front_near);
         assert_eq!(pipe.batches_in_flight, 0);
@@ -5431,14 +5567,14 @@ mod test {
         p2.commit(&mut m_untracked, &mut ru0, ROOM_LEN);
         drop(ru0);
         let pu0 = p2.room_streams[1].head_piece as usize;
-        p2.shared().pieces[pu0].done.store(false, Ordering::SeqCst);
+        p2.storage().pieces[pu0].done.store(false, Ordering::SeqCst);
         let mut ru1 = block_on(p2.room());
         ru1.bytes_mut().fill(0x31);
         data_u.extend_from_slice(ru1.bytes_mut());
         p2.commit(&mut m_untracked, &mut ru1, ROOM_LEN);
         drop(ru1);
         assert_ne!(p2.room_streams[1].head_piece, p2.room_streams[1].tail_piece, "slot 1 holds two pieces");
-        p2.shared().pieces[pu0].done.store(true, Ordering::SeqCst);
+        p2.storage().pieces[pu0].done.store(true, Ordering::SeqCst);
 
         let mut data_a = Vec::new();
         // Commit 2 full rooms to `m_a` (slot 5), keeping piece 0's `done` bit
@@ -5451,7 +5587,7 @@ mod test {
         p2.commit(&mut m_a, &mut r0, ROOM_LEN);
         drop(r0);
         let p0 = p2.room_streams[5].head_piece as usize;
-        p2.shared().pieces[p0].done.store(false, Ordering::SeqCst);
+        p2.storage().pieces[p0].done.store(false, Ordering::SeqCst);
 
         let mut r1 = block_on(p2.room());
         r1.bytes_mut().fill(0x11);
@@ -5459,7 +5595,7 @@ mod test {
         p2.commit(&mut m_a, &mut r1, ROOM_LEN);
         drop(r1);
         assert_ne!(p2.room_streams[5].head_piece, p2.room_streams[5].tail_piece, "m_a holds two pieces");
-        p2.shared().pieces[p0].done.store(true, Ordering::SeqCst);
+        p2.storage().pieces[p0].done.store(true, Ordering::SeqCst);
 
         // Temporarily detach slot 1 from `piece_slots` (leaving only [5]) and
         // park all remaining free piece nodes so `m_b`'s commit forces
