@@ -413,13 +413,14 @@ process_static! {
     /// one), so one that is not kept here is lost for good: a list of 16 lost
     /// every storage past the sixteenth, and a server with a Pipeline per
     /// connection grew by one at each connection beyond 16 at once (BLAKE3
-    /// #427). The process now holds, for Pipelines of the same Limits, as
-    /// many as its most such Pipelines at once (`acquire` gives a storage
-    /// only to a Pipeline of as many rooms whose actions, messages and
-    /// groups all fit in it: one of another size takes a new storage. A
-    /// storage is made with 1,024 actions, 64 messages and 64 groups at
-    /// the least, and the actions bind first: with one Room, 15 messages
-    /// fit a storage made for one, and 16 do not).
+    /// #427). `acquire` picks the tightest-fitting free storage whose queues
+    /// fit and whose rooms fit (exact `0` for a zero-room Pipeline, otherwise
+    /// `st.rooms.count >= rooms`, best-fit by room count first), and new
+    /// room-bearing storages round up to half-power-of-two size classes
+    /// (`1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, ...`) so varying `rooms`
+    /// across Pipelines reuses larger storages instead of allocating one per
+    /// distinct room count (#465). A storage is made with 1,024 actions, 64
+    /// messages and 64 groups at the least.
     static FREE_STORAGES: Mutex<Vec<&'static PipeStorage>> = Mutex::new(Vec::new());
 }
 
@@ -452,6 +453,20 @@ process_static! {
 #[path = "../tests/model/storages.rs"]
 pub(crate) mod model_storages;
 
+/// Half-power-of-two room storage size classes (`0, 1, 2, 3, 4, 6, 8, 12, 16,
+/// 24, 32, 48, 64, ...`, clamped below `1 << 29`): at most +33% rounding on
+/// allocation while bounding distinct storages when callers vary `Limits.rooms`
+/// (#465).
+fn room_storage_class(rooms: usize) -> usize {
+    if rooms <= 4 {
+        return rooms;
+    }
+    let max_rooms = (1usize << 29) - 1;
+    let p = rooms.next_power_of_two();
+    let mid = (p >> 1) + (p >> 2);
+    if rooms <= mid { mid } else { p.min(max_rooms) }
+}
+
 impl PipeStorage {
     /// Give up `n` holds on `st` (its Pipeline's teardown holds, or a
     /// surviving Room's): the last hold puts it on the free list. A Room may
@@ -470,9 +485,16 @@ impl PipeStorage {
         let chosen = {
             let mut free = FREE_STORAGES.lock().unwrap();
             let fits = |st: &&'static PipeStorage| {
-                st.source.actions_len() >= actions && st.loan_completed.len() >= messages && st.rooms.count == rooms && st.groups.len() >= groups
+                let rooms_ok = if rooms == 0 { st.rooms.count == 0 } else { st.rooms.count >= rooms };
+                st.source.actions_len() >= actions && st.loan_completed.len() >= messages && rooms_ok && st.groups.len() >= groups
             };
-            free.iter().position(fits).map(|at| free.swap_remove(at))
+            let best = free
+                .iter()
+                .enumerate()
+                .filter(|(_, st)| fits(st))
+                .min_by_key(|(_, st)| (st.rooms.count, st.source.actions_len(), st.loan_completed.len(), st.groups.len()))
+                .map(|(i, _)| i);
+            best.map(|at| free.swap_remove(at))
         };
         if let Some(st) = chosen {
             st.holders.store(1, Ordering::Release);
@@ -481,13 +503,14 @@ impl PipeStorage {
         let actions = actions.max(1024);
         let messages = messages.max(64);
         let groups = groups.max(64);
+        let alloc_rooms = room_storage_class(rooms);
         let dummy = GroupMemberMeta { room: NONE };
         #[cfg(any(test, shuttle))]
         STORAGES_MADE.fetch_add(1, Ordering::Relaxed);
         let raw = Box::into_raw(Box::new(PipeStorage {
             source: Source::with_actions(actions),
             waker: WakerSlot::new(),
-            rooms: Rooms::new(rooms),
+            rooms: Rooms::new(alloc_rooms),
             groups: (0..groups)
                 .map(|_| MemberGroup {
                     task: UnsafeCell::new(Task::members(None)),
@@ -995,16 +1018,19 @@ process_static! {
 /// it has had in use at once: a Room kept past its Pipeline's drop keeps
 /// that Pipeline's storage, and the next Pipeline takes another. No
 /// more than that is promised. A kept storage serves a Pipeline of
-/// other Limits only where it has as many Rooms and room in each of its
-/// queues for that Pipeline's messages, which a small change of
-/// `messages` may or may not leave it (and what the storage shares with
-/// the workers may then be made anew, the old kept beside it); any
-/// other Pipeline is given new storage, and the old is kept. So a
-/// process that varies its Limits holds more than its most in use at
-/// once. The storage is not cleared: a keyed Pipeline's key and the
-/// bytes last written to its Rooms stay in the process's memory until
-/// another Pipeline writes over them, and no call of this crate wipes
-/// them.
+/// other `Limits` whenever it has enough Rooms (`0` for a zero-room
+/// Pipeline, or at least `limits.rooms` for a room-bearing one,
+/// preferring the smallest fitting storage) and room in each of its
+/// queues for that Pipeline's messages (new room-bearing storages round
+/// up to half-power-of-two size classes so varying `rooms` reuses larger
+/// storages instead of allocating one per distinct count; what the
+/// storage shares with the workers is made anew only if `messages` grows
+/// past its previous high-water mark, the old kept beside it). Any
+/// Pipeline that does not fit any kept storage is given a new one, and
+/// the old is kept. The storage is not cleared: a keyed Pipeline's key
+/// and the bytes last written to its Rooms stay in the process's memory
+/// until another Pipeline writes over them, and no call of this crate
+/// wipes them.
 ///
 /// # Giving up a message
 ///
@@ -1437,7 +1463,9 @@ impl<T, B, P> Pipeline<T, B, P> {
         // to that), so reading its lengths races with no worker.
         let held = unsafe { *storage.shared.get() };
         let shared: *mut Shared = if !held.is_null() && unsafe { (&(*held).hashes).len() >= m } {
-            // A storage has one count of rooms, so pieces enough too.
+            // Each Shared allocates `storage.rooms.count + m + 1` piece nodes,
+            // so any later Pipeline reusing this storage with `<= m` messages
+            // and `<= storage.rooms.count` rooms has enough pieces too.
             assert!(unsafe { (&(*held).pieces).len() } >= p_cap, "a Shared of as many messages has as many pieces");
             // Sound: nor does writing its mode. A worker may still be
             // returning from that last task with its `&Shared`: the mode is
@@ -1448,6 +1476,10 @@ impl<T, B, P> Pipeline<T, B, P> {
             }
             held
         } else {
+            // Size `pieces` to `storage.rooms.count + m + 1` so a larger room
+            // storage first used with fewer rooms does not need a fresh Shared
+            // when a subsequent Pipeline uses all `storage.rooms.count` rooms.
+            let shared_p_cap = storage.rooms.count + m + 1;
             // One it replaces stays allocated: a worker of an earlier
             // Pipeline may still be reading it.
             let new = Box::into_raw(Box::new(Shared {
@@ -1472,7 +1504,7 @@ impl<T, B, P> Pipeline<T, B, P> {
                         })
                     })
                     .collect(),
-                pieces: (0..p_cap)
+                pieces: (0..shared_p_cap)
                     .map(|_| PieceNode {
                         slot: UnsafeCell::new(0),
                         room: UnsafeCell::new(0),
@@ -1645,7 +1677,9 @@ impl<T, B, P> Pipeline<T, B, P> {
         if self.local_free_rooms.is_empty() {
             // Sound: as `shared()`.
             let shared = unsafe { &*self.shared };
-            let count = shared.storage.rooms.count;
+            // Scan only `0..self.limits.rooms`, never extra rooms belonging to
+            // a larger reused PipeStorage (#465).
+            let count = self.limits.rooms;
             let start = self.room_cursor;
             for step in 0..count {
                 let i = (start + step) % count;
@@ -2413,13 +2447,15 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         }
         crate::lanes::sources::closed();
         let storage = self.shared().storage;
-        // Pre-reserve one hold per room slot before stamping ROOM_CLOSING_BIT so
-        // any surviving Room dropped concurrently on another thread cannot drop
-        // `storage.holders` to 0 while this loop is still running.
-        let room_count = storage.rooms.count;
+        // Pre-reserve one hold per active room slot (`0..self.limits.rooms`)
+        // before stamping ROOM_CLOSING_BIT so any surviving Room dropped
+        // concurrently on another thread cannot drop `storage.holders` to 0
+        // while this loop is still running. Slots `self.limits.rooms..` of a
+        // larger reused storage were never handed out and stay 0 (#465).
+        let room_count = self.limits.rooms;
         storage.holders.fetch_add(room_count, Ordering::Relaxed);
         let mut survivors = 0usize;
-        for r in &storage.rooms.refs {
+        for r in &storage.rooms.refs[..room_count] {
             let prev = r.fetch_or(ROOM_CLOSING_BIT, Ordering::SeqCst);
             if prev != 0 {
                 survivors += 1;
@@ -5510,5 +5546,160 @@ mod test {
             p2.abort(pad);
         }
         p2.abort(pad6);
+    }
+
+    #[test]
+    fn room_storage_class_boundaries_and_reuse_across_varying_room_counts() {
+        // 1. Half-power-of-two size class boundaries (kills arithmetic/comparison mutants).
+        let expected_classes = [
+            (0usize, 0usize),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 6),
+            (6, 6),
+            (7, 8),
+            (8, 8),
+            (9, 12),
+            (12, 12),
+            (13, 16),
+            (16, 16),
+            (17, 24),
+            (24, 24),
+            (25, 32),
+            (32, 32),
+            (33, 48),
+            (40, 48),
+            (48, 48),
+            (49, 64),
+            (64, 64),
+            (1 << 28, 1 << 28),
+            ((1 << 28) + 1, 3 << 27),
+            (3 << 27, 3 << 27),
+            ((3 << 27) + 1, (1 << 29) - 1),
+            ((1 << 29) - 1, (1 << 29) - 1),
+        ];
+        for (rooms, want) in expected_classes {
+            assert_eq!(room_storage_class(rooms), want, "room_storage_class({rooms})");
+        }
+
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+
+        // 2. Descending room counts 40..=1 sequentially reuse a SINGLE 48-room storage (#465).
+        let before_desc = STORAGES_MADE.load(Ordering::Relaxed);
+        let mut first_ptr: *const PipeStorage = core::ptr::null();
+        for rooms in (1..=40).rev() {
+            let p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms });
+            let ptr: *const PipeStorage = p.shared().storage;
+            if first_ptr.is_null() {
+                first_ptr = ptr;
+                assert_eq!(p.shared().storage.rooms.count, 48);
+            } else {
+                assert_eq!(ptr, first_ptr, "descending rooms={rooms} must reuse the single 48-room storage");
+            }
+            drop(p);
+        }
+        assert_eq!(STORAGES_MADE.load(Ordering::Relaxed) - before_desc, 1, "40..=1 descending must allocate 1 storage");
+
+        // 3. Zero-room Pipelines never steal the free 48-room storage, and reuse their own 0-room storage.
+        let before_zero = STORAGES_MADE.load(Ordering::Relaxed);
+        let pz1 = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        let zero_ptr: *const PipeStorage = pz1.shared().storage;
+        assert_ne!(zero_ptr, first_ptr, "zero-room Pipeline must not take room-bearing storage");
+        assert_eq!(pz1.shared().storage.rooms.count, 0);
+        drop(pz1);
+        let pz2 = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 0 });
+        assert_eq!(pz2.shared().storage as *const PipeStorage, zero_ptr, "zero-room Pipeline reuses 0-room storage");
+        drop(pz2);
+        assert_eq!(STORAGES_MADE.load(Ordering::Relaxed) - before_zero, 1);
+
+        // 4. Best-fit selection: with a 48-room and a 2-room storage both free, a 2-room
+        // Pipeline picks the 2-room storage (leaving the 48-room one free for a 40-room Pipeline).
+        let p_big_hold = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 40 });
+        assert_eq!(p_big_hold.shared().storage as *const PipeStorage, first_ptr);
+        let p_small = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+        let small_ptr: *const PipeStorage = p_small.shared().storage;
+        assert_eq!(p_small.shared().storage.rooms.count, 2);
+        drop(p_big_hold);
+        drop(p_small);
+        // Both 48-room and 2-room storages are now free; best-fit must pick `small_ptr` for rooms=2.
+        let p_fit = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+        assert_eq!(p_fit.shared().storage as *const PipeStorage, small_ptr, "best-fit prefers 2-room over 48-room");
+        drop(p_fit);
+
+        // 5. Strict `limits.rooms` cap, hashing, and surviving-Room teardown on a larger reused storage:
+        // Hold the 2-room storage so a 2-room Pipeline reuses the 48-room storage (`first_ptr`).
+        let hold_small = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+        assert_eq!(hold_small.shared().storage as *const PipeStorage, small_ptr);
+        let mut p_sub = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 2 });
+        assert_eq!(p_sub.shared().storage as *const PipeStorage, first_ptr, "reuses 48-room storage for rooms=2");
+        let r0 = block_on(p_sub.room());
+        let r1 = block_on(p_sub.room());
+        assert!(r0.index < 2 && r1.index < 2 && r0.index != r1.index);
+        let waker = core::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        {
+            let mut fut = core::pin::pin!(p_sub.room());
+            assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending), "2-room Pipeline on 48-room storage must not hand out room >= 2");
+        }
+        // Hash a multi-room message using only rooms 0..2, then leave `r1` surviving past drop.
+        drop(r0);
+        let mut m = block_on(p_sub.message(9, None));
+        let mut r_use = block_on(p_sub.room());
+        assert!(r_use.index < 2);
+        let mut expected = vec![0xA5u8; ROOM_LEN + 73];
+        for (i, b) in expected.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        r_use.bytes_mut()[..ROOM_LEN].copy_from_slice(&expected[..ROOM_LEN]);
+        p_sub.commit(&mut m, &mut r_use, ROOM_LEN);
+        drop(r_use);
+        let mut r_tail = block_on(p_sub.room());
+        assert!(r_tail.index < 2);
+        r_tail.bytes_mut()[..73].copy_from_slice(&expected[ROOM_LEN..]);
+        p_sub.commit(&mut m, &mut r_tail, 73);
+        drop(r_tail);
+        p_sub.end(m);
+        let ev = loop {
+            if let Some(ev) = p_sub.next_event() {
+                break ev;
+            }
+            block_on(p_sub.ready());
+        };
+        let Event::Hashed { tag: 9, hash, .. } = ev else { panic!("expected Hashed") };
+        assert_eq!(*hash.as_bytes(), *blake3::hash(&expected).as_bytes());
+        // Drop `p_sub` while `r1` still lives: only room `r1.index` is stamped, extra rooms 2..48 stay 0.
+        let r1_idx = r1.index as usize;
+        drop(p_sub);
+        assert_eq!(r1.storage.holders.load(Ordering::SeqCst), 1, "single surviving room holds storage");
+        for i in 0..48 {
+            let v = r1.storage.rooms.refs[i].load(Ordering::SeqCst);
+            if i == r1_idx {
+                assert_eq!(v, ROOM_CLOSING_BIT | ROOM_CREDITS);
+            } else {
+                assert_eq!(v, 0, "unused room slot {i} must stay 0");
+            }
+        }
+        drop(r1);
+        // Storage returns cleanly and now serves a full 48-room Pipeline (exercises Shared.pieces sizing!).
+        let p_full = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 48 });
+        assert_eq!(p_full.shared().storage as *const PipeStorage, first_ptr);
+        assert_eq!(p_full.shared().pieces.len(), 48 + 2 + 1);
+        drop(p_full);
+        drop(hold_small);
+    }
+
+    #[test]
+    fn ascending_room_counts_allocate_bounded_size_classes() {
+        // Isolated test process (nextest) verifies ascending 1..=40 creates <= 11 storages (down from 40).
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+        let before = STORAGES_MADE.load(Ordering::Relaxed);
+        for rooms in 1..=40 {
+            let p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms });
+            drop(p);
+        }
+        let made = STORAGES_MADE.load(Ordering::Relaxed) - before;
+        assert!(made <= 11, "ascending rooms 1..=40 created {made} storages, expected <= 11 size classes");
     }
 }
