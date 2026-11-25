@@ -432,14 +432,15 @@ pub(crate) fn ran(kind: Ran) {
 ///
 /// The count `None` takes is the standard library's estimate
 /// ([`std::thread::available_parallelism`], or 1 where it gives none)
-/// and, where a node is chosen, the smaller of that and the node's
-/// allowed CPUs. It is taken before any thread is bound, and a binding
-/// refused afterwards does not change it. Where the system will not tell
-/// a process its CPUs (it refuses `sched_getaffinity`), the estimate can
-/// be more than the process may use, as many as the machine has online:
-/// a program kept to fewer CPUs there does better to pass its number. A
-/// request for `n` threads starts `n - 1` workers whether or not the
-/// node, or the process, has `n` CPUs.
+/// capped by the thread's allowed CPUs (reading `/proc/thread-self/status`
+/// on Linux when `sched_getaffinity` is refused) and, where a node is
+/// chosen, by the node's allowed CPUs. It is taken before any thread is
+/// bound, and a binding refused afterwards does not change it. Where the
+/// system hides both `sched_getaffinity` and `/proc/thread-self/status`,
+/// the estimate can still be as many as the machine has online: a program
+/// kept to fewer CPUs there does better to pass its number. A request for
+/// `n` threads starts `n - 1` workers whether or not the node, or the
+/// process, has `n` CPUs.
 ///
 /// Several programs each with a full pool share the machine without
 /// trouble, and unevenly. On an i7-12700K (20 CPUs), N programs each

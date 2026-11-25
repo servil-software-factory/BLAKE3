@@ -26,11 +26,6 @@ src/lanes.rs	replace prefix_for -> usize with 0	1	same code: every test binary o
 src/lanes.rs	replace prefix_for -> usize with 1	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace sme2_main with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
-# The confined path needs at least two memory nodes in the allowed mask.
-src/lanes.rs	replace == with != in initialize	1	[cpu lacks multi_node] selecting a node cannot narrow the allowed mask here
-src/lanes.rs	replace places::Node::current -> Option<Self> with None	1	[cpu lacks multi_node] the allowed mask already fits at most one exposed node
-src/lanes.rs	replace places::confine_cli_thread with ()	1	[cpu lacks multi_node] the CLI already runs within one allowed node
-src/lib.rs	replace __confine_cli_to_one_node with ()	1	[cpu lacks multi_node] the CLI already runs within one allowed node
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	equivalent: `later >= 0` adds `later` to the owed when it is 0, which is adding nothing; the `if` keeps an atomic add off the path of a job that owes none
 src/pipeline.rs	delete ! in Pipeline<T, B, P>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical

@@ -52,11 +52,6 @@ src/lanes.rs	replace sources::visible -> bool with false	1	OPEN: the pool's sche
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
 src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace || with && in sources::visible	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-# The confined path needs at least two memory nodes in the allowed mask.
-src/lanes.rs	replace == with != in initialize	1	[cpu lacks multi_node] selecting a node cannot narrow the allowed mask here
-src/lanes.rs	replace places::Node::current -> Option<Self> with None	1	[cpu lacks multi_node] the allowed mask already fits at most one exposed node
-src/lanes.rs	replace places::confine_cli_thread with ()	1	[cpu lacks multi_node] the CLI already runs within one allowed node
-src/lib.rs	replace __confine_cli_to_one_node with ()	1	[cpu lacks multi_node] the CLI already runs within one allowed node
 src/lib.rs	replace __all_workers_parked -> bool with true	1	a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	speed: changes how many parked workers a publisher wakes or owes (BLAKE3 #119: every wake direct, the cascade alone and 8 direct measured 4-25% apart on the EPYC and the i7); no result waits on a worker waking: the publisher hashes every piece no worker takes, and finish.rs's handshake wakes a waiting caller

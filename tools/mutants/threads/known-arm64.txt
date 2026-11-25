@@ -86,7 +86,7 @@ src/lanes.rs	delete ! in places::Node::largest	1	compiled out off Linux: choosin
 src/lanes.rs	delete ! in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace != with == in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace != with == in places::Node::within	1	compiled out off Linux: node mask intersection
-src/lanes.rs	replace != with == in places::affinity	1	compiled out off Linux: reading the thread affinity
+src/lanes.rs	replace != with == in places::affinity_syscall	1	compiled out off Linux: reading the thread affinity
 src/lanes.rs	replace != with == in places::has	1	compiled out off Linux: testing a member of a CPU or node set
 src/lanes.rs	replace & with ^ in places::Node::within	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace & with ^ in places::has	1	compiled out off Linux: testing a member of a CPU or node set
@@ -100,11 +100,11 @@ src/lanes.rs	replace * with / in places::Node::largest	1	compiled out off Linux:
 src/lanes.rs	replace - with + in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace - with / in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace / with % in places::Node::largest	2	compiled out off Linux: choosing among NUMA nodes
-src/lanes.rs	replace / with % in places::affinity	1	compiled out off Linux: reading the thread affinity
+src/lanes.rs	replace / with % in places::affinity_syscall	1	compiled out off Linux: reading the thread affinity
 src/lanes.rs	replace / with % in places::cpu_set	2	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace / with % in places::has	1	compiled out off Linux: testing a member of a CPU or node set
 src/lanes.rs	replace / with * in places::Node::largest	2	compiled out off Linux: choosing among NUMA nodes
-src/lanes.rs	replace / with * in places::affinity	1	compiled out off Linux: reading the thread affinity
+src/lanes.rs	replace / with * in places::affinity_syscall	1	compiled out off Linux: reading the thread affinity
 src/lanes.rs	replace / with * in places::cpu_set	2	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace / with * in places::has	1	compiled out off Linux: testing a member of a CPU or node set
 src/lanes.rs	replace < with <= in places::number	1	compiled out off Linux: parsing Linux CPU lists
@@ -143,6 +143,14 @@ src/lanes.rs	replace places::Node::named -> Option<usize> with Some(1)	1	compile
 src/lanes.rs	replace places::Node::within -> Option<Self> with None	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace places::Node::within -> Option<Self> with Some(Default::default())	1	compiled out off Linux: node mask intersection
 src/lanes.rs	replace places::affinity -> std::io::Result<Set> with Ok(Default::default())	1	compiled out off Linux: reading the thread affinity
+src/lanes.rs	replace places::affinity_syscall -> std::io::Result<Set> with Ok(Default::default())	1	compiled out off Linux: reading the thread affinity
+src/lanes.rs	replace places::affinity_with -> std::io::Result<Set> with Ok(Default::default())	1	compiled out off Linux: reading the thread affinity with /proc fallback
+src/lanes.rs	replace places::allowed_cpu_count -> Option<core::num::NonZeroUsize> with None	1	compiled out off Linux: counting allowed CPUs for default pool sizing
+src/lanes.rs	replace places::allowed_cpu_count -> Option<core::num::NonZeroUsize> with Some(1.try_into().unwrap())	1	compiled out off Linux: counting allowed CPUs for default pool sizing
+src/lanes.rs	replace places::allowed_from_status -> Option<Set> with None	1	compiled out off Linux: parsing Cpus_allowed_list from /proc status
+src/lanes.rs	replace places::allowed_from_status -> Option<Set> with Some(Default::default())	1	compiled out off Linux: parsing Cpus_allowed_list from /proc status
+src/lanes.rs	replace places::cap_default_threads -> usize with 0	1	compiled out off Linux: capping default pool threads by node or affinity
+src/lanes.rs	replace places::cap_default_threads -> usize with 1	1	compiled out off Linux: capping default pool threads by node or affinity
 src/lanes.rs	replace places::confine_cli_thread with ()	1	compiled out off Linux: setting the CLI's node affinity
 src/lanes.rs	replace places::cpu_set -> Option<Set> with None	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace places::cpu_set -> Option<Set> with Some(Default::default())	1	compiled out off Linux: parsing Linux CPU lists

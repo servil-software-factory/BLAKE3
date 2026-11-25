@@ -965,9 +965,7 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
         || {
             let available = std::thread::available_parallelism().map_or(1, |n| n.get());
             #[cfg(target_os = "linux")]
-            if let Some(node) = &node {
-                return available.min(node.cpu_count());
-            }
+            let available = places::cap_default_threads(available, node.as_ref(), places::allowed_cpu_count);
             available
         },
         |n| n.get(),
@@ -1449,15 +1447,63 @@ pub(crate) mod places {
             .collect()
     }
 
-    /// The CPU mask of the calling thread.
+    /// Parse `Cpus_allowed_list:` from Linux `/proc/*/status` text into a `Set`.
     #[cfg(target_os = "linux")]
-    fn affinity() -> std::io::Result<Set> {
+    fn allowed_from_status(status: &str) -> Option<Set> {
+        status.lines().find_map(|line| line.strip_prefix("Cpus_allowed_list:")).and_then(cpu_set)
+    }
+
+    /// Read this thread's CPU mask, falling back to `read_status` (Linux
+    /// `/proc/thread-self/status`) when `read_affinity` (`sched_getaffinity`)
+    /// is refused by a sandbox (#465).
+    #[cfg(target_os = "linux")]
+    fn affinity_with(read_affinity: impl FnOnce() -> std::io::Result<Set>, read_status: impl FnOnce() -> std::io::Result<String>) -> std::io::Result<Set> {
+        match read_affinity() {
+            Ok(set) => Ok(set),
+            Err(err) => read_status().ok().as_deref().and_then(allowed_from_status).ok_or(err),
+        }
+    }
+
+    /// Read this thread's CPU mask directly via Linux `sched_getaffinity`.
+    #[cfg(target_os = "linux")]
+    fn affinity_syscall() -> std::io::Result<Set> {
         let mut allowed: Set = [0; CPUS / 64];
         // Sound: the set is `len` writable bytes.
         if unsafe { sched_getaffinity(0, core::mem::size_of::<Set>(), &mut allowed) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(allowed)
+    }
+
+    /// The CPU mask of the calling thread. Falls back to
+    /// `/proc/thread-self/status` (`Cpus_allowed_list:`) when a sandbox
+    /// refuses `sched_getaffinity` (#465).
+    #[cfg(target_os = "linux")]
+    fn affinity() -> std::io::Result<Set> {
+        affinity_with(affinity_syscall, || std::fs::read_to_string("/proc/thread-self/status"))
+    }
+
+    /// Count of CPUs this thread may run on, falling back through `affinity()`
+    /// to `/proc/thread-self/status` when `sched_getaffinity` is refused (#465).
+    #[cfg(target_os = "linux")]
+    pub(super) fn allowed_cpu_count() -> Option<core::num::NonZeroUsize> {
+        let set = affinity().ok()?;
+        core::num::NonZeroUsize::new(set.iter().map(|word| word.count_ones() as usize).sum())
+    }
+
+    /// Cap `initialize(None)`'s default thread count by the chosen node's
+    /// allowed CPUs, or by `allowed()` when no single node is chosen
+    /// (preventing oversubscription in Linux sandboxes that refuse
+    /// `sched_getaffinity` while exposing `/proc/thread-self/status`, #465).
+    #[cfg(target_os = "linux")]
+    pub(super) fn cap_default_threads(available: usize, node: Option<&Node>, allowed: impl FnOnce() -> Option<core::num::NonZeroUsize>) -> usize {
+        if let Some(node) = node {
+            available.min(node.cpu_count())
+        } else if let Some(cpus) = allowed() {
+            available.min(cpus.get())
+        } else {
+            available
+        }
     }
 
     /// The CPUs this thread may run on, in order.
@@ -1532,6 +1578,10 @@ pub(crate) mod places {
     #[cfg(target_os = "linux")]
     impl Node {
         pub(super) fn current() -> Option<Self> {
+            #[cfg(test)]
+            if let Some(pretended) = test::PRETENDED_NODE.get() {
+                return Some(pretended.clone());
+            }
             let system = std::path::Path::new("/sys/devices/system");
             // One node, or no list of them: nothing more is read, and the
             // system is asked nothing (as before this could be refused).
@@ -1714,6 +1764,12 @@ pub(crate) mod places {
         /// (set before the test's first pool call: each test is a process
         /// of its own under nextest).
         pub(crate) static PRETENDED: OnceLock<Vec<Cpu>> = OnceLock::new();
+
+        /// A memory node a test has `Node::current()` return in place of
+        /// `/sys/devices/system/node` so first-worker and CLI node binding are
+        /// verified on single-node machines too (#465).
+        #[cfg(target_os = "linux")]
+        pub(super) static PRETENDED_NODE: OnceLock<Node> = OnceLock::new();
 
         /// A list of CPUs as the system writes one: "0-3,8,10-11".
         #[cfg(target_os = "linux")]
@@ -2130,6 +2186,128 @@ pub(crate) mod places {
                 on_node && pool().threads <= capacity
             });
             assert!(seen > 0 && fits, "the default pool fits an allowed node");
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn affinity_falls_back_to_proc_status_and_caps_default_threads() {
+            // 1. Direct syscall success skips reading /proc status entirely.
+            let sample = cpu_set("0,2-3").unwrap();
+            let direct = affinity_with(|| Ok(sample), || panic!("status fallback must not run when sched_getaffinity succeeds")).unwrap();
+            assert_eq!(direct, sample);
+
+            // 2. Sandbox refusal (EPERM) falls back to Cpus_allowed_list in status.
+            let fake_status = "Name:\tworker\nCpus_allowed:\t0d\nCpus_allowed_list:\t0,2-3\nMems_allowed_list:\t0\n";
+            assert_eq!(allowed_from_status(fake_status), Some(sample));
+            assert_eq!(allowed_from_status("Name:\tworker\n"), None);
+            assert_eq!(allowed_from_status("Cpus_allowed_list:\tbad\n"), None);
+            let from_fake = affinity_with(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)), || Ok(fake_status.to_string())).unwrap();
+            assert_eq!(from_fake, sample);
+
+            // 3. Direct sched_getaffinity and /proc/thread-self/status agree
+            //    (when the host does not itself refuse sched_getaffinity).
+            let from_proc =
+                affinity_with(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)), || std::fs::read_to_string("/proc/thread-self/status")).unwrap();
+            if let Ok(direct) = affinity_syscall() {
+                assert_eq!(direct, from_proc);
+            }
+            assert_eq!(from_proc, affinity().unwrap());
+            assert_eq!(allowed_cpu_count(), core::num::NonZeroUsize::new(allowed().unwrap().len()));
+
+            // 4. When both syscall and status fail, preserve the original error.
+            let err =
+                affinity_with(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)), || Err(std::io::Error::from_raw_os_error(libc::ENOENT))).unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+            let err_missing = affinity_with(|| Err(std::io::Error::from_raw_os_error(libc::ENOSYS)), || Ok("Name:\tx\n".to_string())).unwrap_err();
+            assert_eq!(err_missing.raw_os_error(), Some(libc::ENOSYS));
+
+            // 5. Default thread count is capped by node or allowed CPUs without
+            //    calling allowed() when a node is already chosen.
+            let node2 = Node(cpu_set("0-1").unwrap());
+            assert_eq!(cap_default_threads(16, Some(&node2), || panic!("allowed() not needed with node")), 2);
+            assert_eq!(cap_default_threads(1, Some(&node2), || panic!("allowed() not needed with node")), 1);
+            assert_eq!(cap_default_threads(16, None, || core::num::NonZeroUsize::new(1)), 1);
+            assert_eq!(cap_default_threads(2, None, || core::num::NonZeroUsize::new(8)), 2);
+            assert_eq!(cap_default_threads(16, None, || None), 16);
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn the_first_worker_binds_every_worker_to_a_pretended_node_without_binding_the_caller() {
+            let before = affinity().unwrap();
+            let cpus = bits(&before);
+            let avail = std::thread::available_parallelism().map_or(1, |n| n.get());
+            if cpus.len() < 4 || avail < 2 {
+                return;
+            }
+            // Sound: `before` is `len` readable bytes.
+            if unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &before) } != 0 {
+                let err = std::io::Error::last_os_error();
+                if matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+                    return;
+                }
+                panic!("sched_setaffinity failed unexpectedly: {err}");
+            }
+            // Choose every other allowed CPU and pretend a single shared L3
+            // cache so `places::take` never re-binds workers on multi-L3 hosts:
+            // every worker's mask must come from inheriting worker 1's node bind (#465).
+            let half_cpus: Vec<usize> = cpus.iter().copied().step_by(2).collect();
+            let half_list = half_cpus.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+            let half_mask = cpu_set(&half_list).unwrap();
+            assert!(PRETENDED.set(half_cpus.iter().map(|&cpu| Cpu { cpu, cache: 0, socket: 0 }).collect()).is_ok());
+            assert!(PRETENDED_NODE.set(Node(half_mask)).is_ok());
+            crate::initialize_multithreaded(None);
+            let expected_threads = avail.min(half_cpus.len());
+            assert_eq!(pool().threads, expected_threads);
+            let workers = pool().workers() + usize::from(pool().sme2);
+            let start = now();
+            while !(settled() && all_workers_parked()) {
+                assert!(now() - start < std::time::Duration::from_secs(10), "workers finish startup and park");
+                std::thread::yield_now();
+            }
+            assert_eq!(affinity().unwrap(), before, "initialization leaves the caller's mask alone");
+            let mut seen = 0;
+            for task in std::fs::read_dir("/proc/self/task").unwrap() {
+                let path = task.unwrap().path();
+                let name = std::fs::read_to_string(path.join("comm")).unwrap();
+                if !name.starts_with("blake3-worker-") && name.trim_end() != "blake3-sme2" {
+                    continue;
+                }
+                let status = std::fs::read_to_string(path.join("status")).unwrap();
+                let mask = cpu_set(status.lines().find_map(|l| l.strip_prefix("Cpus_allowed_list:")).unwrap()).unwrap();
+                assert_eq!(mask, half_mask, "worker {} did not inherit pretended node mask", name.trim_end());
+                seen += 1;
+            }
+            assert_eq!(seen, workers);
+            assert!(seen > 0, "expected at least one bound worker");
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn the_cli_mask_binds_to_a_pretended_node() {
+            std::thread::spawn(|| {
+                let before = affinity().unwrap();
+                let cpus = bits(&before);
+                if cpus.len() < 4 {
+                    return;
+                }
+                // Sound: `before` is `len` readable bytes.
+                if unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &before) } != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
+                        return;
+                    }
+                    panic!("sched_setaffinity failed unexpectedly: {err}");
+                }
+                let half_cpus: Vec<usize> = cpus.iter().copied().step_by(2).collect();
+                let half_list = half_cpus.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                let half_mask = cpu_set(&half_list).unwrap();
+                assert!(PRETENDED_NODE.set(Node(half_mask)).is_ok());
+                crate::__confine_cli_to_one_node();
+                assert_eq!(affinity().unwrap(), half_mask, "CLI confinement binds caller to the chosen node");
+            })
+            .join()
+            .unwrap();
         }
 
         #[test]
