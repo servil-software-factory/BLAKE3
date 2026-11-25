@@ -8,8 +8,8 @@
 //! Without the cfg it compiles to nothing.
 //!
 //! What is real: every line of the Pipeline, its Rooms and credits, its
-//! groups, pieces and slots, its storage and that storage's reuse, the
-//! waker slot, `block_on`, and the hashing itself.
+//! groups, pieces and slots, its `PipeStorage` allocation/freeing and
+//! `PipeSlot` reuse, the waker slot, `block_on`, and the hashing itself.
 //!
 //! What stands in: the pool. The Pipeline hands the pool actions through
 //! `Source` (publish_actions) and runs waiting ones itself
@@ -25,8 +25,12 @@
 //! Shuttle reports as a deadlock. A result read before its worker wrote
 //! it, a Room's bytes written while a worker reads them, or a group
 //! reused while in flight gives a digest that is not the message's, and
-//! each scenario compares every digest with the one-thread library's. At
-//! the end of each run every storage made in it must be free again.
+//! each scenario compares every digest with the one-thread library's.
+//! Retired `PipeStorage`s are poisoned and quarantined until run end, and
+//! workers are sometimes held back right after completion atomics so any
+//! worker access after publication panics deterministically. At the end
+//! of each run every `PipeStorage` must be freed and every `PipeSlot`
+//! must be back on its free list.
 //!
 //! tools/pipeline_model_controls.py plants such faults in pipeline.rs one
 //! at a time and requires this model to fail for each. Three things here
@@ -54,8 +58,78 @@
 /// handing-over that is wrong must be able to show.
 mod pipeline_sync {
     pub use shuttle::sync::Mutex;
-    pub use shuttle::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    pub use shuttle::sync::atomic::Ordering;
     pub use shuttle::thread_local;
+
+    /// Wrapper around Shuttle's atomics that can hold a worker back right
+    /// after its completion store/decrement (`swap` / `fetch_sub`), giving
+    /// the owner a deterministic window to reap, drop `Pipeline`, and
+    /// retire/poison `PipeStorage` before the worker executes its next step.
+    pub struct AtomicBool(shuttle::sync::atomic::AtomicBool);
+    impl AtomicBool {
+        pub fn new(v: bool) -> Self {
+            Self(shuttle::sync::atomic::AtomicBool::new(v))
+        }
+        pub fn load(&self, order: Ordering) -> bool {
+            self.0.load(order)
+        }
+        pub fn store(&self, val: bool, order: Ordering) {
+            self.0.store(val, order);
+        }
+        pub fn swap(&self, val: bool, order: Ordering) -> bool {
+            let prev = self.0.swap(val, order);
+            crate::lanes::sources::hold_back_worker();
+            prev
+        }
+    }
+
+    pub struct AtomicU64(shuttle::sync::atomic::AtomicU64);
+    impl AtomicU64 {
+        pub fn new(v: u64) -> Self {
+            Self(shuttle::sync::atomic::AtomicU64::new(v))
+        }
+        pub fn load(&self, order: Ordering) -> u64 {
+            self.0.load(order)
+        }
+        pub fn store(&self, val: u64, order: Ordering) {
+            self.0.store(val, order);
+        }
+        pub fn swap(&self, val: u64, order: Ordering) -> u64 {
+            let prev = self.0.swap(val, order);
+            crate::lanes::sources::hold_back_worker();
+            prev
+        }
+        pub fn compare_exchange(&self, current: u64, new: u64, success: Ordering, failure: Ordering) -> Result<u64, u64> {
+            self.0.compare_exchange(current, new, success, failure)
+        }
+    }
+
+    pub struct AtomicUsize(shuttle::sync::atomic::AtomicUsize);
+    impl AtomicUsize {
+        pub fn new(v: usize) -> Self {
+            Self(shuttle::sync::atomic::AtomicUsize::new(v))
+        }
+        pub fn load(&self, order: Ordering) -> usize {
+            self.0.load(order)
+        }
+        pub fn store(&self, val: usize, order: Ordering) {
+            self.0.store(val, order);
+        }
+        pub fn swap(&self, val: usize, order: Ordering) -> usize {
+            self.0.swap(val, order)
+        }
+        pub fn fetch_add(&self, val: usize, order: Ordering) -> usize {
+            self.0.fetch_add(val, order)
+        }
+        pub fn fetch_sub(&self, val: usize, order: Ordering) -> usize {
+            let prev = self.0.fetch_sub(val, order);
+            crate::lanes::sources::hold_back_worker();
+            prev
+        }
+        pub fn fetch_or(&self, val: usize, order: Ordering) -> usize {
+            self.0.fetch_or(val, order)
+        }
+    }
     /// Shuttle's threads. A caller about to sleep lets the held-back
     /// workers go (lanes::sources::hold_back): they are who would wake it.
     pub mod thread {
@@ -79,6 +153,30 @@ mod pipeline_sync {
     }
     pub(crate) use process_static;
 
+    shuttle::lazy_static! {
+        static ref QUARANTINED_STORAGES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    }
+
+    pub(crate) fn quarantine_storage(st: *mut crate::pipeline::PipeStorage) {
+        QUARANTINED_STORAGES.lock().unwrap().push(st as usize);
+    }
+
+    macro_rules! retire_storage {
+        ($st:expr) => {
+            crate::pipeline_sync::quarantine_storage($st)
+        };
+    }
+    pub(crate) use retire_storage;
+
+    pub(crate) fn drain_quarantined_storages() {
+        let ptrs: Vec<usize> = core::mem::take(&mut *QUARANTINED_STORAGES.lock().unwrap());
+        for addr in ptrs {
+            // Sound: all Shuttle worker threads have joined and `addr` came
+            // from `Box::into_raw` in `PipeStorage::alloc`.
+            unsafe { drop(Box::from_raw(addr as *mut crate::pipeline::PipeStorage)) };
+        }
+    }
+
     #[repr(transparent)]
     pub struct UnsafeCell<T>(core::cell::UnsafeCell<T>);
     impl<T> UnsafeCell<T> {
@@ -88,6 +186,22 @@ mod pipeline_sync {
         pub fn get(&self) -> *mut T {
             shuttle::thread::yield_now();
             self.0.get()
+        }
+    }
+
+    pub(crate) struct SlotRef<T: 'static>(UnsafeCell<Option<&'static T>>);
+    impl<T: 'static> SlotRef<T> {
+        pub(crate) fn new(r: &'static T) -> Self {
+            Self(UnsafeCell::new(Some(r)))
+        }
+        pub(crate) fn get(&self) -> &'static T {
+            // Sound: written once in `new` and poisoned to `None` on retirement;
+            // any late worker access after retirement panics here.
+            unsafe { *self.0.get() }.expect("PipeStorage used after release")
+        }
+        pub(crate) fn poison(&self) {
+            // Sound: called once by the last holder right before quarantine.
+            unsafe { *self.0.get() = None };
         }
     }
 }
@@ -315,8 +429,8 @@ mod lanes {
         pub(crate) fn closed() {}
 
         /// One turn of a worker: an action of some registered Source, run.
-        /// A Source is in a storage that is never freed, so its address
-        /// stays good after its Pipeline is gone.
+        /// A Source lives in a `PipeSlot` that is never freed, so its address
+        /// stays valid after its Pipeline drops and frees `PipeStorage`.
         pub(crate) fn run_one() -> bool {
             let all: Vec<usize> = REGISTERED.lock().unwrap().clone();
             for at in all {
@@ -373,6 +487,20 @@ mod lanes {
             drop(asleep);
             ASLEEP_CHANGED.notify_all();
         }
+        shuttle::thread_local! {
+            static IS_WORKER: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+        }
+
+        pub(crate) fn mark_worker() {
+            IS_WORKER.with(|w| w.set(true));
+        }
+
+        pub(crate) fn hold_back_worker() {
+            if IS_WORKER.with(|w| w.get()) {
+                hold_back();
+            }
+        }
+
         /// The model's end: no worker is held back any more.
         pub(crate) fn ended() {
             ASLEEP.lock().unwrap().1 = true;
@@ -411,6 +539,7 @@ fn with_workers(workers: usize, caller: impl FnOnce()) {
         .map(|_| {
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
+                lanes::sources::mark_worker();
                 loop {
                     let seen = lanes::sources::news_so_far();
                     if stop.load(Ordering::SeqCst) {
@@ -430,10 +559,12 @@ fn with_workers(workers: usize, caller: impl FnOnce()) {
     for t in threads {
         t.join().unwrap();
     }
-    // Every storage made in this run is free again: none is lost, and
-    // none is held by a Pipeline or a Room that is gone.
-    let (made, back) = pipeline::model_storages::free_storages_for_model();
-    assert_eq!(made, back, "storages made in this run, and those free at its end");
+    // Every PipeStorage allocated in this run was freed, and every PipeSlot
+    // returned to FREE_PIPE_SLOTS.
+    let (made, back, live) = pipeline::model_storages::free_storages_for_model();
+    pipeline_sync::drain_quarantined_storages();
+    assert_eq!(live, 0, "all PipeStorages freed at end of run");
+    assert_eq!(made, back, "PipeSlots made in this run, and those free at its end");
 }
 
 fn input(len: usize, salt: u8) -> Vec<u8> {
@@ -529,10 +660,10 @@ fn owned_messages_complete_and_wake_the_caller() {
     });
 }
 
-/// One Pipeline after another of the same size: the second takes the
-/// first's storage, with the first's workers perhaps still on their way
-/// out of its last tasks.
-fn a_pipeline_after_another_reuses_its_storage_soundly() {
+/// One Pipeline after another of the same size: each frees its
+/// `PipeStorage` on drop while the next reuses its `PipeSlot`, with the
+/// first's workers perhaps still on their way out of its last tasks.
+fn a_pipeline_after_another_reuses_its_slot_and_frees_storage_soundly() {
     check(|| {
         with_workers(2, || {
             for round in 0..3u8 {
@@ -618,8 +749,9 @@ fn a_wait_for_a_room_ends_when_another_thread_drops_one() {
 
 /// Messages lent by the caller: when a message's event has come, its
 /// guard can be dropped (a guard dropped before its loan is complete
-/// stops the process).
+/// stops the process), including on another thread after its Pipeline drops.
 fn lent_messages_are_complete_when_their_events_come() {
+    static STATIC_LOAN: [u8; 64] = [0x5Au8; 64];
     check(|| {
         with_workers(2, || {
             let (inputs, want) = inputs_of(&[3 * ROOM_LEN + 1, 0, 200, 6 * ROOM_LEN]);
@@ -650,6 +782,27 @@ fn lent_messages_are_complete_when_their_events_come() {
             for _ in 0..outstanding {
                 take(&mut pipe, &mut guards);
             }
+            // Also exercise a completed `Lent<'static>` dropped on another
+            // thread concurrently with `Pipeline::drop`.
+            let tail_msg = block_on(pipe.message(99, None));
+            // Sound: `STATIC_LOAN` is `'static`.
+            let surviving_lent = unsafe { pipe.lent(tail_msg, &STATIC_LOAN) };
+            let tail_want = reference(&STATIC_LOAN);
+            loop {
+                match pipe.next_event() {
+                    Some(Event::Hashed { tag: 99, hash, .. }) => {
+                        assert_eq!(hash, tail_want);
+                        break;
+                    }
+                    Some(_) => panic!("an event that is no digest"),
+                    None => block_on(pipe.ready()),
+                }
+            }
+            let lent_dropper = thread::spawn(move || {
+                drop(surviving_lent);
+            });
+            drop(pipe);
+            lent_dropper.join().unwrap();
         });
     });
 }
@@ -780,7 +933,7 @@ fn an_aborted_message_leaves_the_others_whole() {
 }
 
 /// The scenarios, one after another in one test: the Pipeline's free
-/// storages and the Sources' registry are the process's, as in a program,
+/// `PipeSlot`s and the Sources' registry are the process's, as in a program,
 /// and two models at once on two test threads would share them.
 #[test]
 fn the_pipeline_under_shuttle() {
@@ -788,7 +941,7 @@ fn the_pipeline_under_shuttle() {
     let scenarios: [(&str, fn()); 9] = [
         ("messages_through_rooms_complete_with_their_own_digests", messages_through_rooms_complete_with_their_own_digests),
         ("owned_messages_complete_and_wake_the_caller", owned_messages_complete_and_wake_the_caller),
-        ("a_pipeline_after_another_reuses_its_storage_soundly", a_pipeline_after_another_reuses_its_storage_soundly),
+        ("a_pipeline_after_another_reuses_its_slot_and_frees_storage_soundly", a_pipeline_after_another_reuses_its_slot_and_frees_storage_soundly),
         ("a_room_outlives_its_pipeline", a_room_outlives_its_pipeline),
         ("a_wait_for_a_room_ends_when_another_thread_drops_one", a_wait_for_a_room_ends_when_another_thread_drops_one),
         ("lent_messages_are_complete_when_their_events_come", lent_messages_are_complete_when_their_events_come),

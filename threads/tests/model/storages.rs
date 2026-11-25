@@ -1,37 +1,26 @@
 //! A child module of src/pipeline.rs under `--cfg shuttle` alone
-//! (tests/shuttle_pipeline.rs): it reaches the Pipeline's private storage
-//! list to free a run's storages at the run's end.
+//! (tests/shuttle_pipeline.rs): verifies that every `PipeStorage` allocated
+//! during a run was freed via `PipeStorage::release_n` and every recycled
+//! `PipeSlot` returned to `FREE_PIPE_SLOTS`, then frees the run's `PipeSlot`s
+//! once all Shuttle threads have joined.
 
-use super::{FREE_STORAGES, MODEL_OWNED_STORAGES, Ordering, OwnedStoragePtr, PipeStorage, STORAGES_MADE};
+use super::{FREE_PIPE_SLOTS, LIVE_STORAGES, MODEL_OWNED_PIPE_SLOTS, Ordering, OwnedPipeSlotPtr, PIPE_SLOTS_MADE, PipeSlot};
 
-/// At the end of one run of the model, every storage made in it is free
-/// again (returned: how many made, how many free), and is freed here through
-/// its original owning `*mut PipeStorage` allocation pointer (never casting a
-/// shared `&PipeStorage` reference back to `*mut`). A program never frees one;
-/// a model that ran thousands of schedules without freeing would hold them all,
-/// and Shuttle's atomics must not pass from one run to the next.
-pub(crate) fn free_storages_for_model() -> (usize, usize) {
-    let free: Vec<&'static PipeStorage> = FREE_STORAGES.lock().unwrap().drain(..).collect();
-    let owned: Vec<OwnedStoragePtr> = MODEL_OWNED_STORAGES.lock().unwrap().drain(..).collect();
-    let made = STORAGES_MADE.swap(0, Ordering::SeqCst);
+/// At the end of one run of the model, verify every `PipeStorage` was freed
+/// (`live == 0`) and every `PipeSlot` made in the run returned to
+/// `FREE_PIPE_SLOTS`, then free the run's `PipeSlot` allocations so Shuttle
+/// atomics do not leak across runs.
+pub(crate) fn free_storages_for_model() -> (usize, usize, usize) {
+    let free: Vec<&'static PipeSlot> = FREE_PIPE_SLOTS.lock().unwrap().drain(..).collect();
+    let owned: Vec<OwnedPipeSlotPtr> = MODEL_OWNED_PIPE_SLOTS.lock().unwrap().drain(..).collect();
+    let made = PIPE_SLOTS_MADE.swap(0, Ordering::SeqCst);
+    let live = LIVE_STORAGES.swap(0, Ordering::SeqCst);
     let back = free.len();
     drop(free);
-    for OwnedStoragePtr(st_ptr) in owned {
-        // Sound: the model's threads have all ended, nothing holds a storage
-        // that was on the free list, and `st_ptr` is the original owning
-        // pointer from `Box::into_raw` in `PipeStorage::acquire`.
-        unsafe {
-            let st = &*st_ptr;
-            let shared = *st.shared.get();
-            if !shared.is_null() {
-                drop(Box::from_raw(shared));
-            }
-            let (at, len) = st.rooms.backing;
-            if !at.is_null() {
-                drop(Box::from_raw(core::ptr::slice_from_raw_parts_mut(at, len)));
-            }
-            drop(Box::from_raw(st_ptr));
-        }
+    for OwnedPipeSlotPtr(ptr) in owned {
+        // Sound: the model's threads have all joined and `ptr` is the original
+        // owning pointer from `Box::into_raw` in `PipeSlot::acquire`.
+        unsafe { drop(Box::from_raw(ptr)) };
     }
-    (made, back)
+    (made, back, live)
 }
