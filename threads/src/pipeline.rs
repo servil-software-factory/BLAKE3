@@ -5139,9 +5139,6 @@ mod test {
                 let pid = libc::fork();
                 assert!(pid >= 0, "fork failed");
                 if pid == 0 {
-                    // Fail fast via SIGALRM (WIFEXITED == false) instead of
-                    // hanging for nextest's timeout if a mutant removes the fork guard.
-                    libc::alarm(2);
                     let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
                         if which == "group" {
                             let _ = p.acquire_free_group();
@@ -5149,14 +5146,61 @@ mod test {
                             let _ = p.alloc_piece_node(0);
                         }
                     }));
-                    libc::_exit(if res.is_err() { 0 } else { 1 });
+                    let fork_panic = match res {
+                        Err(payload) => {
+                            let msg = payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| payload.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+                                .unwrap_or("");
+                            msg.contains("fork")
+                        }
+                        Ok(()) => false,
+                    };
+                    libc::_exit(if fork_panic { 0 } else { 1 });
                 }
+                // Parent-supervised deadline: immune to inherited SIG_IGN on SIGALRM,
+                // well below nextest's 15 s mutants timeout so a removed fork guard
+                // fails cleanly instead of timing out, and retries EINTR (#557).
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
                 let mut status: libc::c_int = 0;
-                assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
-                // Clear synthetic busy state before parent drops `p`.
+                let mut timed_out = false;
+                let mut wait_err: Option<i32> = None;
+                loop {
+                    let got = libc::waitpid(pid, &mut status, libc::WNOHANG);
+                    if got == pid {
+                        break;
+                    }
+                    if got < 0 {
+                        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                        if err == libc::EINTR {
+                            continue;
+                        }
+                        wait_err = Some(err);
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        timed_out = true;
+                        let krc = libc::kill(pid, libc::SIGKILL);
+                        let kerr = if krc < 0 { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) } else { 0 };
+                        if krc == 0 || kerr == libc::ESRCH {
+                            loop {
+                                let r = libc::waitpid(pid, &mut status, 0);
+                                if r == pid || (r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)) {
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                // Clear synthetic busy state before any assertion so parent `Drop` stays clean.
                 for slot in &mut p.assigned_group_epoch {
                     *slot = 0;
                 }
+                assert!(wait_err.is_none(), "waitpid failed with errno {:?}", wait_err);
+                assert!(!timed_out, "forked child hung waiting on {which} (killed by parent deadline)");
                 assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child failed: status={status}");
             }
             return;
@@ -5169,7 +5213,12 @@ mod test {
                 .output()
                 .unwrap();
             let stdout = std::string::String::from_utf8_lossy(&out.stdout);
-            assert!(out.status.success() && stdout.contains("1 passed"), "fork wait case {case} failed: status={:?}\n{stdout}", out.status);
+            let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "fork wait case {case} failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                out.status
+            );
         }
     }
 

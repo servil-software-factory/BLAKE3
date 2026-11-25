@@ -40,10 +40,12 @@ class WorkerTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             start_new_session=True,
         )
+        timed_out = False
         try:
             try:
                 stdout, stderr = child.communicate(timeout=5)
             except subprocess.TimeoutExpired:
+                timed_out = True
                 self.fail(f"worker {mode}: caller waited for the blocked sibling")
             return child.returncode, stdout, stderr
         finally:
@@ -52,7 +54,16 @@ class WorkerTests(unittest.TestCase):
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            child.communicate()
+            except PermissionError:
+                # macOS/Darwin may raise EPERM when the child's process group
+                # has already exited before cleanup runs (#557); never mask a
+                # real kill denial on a live timed-out child.
+                if timed_out:
+                    raise
+            try:
+                child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
     def test_results(self):
         for method in ("fork", "spawn"):

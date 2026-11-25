@@ -1,12 +1,12 @@
-//! Register-only SIMD kernels for [`crate::throughput::hash_counter_range`] and
+//! Single-template SIMD kernels for [`crate::throughput::hash_counter_range`] and
 //! [`crate::throughput::TreeHasher::hash_counter_range`] across AVX-512, AVX2,
 //! Apple/AArch64 SME2, and AArch64 NEON `8+3` (#511).
 //!
 //! Each backend broadcasts the single-block (`4..=64` byte) template once
-//! before the group loop and updates only `counter_word` per group in
-//! registers / L1 stack storage, eliminating input RAM reads, message
-//! transposes, caller stamping, and Apple P-core -> SME2 dirty cache-line
-//! coherency stalls.
+//! before the group loop (keeping it register-resident in AVX-512 / SME2 and in
+//! an L1 stack template table in AVX2 / NEON) and updates only `counter_word`
+//! per group, eliminating caller-side per-message input buffers, message
+//! transposes, and Apple P-core -> SME2 dirty cache-line coherency stalls.
 
 use crate::{BLOCK_LEN, CHUNK_END, CHUNK_START, CVWords, OUT_LEN, ROOT, platform::Platform};
 

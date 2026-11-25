@@ -102,13 +102,14 @@ figure names its machine.
   the 8 KiB stack expansion on full SIMD groups — up to `2.55×` faster
   `Packed<32>` on Apple M6 (`18.77 → 7.36 ns/h`), `-42.5%` (`1.74×`) on
   Apple M4 `MerkleTree 65536×32 B`, and `-21.1%` on Ryzen 9700X.
-- **Register-only `hash_counter_range` across all 4 ISAs (`#511`,
+- **Single-template `hash_counter_range` across all 4 ISAs (`#511`,
   `846ca533`):** hashes a 4..=64-byte single-block template over a
   consecutive range of one 32-bit counter word in any `Mode` (plain,
-  keyed, or derive-key) without materializing per-message input buffers
-  across AVX-512, AVX2, Apple SME2, and AArch64 NEON (`no_std`, 45/45
-  Z3 proofs; `1.49×` end-to-end BLINCS `from_seed` speedup on Apple M6,
-  `-55%` instructions).
+  keyed, or derive-key) without caller-side per-message input buffers
+  across AVX-512 and Apple SME2 (register-resident template) and AVX2
+  and AArch64 NEON (stack template table), `no_std`, 45/45 Z3 proofs
+  (with borrowed `&[[u8; N]]`, `1.49×` end-to-end BLINCS `from_seed`
+  speedup on Apple M6, `-55%` instructions).
 - **Zero-copy `Packed<N>` & `Pipeline` ergonomics (`#509`, `#512`,
   `#502`, `d13e5037`, `7b7a4509`, `905e5eba`, `1ecb67ff`, `444e6ef7`):**
   added `Packed<48>`, borrowed `&[[u8; 16/32/48]]` via `Prepared + ?Sized`,
@@ -126,7 +127,7 @@ figure names its machine.
   (`#376`, `#398`, `#404`, `#448`, `e60cfd27`, `8030cb39`, `704dcd1c`,
   `c1a91893`, `7ecc8803`, `6348b723`, `c891b2b8`, `5d250f20`):**
   zero-spill EVEX AVX-512F+VL partial-chunk kernels (`4`/`8`/`16` lanes,
-  80/80 Z3 proof cases); SIMD partial last chunks and in-place Merkle reduction
+  48 AVX-512 proof cases; 80 across all x86 partial kernels); SIMD partial last chunks and in-place Merkle reduction
   in `hash_each` (Apple M6 `Collection | Nix files -10.8%` and `git
   objects -10.2%` instructions); SIMD `output16`/`output8` final blocks
   in `hash_each` (up to `5.3×`) and staged/padded `finalize_each`
