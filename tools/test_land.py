@@ -11,7 +11,7 @@ import land
 
 class Gates(unittest.TestCase):
     def test_documents_alone_need_no_gate(self):
-        self.assertEqual(land.required(["AGENTS.md", "docs/core-api.md"]), ())
+        self.assertEqual(land.required(["CONTRIBUTING.md", "docs/core-api.md"]), ())
 
     def test_code_needs_every_gate_and_proof_inputs_the_proofs(self):
         base = ("CI", "check-builds", "mutants x86_64", "mutants arm64", "tests aarch64", "tests arm64")
@@ -141,7 +141,7 @@ class Subjects(unittest.TestCase):
 class Landable(unittest.TestCase):
     def test_the_status_text_fits_github_for_every_set_of_gates(self):
         base = "0123456789abcdef"
-        for paths in (["AGENTS.md"], ["tools/land.py"], ["b3sum/src/main.rs"], ["src/lib.rs"], ["c/x.S"]):
+        for paths in (["CONTRIBUTING.md"], ["tools/land.py"], ["b3sum/src/main.rs"], ["src/lib.rs"], ["c/x.S"]):
             text = land.landable(base, list(land.required(paths)))
             self.assertLessEqual(len(text), 140, paths)
             self.assertTrue(text.startswith("every gate green on top of 0123456789ab: "))

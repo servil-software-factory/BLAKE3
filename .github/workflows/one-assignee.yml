@@ -1,5 +1,5 @@
 # Every open issue and pull request has one assignee, the person whose move
-# is next (AGENTS.md). tools/one_assignee.py assigns whoever a "Next move:"
+# is next (CONTRIBUTING.md). tools/one_assignee.py assigns whoever a "Next move:"
 # line names (or replies when that fails), assigns the author to an item
 # left with none, and asks when there are several.
 name: one assignee

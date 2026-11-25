@@ -1,5 +1,5 @@
 """Every open issue and pull request has one assignee, the person
-whose move is next (AGENTS.md, "One assignee makes the next move").
+whose move is next (CONTRIBUTING.md, "One assignee makes the next move").
 
 Run by .github/workflows/one-assignee.yml on issue comments, on every
 change to an item's assignees, and once a day, and by hand:

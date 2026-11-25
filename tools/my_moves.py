@@ -1,6 +1,6 @@
 """What is mine to move: the open issues and pull requests assigned to
 you in both repositories, newest update first, each with who spoke last
-and when (AGENTS.md, "One assignee makes the next move"). The team's
+and when (CONTRIBUTING.md, "One assignee makes the next move"). The team's
 private notes (servil-software-factory/ops) are read too, for whoever
 has access to them: a note written there for you shows here.
 

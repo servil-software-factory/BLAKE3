@@ -29,7 +29,7 @@ among them (pgrep -f lists that shell, whose command holds the pattern
 too). The VM refuses pkill, pgrep and killall (vm/setup.sh), at Zooko's
 request: matching by name has ended the shell running it many times.
 
-Why and when to use it: AGENTS.md, "The VM" (BLAKE3-Servil's AGENTS.md).
+Why and when to use it: CONTRIBUTING.md, "Maintainers' conventions".
 """
 
 import os

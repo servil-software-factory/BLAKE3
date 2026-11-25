@@ -2,7 +2,7 @@
 
 ## Servil Software Factory: values, goals, and principles
 
-**We aspire to create software that serves its users reliably and loyally.** That is easy to say and hard to do. [The Servil Software Factory's page](https://github.com/servil-software-factory) says how we do it: the practices its projects share, which projects it supports (from version 1.0; this one is the first candidate), and what a project needs before it is supported. Five principles govern every change here:
+**We aspire to create software that serves its users reliably and loyally.** That is easy to say and hard to do. Start with **[Servil Software Factory Manual — Chapter 1: Philosophy, Strategy, Style](https://github.com/servil-software-factory/.github/blob/main/manual/01-philosophy.md)** (our short, trigger-first engineering compass) and [the Servil Software Factory's standard](https://github.com/servil-software-factory) (the practices its projects share, which projects it supports from version 1.0, and what a project needs before it is supported). Five principles govern every change here:
 
 1. **Loyalty to the user:** minimize what the user has to trust — small owned code over sprawling dependency trees, hash-verified build inputs, and byte-for-byte reproducible releases.
 2. **Reliability by construction:** make invalid states unrepresentable, keep critical invariant checks active in release builds, fail closed, prove critical kernels, and test the tests with mutation testing and planted faults.
@@ -594,9 +594,16 @@ python3 tools/release_artifacts.py TAG --published --rebuilt dist
 The C library's archive is not rebuilt so: it is checked by its build
 version alone (BLAKE3 #436).
 
-## Maintainers' notes
+## Maintainers' conventions
 
-`AGENTS.md` here, and `AGENTS.md` and `FROZEN.md` in bench-hashes, are the
-maintainers' working notes: their environment and the reasoning behind
-past decisions; the current work is in the issues. Contributing needs none
-of them.
+The shared engineering philosophy and guidelines live in **[Servil Software Factory Manual — Chapter 1: Philosophy, Strategy, Style](https://github.com/servil-software-factory/.github/blob/main/manual/01-philosophy.md)** (re-read at the start of every session and after compaction). Repo-specific maintainer conventions here:
+
+- **Names:** Call Zooko "Zooko" alone; call the library **BLAKE3-Servil** (never "the fork"); Sam Shackleton is she/her.
+- **Git hygiene:** Stage explicit paths by name and check `git status` before committing. Keep worktrees in `tmp/wt-*`, scratch runs in `tmp/runs/`, and job logs in `tmp/jobs/`.
+- **One assignee makes the next move:** Every open issue and PR has one assignee whose move is next; end your move with `Next move: <Name>` and assign them, or close when done. State lives in tracker fields (assignee, milestone, open/closed), not prose alone. A stalled blocking item (>12 h) may be taken with a comment. Start each work block with `python3 tools/my_moves.py`.
+- **Ownership:** John owns BLAKE3-Servil design and landings; Devon owns `bench-hashes` (`FROZEN.md`, `METHODOLOGY.md`, `AGENTS.md`); Sam owns the testing system's design (currently focused on Ode — John/Devon cover what is needed without blocking on her).
+- **APIs & versions:** Public APIs stay pre-1.0 until 1.0 freezes them. Releases carry the full version `X.Y.Z+<40-char-code-sha>` (`tools/gen-ver.py`). Pinned downloads and release artifacts record both SHA-256 and BLAKE3.
+- **Testing & processes:** Run Rust tests under `cargo-nextest` (doc tests under `cargo test --doc`); run Python tools under both CPython `python3` and PyPy `pypy3` (including Z3 ctypes, tested in CI). Start long jobs with `python3 tools/jobs.py start NAME -- CMD...` and stop by exact PID or `jobs.py stop` — never use `pkill`, `pgrep`, or `killall`.
+- **Size beside speed:** Library commits include `python3 tools/size.py BASE REV` beside their speed verdict and name what mechanism/type/case was added or removed.
+- **Privacy:** Operator notes and machine setups live in the private `servil-software-factory/ops` repository; never copy private host details into public issues or pages (use machine labels).
+- **Related docs:** Runner details live in `tools/runner/README.md`; benchmarking methodology and presentation guides live in `bench-hashes/METHODOLOGY.md` and `bench-hashes/AGENTS.md`.
