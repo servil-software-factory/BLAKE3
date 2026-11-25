@@ -77,11 +77,10 @@ src/hasher.rs	replace + with *	1	untested bound: `const DEPTH: usize = MAX_DEPTH
 src/hasher.rs	replace + with -	1	untested bound: `const DEPTH: usize = MAX_DEPTH + 1` (55 -> 53 or 54) holds lazy-merged stack entries up to 2^64 bytes; no test feeds >= 2^53 chunks (8 EiB)
 src/hasher.rs	replace - with + in feed	1	equivalent: ahead is read by the SME2 kernels alone (AArch64); on x86-64 the value passes through the walk to kernels that ignore it
 src/hasher.rs	replace - with / in feed	1	equivalent: ahead is read by the SME2 kernels alone (AArch64); on x86-64 the value passes through the walk to kernels that ignore it
-src/hasher.rs	replace < with <= in ChunkState<P>::fill_buf	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/hasher.rs	replace < with <= in fill	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/hasher.rs	replace | with ^ in ChunkState<P>::absorb	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
-src/hasher.rs	replace | with ^ in ChunkState<P>::output_parts	2	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
-src/hasher.rs	replace | with ^ in Output<P>::root_bytes	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
+src/hasher.rs	replace | with ^ in ChunkState::output_parts	2	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
+src/hasher.rs	replace | with ^ in ChunkState::update	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
+src/hasher.rs	replace | with ^ in Output::root_bytes	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
+src/hasher.rs	replace | with ^ in Output::root_output_block	1	equivalent: | and ^ agree on flag bits that never overlap
 src/hasher.rs	replace | with ^ in parent_output	1	equivalent: | made ^ on flag bits that never overlap (the mode's flag beside CHUNK_START, CHUNK_END, PARENT, or ROOT)
 src/incremental.rs	replace && with || in <impl hasher::Hooks for HasherHooks<'_>>::subtree_cv	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/incremental.rs	replace && with || in Hasher::update_longer	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -144,7 +143,6 @@ src/lib.rs	replace prefetch_update_kernels with ()	1	same code: every test binar
 src/lib.rs	replace | with & in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace | with ^ in Hash::from_hex	1	equivalent: `high << 4 | low` joins a high nibble and a value below 16 for every text that is accepted, and a refused text's bytes are never returned
 src/lib.rs	replace | with ^ in Hash::from_hex::hex_val	2	equivalent: a character is a digit or a letter, never both, so the two masks are never both set, and neither are the two values they select
-src/lib.rs	replace | with ^ in Output::root_output_block	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in OutputReader::fill	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in compress_parents_parallel	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

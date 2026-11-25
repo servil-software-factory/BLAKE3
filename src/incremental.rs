@@ -326,7 +326,7 @@ impl hasher::Hooks for HasherHooks<'_> {
 
 /// The Hasher's kernels: chunks, nodes, and parents on the chunk state's
 /// platform, the rest from `hooks`.
-type HasherKernels<'a> = hasher::Kernels<'a, Platform, HasherHooks<'a>>;
+type HasherKernels<'a> = hasher::Kernels<'a, HasherHooks<'a>>;
 
 /// A Hasher's kernels on its immutable domain and chunk state (see HasherHooks).
 #[inline(always)]

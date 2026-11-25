@@ -316,7 +316,8 @@ impl Platform {
         degree
     }
 
-    pub(crate) fn compress_in_place(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
+    #[inline(always)]
+    fn compress_in_place_raw(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
         match self {
             // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID or compile-time target-feature verification.
             #[cfg(blake3_sse41_ffi)]
@@ -334,10 +335,16 @@ impl Platform {
         }
     }
 
+    pub(crate) fn compress_in_place(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
+        crate::counted(crate::Counted::CompressInPlace);
+        self.compress_in_place_raw(cv, block, block_len, counter, flags);
+    }
+
     /// Compress `count` whole blocks of one chunk into `cv`: the first block
     /// with `flags | flags_start`, the rest with `flags`, all with `counter`.
     /// `blocks` holds at least `count * BLOCK_LEN` bytes; `count` is 1..=16.
     pub(crate) fn compress_blocks(&self, cv: &mut CVWords, blocks: &[u8], count: usize, counter: u64, flags: u8, flags_start: u8) {
+        crate::counted(crate::Counted::CompressBlocks);
         assert!((1..=16).contains(&count));
         assert!(blocks.len() >= count * BLOCK_LEN);
         // The integer-only kernel runs on every AArch64 core.
@@ -353,7 +360,7 @@ impl Platform {
         {
             let mut block_flags = flags | flags_start;
             for block in blocks[..count * BLOCK_LEN].chunks_exact(BLOCK_LEN) {
-                self.compress_in_place(cv, block.try_into().unwrap(), u8::try_from(BLOCK_LEN).unwrap(), counter, block_flags);
+                self.compress_in_place_raw(cv, block.try_into().unwrap(), u8::try_from(BLOCK_LEN).unwrap(), counter, block_flags);
                 block_flags = flags;
             }
         }

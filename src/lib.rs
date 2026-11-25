@@ -384,12 +384,16 @@ pub(crate) enum Counted {
     Flat = 9,
     /// One multi-lane SIMD `Platform::hash_many` dispatch call (#497).
     HashManyCall = 10,
+    /// One single-block compression dispatch (`Platform::compress_in_place`, #219).
+    CompressInPlace = 11,
+    /// One multi-block compression dispatch (`Platform::compress_blocks`, #219).
+    CompressBlocks = 12,
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     /// This thread's counts since the test last cleared them, by Counted.
-    pub(crate) static COUNTED: [core::cell::Cell<u64>; 11] = const { [const { core::cell::Cell::new(0) }; 11] };
+    pub(crate) static COUNTED: [core::cell::Cell<u64>; 13] = const { [const { core::cell::Cell::new(0) }; 13] };
 }
 
 /// Count one of `what`: in the tests' record, and nothing in any other
@@ -397,7 +401,7 @@ std::thread_local! {
 #[inline(always)]
 #[allow(dead_code)]
 pub(crate) fn counted(what: Counted) {
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     let _ = COUNTED.try_with(|c| c[what as usize].set(c[what as usize].get() + 1));
     let _ = what;
 }
@@ -840,58 +844,6 @@ impl fmt::Display for HexError {
 
 #[cfg(feature = "std")]
 impl std::error::Error for HexError {}
-
-pub(crate) type Output = hasher::Output<Platform>;
-
-impl Clone for Output {
-    fn clone(&self) -> Self {
-        hasher::Output {
-            block: self.block,
-            input_chaining_value: self.input_chaining_value,
-            block_len: self.block_len,
-            counter: self.counter,
-            flags: self.flags,
-            platform: self.platform,
-        }
-    }
-}
-
-impl Output {
-    pub fn root_hash(&self) -> Hash {
-        debug_assert_eq!(self.counter, 0);
-        Hash(self.root_bytes())
-    }
-
-    fn root_output_block(&self) -> [u8; 2 * OUT_LEN] {
-        counted(Counted::RootBlock);
-        self.platform.compress_xof(&self.input_chaining_value, &self.block, self.block_len, self.counter, self.flags | ROOT)
-    }
-}
-
-type ChunkState = hasher::ChunkState<Platform>;
-
-impl hasher::Blocks for Platform {
-    #[inline(always)]
-    fn compress_in_place(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
-        Platform::compress_in_place(self, cv, block, block_len, counter, flags)
-    }
-
-    #[inline(always)]
-    fn compress_blocks(&self, cv: &mut CVWords, blocks: &[u8], count: usize, counter: u64, flags: u8, flags_start: u8) {
-        Platform::compress_blocks(self, cv, blocks, count, counter, flags, flags_start)
-    }
-}
-
-impl ChunkState {
-    // Try to avoid buffering as much as possible, by compressing directly from
-    // the input slice when full blocks are available (src/hasher.rs).
-    #[inline(always)]
-    fn update(&mut self, input: &[u8]) -> &mut Self {
-        self.absorb(input);
-        debug_assert!(self.count() <= CHUNK_LEN);
-        self
-    }
-}
 
 // IMPLEMENTATION NOTE
 // ===================
@@ -1419,7 +1371,7 @@ fn hash_many_serial_from(platform: Platform, input: &[u8], message_len: usize, s
 }
 
 mod hasher;
-use hasher::CvStack;
+pub(crate) use hasher::{ChunkState, CvStack, Output};
 
 mod incremental;
 pub(crate) use incremental::*;
