@@ -31,7 +31,7 @@ mod park_sync {
     pub use std::thread;
 }
 mod park;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 #[unsafe(no_mangle)]
 pub(crate) fn register_then_recheck(
@@ -52,6 +52,21 @@ pub(crate) fn park_then_recheck(park: &park::Park, worker: usize, published: &At
 pub(crate) fn sme2_then_recheck(flag: &AtomicBool, published: &AtomicUsize) -> bool {
     // SME2_ADVERTISEMENT
     published.load(Ordering::Acquire) != 0
+}
+
+#[unsafe(no_mangle)]
+pub(crate) fn reader_guard_then_load(cell: &AtomicUsize, slot: usize, reg: &AtomicPtr<()>) -> *mut () {
+    // READER_GUARD_HANDSHAKE
+}
+
+#[unsafe(no_mangle)]
+pub(crate) fn drain_store_then_load(reg: &AtomicPtr<()>, draining: *mut (), cell: &AtomicUsize, slot: usize) -> bool {
+    // DRAIN_HANDSHAKE
+}
+
+#[unsafe(no_mangle)]
+pub(crate) fn enter_any_then_load(cell: &AtomicUsize, any_slot: usize, reg: &AtomicPtr<()>) -> *mut () {
+    // ENTER_ANY_HANDSHAKE
 }
 """
 
@@ -149,31 +164,54 @@ def ordered_cfg(asm, function, announce):
     return seen_ldapr > 0 and seen_fenced > 0
 
 
+def ordered_sc_dekker(asm, function, announce="stlr"):
+    """Verify a SeqCst store (`stlr`) followed by a SeqCst load (`ldar`) with
+    no Relaxed reordering (Arm64 guarantees stlr -> ldar total SC order)."""
+    body = function_body(asm, function)
+    stores = list(re.finditer(rf"^[ \t]+{announce}\b[^\n]*\n", body, re.M))
+    loads = list(re.finditer(r"^[ \t]+ldar\b", body, re.M))
+    return len(stores) == 1 and len(loads) == 1 and stores[0].end() <= loads[0].start()
+
+
 def main():
     src = Path(__file__).resolve().parents[1] / "threads/src"
     sources = {name: (src / name).read_text() for name in ("waker.rs", "park.rs")}
-    # Reuse the actual SME2 announcement; compile only this prelude, not
-    # the hardware-dependent worker loop (which needs the Apple SDK).
+    # Reuse the actual SME2 announcement and ReaderGuard/unregister_and_drain
+    # Dekker handshakes from lanes.rs.
     lanes = (src / "lanes.rs").read_text()
     advertisement = re.search(
         r"(SME2_PARKED\.store\(true, Ordering::SeqCst\);\s+"
-        r"core::sync::atomic::fence\(Ordering::SeqCst\);)\s+if sources::visible\(true\)", lanes
+        r"core::sync::atomic::fence\(Ordering::SeqCst\);)\s+if sources::visible\(Some\(reader\), true\)", lanes
     )
     if advertisement is None:
         raise SystemExit("sleep ordering: SME2 must order its announcement before the work re-check")
-    probe = PROBE.replace("// SME2_ADVERTISEMENT", advertisement[1].replace("SME2_PARKED", "flag"))
+    guard_enter = re.search(r"fn enter\(cell: &'a AtomicUsize, slot: usize\) -> Self \{\s+(cell\.store\(slot, Ordering::\w+\);)", lanes)
+    guard_load = re.search(r"let _guard = reader\.map\(\|cell\| ReaderGuard::enter\(cell, slot\)\);\s+let ptr = (REGISTERED\[slot\]\.load\(Ordering::\w+\));", lanes)
+    enter_any = re.search(r"fn enter_any\(cell: &'a AtomicUsize\) -> Self \{\s+(cell\.store\(ANY_SLOT, Ordering::\w+\);\s+core::sync::atomic::fence\(Ordering::\w+\);)", lanes)
+    guarded_load = re.search(r"fn visible_guarded\(streams: bool\) -> bool \{[\s\S]*?let ptr = (REGISTERED\[slot\]\.load\(Ordering::\w+\));", lanes)
+    drain_store = re.search(r"fn unregister_and_drain\(slot: usize\) \{[\s\S]*?(REGISTERED\[slot\]\.store\(DRAINING, Ordering::\w+\);)", lanes)
+    drain_load = re.search(r"fn unregister_and_drain\(slot: usize\) \{[\s\S]*?let cur = (reader\.0\.load\(Ordering::\w+\));", lanes)
+    if not all((guard_enter, guard_load, enter_any, guarded_load, drain_store, drain_load)):
+        raise SystemExit("sleep ordering: could not locate ReaderGuard / unregister_and_drain Dekker handshake in lanes.rs")
+    reader_body = f"{guard_enter[1]}\n    {guard_load[1].replace('REGISTERED[slot]', 'reg')}"
+    enter_any_body = f"{enter_any[1].replace('ANY_SLOT', 'any_slot')}\n    {guarded_load[1].replace('REGISTERED[slot]', 'reg')}"
+    drain_body = f"{drain_store[1].replace('REGISTERED[slot]', 'reg').replace('DRAINING', 'draining')}\n    {drain_load[1].replace('reader.0', 'cell')} == slot"
+    probe = (
+        PROBE.replace("// SME2_ADVERTISEMENT", advertisement[1].replace("SME2_PARKED", "flag"))
+        .replace("// READER_GUARD_HANDSHAKE", reader_body)
+        .replace("// DRAIN_HANDSHAKE", drain_body)
+        .replace("// ENTER_ANY_HANDSHAKE", enter_any_body)
+    )
     paths = {
         "waker.rs": [("register_then_recheck", "stlr", ordered_cfg)],
         "park.rs": [("park_then_recheck", "ldsetal", ordered)],
-        "probe.rs": [("sme2_then_recheck", "stlrb", ordered)],
     }
     with tempfile.TemporaryDirectory(prefix="sleep-order-") as tmp:
         directory = Path(tmp)
         sources["probe.rs"] = probe
         asm = compile_probe(sources, directory)
         for name, checks in paths.items():
-            prefix = "core::sync::atomic::" if name == "probe.rs" else ""
-            fence = prefix + "fence(Ordering::SeqCst);"
+            fence = "fence(Ordering::SeqCst);"
             if sources[name].count(fence) != 1:
                 raise SystemExit(f"sleep ordering: expected one SeqCst fence in {name}")
             unfenced = compile_probe({**sources, name: sources[name].replace(fence, "")}, directory)
@@ -183,6 +221,30 @@ def main():
                 if check(unfenced, function, announce):
                     raise SystemExit(f"sleep ordering: negative control retained a barrier in {function}")
                 print(f"sleep ordering: {function} has {announce}/dmb ish/ldapr; unfenced control rejected")
+        for function, announce, snippet in (
+            ("sme2_then_recheck", "stlrb", advertisement[1].replace("SME2_PARKED", "flag")),
+            ("enter_any_then_load", "stlr", enter_any_body),
+        ):
+            fence = "core::sync::atomic::fence(Ordering::SeqCst);"
+            if snippet.count(fence) != 1:
+                raise SystemExit(f"sleep ordering: expected one SeqCst fence in {function}")
+            if not ordered(asm, function, announce):
+                raise SystemExit(f"sleep ordering: missing {announce}/dmb ish/ldapr in {function}")
+            unfenced = compile_probe({**sources, "probe.rs": probe.replace(snippet, snippet.replace(fence, ""))}, directory)
+            if ordered(unfenced, function, announce):
+                raise SystemExit(f"sleep ordering: negative unfenced control still passed {function}")
+            print(f"sleep ordering: {function} has {announce}/dmb ish/ldapr; unfenced control rejected")
+        for function, snippet in (
+            ("reader_guard_then_load", reader_body),
+            ("drain_store_then_load", drain_body),
+        ):
+            if not ordered_sc_dekker(asm, function):
+                raise SystemExit(f"sleep ordering: missing stlr/ldar SeqCst pair in {function}")
+            relaxed_probe = probe.replace(snippet, snippet.replace("Ordering::SeqCst", "Ordering::Relaxed", 1))
+            relaxed_asm = compile_probe({**sources, "probe.rs": relaxed_probe}, directory)
+            if ordered_sc_dekker(relaxed_asm, function):
+                raise SystemExit(f"sleep ordering: negative Relaxed control still passed {function}")
+            print(f"sleep ordering: {function} has stlr/ldar SeqCst Dekker pair; Relaxed control rejected")
 
 
 if __name__ == "__main__":

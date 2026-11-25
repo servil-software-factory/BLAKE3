@@ -169,7 +169,7 @@
 //!   [`throughput::update_each`] allocates and frees nothing beyond the
 //!   one-time per-thread SME2 flat-walk scratch noted above if a fresh thread
 //!   hashes a whole 32 KiB+ piece on a 512-bit SME2 CPU.
-//! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction and allocates nothing during steady-state message submission, hashing, and reaping on the calling thread or the workers (teardown may grow the global reusable-storage free list when the last holder retires a storage).
+//! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction, allocates nothing during steady-state message submission, hashing, and reaping on the calling thread or the workers, and frees its backing storage back to the system allocator once the Pipeline and any surviving [`Room`](throughput::Room) or [`Lent`](throughput::Lent) guard have dropped.
 //! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
 //!   where it hashes on the calling thread. Above that length it keeps a list
 //!   of the pieces it hands out, 56 bytes for each piece (most are of up
@@ -304,15 +304,14 @@ mod waker_sync {
 /// beside its own `pipeline_sync`.
 mod pipeline_sync {
     pub use core::cell::UnsafeCell;
-    pub use std::sync::Mutex;
     pub use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     pub use std::thread;
     pub use std::thread_local;
     /// A static for the life of the process. (The model's is for one run.)
     macro_rules! process_static {
-        ($(#[$attribute:meta])* static $name:ident: $kind:ty = $first:expr;) => {
+        ($(#[$attribute:meta])* $vis:vis static $name:ident: $kind:ty = $first:expr;) => {
             $(#[$attribute])*
-            static $name: $kind = $first;
+            $vis static $name: $kind = $first;
         };
     }
     pub(crate) use process_static;

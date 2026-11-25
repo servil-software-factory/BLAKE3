@@ -735,8 +735,12 @@ each bug are in `git log`.
 9. **A worker could read freed Pipeline state** (`Shared` in
    `threads/src/pipeline.rs`, #399). An unexplained test crash led to the
    cause: a worker read the state after publishing completion, when the
-   owner could already have freed it. The state now lives with its
-   process-lifetime storage. No release shipped that Pipeline code.
+   owner could already have freed it. The initial repair kept storage for
+   process lifetime; later `#465` merged `Shared` into `PipeStorage` and
+   freed it on drop once `Source::unregister_and_drain` drains every
+   active worker's `ReaderGuard` (with `Waker::wake` invoked only after
+   the guard drops, checked by Shuttle and `tools/check-waker-order.py`).
+   No release shipped that Pipeline code.
 10. **A final output error could exit successfully** (`b3sum`'s `main`).
     The buffered writer's final flush error was ignored; some check-output
     errors were ignored too. They are propagated now. `/dev/full` makes

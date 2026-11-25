@@ -44,9 +44,12 @@ use std::{
 // WALKED
 // Pipeline::new Pipeline::with_owners Pipeline::with_batches Pipeline::with_owners_and_batches Pipeline::message Pipeline::message_with Pipeline::room Pipeline::commit Pipeline::end Pipeline::abort Pipeline::owned
 // Pipeline::lent Pipeline::batch Pipeline::next_event Pipeline::ready Pipeline::Drop Room::len Room::bytes_mut Room::as_mut_ptr Room::Drop Lent::Drop
-// Pipeline::Send Room::Send
+// Pipeline::Send Room::Send Lent::Send
 // NOT_WALKED
 // Room::Sync: A shared reference to a Room gives its length alone.
+// Lent::Sync: Lent has no &self methods; a shared reference does nothing beyond keeping the guard alive.
+// Lent::UnwindSafe: Marker trait; Lent holds only immutable references to its completion counter and refcount.
+// Lent::RefUnwindSafe: Marker trait; Lent exposes no interior mutability.
 // Message::Drop: Its panic has a unit test (contract_dropped_unfinished_message_panics, threads/src/pipeline.rs); legal steps drop no message.
 // END
 //
@@ -290,7 +293,9 @@ async fn without_owners(mode: Mode<'static>, limits: Limits, data: &[u8]) {
     p.ready().await;
     let Some(Event::Hashed { tag: 1, hash, owner: None }) = p.next_event() else { panic!("the loan's event") };
     assert_eq!(*hash.as_bytes(), official(mode, &data[..1025]));
-    drop(guard);
+    thread::scope(|s| {
+        s.spawn(move || drop(guard));
+    });
     {
         let mut pb = Pipeline::<usize, (), blake3_servil::throughput::Packed<32>>::with_batches(mode, Limits { messages: 1, rooms: 0 });
         let mb = pb.message(0, None).await;
