@@ -196,7 +196,7 @@ impl Park {
     /// token, until a waker clears the bit. Returns having found work
     /// (false) or having been woken (true); a woken worker then pays the
     /// wakes owed ([`Park::pay_owed`]).
-    pub(crate) fn park_unless(&self, me: usize, visible: impl Fn() -> bool) -> bool {
+    pub(crate) fn park_unless(&self, me: usize, visible: impl FnOnce() -> bool) -> bool {
         let (word, bit) = self.place(me);
         word.fetch_or(bit, Ordering::SeqCst);
         // An acquire-only visibility check does not order the parked bit.

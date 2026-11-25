@@ -2,8 +2,8 @@
 # AVX2 without AVX-512), each with its reason; tools/mutants/check.py
 # fails on any other survivor and on any listed one now caught.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/finish.rs src/lanes.rs src/park.rs src/pipeline.rs src/waker.rs src/lib.rs
-model files: src/finish.rs src/park.rs src/waker.rs
+files: src/finish.rs src/lanes.rs src/park.rs src/pipeline.rs src/registry.rs src/waker.rs src/lib.rs
+model files: src/finish.rs src/park.rs src/registry.rs src/waker.rs
 src/finish.rs	delete ! in Finish::wait	1	OPEN: the pool's scheduling: `if poll()` leaves the polls for the park as soon as a poll did work; whether a test then hangs depends on the machine: it survives on five x86-64 machines of 16 to 112 threads (whole runs at 5c0247cd, November 12), and on aarch64 since the first pipeline's tests went (known-aarch64.txt)
 src/lanes.rs	delete ! in initialize	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	delete ! in sme2_serve	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -12,7 +12,9 @@ src/lanes.rs	replace % with + in places::assign	3	same code: every test binary h
 src/lanes.rs	replace & with ^ in sme2_serve	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace & with | in sme2_serve	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace && with || in initialize	2	compiled out on x86: the SME2 thread (cfg!(blake3_sme2) is false, so the expression is false whatever the comparison)
+src/lanes.rs	replace && with || in sme2_serve	2	compiled out on x86: the SME2 thread (cfg!(blake3_sme2) is false, so sme2_serve is never spawned on x86-64)
 src/lanes.rs	replace * with + in merge_to_children	1	array capacity: 2 + MAX children a call instead of 2 * MAX, the same tree in more calls
+src/lanes.rs	replace + with - in initialize	1	compiled out on x86: usize::from(sme2) is 0 on x86-64 so workers + 0 and workers - 0 are identical
 src/lanes.rs	replace - with + in Pool::run_job	3	OPEN: the pool's scheduling: `pieces - own`, where own, the caller's own pieces, is nonzero only with the SME2 thread's prefix; on x86-64 own is 0 and the sum is the difference (the wake count itself is tested, test_a_job_wakes_one_worker_a_piece_past_its_own). Two places survive every run; the third is caught in some (November 10, 2026)
 src/lanes.rs	replace - with / in Pool::run_job	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103). It survived the AVX-512 machines' whole runs of November 10, 2026, and the AVX2 machine's caught it
 src/lanes.rs	replace == with != in sme2_serve	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -26,6 +28,8 @@ src/lanes.rs	replace prefix_for -> usize with 0	1	same code: every test binary o
 src/lanes.rs	replace prefix_for -> usize with 1	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace sme2_main with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
+src/lib.rs	replace registry_sync::pause_slow with ()	1	speed: std::thread::sleep(50 us) only yields CPU during drain spin-wait under fixed-priority scheduling (Shuttle uses yield_now in tests/shuttle_registry.rs)
+src/lib.rs	replace registry_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_registry.rs)
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	equivalent: `later >= 0` adds `later` to the owed when it is 0, which is adding nothing; the `if` keeps an atomic add off the path of a job that owes none
 src/pipeline.rs	delete ! in Pipeline<T, B, P>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical

@@ -29,9 +29,9 @@ release's measure of assurance.
 | Hazard | Protection | What the evidence does not establish |
 |---|---|---|
 | Wrong kernel output, out-of-bounds access, secret-dependent branch/address | proofs over assembled kernels under stated contracts; planted bad kernels rejected | correctness of all Rust callers, every toolchain's output, or the processor |
-| Worker reads state after its owner frees it | Pipeline worker-visible state lives for the process | correct reuse or synchronization of that state |
-| A wait loses a wake or races on a waker | Shuttle checks the production finish/park/waker modules; `tools/check-waker-order.py` compiles the Apple Arm64 wait handshakes (`WakerSlot`, `Park`, `sme2_serve`) and verifies their fences against `RCpc` loads, rejecting unfenced controls | every possible schedule, or weak-memory paths outside those handshakes |
-| The Pipeline hands a result, a Room or a storage over too early, or loses a wake | Shuttle runs the whole of `pipeline.rs` against a stand-in pool; ten planted faults each make that model fail | schedules not tried, weak-memory execution, and the pool itself, which the model replaces |
+| Worker reads state after its owner frees it | `PipeStorage` is ref-counted across `Pipeline`, `Lent`, and any surviving `Room` (via `ROOM_CLOSING_BIT` teardown stamping) and freed on drop only after `EpochRegistry::unregister_and_drain` (`threads/src/registry.rs`, model-checked directly by `shuttle_registry.rs`) drains every active worker's bounded-burst type-enforced `ReaderGuard` (Dekker store-load fences verified directly on `registry.rs` for Arm64 and x86-64 by `tools/check-waker-order.py`) | schedules not tried in Shuttle, or hardware weak-memory paths outside the checked Dekker pairs |
+| A wait loses a wake or races on a waker | Shuttle checks the production finish/park/waker/registry modules directly; `tools/check-waker-order.py` compiles the Apple Arm64 wait handshakes (`WakerSlot`, `Park`, `sme2_serve`) and the Arm64 + x86-64 `registry.rs` reader/drain Dekker handshakes directly, verifying their fences and rejecting unfenced/misordered controls | every possible schedule, or weak-memory paths outside those handshakes |
+| The Pipeline hands a result, a Room or a storage over too early, or loses a wake | Shuttle runs the whole of `pipeline.rs` against a stand-in pool (`shuttle_pipeline.rs`) and the production epoch registry directly (`shuttle_registry.rs`); eleven planted faults each make the Pipeline model fail | schedules not tried, weak-memory execution, and the production worker loop outside `registry.rs` |
 | An `unsafe` block rests on a reason no one wrote down | every `unsafe` block across all five shipped crates and build scripts carries a `// Sound:` comment verified by `tools/unsafe_reasons.py` (0 undocumented blocks); `tools/counts.py` blocks rising counts of undocumented `unsafe`, `debug_assert!`, and narrowing-cast allows | that each stated reason is true: they are read by people and by the audits, not proved |
 | Kernel still writes an I/O buffer after error recovery frees it | failed `io_uring_enter` aborts before recovery or unwind; a ring dropped with reads in flight aborts; a panic in `b3sum` aborts | every other lifetime or cancellation path |
 | File name replaced after the file is opened | every path hashes the file already open; direct reads reopen that descriptor through procfs | a coherent snapshot against concurrent writes to that inode: a file changed while it is hashed can give the hash of bytes it never held (`b3sum/README.md`, #443) |
@@ -735,8 +735,15 @@ each bug are in `git log`.
 9. **A worker could read freed Pipeline state** (`Shared` in
    `threads/src/pipeline.rs`, #399). An unexplained test crash led to the
    cause: a worker read the state after publishing completion, when the
-   owner could already have freed it. The state now lives with its
-   process-lifetime storage. No release shipped that Pipeline code.
+   owner could already have freed it. The initial repair kept storage for
+   process lifetime; later `#465` merged `Shared` into `PipeStorage` and
+   freed it on drop once `Source::unregister_and_drain` drains every
+   active worker's type-enforced epoch `ReaderGuard` (with the Arm64 and
+   x86-64 Dekker pairs checked by `tools/check-waker-order.py`, the
+   lock-free epoch drain checked under Shuttle in `shuttle_pipeline.rs`,
+   and `Waker::wake`-after-guard-drop tested directly in
+   `waker_dropping_pipeline_inline_on_worker_does_not_deadlock`).
+   No release shipped that Pipeline code.
 10. **A final output error could exit successfully** (`b3sum`'s `main`).
     The buffered writer's final flush error was ignored; some check-output
     errors were ignored too. They are propagated now. `/dev/full` makes
@@ -861,21 +868,30 @@ python3 tools/pipeline_model_controls.py
 ```
 
 The Pipeline's model (`threads/tests/shuttle_pipeline.rs`) runs the
-whole of `pipeline.rs` with a stand-in for the pool: a queue of actions
-served by the model's worker threads. Its nine scenarios cover
-messages through Rooms, owned and lent messages, batches, an abort, one
-Pipeline after another on one storage, a Room that outlives its
-Pipeline, a wait for a Room that another thread's drop ends, and a
-Pipeline with no place in the pool. Every digest is compared with the
-one-thread library's, a caller no one wakes is a deadlock, and each run
-ends with every storage free again. The second command plants ten
-faults in `pipeline.rs` one at a time (a result published before it is
-written, a wake left out, a Room given back while a worker reads it, a
-storage reused while held, and others) and requires the model to fail
-for each. It plants them in a copy of the tree, in the build directory:
-the tree itself never holds a fault. What the model
-cannot see: Shuttle treats every atomic ordering as SeqCst; it tries
-thousands of schedules, not all; and the pool itself is the stand-in.
+whole of `pipeline.rs` with a stand-in for the pool (a queue of actions
+served by the model's worker threads), while `threads/tests/shuttle_registry.rs`
+compiles the production lock-free epoch registry (`threads/src/registry.rs`)
+directly beside Shuttle's atomics.
+The Pipeline model's nine scenarios cover messages through Rooms, owned and
+lent messages, batches, an abort, sequential Pipelines allocating and freeing
+fresh storage, a Room that outlives its Pipeline, a wait for a Room that
+another thread's drop ends, and a Pipeline with no place in the pool; the
+registry model covers concurrent bounded-burst scanning with a continuously
+regenerating source and freed-source poison checks across both
+`unregister_and_drain` and thread-exit `drain_readers`. Every
+digest is compared with the one-thread library's, a caller no one wakes
+is a deadlock, and each run ends with every storage freed. The second
+command plants eleven faults in `pipeline.rs` one at a time (a result
+published before it is written, a wake left out, a Room given back while
+a worker reads it, a storage leaked or freed while a Room still holds it,
+and others) and requires the model to fail for each (with the
+early-release control caught deterministically by the model-only
+retirement check before deallocation). It plants them in a copy of the
+tree, in the build directory: the tree itself never holds a fault. What
+the model cannot see: Shuttle treats every atomic ordering as SeqCst; it
+tries thousands of schedules, not all; and the production pool outside
+`finish.rs`/`park.rs`/`waker.rs`/`registry.rs` is replaced by the Pipeline
+model's stand-in.
 
 `tools/b3sum_controls.py` does the same for `b3sum`, which the mutation
 gate does not cover: it takes eleven protections out one at a time and

@@ -2,8 +2,8 @@
 # SME2 and the SHA-3 extension), each with its reason; tools/mutants/check.py
 # fails on any other survivor and on any listed one now caught.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/finish.rs src/lanes.rs src/park.rs src/pipeline.rs src/waker.rs src/lib.rs
-model files: src/finish.rs src/park.rs src/waker.rs
+files: src/finish.rs src/lanes.rs src/park.rs src/pipeline.rs src/registry.rs src/waker.rs src/lib.rs
+model files: src/finish.rs src/park.rs src/registry.rs src/waker.rs
 src/finish.rs	delete ! in Finish::wait	1	OPEN: the pool's scheduling: `if poll()` leaves the polls for the park as soon as a poll did work; whether a test then hangs depends on the machine: it survives here (the VM's whole run at 5c0247cd, November 12) and on five x86-64 machines; the tests it hung were the first pipeline's
 src/lanes.rs	delete ! in initialize	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	delete ! in sources::visible	2	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
@@ -26,7 +26,6 @@ src/lanes.rs	replace < with == in cut_items	1	OPEN: the pool's scheduling under 
 src/lanes.rs	replace < with == in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with > in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with > in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace << with >> in sources::Source::unregister	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace == with != in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace == with != in sme2_serve	1	speed: swaps which actions run under Sme2Turn vs pool_platform() on the SME2 thread (identical digests)
 src/lanes.rs	replace > with < in initialize	1	speed: whether the pool starts its SME2 thread (without it the NEON workers do its share; the same results)
@@ -44,7 +43,6 @@ src/lanes.rs	replace all_workers_parked -> bool with true	1	OPEN: the pool's sch
 src/lanes.rs	replace poll_pause with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace prefix_for -> usize with 0	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
 src/lanes.rs	replace prefix_for -> usize with 1	1	speed: how the work is cut among threads (every cut tiles the input, as the code's assertions and the tests check)
-src/lanes.rs	replace sources::<impl Drop for Held>::drop with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::Source::unregister with ()	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::open -> bool with false	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace sources::open -> bool with true	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
@@ -53,6 +51,8 @@ src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, 
 src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace || with && in sources::visible	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lib.rs	replace __all_workers_parked -> bool with true	1	a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before
+src/lib.rs	replace registry_sync::pause_slow with ()	1	speed: std::thread::sleep(50 us) only yields CPU during drain spin-wait under fixed-priority scheduling (Shuttle uses yield_now in tests/shuttle_registry.rs)
+src/lib.rs	replace registry_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_registry.rs)
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	speed: changes how many parked workers a publisher wakes or owes (BLAKE3 #119: every wake direct, the cascade alone and 8 direct measured 4-25% apart on the EPYC and the i7); no result waits on a worker waking: the publisher hashes every piece no worker takes, and finish.rs's handshake wakes a waiting caller
 src/pipeline.rs	delete ! in Pipeline<T, B, P>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical

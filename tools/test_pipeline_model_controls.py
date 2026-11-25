@@ -51,7 +51,10 @@ fi
 [ "$CONTROLS_FAULT" = runs-no-test ] && { echo "running 0 tests"; exit 0; }
 echo "running 1 test"
 case "$CONTROLS_FAULT" in
-caught|stale) exit 101 ;;
+caught|stale)
+    echo "PipeStorage used after release" >&2
+    exit 101
+    ;;
 missed) passes ;;
 allocator)
     echo "shuttle_pipeline: messages_through_rooms_complete_with_their_own_digests" >&2
@@ -62,6 +65,7 @@ allocator)
 saves)
     # Someone saves the tree's source while a fault's model runs.
     echo "// saved during the run" >> "$CONTROLS_TREE/threads/src/pipeline.rs"
+    echo "PipeStorage used after release" >&2
     exit 101
     ;;
 never-ends)
@@ -229,12 +233,24 @@ class Controls(unittest.TestCase):
         self.assert_untouched()
 
     def test_each_faults_run_is_kept_whole_and_the_allocators_stop_is_named(self):
+        required = script().REQUIRED_DIAGNOSTICS
         run = self.run_script("allocator")
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        lines = [line for line in run.stdout.splitlines() if line.startswith("caught  ")]
-        self.assertEqual(len(lines), len(faults()))
-        for (name, _, _), line in zip(faults(), lines):
-            self.assertEqual(line, f"caught  {name} (in messages_through_rooms_complete_with_their_own_digests: the allocator stopped the process: free(): invalid pointer)")
+        # Faults with a required model-only diagnostic reject an allocator-only
+        # stop, while all other faults name the allocator's stop as caught.
+        if required:
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn(f"passes {len(required)} planted faults", run.stderr)
+        else:
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        caught_lines = [line for line in run.stdout.splitlines() if line.startswith("caught  ")]
+        missed_lines = [line for line in run.stdout.splitlines() if line.startswith("MISSED  ")]
+        expected_caught = [name for name, _, _ in faults() if name not in required]
+        expected_missed = [name for name, _, _ in faults() if name in required]
+        self.assertEqual(
+            caught_lines,
+            [f"caught  {name} (in messages_through_rooms_complete_with_their_own_digests: the allocator stopped the process: free(): invalid pointer)" for name in expected_caught],
+        )
+        self.assertEqual(missed_lines, [f"MISSED  {name}" for name in expected_missed])
         logs = os.path.join(os.path.dirname(self.copy), "logs")
         self.assertEqual(sorted(os.listdir(logs)), [f"{n:02}.log" for n in range(len(faults()))])
         for n, (name, _, _) in enumerate(faults()):

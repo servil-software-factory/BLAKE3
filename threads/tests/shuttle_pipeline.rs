@@ -8,7 +8,7 @@
 //! Without the cfg it compiles to nothing.
 //!
 //! What is real: every line of the Pipeline, its Rooms and credits, its
-//! groups, pieces and slots, its storage and that storage's reuse, the
+//! groups, pieces and slots, its storage allocation and free-on-drop, the
 //! waker slot, `block_on`, and the hashing itself.
 //!
 //! What stands in: the pool. The Pipeline hands the pool actions through
@@ -26,7 +26,7 @@
 //! it, a Room's bytes written while a worker reads them, or a group
 //! reused while in flight gives a digest that is not the message's, and
 //! each scenario compares every digest with the one-thread library's. At
-//! the end of each run every storage made in it must be free again.
+//! the end of each run every storage made in it must have been freed.
 //!
 //! tools/pipeline_model_controls.py plants such faults in pipeline.rs one
 //! at a time and requires this model to fail for each. Three things here
@@ -56,6 +56,29 @@ mod pipeline_sync {
     pub use shuttle::sync::Mutex;
     pub use shuttle::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     pub use shuttle::thread_local;
+
+    shuttle::lazy_static! {
+        static ref QUARANTINED_STORAGES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    }
+
+    pub(crate) fn quarantine_storage(st: *mut crate::pipeline::PipeStorage) {
+        QUARANTINED_STORAGES.lock().unwrap().push(st as usize);
+    }
+
+    macro_rules! retire_storage {
+        ($st:expr) => {
+            crate::pipeline_sync::quarantine_storage($st)
+        };
+    }
+    pub(crate) use retire_storage;
+
+    pub(crate) fn drain_quarantined_storages() {
+        let ptrs: Vec<usize> = core::mem::take(&mut *QUARANTINED_STORAGES.lock().unwrap());
+        for addr in ptrs {
+            // Sound: called only after all Shuttle threads for the run have joined.
+            unsafe { drop(Box::from_raw(addr as *mut crate::pipeline::PipeStorage)) };
+        }
+    }
     /// Shuttle's threads. A caller about to sleep lets the held-back
     /// workers go (lanes::sources::hold_back): they are who would wake it.
     pub mod thread {
@@ -74,6 +97,12 @@ mod pipeline_sync {
             shuttle::lazy_static! {
                 $(#[$attribute])*
                 static ref $name: $kind = $first;
+            }
+        };
+        ($(#[$attribute:meta])* pub(crate) static $name:ident: $kind:ty = $first:expr;) => {
+            shuttle::lazy_static! {
+                $(#[$attribute])*
+                pub(crate) static ref $name: $kind = $first;
             }
         };
     }
@@ -237,7 +266,7 @@ mod lanes {
 
         pub(crate) const ACTION_SME2: u64 = 1 << 63;
 
-        type Action = (unsafe fn(*const (), u64, Platform), usize, u64);
+        type Action = (unsafe fn(*const (), u64, Platform) -> Option<core::task::Waker>, usize, u64);
 
         /// A Pipeline's actions waiting for a thread.
         pub(crate) struct Source {
@@ -250,18 +279,30 @@ mod lanes {
             pub(crate) static ref NO_SLOT: shuttle::sync::atomic::AtomicBool = shuttle::sync::atomic::AtomicBool::new(false);
             /// The Sources a worker serves: those of the Pipelines open now.
             static ref REGISTERED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+            /// Sources currently borrowed by an active worker inside `run_one`.
+            static ref ACTIVE_READERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+            static ref DRAIN_DONE: shuttle::sync::Condvar = shuttle::sync::Condvar::new();
             static ref NEWS: Mutex<u64> = Mutex::new(0);
             static ref NEWS_CAME: shuttle::sync::Condvar = shuttle::sync::Condvar::new();
+        }
+
+        struct ReaderGuard(usize);
+        impl Drop for ReaderGuard {
+            fn drop(&mut self) {
+                let mut readers = ACTIVE_READERS.lock().unwrap();
+                if let Some(pos) = readers.iter().position(|&at| at == self.0) {
+                    readers.swap_remove(pos);
+                }
+                drop(readers);
+                DRAIN_DONE.notify_all();
+            }
         }
 
         impl Source {
             pub(crate) fn with_actions(actions: usize) -> Source {
                 Source { waiting: Mutex::new(VecDeque::new()), actions }
             }
-            pub(crate) fn actions_len(&self) -> usize {
-                self.actions
-            }
-            pub(crate) fn register(&'static self) -> Option<usize> {
+            pub(crate) unsafe fn register_until_drained(&self) -> Option<usize> {
                 // The pool has 64 slots, and a Pipeline that finds none
                 // free runs each action itself, where it dispatches it.
                 if NO_SLOT.load(shuttle::sync::atomic::Ordering::SeqCst) {
@@ -271,10 +312,20 @@ mod lanes {
                 REGISTERED.lock().unwrap().push(at);
                 Some(at)
             }
-            pub(crate) fn unregister(slot: usize) {
+            pub(crate) fn unregister_and_drain(slot: usize) {
                 REGISTERED.lock().unwrap().retain(|&at| at != slot);
+                let mut readers = ACTIVE_READERS.lock().unwrap();
+                while readers.contains(&slot) {
+                    readers = DRAIN_DONE.wait(readers).unwrap();
+                }
             }
-            pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64], _near: bool) {
+            pub(crate) unsafe fn publish_actions(
+                &self,
+                run: unsafe fn(*const (), u64, Platform) -> Option<core::task::Waker>,
+                context: *const (),
+                args: &[u64],
+                _near: bool,
+            ) {
                 let mut waiting = self.waiting.lock().unwrap();
                 assert!(waiting.len() + args.len() <= self.actions, "more actions than the Source was made for");
                 waiting.extend(args.iter().map(|&arg| (run, context as usize, arg)));
@@ -283,7 +334,9 @@ mod lanes {
             }
             pub(crate) fn run_waiting_action(&self) -> bool {
                 let Some((run, context, arg)) = self.waiting.lock().unwrap().pop_front() else { return false };
-                unsafe { run(context as *const (), arg & !ACTION_SME2, pool_platform()) };
+                if let Some(waker) = unsafe { run(context as *const (), arg & !ACTION_SME2, pool_platform()) } {
+                    crate::waker::wake_or_abort(waker);
+                }
                 true
             }
             pub(crate) fn wake_for_waiting(&self) {
@@ -314,16 +367,28 @@ mod lanes {
         pub(crate) fn opened() {}
         pub(crate) fn closed() {}
 
-        /// One turn of a worker: an action of some registered Source, run.
-        /// A Source is in a storage that is never freed, so its address
-        /// stays good after its Pipeline is gone.
+        /// One turn of a worker: an action of some registered Source, run
+        /// under a reader guard so `unregister_and_drain` waits for it before
+        /// freeing the Source's `PipeStorage`.
         pub(crate) fn run_one() -> bool {
             let all: Vec<usize> = REGISTERED.lock().unwrap().clone();
             for at in all {
+                let guard = {
+                    let reg = REGISTERED.lock().unwrap();
+                    if !reg.contains(&at) {
+                        continue;
+                    }
+                    ACTIVE_READERS.lock().unwrap().push(at);
+                    ReaderGuard(at)
+                };
                 let source = unsafe { &*(at as *const Source) };
                 let Some((run, context, arg)) = source.waiting.lock().unwrap().pop_front() else { continue };
                 hold_back();
-                unsafe { run(context as *const (), arg & !ACTION_SME2, pool_platform()) };
+                let waker = unsafe { run(context as *const (), arg & !ACTION_SME2, pool_platform()) };
+                drop(guard);
+                if let Some(waker) = waker {
+                    crate::waker::wake_or_abort(waker);
+                }
                 BY_WORKERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return true;
             }
@@ -430,10 +495,12 @@ fn with_workers(workers: usize, caller: impl FnOnce()) {
     for t in threads {
         t.join().unwrap();
     }
-    // Every storage made in this run is free again: none is lost, and
-    // none is held by a Pipeline or a Room that is gone.
-    let (made, back) = pipeline::model_storages::free_storages_for_model();
-    assert_eq!(made, back, "storages made in this run, and those free at its end");
+    // Every storage made in this run has been freed: none is leaked, and
+    // none is still held by a Pipeline, Room, or Lent guard. Verify count
+    // remains 0 both before and after dropping quarantined allocations.
+    assert_eq!(pipeline::LIVE_STORAGES.load(Ordering::SeqCst), 0, "all PipeStorages freed at end of run");
+    pipeline_sync::drain_quarantined_storages();
+    assert_eq!(pipeline::LIVE_STORAGES.load(Ordering::SeqCst), 0, "LIVE_STORAGES must not double-decrement when quarantine drains");
 }
 
 fn input(len: usize, salt: u8) -> Vec<u8> {
@@ -529,10 +596,9 @@ fn owned_messages_complete_and_wake_the_caller() {
     });
 }
 
-/// One Pipeline after another of the same size: the second takes the
-/// first's storage, with the first's workers perhaps still on their way
-/// out of its last tasks.
-fn a_pipeline_after_another_reuses_its_storage_soundly() {
+/// One Pipeline after another of the same size: each frees its storage on
+/// drop once `unregister_and_drain` drains late workers exiting its last tasks.
+fn a_pipeline_after_another_frees_its_storage_soundly() {
     check(|| {
         with_workers(2, || {
             for round in 0..3u8 {
@@ -779,16 +845,16 @@ fn an_aborted_message_leaves_the_others_whole() {
     });
 }
 
-/// The scenarios, one after another in one test: the Pipeline's free
-/// storages and the Sources' registry are the process's, as in a program,
-/// and two models at once on two test threads would share them.
+/// The scenarios, one after another in one test: the Sources' registry and
+/// live-storage counter are process-wide, as in a program, and two models at
+/// once on two test threads would share them.
 #[test]
 fn the_pipeline_under_shuttle() {
     blake3_servil_core::initialize();
     let scenarios: [(&str, fn()); 9] = [
         ("messages_through_rooms_complete_with_their_own_digests", messages_through_rooms_complete_with_their_own_digests),
         ("owned_messages_complete_and_wake_the_caller", owned_messages_complete_and_wake_the_caller),
-        ("a_pipeline_after_another_reuses_its_storage_soundly", a_pipeline_after_another_reuses_its_storage_soundly),
+        ("a_pipeline_after_another_frees_its_storage_soundly", a_pipeline_after_another_frees_its_storage_soundly),
         ("a_room_outlives_its_pipeline", a_room_outlives_its_pipeline),
         ("a_wait_for_a_room_ends_when_another_thread_drops_one", a_wait_for_a_room_ends_when_another_thread_drops_one),
         ("lent_messages_are_complete_when_their_events_come", lent_messages_are_complete_when_their_events_come),

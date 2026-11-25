@@ -865,7 +865,7 @@ def run(files, extra=(), shards=SHARDS, label="run", loom=False, known=None, tkn
         # Consecutive slices (cargo-mutants' default): a shard's mutants in one
         # file one after another rebuild less (round-robin evened the shards
         # and made each build 10% slower, the run no faster, October 21).
-        tests = ["--test", "shuttle_finish", "--test", "shuttle_park", "--test", "shuttle_waker"] if loom else ["--lib", "--tests"]
+        tests = ["--test", "shuttle_finish", "--test", "shuttle_park", "--test", "shuttle_waker", "--test", "shuttle_registry"] if loom else ["--lib", "--tests"]
         shard = args + ["--shard", f"{k}/{shards}", "--output", os.path.join(tree, "mutants-result"), "--", *tests]
         runs.append((tree, shard))
         envs[tree] = env
