@@ -51,7 +51,10 @@ and the rest timed out or have no verdict.
   word is taken alone); the crates file by file against the commit. 0.9.0's two b3sum programs were built in checkouts
   holding untracked files and say "dirty" (BLAKE3 #435); no step looked.
 - The pages: README.md, QUALITY.md, CHANGELOG.md changed since the
-  previous release (a release rewrites them for its readers).
+  previous release (a release rewrites them for its readers), and the
+  README benchmark SVGs (`docs/images/hash-epyc-128mib.svg`,
+  `docs/images/b3sum-epyc-1000-files.svg`) match this release's X.Y.Z
+  version (`python3 tools/sync_readme_charts.py`).
 
 By default the previous release is the nearest reachable v* tag other
 than the candidate. If a patch release is on a separate line, pass its
@@ -78,6 +81,7 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import release_artifacts  # noqa: E402 (beside this file)
+import sync_readme_charts  # noqa: E402 (beside this file)
 
 ROOT = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
 # The main checkout holds the token, the runner's jobs and results, and the
@@ -597,6 +601,21 @@ def mac_check(exchange, commit, old):
     return (NO_VERDICT if notes or status in ("no verdict", "cancelled") else False), note
 
 
+def readme_charts_result(commit):
+    """Verify the two README benchmark SVGs at `commit` match its Cargo.toml X.Y.Z."""
+    def show(rel):
+        try:
+            return git("show", f"{commit}:{rel}")
+        except subprocess.CalledProcessError:
+            return None
+
+    return sync_readme_charts.check_chart_texts(
+        show("Cargo.toml"),
+        show(sync_readme_charts.CHARTS[0][1]),
+        show(sync_readme_charts.CHARTS[1][1]),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Check the evidence for a BLAKE3-Servil release.")
     parser.add_argument("commit", nargs="?", default="main")
@@ -660,6 +679,7 @@ def main():
             step(f"{page} rewritten since {previous}", page in changed, "a release rewrites it for its readers")
     else:
         step("pages read fresh for the first release", None, "no previous release: read README.md, QUALITY.md and CHANGELOG.md as a newcomer would, and record it in the release issue")
+    step("README benchmark charts match this release", *readme_charts_result(commit))
 
     failing = sum(1 for r in results if r is False or r is None)
     undecided = sum(1 for r in results if r in (TIMED_OUT, NO_VERDICT))

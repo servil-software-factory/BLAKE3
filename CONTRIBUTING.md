@@ -426,7 +426,10 @@ it takes and ticks each step:
 7. The pages, read as a newcomer would: the README's servil preface,
    `QUALITY.md` and `docs/quality-manual.md`, `CHANGELOG.md` (what
    changed for users, in their terms), the supported-platforms table
-   (exactly what CI runs).
+   (exactly what CI runs), and the README benchmark SVGs refreshed from
+   the release's EPYC 9255 `bench-hashes` run via
+   `python3 tools/sync_readme_charts.py --bench ../bench-hashes`
+   (checked automatically by `tools/release-check.py`).
 8. A full bench-hashes run on the version commit on the Mac, its results
    retained for publication with the release and named on the map.
 9. Once the gates and reviews accept that exact version commit,

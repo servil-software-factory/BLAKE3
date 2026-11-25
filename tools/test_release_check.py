@@ -80,7 +80,7 @@ class ReleaseEvidence(unittest.TestCase):
     # The note that names the fixture's one record, and what it said.
     LAST = '(the last one, "job.20261120T135633Z-mac-m6-timing": {})'
 
-    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, ""), previous=None, builds_log="check-builds: every build passes", dry_run_log="publish-dry-run: ok", mac_results=None, inspections=ABSENT):
+    def run_gate(self, cells="all", kind="check", ci_jobs=None, new=HEAD, old=OLD, verdict="no regression", git_override=None, ci_event="workflow_dispatch", mutation_log=MUTATION_OK, core_log=MUTATION_OK, power=("AC Power, 100%", "AC Power, 100%"), artifacts=(True, ""), previous=None, builds_log="check-builds: every build passes", dry_run_log="publish-dry-run: ok", mac_results=None, inspections=ABSENT, chart_version="0.4.0"):
         jobs = [job(), job()] if ci_jobs is None else ci_jobs
         def git(*args):
             if args[0] == "rev-parse":
@@ -91,6 +91,14 @@ class ReleaseEvidence(unittest.TestCase):
                 return "v0.3.0+fixture"
             if args[0] == "diff":
                 return "README.md\nQUALITY.md\nCHANGELOG.md"
+            if args[0] == "show":
+                rel = args[1].split(":", 1)[1]
+                if rel == "Cargo.toml":
+                    return '[package]\nname = "blake3-servil-core"\nversion = "0.4.0+fixture"\n'
+                if rel == "docs/images/hash-epyc-128mib.svg":
+                    return f"<svg><text>BLAKE3-Servil {chart_version}+fixture</text></svg>"
+                if rel == "docs/images/b3sum-epyc-1000-files.svg":
+                    return f"<svg><text>b3sum {chart_version}+fixture</text></svg>"
             raise AssertionError(args)
 
         def github(path):
@@ -1031,6 +1039,10 @@ class PreviousRelease(unittest.TestCase):
         self.git("config", "core.hooksPath", str(self.repo / "no-hooks"))
         for page in ["README.md", "QUALITY.md", "CHANGELOG.md"]:
             (self.repo / page).write_text("old\n")
+        (self.repo / "Cargo.toml").write_text('[package]\nname = "blake3-servil-core"\nversion = "0.3.0+fixture"\n')
+        (self.repo / "docs/images").mkdir(parents=True)
+        (self.repo / "docs/images/hash-epyc-128mib.svg").write_text("<svg><text>BLAKE3-Servil 0.3.0+fixture</text></svg>\n")
+        (self.repo / "docs/images/b3sum-epyc-1000-files.svg").write_text("<svg><text>b3sum 0.3.0+fixture</text></svg>\n")
         self.git("add", ".")
         self.git("commit", "-qm", "old release")
         self.old = self.git("rev-parse", "HEAD")
@@ -1038,6 +1050,9 @@ class PreviousRelease(unittest.TestCase):
         self.date = "2020-01-02T00:00:00+00:00"
         for page in ["README.md", "QUALITY.md", "CHANGELOG.md"]:
             (self.repo / page).write_text("new\n")
+        (self.repo / "Cargo.toml").write_text('[package]\nname = "blake3-servil-core"\nversion = "0.8.0+fixture"\n')
+        (self.repo / "docs/images/hash-epyc-128mib.svg").write_text("<svg><text>BLAKE3-Servil 0.8.0+fixture</text></svg>\n")
+        (self.repo / "docs/images/b3sum-epyc-1000-files.svg").write_text("<svg><text>b3sum 0.8.0+fixture</text></svg>\n")
         self.git("commit", "-qam", "candidate")
         self.new = self.git("rev-parse", "HEAD")
         self.git("branch", "candidate")
@@ -1051,6 +1066,13 @@ class PreviousRelease(unittest.TestCase):
         code, output = ReleaseEvidence.run_gate(self, new=self.new, old=self.old, git_override=self.git)
         self.assertEqual(code, 0, output)
         self.assertIn("rewritten since v0.3.0+fixture", output)
+        self.assertIn("PASS  README benchmark charts match this release", output)
+
+    def test_stale_readme_chart_fails_release_check(self):
+        code, output = ReleaseEvidence.run_gate(self, chart_version="0.3.0")
+        self.assertEqual(code, 1, output)
+        self.assertIn("FAIL  README benchmark charts match this release", output)
+        self.assertIn("is 0.3.0, expected 0.4.0", output)
 
     def test_unrelated_recent_tag_cannot_set_the_baseline(self):
         self.git("checkout", "-qb", "unrelated", self.old)
@@ -1084,7 +1106,9 @@ class PreviousRelease(unittest.TestCase):
         patch_commit = self.git("rev-parse", "HEAD")
         self.git("checkout", "-q", "candidate")
         manifest.write_text('[package]\nversion = "0.4.0+dev"\n')
-        self.git("add", "Cargo.toml")
+        (self.repo / "docs/images/hash-epyc-128mib.svg").write_text("<svg><text>BLAKE3-Servil 0.4.0+fixture</text></svg>\n")
+        (self.repo / "docs/images/b3sum-epyc-1000-files.svg").write_text("<svg><text>b3sum 0.4.0+fixture</text></svg>\n")
+        self.git("add", "Cargo.toml", "docs/images/hash-epyc-128mib.svg", "docs/images/b3sum-epyc-1000-files.svg")
         self.git("commit", "-qm", "candidate version")
         head = self.git("rev-parse", "HEAD")
 

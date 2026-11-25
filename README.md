@@ -15,9 +15,11 @@ about a vulnerability today, and the API may still change between minor versions
 
 Speed depends on your machine and on how your program hashes.
 [bench-hashes](https://github.com/servil-software-factory/bench-hashes) measures both on your own
-computer; its published maps cover an [Apple M4 Max](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AppleM4Max.darwin25/bench-hashes.map.html),
-an [AMD EPYC 9255](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AMDEPYC925524CoreProcessor.linux70038generic/bench-hashes.map.html),
-and an [Intel i7-12700K](https://servil-software-factory.github.io/bench-hashes/benchmark-results/12thGenIntelRCoreTMi712700K.linux70042generic/bench-hashes.map.html);
+computer; its published `0.11.0` maps cover an [Apple M6](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AppleM6.darwin27/bench-hashes.map.html),
+an [AMD Ryzen 7 9700X](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AMDRyzen79700X8CoreProcessor.linux70043generic/bench-hashes.map.html),
+an [AMD EPYC 9255](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AMDEPYC925524CoreProcessor.linux70043generic/bench-hashes.map.html),
+an [AMD EPYC 7443](https://servil-software-factory.github.io/bench-hashes/benchmark-results/AMDEPYC744324CoreProcessor.linux70042generic/bench-hashes.map.html),
+and an [Intel Xeon Gold 6330](https://servil-software-factory.github.io/bench-hashes/benchmark-results/IntelRXeonRGold6330CPU200GHz.linux70043generic/bench-hashes.map.html);
 [an overview](https://servil-software-factory.github.io/bench-hashes/) sets every machine side by side.
 
 We measure and tune on one memory node. On Linux, the library keeps its
