@@ -360,7 +360,6 @@ src/platform.rs	replace == with != in family	1	same code: every test binary hash
 src/platform.rs	replace == with != in features_of	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in os_saves_avx	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in read_cpu_words	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace == with != in sme2_detect_uncached	1	detection, on a machine with SME2: a wrong no runs NEON (equally correct), a wrong yes is this machine's answer (a machine without SME2 would stop on it)
 src/platform.rs	replace == with != in sme2_reported	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace >= with < in Platform::xof_many	1	speed: moves a threshold between equally correct paths
 src/platform.rs	replace >= with < in wide_cpu	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -440,3 +439,5 @@ src/tree.rs	replace + with * in wide	1	speed: how far past its input a subtree p
 src/tree.rs	replace + with - in wide	1	speed: how far past its input a subtree prefetches (a prefetch never faults)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::children -> Option<[Cv; 2]> with None	1	[cpu lacks sme2] speed: SME2 flat-to-parent shortcut; falls back to the same two-child tree walk (caught on SME2 hosts)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	speed: subtrees then hash on the walk's one-chunk path, the same digests
+src/each.rs	replace finish_each with ()	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/each.rs	replace | with ^ in hash_by_blocks	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits

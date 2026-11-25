@@ -72,3 +72,4 @@ src/pipeline.rs	replace == with != in Pipeline<T, B, P>::acquire_free_group	1	eq
 src/pipeline.rs	replace >= with < in Pipeline<T, B, P>::commit_multi	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the room piece (identical digests)
 src/pipeline.rs	replace >= with < in block_on	1	speed: SPIN_BEFORE_SLEEP governs only how long block_on spins before parking; ThreadPark wakes the thread either way
 src/pipeline.rs	replace | with ^ in pack_arg	3	equivalent: | and ^ agree on non-overlapping bitfields (kind << 61, a << 32, b, ACTION_SME2)
+src/park.rs	replace | with ^ in Park::wake_for	1	equivalent: (next_gen << 32) and next_count (<= u32::MAX) are disjoint 32-bit fields

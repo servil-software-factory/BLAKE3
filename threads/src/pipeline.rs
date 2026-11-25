@@ -5117,6 +5117,9 @@ mod test {
                 let pid = libc::fork();
                 assert!(pid >= 0, "fork failed");
                 if pid == 0 {
+                    // Fail fast via SIGALRM (WIFEXITED == false) instead of
+                    // hanging for nextest's timeout if a mutant removes the fork guard.
+                    libc::alarm(2);
                     let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
                         if which == "group" {
                             let _ = p.acquire_free_group();

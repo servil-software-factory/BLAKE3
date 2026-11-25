@@ -2065,6 +2065,27 @@ pub(crate) mod places {
 
         #[test]
         #[cfg(target_os = "linux")]
+        fn allowed_reads_single_nonzero_cpu_mask() {
+            let status = std::fs::read_to_string("/proc/thread-self/status").unwrap();
+            let list = status.lines().find_map(|line| line.strip_prefix("Cpus_allowed_list:")).unwrap();
+            let Some(&target) = listed(list).iter().find(|&&c| c % 64 != 0) else { return };
+            std::thread::spawn(move || {
+                let mut one: Set = [0; CPUS / 64];
+                one[target / 64] = 1u64 << (target % 64);
+                // Sound: `one` is `size_of::<Set>()` readable bytes on this stack.
+                if unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &one) } == 0 {
+                    assert_eq!(allowed(), Some(vec![target]));
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    assert_eq!(err.raw_os_error(), Some(libc::EPERM), "unexpected sched_setaffinity error: {err}");
+                }
+            })
+            .join()
+            .unwrap();
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
         fn the_pool_stays_on_one_node_without_binding_the_caller() {
             let before = affinity().unwrap();
             let nodes = node_masks();
