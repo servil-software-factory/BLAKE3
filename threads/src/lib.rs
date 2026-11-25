@@ -169,7 +169,7 @@
 //!   [`throughput::update_each`] allocates and frees nothing beyond the
 //!   one-time per-thread SME2 flat-walk scratch noted above if a fresh thread
 //!   hashes a whole 32 KiB+ piece on a 512-bit SME2 CPU.
-//! - **[`throughput::Pipeline`]** pre-allocates its [`Limits`](throughput::Limits) rooms and message slots once at construction and allocates nothing during steady-state message submission, hashing, and reaping on the calling thread or the workers (teardown may grow the global reusable-storage free list when the last holder retires a storage).
+//! - **[`throughput::Pipeline`]** allocates its [`Limits`](throughput::Limits) rooms and message slots at construction, allocates nothing during steady-state message submission, hashing, and reaping on the calling thread or the workers, and frees its per-pipeline storage once the `Pipeline` and any surviving [`Room`](throughput::Room)s drop (returning only its worker-facing action ring, waker slot, and monotonic completion lines to the process free list).
 //! - **[`throughput::hash_multithreaded`]** allocates nothing below 512 KiB,
 //!   where it hashes on the calling thread. Above that length it keeps a list
 //!   of the pieces it hands out, 56 bytes for each piece (most are of up
@@ -316,6 +316,32 @@ mod pipeline_sync {
         };
     }
     pub(crate) use process_static;
+    macro_rules! register_storage {
+        ($st:expr) => {};
+    }
+    pub(crate) use register_storage;
+    macro_rules! retire_storage {
+        ($st:expr) => {{
+            // Sound: caller released the final holder reference; free cleanly.
+            unsafe { drop(Box::from_raw($st)) };
+        }};
+    }
+    pub(crate) use retire_storage;
+
+    #[repr(transparent)]
+    pub(crate) struct SlotRef<T: 'static>(&'static T);
+    impl<T: 'static> SlotRef<T> {
+        #[inline(always)]
+        pub(crate) fn new(r: &'static T) -> Self {
+            Self(r)
+        }
+        #[inline(always)]
+        pub(crate) fn get(&self) -> &'static T {
+            self.0
+        }
+        #[inline(always)]
+        pub(crate) fn poison(&self) {}
+    }
 }
 mod lanes;
 mod park;

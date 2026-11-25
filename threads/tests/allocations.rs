@@ -24,6 +24,7 @@ struct Counts {
     reallocations: usize,
     deallocations: usize,
     bytes: usize,
+    freed_bytes: usize,
 }
 
 impl Counts {
@@ -33,6 +34,7 @@ impl Counts {
             reallocations: self.reallocations - before.reallocations,
             deallocations: self.deallocations - before.deallocations,
             bytes: self.bytes - before.bytes,
+            freed_bytes: self.freed_bytes - before.freed_bytes,
         }
     }
     fn plus(self, other: Self) -> Self {
@@ -41,6 +43,7 @@ impl Counts {
             reallocations: self.reallocations + other.reallocations,
             deallocations: self.deallocations + other.deallocations,
             bytes: self.bytes + other.bytes,
+            freed_bytes: self.freed_bytes + other.freed_bytes,
         }
     }
 }
@@ -50,6 +53,7 @@ struct AtomicCounts {
     reallocations: AtomicUsize,
     deallocations: AtomicUsize,
     bytes: AtomicUsize,
+    freed_bytes: AtomicUsize,
 }
 impl AtomicCounts {
     fn get(&self) -> Counts {
@@ -58,6 +62,7 @@ impl AtomicCounts {
             reallocations: self.reallocations.load(Ordering::Relaxed),
             deallocations: self.deallocations.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
+            freed_bytes: self.freed_bytes.load(Ordering::Relaxed),
         }
     }
     fn add(&self, c: Counts) {
@@ -65,10 +70,16 @@ impl AtomicCounts {
         self.reallocations.fetch_add(c.reallocations, Ordering::Relaxed);
         self.deallocations.fetch_add(c.deallocations, Ordering::Relaxed);
         self.bytes.fetch_add(c.bytes, Ordering::Relaxed);
+        self.freed_bytes.fetch_add(c.freed_bytes, Ordering::Relaxed);
     }
 }
-static WORKER_COUNTS: AtomicCounts =
-    AtomicCounts { allocations: AtomicUsize::new(0), reallocations: AtomicUsize::new(0), deallocations: AtomicUsize::new(0), bytes: AtomicUsize::new(0) };
+static WORKER_COUNTS: AtomicCounts = AtomicCounts {
+    allocations: AtomicUsize::new(0),
+    reallocations: AtomicUsize::new(0),
+    deallocations: AtomicUsize::new(0),
+    bytes: AtomicUsize::new(0),
+    freed_bytes: AtomicUsize::new(0),
+};
 
 unsafe extern "C" {
     fn pthread_self() -> RawPthread;
@@ -90,7 +101,7 @@ fn library_worker() -> bool {
 // Count the calling thread separately from the harness's other threads.
 thread_local! {
     static COUNTS: Cell<Counts> = const { Cell::new(Counts {
-        allocations: 0, reallocations: 0, deallocations: 0, bytes: 0,
+        allocations: 0, reallocations: 0, deallocations: 0, bytes: 0, freed_bytes: 0,
     }) };
 }
 
@@ -131,7 +142,10 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.realloc(ptr, layout, new_size) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        record(|c| c.deallocations += 1);
+        record(|c| {
+            c.deallocations += 1;
+            c.freed_bytes += layout.size();
+        });
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -163,10 +177,13 @@ fn allocated(call: impl FnOnce()) -> usize {
 
 #[test]
 fn allocation_counter_sees_a_callers_allocation() {
-    assert_eq!(counts(|| drop(std::hint::black_box(vec![0u8; 4096]))), Counts { allocations: 1, deallocations: 1, bytes: 4096, ..Counts::default() });
+    assert_eq!(
+        counts(|| drop(std::hint::black_box(vec![0u8; 4096]))),
+        Counts { allocations: 1, deallocations: 1, bytes: 4096, freed_bytes: 4096, ..Counts::default() }
+    );
     let mut buffer = vec![0u8; 8];
     assert_eq!(counts(|| buffer.reserve_exact(4096)), Counts { reallocations: 1, bytes: 4104, ..Counts::default() });
-    assert_eq!(counts(|| drop(buffer)), Counts { deallocations: 1, ..Counts::default() });
+    assert_eq!(counts(|| drop(buffer)), Counts { deallocations: 1, freed_bytes: 4104, ..Counts::default() });
 }
 
 #[test]
@@ -199,7 +216,7 @@ fn worker_counter_sees_an_owned_background_allocation() {
     });
     flags[3].store(true, Ordering::Release);
     worker.join().unwrap();
-    assert_eq!(work, Counts { allocations: 1, deallocations: 1, bytes: 4096, ..Counts::default() });
+    assert_eq!(work, Counts { allocations: 1, deallocations: 1, bytes: 4096, freed_bytes: 4096, ..Counts::default() });
 }
 
 /// Only key bytes vary: caller preparation stays outside the allocator
@@ -665,19 +682,22 @@ fn prepare_after_pooled_job_allocates_nothing() {
     assert_eq!(prep, Counts::default(), "already-sufficient pool scratch must not reallocate after pooled job: {prep:?}");
 }
 
-/// Dropping a quiescent `Pipeline` holding an unreaped pending `Batch` must
-/// deallocate every per-Pipeline allocation (including `RawSlots` backing and
-/// both the pending `Batch` and digest box) with zero leaked allocations.
+/// Dropping `Pipeline`s across varied `Limits.rooms`, with pending batches,
+/// surviving `Room`s, and surviving `Lent`s, must free every per-Pipeline
+/// `PipeStorage` allocation (including `Rooms`, `groups`, `pieces`, `slots`,
+/// and pending `Batch`/digest boxes) cleanly with zero leaked allocations
+/// beyond the reused `PipeSlot`.
 #[test]
-fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
+fn dropping_pipeline_frees_storage_and_pending_batches_across_varied_limits() {
     use blake3_servil::throughput::{Limits, Pipeline, block_on};
     pool_ready(2);
-    // Warm up reusable storage and FREE_STORAGES capacity first.
-    let warm = Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 });
-    drop(warm);
+    // Warm up one reusable PipeSlot (1024-action bucket).
+    drop(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
+
+    // 1. Pending batch + per-Pipeline storage freed completely.
     let mut pipe = None;
     let create = counts(|| {
-        pipe = Some(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 0 }));
+        pipe = Some(Pipeline::<u32, [u8; 64]>::with_owners(Mode::Plain, Limits { messages: 4, rooms: 2 }));
     });
     let mut pipe = pipe.unwrap();
     let msg = block_on(pipe.message(1, None));
@@ -688,8 +708,6 @@ fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
         });
         (c, out.unwrap())
     };
-    // Short batch stays buffered locally in open_group, so Pipeline::drop drops
-    // it quietly and frees both allocations alongside RawSlots.
     pipe.batch(msg, batch, digests);
     let dropped = counts(|| drop(pipe));
     assert_eq!(
@@ -697,4 +715,44 @@ fn dropping_pipeline_frees_raw_slots_and_pending_batches() {
         create.allocations + batch_allocs.allocations,
         "Pipeline::drop must free every per-Pipeline allocation (create={create:?}, batch={batch_allocs:?}, dropped={dropped:?})"
     );
+    assert_eq!(
+        dropped.freed_bytes,
+        create.bytes + batch_allocs.bytes,
+        "Pipeline::drop must free every per-Pipeline byte (create={create:?}, batch={batch_allocs:?}, dropped={dropped:?})"
+    );
+
+    // 2. Varying Limits.rooms (1..=8) reuses the single PipeSlot and frees every
+    //    PipeStorage / Rooms allocation immediately on drop (#465). Completed
+    //    `Lent` guards outliving their `Pipeline` pin zero `PipeStorage` bytes.
+    let loan_buf = [0x3Cu8; 64];
+    let mut surviving_lents = Vec::with_capacity(8);
+    let varied = counts(|| {
+        for rooms in 1..=8 {
+            let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms });
+            let mut m = block_on(p.message(rooms as u32, None));
+            let mut r = block_on(p.room());
+            r.bytes_mut()[..64].fill(rooms as u8);
+            p.commit(&mut m, &mut r, 64);
+            p.end(m);
+            let m_lent = block_on(p.message(100 + rooms as u32, None));
+            // Sound: `loan_buf` outlives every guard in `surviving_lents`.
+            let guard = unsafe { p.lent(m_lent, &loan_buf) };
+            let mut seen = 0;
+            while seen < 2 {
+                match p.next_event() {
+                    Some(_) => seen += 1,
+                    None => block_on(p.ready()),
+                }
+            }
+            // Let `r` and `guard` outlive `p`; dropping `r` frees `PipeStorage`
+            // immediately while `guard` remains alive.
+            drop(p);
+            drop(r);
+            surviving_lents.push(guard);
+        }
+    });
+    drop(surviving_lents);
+    assert!(varied.allocations > 0 && varied.bytes > 0, "expected PipeStorage allocations across varied limits");
+    assert_eq!(varied.deallocations, varied.allocations, "varied Limits.rooms must free every PipeStorage allocation cleanly: {varied:?}");
+    assert_eq!(varied.freed_bytes, varied.bytes, "varied Limits.rooms must free every PipeStorage byte while Lent guards survive: {varied:?}");
 }
