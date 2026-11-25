@@ -304,7 +304,6 @@ mod waker_sync {
 /// beside its own `pipeline_sync`.
 mod pipeline_sync {
     pub use core::cell::UnsafeCell;
-    pub use std::sync::Mutex;
     pub use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     pub use std::thread;
     pub use std::thread_local;

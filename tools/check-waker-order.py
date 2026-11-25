@@ -157,7 +157,7 @@ def main():
     lanes = (src / "lanes.rs").read_text()
     advertisement = re.search(
         r"(SME2_PARKED\.store\(true, Ordering::SeqCst\);\s+"
-        r"core::sync::atomic::fence\(Ordering::SeqCst\);)\s+if sources::visible\(true\)", lanes
+        r"core::sync::atomic::fence\(Ordering::SeqCst\);)\s+if sources::visible\(Some\(reader\), true\)", lanes
     )
     if advertisement is None:
         raise SystemExit("sleep ordering: SME2 must order its announcement before the work re-check")

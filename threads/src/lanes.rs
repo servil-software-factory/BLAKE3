@@ -952,6 +952,11 @@ struct Pool {
     /// Which workers are parked, how one parks without missing work, and
     /// how a publisher wakes one (crate::park, which Shuttle checks).
     park: crate::park::Park,
+    /// Per-worker active `sources` slot (`0..workers` for worker `me`,
+    /// `workers` for the SME2 thread; `sources::NO_SLOT` when idle), so
+    /// `Source::unregister_and_drain` waits until no worker still holds a
+    /// pointer to a dropping `Pipeline`'s storage before freeing it.
+    readers: Box<[OwnLine<AtomicUsize>]>,
 }
 
 /// Create the pool and start its threads in the background, once per
@@ -974,7 +979,9 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
     );
     // With one thread, none beside the caller: no SME2 thread either.
     let sme2 = threads > 1 && cfg!(blake3_sme2) && !matches!(pool_platform(), p if core::mem::discriminant(&p) == core::mem::discriminant(&Platform::detect()));
-    let pool = Pool { callers: AtomicUsize::new(0), threads, sme2, park: crate::park::Park::new(Pool::workers_of(threads), crate::park::FANOUT) };
+    let workers = Pool::workers_of(threads);
+    let readers = (0..workers + usize::from(sme2)).map(|_| OwnLine(AtomicUsize::new(sources::NO_SLOT))).collect();
+    let pool = Pool { callers: AtomicUsize::new(0), threads, sme2, park: crate::park::Park::new(workers, crate::park::FANOUT), readers };
     if threads > 1 {
         // Before any thread starts: a child forked from here on has none
         // of them, and its multithreaded calls stop at `pool` (FORKED).
@@ -2276,7 +2283,7 @@ pub(crate) mod places {
             }
             // At rest and settled: a worker in its place parks, and one
             // not yet in its place would stay up.
-            assert!(!stays(true) && stays(false));
+            assert!(!stays(None, true) && stays(None, false));
             // This thread's place is its CPU's: kept to one CPU of each
             // place in turn, it is in that place and counts its workers.
             for place in 0..2 {
@@ -2608,7 +2615,7 @@ pub(crate) mod places {
                 assert!(now() - started < std::time::Duration::from_secs(5), "the pool settles and rests");
                 std::thread::yield_now();
             }
-            assert!(!stays(true) && stays(false));
+            assert!(!stays(None, true) && stays(None, false));
         }
 
         /// The size classes: by the length's highest bit from 512 KiB to
@@ -2939,10 +2946,10 @@ impl Pool {
         let mut placed = false;
         let mut turn = sources::Turn::default();
         loop {
-            if sources::run_one(&mut turn) {
+            if sources::run_one(Some(me), &mut turn) {
                 continue;
             }
-            if sources::open() && spin_for_work() {
+            if sources::open() && spin_for_work(Some(me)) {
                 continue;
             }
             // With nothing to do, and once: the worker moves to its place,
@@ -2956,7 +2963,7 @@ impl Pool {
             // are settled: it sets its parked bit, then looks, and `settle`
             // stores, then wakes the parked, both SeqCst: one sees the
             // other, as with work.)
-            if self.park.park_unless(me, || stays(placed)) {
+            if self.park.park_unless(me, || stays(Some(me), placed)) {
                 self.park.pay_owed();
             }
         }
@@ -2965,8 +2972,8 @@ impl Pool {
 
 /// Whether a worker about to park stays up: work waits, or the places
 /// are settled and it is not yet in its own.
-fn stays(placed: bool) -> bool {
-    sources::visible(false) || (!placed && places::settled())
+fn stays(reader: Option<usize>, placed: bool) -> bool {
+    sources::visible(reader, false) || (!placed && places::settled())
 }
 
 /// How long a worker that finds nothing keeps looking while a stream is
@@ -2977,12 +2984,12 @@ fn stays(placed: bool) -> bool {
 const SPIN: std::time::Duration = std::time::Duration::from_micros(5);
 
 /// Look for work for up to SPIN: whether some appeared.
-fn spin_for_work() -> bool {
+fn spin_for_work(reader: Option<usize>) -> bool {
     let started = now();
     loop {
         for _ in 0..16 {
             noted(Noted::Poll);
-            if sources::visible(false) {
+            if sources::visible(reader, false) {
                 return true;
             }
             core::hint::spin_loop();
@@ -3020,6 +3027,36 @@ pub(crate) mod sources {
     /// Sources registered at once. A stream or a job that finds none free
     /// is hashed on its own thread.
     const SLOTS: usize = 64;
+
+    /// Sentinel stored in `Pool::readers` when a worker is not borrowing a slot.
+    pub(crate) const NO_SLOT: usize = usize::MAX;
+
+    /// Sentinel stored in `REGISTERED[slot]` while `unregister_and_drain` waits
+    /// for active readers on `slot`: invisible to workers and un-reusable by a
+    /// new registration until every reader has exited.
+    const DRAINING: *mut Source = core::ptr::without_provenance_mut(1);
+
+    #[inline(always)]
+    fn is_live(ptr: *mut Source) -> bool {
+        !ptr.is_null() && ptr != DRAINING
+    }
+
+    struct ReaderGuard<'a>(&'a AtomicUsize);
+
+    impl<'a> ReaderGuard<'a> {
+        #[inline(always)]
+        fn enter(cell: &'a AtomicUsize, slot: usize) -> Self {
+            cell.store(slot, Ordering::SeqCst);
+            Self(cell)
+        }
+    }
+
+    impl Drop for ReaderGuard<'_> {
+        #[inline(always)]
+        fn drop(&mut self) {
+            self.0.store(NO_SLOT, Ordering::Release);
+        }
+    }
 
     static REGISTERED: [AtomicPtr<Source>; SLOTS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; SLOTS];
     static ACTIVE: AtomicU64 = AtomicU64::new(0);
@@ -3102,6 +3139,7 @@ pub(crate) mod sources {
             }
         }
 
+        #[cfg(test)]
         pub(crate) fn actions_len(&self) -> usize {
             self.actions.len()
         }
@@ -3110,8 +3148,20 @@ pub(crate) mod sources {
             !self.actions.is_empty()
         }
 
-        /// Register for the workers: the slot, or None when all are taken.
+        /// Register a `'static` recycled job source for the workers.
         pub(crate) fn register(&'static self) -> Option<usize> {
+            // Sound: `self` is `'static` (recycled, never freed).
+            unsafe { self.register_until_drained() }
+        }
+
+        /// Register a pinned source that will stay alive at its address until
+        /// [`Source::unregister_and_drain`] returns.
+        ///
+        /// # Safety
+        ///
+        /// `*self` must remain valid at its address until the returned slot is
+        /// passed to [`Source::unregister_and_drain`] and that call returns.
+        pub(crate) unsafe fn register_until_drained(&self) -> Option<usize> {
             let ptr = self as *const Source as *mut Source;
             let slot = (0..SLOTS).find(|&i| REGISTERED[i].compare_exchange(core::ptr::null_mut(), ptr, Ordering::SeqCst, Ordering::Relaxed).is_ok())?;
             ACTIVE.fetch_or(1 << slot, Ordering::SeqCst);
@@ -3121,6 +3171,26 @@ pub(crate) mod sources {
         pub(crate) fn unregister(slot: usize) {
             ACTIVE.fetch_and(!(1 << slot), Ordering::SeqCst);
             REGISTERED[slot].store(core::ptr::null_mut(), Ordering::SeqCst);
+        }
+
+        /// Unregister `slot` and wait until every pool worker currently
+        /// borrowing `slot` has exited its reader guard, so the caller can
+        /// soundly free the `Source` and its enclosing `PipeStorage`.
+        ///
+        /// `REGISTERED[slot]` holds `DRAINING` until the drain completes so no
+        /// new registration can reuse `slot` and re-arm readers on it while
+        /// draining.
+        pub(crate) fn unregister_and_drain(slot: usize) {
+            ACTIVE.fetch_and(!(1 << slot), Ordering::SeqCst);
+            REGISTERED[slot].store(DRAINING, Ordering::SeqCst);
+            if let Some(pool) = POOL.get() {
+                for reader in &pool.readers {
+                    while reader.0.load(Ordering::SeqCst) == slot {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+            REGISTERED[slot].store(core::ptr::null_mut(), Ordering::Release);
         }
 
         /// Publish one or more pipeline actions in order with one Release
@@ -3281,7 +3351,7 @@ pub(crate) mod sources {
         /// Whether `slot` holds a source's pointer (tests).
         #[cfg(test)]
         pub(crate) fn registered(slot: usize) -> bool {
-            !REGISTERED[slot].load(Ordering::SeqCst).is_null()
+            is_live(REGISTERED[slot].load(Ordering::SeqCst))
         }
 
         /// Count `n` of the caller's job's pieces finished (their outputs
@@ -3366,20 +3436,24 @@ pub(crate) mod sources {
     }
 
     /// The first registered source for which `f` says yes.
-    fn find(f: impl FnMut(&'static Source) -> bool) -> bool {
-        find_from(0, f).is_some()
+    fn find(reader: Option<usize>, f: impl FnMut(&Source) -> bool) -> bool {
+        find_from(reader, 0, f).is_some()
     }
 
     /// The slot of the first registered source for which `f` says yes, in
     /// a walk of the slots from `start` up and then of those below it.
-    fn find_from(start: usize, mut f: impl FnMut(&'static Source) -> bool) -> Option<usize> {
+    fn find_from(reader: Option<usize>, start: usize, mut f: impl FnMut(&Source) -> bool) -> Option<usize> {
         let mut active = ACTIVE.load(Ordering::SeqCst).rotate_right(u32::from(start.to_le_bytes()[0]));
         while active != 0 {
             let slot = (active.trailing_zeros() as usize + start) % SLOTS;
             active &= active - 1;
-            let ptr = REGISTERED[slot].load(Ordering::Acquire);
-            // Sound: sources are never freed (they are recycled).
-            if !ptr.is_null() && f(unsafe { &*ptr }) {
+            let _guard = reader.map(|r| ReaderGuard::enter(&pool().readers[r].0, slot));
+            let ptr = REGISTERED[slot].load(Ordering::SeqCst);
+            // Sound: while `_guard` holds `slot`, `Source::unregister_and_drain`
+            // cannot return until `_guard` drops (and `Source::unregister` is
+            // used only for never-freed `job_source`s; `reader == None` runs
+            // only in single-threaded unit tests).
+            if is_live(ptr) && f(unsafe { &*ptr }) {
                 return Some(slot);
             }
         }
@@ -3421,16 +3495,16 @@ pub(crate) mod sources {
     /// and goes round. One source alone is served as before, and several
     /// each get a share of every worker that their slot does not decide
     /// (the same message then took about 1 ms).
-    pub(crate) fn run_one(turn: &mut Turn) -> bool {
-        run_one_from(turn, serve)
+    pub(crate) fn run_one(reader: Option<usize>, turn: &mut Turn) -> bool {
+        run_one_from(reader, turn, serve)
     }
 
     /// [`run_one`]'s walk, with `serve` what is done with the item taken
     /// (the test's way in: a recording `serve`).
-    fn run_one_from(turn: &mut Turn, mut serve: impl FnMut(&'static Source, Item)) -> bool {
+    fn run_one_from(reader: Option<usize>, turn: &mut Turn, mut serve: impl FnMut(&Source, Item)) -> bool {
         let in_turn = turn.taken >= TURN;
         let start = if in_turn { turn.cursor as usize } else { 0 };
-        let taken_from = find_from(start, |source| {
+        let taken_from = find_from(reader, start, |source| {
             let Some(item) = source.take() else { return false };
             serve(source, item);
             true
@@ -3461,7 +3535,7 @@ pub(crate) mod sources {
 
     /// Hash `item` of `source` on this thread, waking the next worker first
     /// when two or more wait and one is parked.
-    fn serve(source: &'static Source, item: Item) {
+    fn serve(source: &Source, item: Item) {
         if source.waiting() >= 2 {
             let near = match item {
                 Item::Action { .. } => source.front_action_near(),
@@ -3486,19 +3560,19 @@ pub(crate) mod sources {
         }
     }
 
-    /// An item from any stream or pipeline (the SME2 thread takes these alone).
-    pub(crate) fn take_stream_item() -> Option<Item> {
-        let mut found = None;
-        find(|source| {
-            found = if source.carries_tasks() { source.take() } else { None };
-            found.is_some()
-        });
-        found
+    /// Take and run one item from any stream or pipeline while holding the
+    /// slot's reader guard (the SME2 thread calls this).
+    pub(crate) fn run_stream_item(reader: Option<usize>, mut run: impl FnMut(Item)) -> bool {
+        find(reader, |source| {
+            let Some(item) = (if source.carries_tasks() { source.take() } else { None }) else { return false };
+            run(item);
+            true
+        })
     }
 
     /// Whether any source has work waiting (`streams`: any stream or pipeline).
-    pub(crate) fn visible(streams: bool) -> bool {
-        find(|source| (!streams || source.carries_tasks()) && source.waiting() > 0)
+    pub(crate) fn visible(reader: Option<usize>, streams: bool) -> bool {
+        find(reader, |source| (!streams || source.carries_tasks()) && source.waiting() > 0)
     }
 
     #[cfg(test)]
@@ -3512,9 +3586,9 @@ pub(crate) mod sources {
         fn test_unregister_gives_the_slot_back() {
             let source: &'static Source = &*Box::leak(Box::new(Source::new()));
             let slot = source.register().expect("a free slot");
-            assert!(find(|t| core::ptr::eq(t, source)), "a registered source is reached");
+            assert!(find(None, |t| core::ptr::eq(t, source)), "a registered source is reached");
             Source::unregister(slot);
-            assert!(!find(|t| core::ptr::eq(t, source)), "an unregistered source is still reached");
+            assert!(!find(None, |t| core::ptr::eq(t, source)), "an unregistered source is still reached");
         }
 
         #[test]
@@ -3524,9 +3598,60 @@ pub(crate) mod sources {
             let source: &'static Source = &*Box::leak(Box::new(Source::with_actions(4)));
             let slot = source.register().expect("a free slot");
             unsafe { source.publish_actions(noop, core::ptr::null(), &[77], false) };
-            let item = take_stream_item();
+            let mut got = None;
+            assert!(run_stream_item(None, |item| got = Some(item)));
             Source::unregister(slot);
-            assert!(matches!(item, Some(Item::Action { arg: 77, .. })));
+            assert!(matches!(got, Some(Item::Action { arg: 77, .. })));
+        }
+
+        /// `unregister_and_drain` holds `REGISTERED[slot] == DRAINING` and
+        /// waits until an active pool worker exits its `ReaderGuard` before
+        /// freeing the slot and returning.
+        #[test]
+        fn test_unregister_and_drain_waits_for_active_reader() {
+            crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+            struct State {
+                entered: std::sync::Barrier,
+                release: std::sync::Barrier,
+            }
+            unsafe fn hold(ctx: *const (), arg: u64, _platform: Platform) {
+                if arg == 0 {
+                    // Sound: `state` stays alive until `drainer` finishes after `release`.
+                    let st = unsafe { &*(ctx as *const State) };
+                    st.entered.wait();
+                    st.release.wait();
+                }
+            }
+            let state = Box::new(State { entered: std::sync::Barrier::new(2), release: std::sync::Barrier::new(2) });
+            let source = Box::new(Source::with_actions(4));
+            // Sound: `source` stays pinned at its heap address until `unregister_and_drain` returns.
+            let slot = unsafe { source.register_until_drained() }.expect("a free slot");
+            let ctx = (&*state as *const State) as *const ();
+            // Publish two items so `publish_actions` wakes a worker immediately.
+            // Sound: `hold` and `ctx` remain valid until `unregister_and_drain` returns.
+            unsafe { source.publish_actions(hold, ctx, &[0, 1], false) };
+            state.entered.wait();
+            let done = std::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+            let done_t = std::sync::Arc::clone(&done);
+            let drainer = std::thread::spawn(move || {
+                Source::unregister_and_drain(slot);
+                done_t.store(true, Ordering::SeqCst);
+            });
+            while REGISTERED[slot].load(Ordering::SeqCst) != DRAINING {
+                std::thread::yield_now();
+            }
+            assert!(!Source::registered(slot), "slot invisible to workers while draining");
+            // Give `drainer` a turn to observe the active `ReaderGuard` and confirm it does not exit early.
+            for _ in 0..64 {
+                std::thread::yield_now();
+            }
+            assert!(!done.load(Ordering::SeqCst), "unregister_and_drain must wait while worker executes action");
+            state.release.wait();
+            drainer.join().unwrap();
+            assert!(done.load(Ordering::SeqCst));
+            assert!(REGISTERED[slot].load(Ordering::SeqCst).is_null(), "slot freed after drain completes");
+            drop(source);
+            drop(state);
         }
 
         /// What a worker looks for before it parks: a registered source
@@ -3542,16 +3667,16 @@ pub(crate) mod sources {
             let job: &'static Source = &*Box::leak(Box::new(Source::new()));
             let stream: &'static Source = &*Box::leak(Box::new(Source::with_actions(4)));
             let slots = [job.register().expect("a free slot"), stream.register().expect("a free slot")];
-            assert!(!visible(false) && !visible(true), "nothing published: nothing visible");
-            assert!(!stays(true) && !stays(false), "no work, and no places settled (no pool here): a worker parks");
+            assert!(!visible(None, false) && !visible(None, true), "nothing published: nothing visible");
+            assert!(!stays(None, true) && !stays(None, false), "no work, and no places settled (no pool here): a worker parks");
             job.finish.published.store(1, Ordering::SeqCst);
-            assert!(visible(false), "a job's piece waits: a worker sees it");
-            assert!(stays(true) && stays(false), "work waits: a worker stays up, in its place or not");
-            assert!(!visible(true), "the SME2 thread looks at streams alone");
+            assert!(visible(None, false), "a job's piece waits: a worker sees it");
+            assert!(stays(None, true) && stays(None, false), "work waits: a worker stays up, in its place or not");
+            assert!(!visible(None, true), "the SME2 thread looks at streams alone");
             job.claimed.store(1, Ordering::SeqCst);
-            assert!(!visible(false), "the piece was claimed: nothing waits");
+            assert!(!visible(None, false), "the piece was claimed: nothing waits");
             stream.finish.published.store(1, Ordering::SeqCst);
-            assert!(visible(false) && visible(true), "a stream's task waits: both see it");
+            assert!(visible(None, false) && visible(None, true), "a stream's task waits: both see it");
             for slot in slots {
                 Source::unregister(slot);
             }
@@ -3685,9 +3810,9 @@ pub(crate) mod sources {
             let sources: Vec<&'static Source> = (0..3).map(|_| &*Box::leak(Box::new(Source::new()))).collect();
             let slots: Vec<usize> = sources.iter().map(|s| s.register().expect("a free slot")).collect();
             Source::unregister(slots[1]);
-            assert!(!find(|t| core::ptr::eq(t, sources[1])), "the unregistered source is still reached");
+            assert!(!find(None, |t| core::ptr::eq(t, sources[1])), "the unregistered source is still reached");
             for &i in &[0, 2] {
-                assert!(find(|t| core::ptr::eq(t, sources[i])), "source {i} lost its registration with another's");
+                assert!(find(None, |t| core::ptr::eq(t, sources[i])), "source {i} lost its registration with another's");
             }
             for &i in &[0, 2] {
                 Source::unregister(slots[i]);
@@ -3726,7 +3851,7 @@ pub(crate) mod sources {
             let mut served = Vec::new();
             for _ in 0..7 * (TURN as usize + 1) {
                 refill(&[3, 5, 63]);
-                assert!(run_one_from(&mut turn, |source, _| served.push(slot_of(source))));
+                assert!(run_one_from(None, &mut turn, |source, _| served.push(slot_of(source))));
             }
             let in_turn: Vec<usize> = served.iter().copied().skip(TURN as usize).step_by(TURN as usize + 1).collect();
             assert_eq!(in_turn, [3, 5, 63, 3, 5, 63, 3]);
@@ -3737,7 +3862,7 @@ pub(crate) mod sources {
             let all: Vec<usize> = (0..SLOTS).collect();
             for _ in 0..64 * (TURN as usize + 1) {
                 refill(&all);
-                assert!(run_one_from(&mut turn, |source, _| served.push(slot_of(source))));
+                assert!(run_one_from(None, &mut turn, |source, _| served.push(slot_of(source))));
             }
             let in_turn: Vec<usize> = served.iter().copied().skip(TURN as usize).step_by(TURN as usize + 1).collect();
             assert_eq!(in_turn, (4..64).chain(0..4).collect::<Vec<_>>());
@@ -3750,18 +3875,18 @@ pub(crate) mod sources {
                 s.claimed.store(s.finish.published.load(Ordering::SeqCst), Ordering::SeqCst);
             }
             turn.taken = TURN;
-            assert!(!run_one_from(&mut turn, |_, _| panic!("nothing to serve")));
+            assert!(!run_one_from(None, &mut turn, |_, _| panic!("nothing to serve")));
             sources[0].finish.published.fetch_add(1, Ordering::SeqCst);
             sources[4].finish.published.fetch_add(1, Ordering::SeqCst);
             assert!(
-                run_one_from(&mut turn, |source, _| assert_eq!(slot_of(source), 4)),
+                run_one_from(None, &mut turn, |source, _| assert_eq!(slot_of(source), 4)),
                 "empty walk must preserve due turn and cursor across competing nonempty sources"
             );
             // Drain slot 0, then verify a due turn still wraps below its cursor.
-            assert!(run_one_from(&mut turn, |source, _| assert_eq!(slot_of(source), 0)));
+            assert!(run_one_from(None, &mut turn, |source, _| assert_eq!(slot_of(source), 0)));
             turn.taken = TURN;
             sources[0].finish.published.fetch_add(1, Ordering::SeqCst);
-            assert!(run_one_from(&mut turn, |source, _| assert_eq!(slot_of(source), 0)), "a due turn still finds work below its cursor");
+            assert!(run_one_from(None, &mut turn, |source, _| assert_eq!(slot_of(source), 0)), "a due turn still finds work below its cursor");
             for slot in slots {
                 Source::unregister(slot);
             }
@@ -3854,7 +3979,7 @@ pub(crate) mod sources {
             }
             let mut served = Vec::new();
             let mut turn = Turn::default();
-            while run_one_from(&mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
+            while run_one_from(None, &mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
             let (a, b) = (slots[0], slots[1]);
             assert_eq!(served, [a, a, a, b, b, b], "the lower slot whole, then the higher");
             // An item published to the lower slot meanwhile is served before
@@ -3862,7 +3987,7 @@ pub(crate) mod sources {
             sources[0].finish.published.store(4, Ordering::SeqCst);
             sources[1].finish.published.store(5, Ordering::SeqCst);
             served.clear();
-            while run_one_from(&mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
+            while run_one_from(None, &mut turn, |source, _| served.push(slots[sources.iter().position(|s| core::ptr::eq(*s, source)).unwrap()])) {}
             assert_eq!(served, [a, b, b]);
             // A lower source that is never empty (it streams) does not keep
             // the higher ones waiting for ever: after every TURN items the
@@ -3880,7 +4005,7 @@ pub(crate) mod sources {
             let mut turn = Turn::default();
             served.clear();
             for _ in 0..3 * (TURN as usize + 1) {
-                assert!(run_one_from(&mut turn, |source, _| served.push(slot_of(source))));
+                assert!(run_one_from(None, &mut turn, |source, _| served.push(slot_of(source))));
             }
             let lowest = a.min(b).min(c);
             let mut in_turn = Vec::new();
@@ -3910,7 +4035,7 @@ pub(crate) mod sources {
                 s.register().expect("a free slot");
             }
             for (i, s) in sources.iter().enumerate() {
-                assert!(find(|t| core::ptr::eq(t, *s)), "find reaches registered source {i} of 3");
+                assert!(find(None, |t| core::ptr::eq(t, *s)), "find reaches registered source {i} of 3");
             }
         }
     }
@@ -4023,28 +4148,28 @@ fn sme2_serve() -> ! {
     // first task on this worker allocates nothing.
     #[cfg(blake3_sme2)]
     blake3_servil_core::thread_support::prepare_sme2_scratch();
+    let reader = pool().workers();
     loop {
-        if let Some(item) = sources::take_stream_item() {
-            match item {
-                sources::Item::Action { run, context, arg } => {
-                    // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
-                    let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
-                    if arg & sources::ACTION_SME2 == 0 {
-                        unsafe { f(context as *const (), arg, pool_platform()) };
-                    } else {
-                        let turn = Sme2Turn::take(Platform::detect(), true);
-                        unsafe { f(context as *const (), arg & !sources::ACTION_SME2, turn.platform()) };
-                        drop(turn);
-                    }
+        if sources::run_stream_item(Some(reader), |item| match item {
+            sources::Item::Action { run, context, arg } => {
+                // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
+                let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
+                if arg & sources::ACTION_SME2 == 0 {
+                    unsafe { f(context as *const (), arg, pool_platform()) };
+                } else {
+                    let turn = Sme2Turn::take(Platform::detect(), true);
+                    unsafe { f(context as *const (), arg & !sources::ACTION_SME2, turn.platform()) };
+                    drop(turn);
                 }
-                sources::Item::Pieces(..) => unreachable!("the SME2 thread takes stream and pipeline items alone"),
             }
+            sources::Item::Pieces(..) => unreachable!("the SME2 thread takes stream and pipeline items alone"),
+        }) {
             continue;
         }
         // Park as a worker does: the flag, one more look, the token.
         SME2_PARKED.store(true, Ordering::SeqCst);
         core::sync::atomic::fence(Ordering::SeqCst);
-        if sources::visible(true) {
+        if sources::visible(Some(reader), true) {
             SME2_PARKED.store(false, Ordering::SeqCst);
             continue;
         }
@@ -4649,17 +4774,17 @@ mod test {
         let _ = pool();
         counts();
         clock(1000, 1);
-        assert!(!spin_for_work(), "no stream open: no work appears");
+        assert!(!spin_for_work(None), "no stream open: no work appears");
         assert_eq!(counts()[Noted::Poll as usize], 16, "no stream open: one look and park");
         sources::opened();
         clock(1000, 1);
-        assert!(!spin_for_work());
+        assert!(!spin_for_work(None));
         assert_eq!(counts()[Noted::Poll as usize], 80, "a stream open: looks until 5 us have passed");
         clock(1000, 5);
-        assert!(!spin_for_work());
+        assert!(!spin_for_work(None));
         assert_eq!(counts()[Noted::Poll as usize], 16, "5 us passed at the first check: one look");
         clock(1000, 4);
-        assert!(!spin_for_work());
+        assert!(!spin_for_work(None));
         assert_eq!(counts()[Noted::Poll as usize], 32, "4 us, then 8: two looks");
         sources::closed();
         TEST_CLOCK.with(|c| c.set(None));
