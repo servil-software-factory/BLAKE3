@@ -296,17 +296,18 @@ fn test_the_paths_chosen_exactly() {
     {
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 1, BLOCK_LEN + 1), None);
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 1, BLOCK_LEN + 1), None);
-        // 2 whole chunks -> 4-lane horizontal zmm (all partials on wide Zen 5; > 2 blocks on Ice Lake).
-        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 2, 1), Some(4));
+        // 2 whole chunks -> 4-lane horizontal zmm (> 4 blocks so cold-cache 2304 B stays fast).
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 2, 4 * BLOCK_LEN), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 2, 4 * BLOCK_LEN + 1), Some(4));
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 2, 4 * BLOCK_LEN), None);
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 2, 4 * BLOCK_LEN + 1), Some(4));
         // 3 whole chunks -> 4-lane horizontal zmm (all partials on wide Zen 5; > 1 block on Ice Lake).
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 3, 1), Some(4));
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 3, BLOCK_LEN), None);
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 3, BLOCK_LEN + 1), Some(4));
-        // 4 whole chunks -> 8-lane ymm (> 2 blocks on wide Zen 5; > 13 blocks on Ice Lake).
-        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 4, 2 * BLOCK_LEN), None);
-        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 4, 2 * BLOCK_LEN + 1), Some(8));
+        // 4 whole chunks -> 8-lane ymm (> 13 blocks so cold-cache 4470 B stays fast).
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 4, 13 * BLOCK_LEN), None);
+        assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 4, 13 * BLOCK_LEN + 1), Some(8));
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 4, 13 * BLOCK_LEN), None);
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 4, 13 * BLOCK_LEN + 1), Some(8));
         // 5..=7 whole chunks -> 8-lane ymm unconditionally.

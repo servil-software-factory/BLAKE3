@@ -360,7 +360,6 @@ src/platform.rs	replace == with != in family	1	same code: every test binary hash
 src/platform.rs	replace == with != in features_of	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in os_saves_avx	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in read_cpu_words	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace == with != in sme2_detect_uncached	1	detection, on a machine with SME2: a wrong no runs NEON (equally correct), a wrong yes is this machine's answer (a machine without SME2 would stop on it)
 src/platform.rs	replace == with != in sme2_reported	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace >= with < in Platform::xof_many	1	speed: moves a threshold between equally correct paths
 src/platform.rs	replace >= with < in wide_cpu	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

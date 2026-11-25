@@ -121,12 +121,11 @@ fn hash_chunks_with_partial<const W: usize>(
 /// - 3 whole chunks in 4 lanes on SSE4.1/AVX2, and on AVX-512 horizontal zmm
 ///   (all partials on wide AVX-512 such as Zen 5, > 1 block on non-wide AVX-512
 ///   such as Ice Lake and Zen 4);
-/// - 2 whole chunks in 4 lanes on AVX-512 horizontal zmm (all partials on wide
-///   AVX-512, > 4 blocks on non-wide AVX-512 so Zen 4's 2177..2304 B stay
-///   regression-free);
+/// - 2 whole chunks in 4 lanes on AVX-512 horizontal zmm (> 4 blocks so
+///   cold-cache 2177..2304 B on Zen 4 and Ryzen 9700X stay regression-free);
 /// - 6 or 7 whole chunks (or 5 with > 5 partial blocks) in 8 lanes on AVX2;
-///   5..=7 whole chunks (or 4 past 2 blocks on wide AVX-512 / 13 blocks on
-///   non-wide AVX-512) in 8 lanes on AVX-512;
+///   5..=7 whole chunks (or 4 past 13 blocks so cold-cache 4470 B on Ryzen
+///   9700X and Ice Lake stays regression-free) in 8 lanes on AVX-512;
 /// - 9..=15 whole chunks (all partials on wide AVX-512, > 9 blocks on non-wide
 ///   AVX-512) and 8 whole chunks (> 2 blocks on wide AVX-512) in 16 lanes on
 ///   AVX-512.
@@ -147,10 +146,10 @@ pub(crate) fn spare_lane_for(platform: Platform, wide: bool, whole: usize, parti
         (Platform::SSE41 | Platform::AVX2, 3) => Some(4),
         (Platform::AVX2, 6..=7) => Some(8),
         (Platform::AVX2, 5) if partial > 5 * BLOCK_LEN => Some(8),
-        (Platform::AVX512, 2) if wide || partial > 4 * BLOCK_LEN => Some(4),
+        (Platform::AVX512, 2) if partial > 4 * BLOCK_LEN => Some(4),
         (Platform::AVX512, 3) if wide || partial > BLOCK_LEN => Some(4),
         (Platform::AVX512, 5..=7) => Some(8),
-        (Platform::AVX512, 4) if partial > (if wide { 2 } else { 13 }) * BLOCK_LEN => Some(8),
+        (Platform::AVX512, 4) if partial > 13 * BLOCK_LEN => Some(8),
         (Platform::AVX512, 9..=15) if wide || partial > 9 * BLOCK_LEN => Some(16),
         (Platform::AVX512, 8) if wide && partial > 2 * BLOCK_LEN => Some(16),
         _ => None,

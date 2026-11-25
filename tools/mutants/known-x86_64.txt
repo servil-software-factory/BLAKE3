@@ -256,7 +256,6 @@ src/platform.rs	replace < with > in Platform::xof_many	1	same code: every test b
 src/platform.rs	replace < with > in prefetch_code	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace << with >> in sme2_reported	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace <impl Drop for Sme2Turn>::drop with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/platform.rs	replace == with != in sme2_detect_uncached	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in sme2_reported	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace >= with < in Platform::xof_many	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace Platform::avx512 -> Option<Self> with None	1	[cpu lacks avx512f avx512vl] equivalent: this CPU lacks AVX-512, so the forced None is its own answer (a CPU with it catches it)
@@ -325,3 +324,17 @@ src/tree.rs	replace + with * in wide	1	SME2 only: the argument is `ahead`, consu
 src/tree.rs	replace + with - in wide	1	SME2 only: the argument is `ahead`, consumed by the SME2 subtree path; on x86 subtree() returns None and serial calls pass 0
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::children -> Option<[Cv; 2]> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
+src/each.rs	replace >= with < in finalize_each	2	same code: #[cfg(blake3_neon)] branch is not compiled on x86-64
+src/each.rs	replace finish_each with ()	1	same code: #[cfg(not(any(blake3_neon, blake3_sse41_ffi)))] fallback is not compiled on x86-64
+src/each.rs	replace | with ^ in hash_by_blocks	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
+src/ffi_partial.rs	replace | with ^ in finalize_each	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
+src/many.rs	replace noted_lanes with ()	1	test-only hook: #[cfg(test)] instrumentation recording FOUR_AT_A_TIME_LANES
+src/many.rs	replace | with ^ in hash_four_at_a_time	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
+src/platform.rs	replace && with || in sme2_allowed	1	same code: #[cfg(blake3_sme2)] detection helper is not compiled on x86-64
+src/platform.rs	replace == with != in sme2_svl_ok	1	same code: #[cfg(blake3_sme2)] detection helper is not compiled on x86-64
+src/platform.rs	replace sme2_allowed -> bool with false	1	same code: #[cfg(blake3_sme2)] detection helper is not compiled on x86-64
+src/platform.rs	replace sme2_allowed -> bool with true	1	same code: #[cfg(blake3_sme2)] detection helper is not compiled on x86-64
+src/platform.rs	replace sme2_svl_ok -> bool with false	1	same code: #[cfg(blake3_sme2)] detection helper is not compiled on x86-64
+src/platform.rs	replace sme2_svl_ok -> bool with true	1	same code: #[cfg(blake3_sme2)] detection helper is not compiled on x86-64
+src/self_test.rs	replace == with != in ensure_slow	1	same code: #[cfg(not(feature = "std"))] spin loop is not compiled under default std tests
+src/throughput.rs	replace >= with < in TreeHasher::parent_cvs	1	same code: SME2 turn_if hint is a no-op on x86-64

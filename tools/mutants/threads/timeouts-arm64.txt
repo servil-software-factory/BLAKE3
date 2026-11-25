@@ -43,3 +43,8 @@ src/pipeline.rs	replace Pipeline<T, B, P>::front_uses_open_group -> bool with fa
 src/pipeline.rs	replace Pipeline<T, B, P>::try_take_room -> Option<Room> with None	1	hang: poll_room never acquires a free room and parks forever
 src/lanes.rs	replace &= with |= in sources::find_from	1	find_from's loop (find's, before the turn) never empties `active`: even the single-threaded test_find_reaches_every_registered_source never returns (gate16's logs)
 src/lanes.rs	replace - with / in sources::find_from	1	find_from's loop (find's, before the turn) never empties `active`: even the single-threaded test_find_reaches_every_registered_source never returns (gate16's logs)
+src/lanes.rs	replace > with < in initialize	1	hang: skips pthread_atfork registration when workers > 0, so a forked child blocks waiting on vanished parent workers
+src/lanes.rs	replace > with == in initialize	1	hang: skips pthread_atfork registration when workers > 1, so a forked child blocks waiting on vanished parent workers
+src/lanes.rs	replace mark_forked with ()	1	hang: leaves FORKED false in a forked child, so multithreaded calls wait forever on vanished parent workers
+src/lanes.rs	replace match guard FORKED.load(Ordering::Relaxed) with false in pool	1	hang: bypasses the forked-child stop check, so the child blocks forever waiting on vanished parent workers
+src/lanes.rs	replace require with ()	1	hang: bypasses the forked-child stop check in Pipeline wait loops, so the child blocks forever on vanished parent workers
