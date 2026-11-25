@@ -1241,7 +1241,9 @@ pub(crate) mod places {
     }
 
     std::thread_local! {
-        static LEARNED: core::cell::Cell<[[Learned; CLASSES]; 4]> = const { core::cell::Cell::new([[Learned { job: 0, rate: [0; 2], round: None, longer: 0 }; CLASSES]; 4]) };
+        static LEARNED: [[core::cell::Cell<Learned>; CLASSES]; 4] = const {
+            [const { [const { core::cell::Cell::new(Learned { job: 0, rate: [0; 2], round: None, longer: 0 }) }; CLASSES] }; 4]
+        };
         /// The thread's last learning job: its kind and class, and when it ended.
         static LAST: core::cell::Cell<Option<(Kind, usize, std::time::Instant)>> = const { core::cell::Cell::new(None) };
     }
@@ -1293,7 +1295,7 @@ pub(crate) mod places {
             if len >= FAR_LEN {
                 return Plan { threads: all, in_flight: 1, learning: None };
             }
-            let reach = LEARNED.with(|l| l.get()[kind as usize][class(len)].choose());
+            let reach = LEARNED.with(|l| l[kind as usize][class(len)].get().choose());
             let threads = if reach == Reach::Near { (near + 1).min(all) } else { all };
             Plan { threads, in_flight: 1, learning: Some((kind, len, reach, now())) }
         }
@@ -1307,17 +1309,17 @@ pub(crate) mod places {
         pub(crate) fn done(&self) {
             if let Some((kind, len, reach, started)) = self.learning {
                 let ended = now();
+                let cls = class(len);
                 let nanos = cost(
                     ended - started,
-                    LAST.with(|l| l.replace(Some((kind, class(len), ended))))
-                        .filter(|&(k, c, _)| k == kind && c == class(len))
-                        .map(|(_, _, last)| ended - last),
+                    LAST.with(|l| l.replace(Some((kind, cls, ended)))).filter(|&(k, c, _)| k == kind && c == cls).map(|(_, _, last)| ended - last),
                     self.in_flight.max(1),
                 );
                 LEARNED.with(|l| {
-                    let mut all = l.get();
-                    all[kind as usize][class(len)].record_for(reach, nanos, len);
-                    l.set(all);
+                    let cell = &l[kind as usize][cls];
+                    let mut cur = cell.get();
+                    cur.record_for(reach, nanos, len);
+                    cell.set(cur);
                 });
             }
         }
@@ -2474,7 +2476,8 @@ pub(crate) mod places {
             let base = now();
             TEST_CLOCK.with(|c| c.set(Some((base, std::time::Duration::ZERO, std::time::Duration::from_millis(1)))));
             let len = 3 << 20;
-            let learned = |kind: Kind, len: usize| LEARNED.with(|l| l.get()[kind as usize][class(len)]);
+            let learned = |kind: Kind, len: usize| LEARNED.with(|l| l[kind as usize][class(len)].get());
+            let snapshot_learned = || LEARNED.with(|l| l.each_ref().map(|row| row.each_ref().map(|c| c.get())));
             for job in 0..2 * TRIAL {
                 let plan = Plan::new(Kind::Tree, len, all);
                 let want_near = job >= TRIAL;
@@ -2504,20 +2507,16 @@ pub(crate) mod places {
             assert_eq!(learned(Kind::Tree, len).rate, [325, 651]);
             let mut other_class = learned(Kind::Tree, len);
             other_class.rate[Reach::All as usize] = 651;
-            LEARNED.with(|l| {
-                let mut all = l.get();
-                all[Kind::Tree as usize][class(len)] = other_class;
-                l.set(all);
-            });
+            LEARNED.with(|l| l[Kind::Tree as usize][class(len)].set(other_class));
             Plan::new(Kind::Tree, len / 4, all).done();
             Plan::new(Kind::Tree, len, all).done();
             assert_eq!(learned(Kind::Tree, len).rate, [325, 651]);
             // From FAR_LEN up: every thread's, and nothing learned.
-            let before = LEARNED.with(|l| l.get());
+            let before = snapshot_learned();
             let plan = Plan::new(Kind::Tree, FAR_LEN, all);
             assert_eq!((plan.threads, plan.near(), plan.learning.is_none()), (all, false, true));
             plan.done();
-            assert_eq!(LEARNED.with(|l| l.get()), before);
+            assert_eq!(snapshot_learned(), before);
             assert!(Plan::new(Kind::Tree, FAR_LEN - 1, all).learning.is_some());
             // Split Pipeline::batch learns its own kind (Kind::PipelineBatch).
             for job in 0..2 * TRIAL {
@@ -3340,6 +3339,23 @@ pub(crate) mod sources {
             let c = self.claimed.load(Ordering::Acquire);
             let p = self.finish.published.load(Ordering::Acquire);
             c < p && self.actions[c % self.actions.len()].near.load(Ordering::Relaxed)
+        }
+
+        /// Number of action tickets published to this source so far.
+        #[cfg(test)]
+        pub(crate) fn published_count(&self) -> usize {
+            self.finish.published.load(Ordering::Acquire)
+        }
+
+        /// The `near` wake hints written into every action ticket published in
+        /// `from..self.published_count()` (head through tail), independent of
+        /// whether workers already claimed them.
+        #[cfg(test)]
+        pub(crate) fn published_nears(&self, from: usize) -> Vec<bool> {
+            let p = self.finish.published.load(Ordering::Acquire);
+            let cap = self.actions.len();
+            assert!(p >= from && p - from <= cap, "published action range exceeds ring capacity");
+            (from..p).map(|idx| self.actions[idx % cap].near.load(Ordering::Relaxed)).collect()
         }
 
         /// Run one unclaimed action from this source on the calling thread,
