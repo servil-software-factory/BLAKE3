@@ -50,7 +50,9 @@ class WorkerTests(unittest.TestCase):
             # This suite must also finish and reap its child on a broken build.
             try:
                 os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
+                # macOS/Darwin may raise EPERM when the child's process group
+                # has already exited before cleanup runs (#557).
                 pass
             child.communicate()
 

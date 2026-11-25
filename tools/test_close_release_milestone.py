@@ -73,6 +73,71 @@ class CloseReleaseMilestoneTests(unittest.TestCase):
         self.assertIn("nothing to close", out.getvalue())
         self.assertEqual(calls, ["GET"])
 
+    def test_paginates_past_100_open_milestones_and_closes_on_page_3(self):
+        milestones = [
+            {"number": i, "title": f"0.0.{i}", "open_issues": 1, "closed_issues": 0}
+            for i in range(1, 201)
+        ] + [{"number": 201, "title": "0.11.0", "open_issues": 0, "closed_issues": 39}]
+        pages_requested = []
+        patched = []
+
+        def fake_request(method, url, token, payload=None):
+            if method == "GET":
+                page = int(url.split("page=")[-1])
+                pages_requested.append(page)
+                start = (page - 1) * 100
+                return milestones[start : start + 100]
+            patched.append((url, payload))
+            return {"number": 201, "state": "closed"}
+
+        out = io.StringIO()
+        status = mod.close_completed_milestone("v0.11.0+deadbeef", "owner/repo", "tok", request=fake_request, out=out)
+        self.assertEqual(status, "closed")
+        self.assertEqual(pages_requested, [1, 2, 3])
+        self.assertEqual(len(patched), 1)
+        self.assertTrue(patched[0][0].endswith("/repos/owner/repo/milestones/201"))
+        self.assertEqual(patched[0][1], {"state": "closed"})
+
+    def test_pagination_stops_early_when_found_on_page_2(self):
+        milestones = [
+            {"number": i, "title": f"0.0.{i}", "open_issues": 1, "closed_issues": 0}
+            for i in range(1, 206)
+        ]
+        milestones[100] = {"number": 101, "title": "0.11.0", "open_issues": 3, "closed_issues": 10}
+        pages_requested = []
+
+        def fake_request(method, url, token, payload=None):
+            self.assertEqual(method, "GET")
+            page = int(url.split("page=")[-1])
+            pages_requested.append(page)
+            start = (page - 1) * 100
+            return milestones[start : start + 100]
+
+        out = io.StringIO()
+        status = mod.close_completed_milestone("v0.11.0+deadbeef", "owner/repo", "tok", request=fake_request, out=out)
+        self.assertEqual(status, "still_open")
+        self.assertEqual(pages_requested, [1, 2])
+        self.assertIn("still has 3 open issue(s)", out.getvalue())
+
+    def test_pagination_exact_100_boundary_stops_on_empty_page_2(self):
+        milestones = [
+            {"number": i, "title": f"0.0.{i}", "open_issues": 1, "closed_issues": 0}
+            for i in range(1, 101)
+        ]
+        pages_requested = []
+
+        def fake_request(method, url, token, payload=None):
+            self.assertEqual(method, "GET")
+            page = int(url.split("page=")[-1])
+            pages_requested.append(page)
+            start = (page - 1) * 100
+            return milestones[start : start + 100]
+
+        out = io.StringIO()
+        status = mod.close_completed_milestone("v0.11.0+deadbeef", "owner/repo", "tok", request=fake_request, out=out)
+        self.assertEqual(status, "not_found")
+        self.assertEqual(pages_requested, [1, 2])
+
 
 if __name__ == "__main__":
     unittest.main()

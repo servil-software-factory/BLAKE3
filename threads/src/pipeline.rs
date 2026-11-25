@@ -5139,9 +5139,6 @@ mod test {
                 let pid = libc::fork();
                 assert!(pid >= 0, "fork failed");
                 if pid == 0 {
-                    // Fail fast via SIGALRM (WIFEXITED == false) instead of
-                    // hanging for nextest's timeout if a mutant removes the fork guard.
-                    libc::alarm(2);
                     let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
                         if which == "group" {
                             let _ = p.acquire_free_group();
@@ -5149,14 +5146,43 @@ mod test {
                             let _ = p.alloc_piece_node(0);
                         }
                     }));
-                    libc::_exit(if res.is_err() { 0 } else { 1 });
+                    let fork_panic = match res {
+                        Err(payload) => {
+                            let msg = payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| payload.downcast_ref::<std::string::String>().map(|s| s.as_str()))
+                                .unwrap_or("");
+                            msg.contains("fork")
+                        }
+                        Ok(()) => false,
+                    };
+                    libc::_exit(if fork_panic { 0 } else { 1 });
                 }
+                // Parent-supervised deadline: immune to inherited SIG_IGN on SIGALRM
+                // and distinguishes a hang (SIGKILLed by parent) from a logic failure (#557).
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
                 let mut status: libc::c_int = 0;
-                assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+                let mut timed_out = false;
+                loop {
+                    let got = libc::waitpid(pid, &mut status, libc::WNOHANG);
+                    if got == pid {
+                        break;
+                    }
+                    assert!(got == 0, "waitpid failed: {got}");
+                    if std::time::Instant::now() >= deadline {
+                        timed_out = true;
+                        let _ = libc::kill(pid, libc::SIGKILL);
+                        let _ = libc::waitpid(pid, &mut status, 0);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
                 // Clear synthetic busy state before parent drops `p`.
                 for slot in &mut p.assigned_group_epoch {
                     *slot = 0;
                 }
+                assert!(!timed_out, "forked child hung waiting on {which} (killed by parent deadline)");
                 assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child failed: status={status}");
             }
             return;
