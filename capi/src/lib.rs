@@ -104,16 +104,17 @@ unsafe fn hasher_mut<'a>(hasher: *mut B3Hasher) -> &'a mut Hasher {
     unsafe { &mut *(hasher as *mut Hasher) }
 }
 
+const VERSION_LEN: usize = blake3_servil::BUILD_VERSION.len();
+static VERSION: [u8; VERSION_LEN + 1] = {
+    let mut text = [0; VERSION_LEN + 1];
+    text.split_at_mut(VERSION_LEN).0.copy_from_slice(blake3_servil::BUILD_VERSION.as_bytes());
+    text
+};
+
 /// `b3_version`: the library's build version (`blake3_servil::BUILD_VERSION`),
 /// which starts with `b3.h`'s `B3_VERSION`.
 #[unsafe(no_mangle)]
 pub extern "C" fn b3_version() -> *const c_char {
-    const N: usize = blake3_servil::BUILD_VERSION.len();
-    static VERSION: [u8; N + 1] = {
-        let mut text = [0; N + 1];
-        text.split_at_mut(N).0.copy_from_slice(blake3_servil::BUILD_VERSION.as_bytes());
-        text
-    };
     VERSION.as_ptr().cast()
 }
 
@@ -210,4 +211,11 @@ pub unsafe extern "C" fn b3_hasher_finalize_xof(hasher: *mut B3Hasher, offset: u
 #[cfg(test)]
 mod test {
     include!("../../tools/require_nextest.rs");
+
+    #[test]
+    fn b3_version_matches_exact_build_version_with_trailing_nul() {
+        assert_eq!(&super::VERSION[..super::VERSION_LEN], blake3_servil::BUILD_VERSION.as_bytes());
+        assert_eq!(super::VERSION[super::VERSION_LEN], 0, "VERSION backing array must be NUL-terminated");
+        assert_eq!(super::b3_version(), super::VERSION.as_ptr().cast());
+    }
 }

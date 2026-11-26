@@ -227,8 +227,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // aarch64-unknown-linux-gnu_ilp32), where this library's sizes, which
     // are checked for 64 bits, would wrap. Require a non-empty Linux target
     // env (gnu/musl, etc.) so freestanding std-free Linux targets such as
-    // x86_64-unknown-linux-none get this diagnostic instead of E0463, and
-    // reject arm64e (pointer-auth ABI, untested here) explicitly.
+    // x86_64-unknown-linux-none also emit this diagnostic (rerun with
+    // `--keep-going` if Cargo stops early on `E0463`), and reject arm64e
+    // (pointer-auth ABI, untested here) explicitly.
     let target_env = var("CARGO_CFG_TARGET_ENV");
     let supported = var("CARGO_CFG_TARGET_ENDIAN") == "little"
         && var("CARGO_CFG_TARGET_POINTER_WIDTH") == "64"

@@ -599,6 +599,12 @@ fn hash_chunks_by_blocks(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8
 
 fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, flags_end: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     const GROUP: usize = 16;
+    const BINS: usize = crate::CHUNK_LEN / crate::BLOCK_LEN;
+    const { assert!(BY_BLOCKS_AT_ONCE <= u8::MAX as usize) };
+    let n = items.len();
+    if n == 0 {
+        return;
+    }
     // On SME2, a table of messages of one length, whole blocks, at counter 0,
     // with at least the work that pays for the SME2 turn: one call of the message
     // kernel for all of them (a turn's 1 KiB messages finishing together:
@@ -653,8 +659,30 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         }
     }
     let whole = |item: &[u8]| item.len().saturating_sub(1) / crate::BLOCK_LEN;
-    let mut order: crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE> = (0..items.len()).collect();
-    order.sort_unstable_by_key(|&i| whole(items[i]));
+    let mut order = [0u8; BY_BLOCKS_AT_ONCE];
+    let first = whole(items[0]);
+    if items[1..].iter().all(|item| whole(item) == first) {
+        for (slot, i) in order[..n].iter_mut().zip(0u8..) {
+            *slot = i;
+        }
+    } else {
+        let mut ends = [0u8; BINS];
+        for item in items {
+            ends[whole(item)] += 1;
+        }
+        let mut sum = 0u8;
+        for end in &mut ends {
+            sum += *end;
+            *end = sum;
+        }
+        let n_u8 = u8::try_from(n).expect("chunk <= BY_BLOCKS_AT_ONCE");
+        for i in (0..n_u8).rev() {
+            let bin = whole(items[usize::from(i)]);
+            ends[bin] -= 1;
+            order[usize::from(ends[bin])] = i;
+        }
+    }
+    let order = &order[..n];
     // With SHA-3 the last block stays in the lanes too; other AArch64
     // CPUs keep the prefix kernels followed by scalar last blocks.
     #[cfg(blake3_neon)]
@@ -664,16 +692,16 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     let mut cvs = [*key; BY_BLOCKS_AT_ONCE];
     // chunk_by always advances and returns nonempty groups, even if a
     // changed predicate groups the wrong items; no mutable loop bound.
-    for same_blocks in order.chunk_by(|&a, &b| whole(items[a]) == whole(items[b])) {
-        let k = whole(items[same_blocks[0]]);
+    for same_blocks in order.chunk_by(|&a, &b| whole(items[usize::from(a)]) == whole(items[usize::from(b)])) {
+        let k = whole(items[usize::from(same_blocks[0])]);
         #[cfg(blake3_neon)]
         if last_lanes {
             for group in same_blocks.chunks(GROUP) {
-                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[usize::from(i)].as_ptr()).collect();
                 let mut last_blocks = [[0u8; crate::BLOCK_LEN]; GROUP];
                 let mut lengths = [0u32; GROUP];
                 for ((&i, block), len) in group.iter().zip(&mut last_blocks).zip(&mut lengths) {
-                    let tail = &items[i][k * crate::BLOCK_LEN..];
+                    let tail = &items[usize::from(i)][k * crate::BLOCK_LEN..];
                     block[..tail.len()].copy_from_slice(tail);
                     *len = u32::from(tail.len().to_le_bytes()[0]);
                 }
@@ -697,7 +725,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                     );
                 }
                 for (&i, digest) in group.iter().zip(digests.chunks_exact(OUT_LEN)) {
-                    out[i].copy_from_slice(digest);
+                    out[usize::from(i)].copy_from_slice(digest);
                 }
             }
             continue;
@@ -705,7 +733,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         if k > 0 {
             for group in same_blocks.chunks(GROUP) {
                 #[cfg_attr(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")), allow(unused_mut))]
-                let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[usize::from(i)].as_ptr()).collect();
                 #[cfg(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux"))]
                 let padded = crate::ffi_output::pad_by_blocks_inputs(&mut inputs, platform);
                 #[cfg(all(target_arch = "x86_64", not(all(blake3_avx512_ffi, target_os = "linux"))))]
@@ -734,7 +762,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                     )
                 };
                 for (n, &i) in group.iter().enumerate() {
-                    cvs[i] = crate::platform::words_from_le_bytes_32(lanes[n * OUT_LEN..][..OUT_LEN].try_into().unwrap());
+                    cvs[usize::from(i)] = crate::platform::words_from_le_bytes_32(lanes[n * OUT_LEN..][..OUT_LEN].try_into().unwrap());
                 }
             }
         }
@@ -747,6 +775,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     #[cfg(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")))]
     let serial_start = 0usize;
     for &i in &order[serial_start..] {
+        let i = usize::from(i);
         let item = items[i];
         let k = whole(item);
         let mut cv = cvs[i];
