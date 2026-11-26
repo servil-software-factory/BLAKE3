@@ -677,12 +677,10 @@ fn test_xof_partial_block_cache_seeks_and_clones() {
     }
 }
 
-/// pair's hash_many_blocks on every platform this build has: AVX2's and
-/// AVX-512's assembly, and the fallback, one input after another on the
-/// platform's compression, which SSE4.1 takes (BLAKE3 #238: no test ran
-/// the fallback; it is in an unsafe fn, which cargo-mutants never mutates).
-/// Block counts of 1, 2, 3 and 16 (a whole chunk), one to five inputs,
-/// counters incremented or not, the chunk flags at start and end.
+/// `pair::hash_many_blocks` on every platform this build has: AVX-512, AVX2,
+/// and SSE4.1 assembly on x86-64, and the per-input compression loop on
+/// non-x86 platforms. Block counts of 1, 2, 3 and 16 (a whole chunk), one to
+/// five inputs, counters incremented or not, the chunk flags at start and end.
 #[test]
 fn test_pair_hash_many_blocks_every_platform() {
     use crate::{CHUNK_END, CHUNK_START, IV};

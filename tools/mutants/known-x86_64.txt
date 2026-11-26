@@ -135,6 +135,20 @@ src/lib.rs	replace | with ^ in OutputReader::fill	1	equivalent: | and ^ agree on
 src/lib.rs	replace | with ^ in compress_parents_parallel	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace || with && in compress_chunks_parallel	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	delete match arm 2 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 3 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 4 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 5 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 6 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 7 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 8 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 9 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 10 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 11 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 12 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 13 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 14 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 15 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
 src/many.rs	replace % with + in hash_blocks	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace % with + in hash_chunked	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace % with + in hash_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -310,7 +324,6 @@ src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<us
 src/each.rs	replace >= with < in finalize_each	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace | with ^ in hash_by_blocks	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/ffi_partial.rs	replace | with ^ in finalize_each	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
-src/many.rs	replace noted_lanes with ()	1	test-only hook: #[cfg(test)] instrumentation recording FOUR_AT_A_TIME_LANES
 src/many.rs	replace | with ^ in hash_four_at_a_time	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/platform.rs	replace && with || in sme2_allowed	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in sme2_svl_ok	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

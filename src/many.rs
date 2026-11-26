@@ -128,21 +128,38 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
         }
     }
     for (messages, digests) in input.chunks(slot * TABLE).zip(outputs.chunks_mut(TABLE)) {
-        match slot / BLOCK_LEN {
+        let blocks = slot / BLOCK_LEN;
+        match blocks {
             1 => hash_run_short(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(blake3_sse41_ffi)]
+            2..=15 => crate::sse41::hash_blocks_x86(messages, blocks, key, flags, digests, platform, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             2 => hash_blocks::<{ 2 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             3 => hash_blocks::<{ 3 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             4 => hash_blocks::<{ 4 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             5 => hash_blocks::<{ 5 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             6 => hash_blocks::<{ 6 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             7 => hash_blocks::<{ 7 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             8 => hash_blocks::<{ 8 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             9 => hash_blocks::<{ 9 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             10 => hash_blocks::<{ 10 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             11 => hash_blocks::<{ 11 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             12 => hash_blocks::<{ 12 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             13 => hash_blocks::<{ 13 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             14 => hash_blocks::<{ 14 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            #[cfg(not(blake3_sse41_ffi))]
             15 => hash_blocks::<{ 15 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
             16 => hash_blocks::<{ 16 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
             _ => unreachable!("messages of up to a chunk"),
@@ -875,10 +892,11 @@ fn neon_plans_last_len<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags:
 ///   kernels runs in the SME unit's slow state on the VM: 17 x 256 B, 68
 ///   ns per message after, 44 before).
 /// - The integer + NEON plans (no SME2, or fewer messages): all at once.
-/// - Elsewhere (`plans` false: x86-64), whole last blocks: multi-block
-///   counts (`128..=1024 B`) round multi-pass tails up to the platform's
-///   next one-pass SIMD width (`hash_four_at_a_time`); with a short last
-///   block, one call each (or SIMD on Linux x86-64).
+/// - Elsewhere (`plans` false: x86-64 full chunks, or non-x86 `plans == false`
+///   tests), whole last blocks: x86-64 `2..=15`-block widths route directly
+///   through `sse41::hash_blocks_x86` in `hash_many_on`, while full chunks
+///   (`1024 B`) round through `hash_four_at_a_time` (`hash_many_rounded`);
+///   with a short last block, one call each (or SIMD on x86-64).
 #[inline(never)]
 fn hash_blocks<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, plans: bool, last_len: usize) {
     const GROUP: usize = 16;
@@ -924,150 +942,38 @@ fn hash_blocks<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, output
     let _ = groups;
 }
 
-/// Compute `(full_prefix_lanes, rounded_tail_width)` once for x86-64 AVX2 /
-/// AVX-512 multi-block (`2..=15` blocks) batches. Returns `(0, 0)` when no
-/// tail rounding applies (exact widths, `1..=2` remainders, or `128..192 B`
-/// `n = 9..=10` remainders on AVX-512 where `8 + 1/2` avoids wide-kernel
-/// setup overhead).
-#[cfg(target_arch = "x86_64")]
-fn round_x86_blocks(platform: Platform, blocks: usize, count: usize) -> (usize, usize) {
-    let widest = match platform {
-        #[cfg(blake3_avx512_ffi)]
-        Platform::AVX512 => 16,
-        #[cfg(blake3_avx2_ffi)]
-        Platform::AVX2 => 8,
-        _ => return (0, 0),
-    };
-    let rem = count % widest;
-    let target = match rem {
-        3 => 4,
-        5..=7 => 8,
-        9..=10 if blocks >= 4 => 16,
-        11..=15 => 16,
-        _ => 0,
-    };
-    if target == 0 { (0, 0) } else { (count - rem, target) }
-}
-
-/// Non-generic x86-64 AVX2/AVX-512 rounded multi-block batch helper (`2..=15`
-/// blocks) built over `pair::hash_many_blocks` with width-sized stack scratch
-/// (`4/8/16`), avoiding per-length monomorphization bloat in `hash_blocks`.
-#[cfg(target_arch = "x86_64")]
-#[inline(never)]
-unsafe fn hash_blocks_rounded_x86(ptrs: &[*const u8], blocks: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
-    let count = outputs.len();
-    let (full, target) = round_x86_blocks(platform, blocks, count);
-    if target == 0 {
-        // Sound: caller verified AVX2/AVX-512 and every pointer reaches `blocks` blocks.
-        unsafe {
-            crate::pair::hash_many_blocks(platform, ptrs, blocks, key, 0, false, flags, CHUNK_START, CHUNK_END | ROOT, outputs.as_flattened_mut());
-        }
-        return;
-    }
-    if full != 0 {
-        // Sound: same pointer/platform guarantees on the leading `full` lanes.
-        unsafe {
-            crate::pair::hash_many_blocks(
-                platform,
-                &ptrs[..full],
-                blocks,
-                key,
-                0,
-                false,
-                flags,
-                CHUNK_START,
-                CHUNK_END | ROOT,
-                outputs[..full].as_flattened_mut(),
-            );
-        }
-    }
-    let tail = &ptrs[full..];
-    let tail_out = &mut outputs[full..];
-    let last = *tail.last().expect("rounded tail has 3 or more lanes");
-    let mut padded = crate::stack_vec::StackVec::<*const u8, 16>::new();
-    padded.extend_from_slice(tail);
-    padded.extend(core::iter::repeat_n(last, target - tail.len()));
-    crate::ran(crate::Ran::RoundedUp);
-    let mut run = |scratch: &mut [u8]| {
-        // Sound: `padded` holds `target` valid `blocks`-block pointers and `scratch` holds `target` CVs.
-        unsafe {
-            crate::pair::hash_many_blocks(platform, &padded, blocks, key, 0, false, flags, CHUNK_START, CHUNK_END | ROOT, scratch);
-        }
-        tail_out.as_flattened_mut().copy_from_slice(&scratch[..tail.len() * OUT_LEN]);
-    };
-    match target {
-        4 => run(&mut [0u8; 4 * OUT_LEN]),
-        8 => run(&mut [0u8; 8 * OUT_LEN]),
-        16 => run(&mut [0u8; 16 * OUT_LEN]),
-        _ => unreachable!("x86 multi-block target width is 4, 8, or 16"),
-    }
-}
-
-/// The arrangement for messages of whole blocks (`2..=16` blocks) where the
-/// NEON plans are absent: on x86-64, whole chunks (`1024 B`) delegate to
-/// `hash_many_rounded` (including Zen 5 `hash32` for `17..=31`), AVX2/AVX-512
-/// `128..=960 B` delegate to non-generic `hash_blocks_rounded_x86` (keeping
-/// `128..192 B` `n = 3` on the inline 4-lane scratch below), and SSE4.1 or
-/// non-x86 targets run groups of four plus a padded fourth lane for remainders
-/// of three.
+/// Whole-block message dispatch on `plans == false`: full-chunk (`1024 B`)
+/// x86-64 batches go through `hash_many_rounded` (including Zen 5 `hash32` for
+/// `17..=31`), while non-x86 `plans == false` test paths run groups of four
+/// plus a padded fourth lane for remainders of three.
 #[inline(never)]
 fn hash_four_at_a_time<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     #[cfg(target_arch = "x86_64")]
     {
-        if N == CHUNK_LEN {
-            noted_lanes(lanes.len());
-            crate::hash_many_rounded(platform, lanes, key, 0, IncrementCounter::No, flags, CHUNK_START, CHUNK_END | ROOT, outputs.as_flattened_mut());
-            return;
-        }
-        if crate::pair::takes_platform(platform) && lanes.len() != 3 {
-            noted_lanes(lanes.len());
-            let mut ptrs = crate::stack_vec::StackVec::<*const u8, TABLE>::new();
-            ptrs.extend(lanes.iter().map(|m| m.as_ptr()));
-            // Sound: every element of `lanes` is `&[u8; N]` (`N / BLOCK_LEN` whole blocks).
-            unsafe { hash_blocks_rounded_x86(&ptrs, N / BLOCK_LEN, key, flags, outputs, platform) };
-            return;
-        }
-        if lanes.len() % 4 != 3 {
-            noted_lanes(lanes.len());
-            whole_messages(lanes, key, flags, outputs, platform);
-            return;
-        }
+        const { assert!(N == CHUNK_LEN, "x86_64 routes 2..=15-block batches through hash_blocks_x86") };
+        crate::hash_many_rounded(platform, lanes, key, 0, IncrementCounter::No, flags, CHUNK_START, CHUNK_END | ROOT, outputs.as_flattened_mut());
+        return;
     }
-    let fours = lanes.len() / 4 * 4;
-    if fours > 0 {
-        noted_lanes(fours);
-        whole_messages(&lanes[..fours], key, flags, &mut outputs[..fours], platform);
-    }
-    match lanes.len() - fours {
-        3 => {
-            let spare = [lanes[fours], lanes[fours + 1], lanes[fours + 2], lanes[fours + 2]];
-            let mut digests = [[0u8; OUT_LEN]; 4];
-            noted_lanes(4);
-            whole_messages(&spare, key, flags, &mut digests, platform);
-            outputs[fours..].copy_from_slice(&digests[..3]);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let fours = lanes.len() / 4 * 4;
+        if fours > 0 {
+            whole_messages(&lanes[..fours], key, flags, &mut outputs[..fours], platform);
         }
-        _ => {
-            for (output, message) in outputs[fours..].iter_mut().zip(&lanes[fours..]) {
-                *output = *crate::hash_serial_on(&message[..], key, flags, platform).as_bytes();
+        match lanes.len() - fours {
+            3 => {
+                let spare = [lanes[fours], lanes[fours + 1], lanes[fours + 2], lanes[fours + 2]];
+                let mut digests = [[0u8; OUT_LEN]; 4];
+                whole_messages(&spare, key, flags, &mut digests, platform);
+                outputs[fours..].copy_from_slice(&digests[..3]);
+            }
+            _ => {
+                for (output, message) in outputs[fours..].iter_mut().zip(&lanes[fours..]) {
+                    *output = *crate::hash_serial_on(&message[..], key, flags, platform).as_bytes();
+                }
             }
         }
     }
-}
-
-#[cfg(test)]
-std::thread_local! {
-    /// The lanes of each hash_many call hash_four_at_a_time made on this
-    /// thread, for the test of its arrangement (BLAKE3 #219).
-    pub(crate) static FOUR_AT_A_TIME_LANES: core::cell::RefCell<std::vec::Vec<usize>> = const { core::cell::RefCell::new(std::vec::Vec::new()) };
-}
-
-/// Note a hash_many call of `lanes` lanes (in the tests' record; nothing
-/// in any other build).
-#[inline(always)]
-fn noted_lanes(lanes: usize) {
-    #[cfg(test)]
-    let _ = FOUR_AT_A_TIME_LANES.try_with(|v| v.borrow_mut().push(lanes));
-    let _ = lanes;
 }
 
 /// Whether this build runs the integer + NEON kernels (hash_many's plans
@@ -1232,19 +1138,26 @@ mod test {
                 "64 B unrounded on {platform:?}"
             );
 
-            // 2. 128 B (2 blocks): `n = 3` uses inline 4-lane scratch, `5..=7 -> 8`,
-            // `9..=10` stay unrounded on AVX-512 (`128 B` fast path), `11..=15 -> 16`, `31 -> 16 + 16`.
-            let m128 = messages(2 * BLOCK_LEN, 31);
-            let l128: Vec<&[u8; 2 * BLOCK_LEN]> = (0..31).map(|i| m128[i * 2 * BLOCK_LEN..][..2 * BLOCK_LEN].try_into().unwrap()).collect();
-            for count in [1usize, 2, 3, 4, 5, 7, 8, 9, 10, 11, 15, 16, 31] {
+            // 2. 128 B (2 blocks) via `hash_many_on` (the public batch dispatcher):
+            // `n = 3` uses inline 4-lane scratch (with 0 single-block `CompressInPlace`
+            // scalar fallbacks on SSE4.1), `5..=7 -> 8`, `9..=10` stay unrounded on
+            // AVX-512, `11..=15 -> 16`, `31 -> 16 + 16`, and `131` crosses `TABLE = 128`.
+            let m128 = messages(2 * BLOCK_LEN, TABLE + 3);
+            for count in [2usize, 3, 4, 5, 7, 8, 9, 10, 11, 15, 16, 31, TABLE + 3] {
                 let mut out = vec![[0u8; OUT_LEN]; count];
-                let got = calls(&mut || hash_four_at_a_time::<{ 2 * BLOCK_LEN }>(&l128[..count], crate::IV, 0, &mut out, platform));
+                crate::COUNTED.with(|c| c[crate::Counted::CompressInPlace as usize].set(0));
+                let got = calls(&mut || hash_many_on(&m128[..count * 2 * BLOCK_LEN], 2 * BLOCK_LEN, 2 * BLOCK_LEN, crate::IV, 0, &mut out, platform));
+                if !is_512 && !is_2 && count == 3 {
+                    let single_compress = crate::COUNTED.with(|c| c[crate::Counted::CompressInPlace as usize].get());
+                    assert_eq!(single_compress, 0, "SSE4.1 3x128 B must call SSE4.1 hash_many assembly, not scalar CompressInPlace");
+                }
                 let want: Vec<(usize, usize)> = if is_512 {
                     match count {
                         3 => vec![(2, 4)],
                         5 | 7 => vec![(2, 8)],
                         11 | 15 => vec![(2, 16)],
                         31 => vec![(2, 16), (2, 16)],
+                        131 => vec![(2, 128), (2, 4)],
                         _ => vec![(2, count)],
                     }
                 } else if is_2 {
@@ -1254,6 +1167,7 @@ mod test {
                         11 => vec![(2, 8), (2, 4)],
                         15 => vec![(2, 8), (2, 8)],
                         31 => vec![(2, 24), (2, 8)],
+                        131 => vec![(2, 128), (2, 4)],
                         _ => vec![(2, count)],
                     }
                 } else {
@@ -1263,21 +1177,33 @@ mod test {
                         11 => vec![(2, 8), (2, 4)],
                         15 => vec![(2, 12), (2, 4)],
                         31 => vec![(2, 28), (2, 4)],
+                        131 => vec![(2, 128), (2, 4)],
                         _ => vec![(2, count)],
                     }
                 };
                 assert_eq!(got, want, "128 B count={count} on {platform:?}");
                 for (i, o) in out.iter().enumerate() {
-                    assert_eq!(*o, *blake3::hash(l128[i]).as_bytes(), "128 B count={count} msg {i}");
+                    assert_eq!(*o, *blake3::hash(&m128[i * 2 * BLOCK_LEN..][..2 * BLOCK_LEN]).as_bytes(), "128 B count={count} msg {i}");
                 }
             }
 
-            // 3. 256 B (4 blocks): full rounding including `9..=10 -> 16` on AVX-512.
+            // 2b. 192 B (3 blocks) via `hash_many_on`: `9..=10` remain unrounded
+            // on AVX-512 (`blocks >= 4` boundary).
+            let m192 = messages(3 * BLOCK_LEN, 10);
+            for count in [9usize, 10] {
+                let mut out = vec![[0u8; OUT_LEN]; count];
+                let got = calls(&mut || hash_many_on(&m192[..count * 3 * BLOCK_LEN], 3 * BLOCK_LEN, 3 * BLOCK_LEN, crate::IV, 0, &mut out, platform));
+                assert_eq!(got, vec![(3, count)], "192 B count={count} stays unrounded on {platform:?}");
+                for (i, o) in out.iter().enumerate() {
+                    assert_eq!(*o, *blake3::hash(&m192[i * 3 * BLOCK_LEN..][..3 * BLOCK_LEN]).as_bytes(), "192 B count={count} msg {i}");
+                }
+            }
+
+            // 3. 256 B (4 blocks) via `hash_many_on`: full rounding including `9..=10 -> 16` on AVX-512.
             let m256 = messages(4 * BLOCK_LEN, 31);
-            let l256: Vec<&[u8; 4 * BLOCK_LEN]> = (0..31).map(|i| m256[i * 4 * BLOCK_LEN..][..4 * BLOCK_LEN].try_into().unwrap()).collect();
             for count in [3usize, 5, 9, 10, 15, 16, 19, 31] {
                 let mut out = vec![[0u8; OUT_LEN]; count];
-                let got = calls(&mut || hash_four_at_a_time::<{ 4 * BLOCK_LEN }>(&l256[..count], crate::IV, 0, &mut out, platform));
+                let got = calls(&mut || hash_many_on(&m256[..count * 4 * BLOCK_LEN], 4 * BLOCK_LEN, 4 * BLOCK_LEN, crate::IV, 0, &mut out, platform));
                 let want: Vec<(usize, usize)> = if is_512 {
                     match count {
                         3 => vec![(4, 4)],
@@ -1309,7 +1235,7 @@ mod test {
                 };
                 assert_eq!(got, want, "256 B count={count} on {platform:?}");
                 for (i, o) in out.iter().enumerate() {
-                    assert_eq!(*o, *blake3::hash(l256[i]).as_bytes(), "256 B count={count} msg {i}");
+                    assert_eq!(*o, *blake3::hash(&m256[i * 4 * BLOCK_LEN..][..4 * BLOCK_LEN]).as_bytes(), "256 B count={count} msg {i}");
                 }
             }
 
@@ -1371,9 +1297,12 @@ mod test {
                 }
             }
         }
-        // SSE4.1 stays on its 4-lane path (not `hash_blocks_rounded_x86`).
+        // SSE4.1 rounds remainder-3 tails to 4 lanes through `round_x86_blocks`.
         #[cfg(blake3_sse41_ffi)]
-        assert_eq!(round_x86_blocks(Platform::SSE41, 4, 7), (0, 0));
+        {
+            assert_eq!(crate::sse41::round_x86_blocks(Platform::SSE41, 4, 7), (4, 4));
+            assert_eq!(crate::sse41::round_x86_blocks(Platform::SSE41, 4, 6), (0, 0));
+        }
     }
 
     /// The paths hash_many_on takes by message count (BLAKE3 #219): one-
@@ -1674,6 +1603,9 @@ mod test {
             let input = messages(4 * BLOCK_LEN, count);
             for &platform in &platforms {
                 let mut out = vec![[0xAAu8; OUT_LEN]; count + 16];
+                #[cfg(blake3_sse41_ffi)]
+                crate::sse41::hash_blocks_x86(&input, 4, crate::IV, 0, &mut out[..count], platform, BLOCK_LEN);
+                #[cfg(not(blake3_sse41_ffi))]
                 hash_blocks::<{ 4 * BLOCK_LEN }>(&input, crate::IV, 0, &mut out[..count], platform, false, BLOCK_LEN);
                 assert!(out[count..].iter().all(|d| *d == [0xAA; OUT_LEN]), "{platform:?}, {count}: a store past the last output");
                 for (i, digest) in out[..count].iter().enumerate() {

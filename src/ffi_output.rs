@@ -74,7 +74,7 @@ pub(crate) fn pad_by_blocks_inputs<const GROUP: usize>(inputs: &mut crate::stack
 /// 16-lane `output16` and 8-lane `output8` for chunks of `>= 4` items,
 /// returning how many leading entries of `order` were written into `out`.
 pub(crate) fn finish_last_blocks_order(
-    order: &[usize],
+    order: &[u8],
     items: &[&[u8]],
     cvs: &[crate::CVWords],
     counter: u64,
@@ -112,7 +112,7 @@ pub(crate) fn finish_last_blocks_order(
 /// spare lanes by repeating the last item in `chunk`.
 #[inline(never)]
 pub(crate) fn finish_last_blocks_simd<const W: usize>(
-    chunk: &[usize],
+    chunk: &[u8],
     items: &[&[u8]],
     cvs: &[crate::CVWords],
     flags: u8,
@@ -124,7 +124,7 @@ pub(crate) fn finish_last_blocks_simd<const W: usize>(
     let mut lens = [0u8; W];
     let mut item_flags = [0u8; W];
     for (j, &i) in chunk.iter().enumerate() {
-        let item = items[i];
+        let item = items[usize::from(i)];
         let k = item.len().saturating_sub(1) / BLOCK_LEN;
         let last = item.len() - k * BLOCK_LEN;
         blocks[j][..last].copy_from_slice(&item[k * BLOCK_LEN..]);
@@ -134,14 +134,14 @@ pub(crate) fn finish_last_blocks_simd<const W: usize>(
     }
     let inputs: [Input<'_>; W] = core::array::from_fn(|j| {
         let idx = j.min(count - 1);
-        item_last(&blocks[idx], &cvs[chunk[idx]], lens[idx], item_flags[idx])
+        item_last(&blocks[idx], &cvs[usize::from(chunk[idx])], lens[idx], item_flags[idx])
     });
     let mut scratch = [[0u8; OUT_LEN]; W];
     // Sound: caller verified platform supports W-lane output16/output8;
     // every block/CV reference stays live across the call.
     unsafe { hash_group::<W>(&inputs, &mut scratch) };
     for (j, &i) in chunk.iter().enumerate() {
-        out[i] = scratch[j];
+        out[usize::from(i)] = scratch[j];
     }
 }
 
@@ -247,26 +247,26 @@ pub(crate) unsafe fn hash_group<const W: usize>(inputs: &[Input<'_>; W], out: &m
 
 /// Hash complete held stages without grouping by their keys. Leaf calls
 /// already fill their chunk lanes; parents borrow each message's own key
+const HELD_TILE: usize = 16;
+
 /// and flags in the existing independent-compression descriptors. The
 /// caller supplies 1..=TABLE stages and a detected AVX2/AVX512 platform.
-/// Dispatches to a 16-stage workspace for small turns so they do not
-/// reserve the full 128-stage stack frame.
+/// All turns tile in 16-stage chunks (`held_groups_in`), avoiding a 128-stage
+/// stack frame (~84 KiB / 85,952 B smaller frame on x86-64).
 pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
-    if held.len() <= 16 {
-        held_groups_in::<16>(hashers, held, platform);
-    } else {
-        held_groups_in::<{ crate::many::TABLE }>(hashers, held, platform);
+    for tile in held.chunks(HELD_TILE) {
+        held_groups_in(hashers, tile, platform);
     }
 }
 
 #[inline(never)]
-fn held_groups_in<const N: usize>(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
+fn held_groups_in(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
     let width = lanes(platform);
     debug_assert!(!held.is_empty() && width != 0);
     const PER: usize = crate::STAGE_LEN / CHUNK_LEN;
     const { assert!(PER == 16) };
     let n = held.len();
-    let mut work = crate::each::HeldWorkspace::<N>::new();
+    let mut work = crate::each::HeldWorkspace::<HELD_TILE>::new();
     let (mut level, mut next) = work.buffers(n);
     for (k, &i) in held.iter().enumerate() {
         let h = &hashers[i];
