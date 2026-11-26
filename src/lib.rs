@@ -25,20 +25,17 @@
 //! assert_eq!(hash1, hash2);
 //!
 //! // Extended output. OutputReader also implements Read and Seek.
-//! # #[cfg(feature = "std")] {
 //! let mut output = [0; 1000];
 //! let mut hasher = blake3_servil_core::convenience::Hasher::new(blake3_servil_core::Mode::Plain, None);
 //! hasher.update(b"foobarbaz");
 //! let mut output_reader = hasher.finalize_xof();
 //! output_reader.fill(&mut output);
 //! assert_eq!(hash1, output[..32]);
-//! # }
 //!
 //! // Print a hash as hex.
 //! println!("{}", hash1);
 //!
 //! // Many short messages in one call: a Batch lays them out in Blocks.
-//! # #[cfg(feature = "std")] {
 //! use blake3_servil_core::{throughput::{self, Batch}, Mode};
 //! let mut batch = Batch::new(64, 3);
 //! for i in 0..3 {
@@ -47,7 +44,6 @@
 //! let mut hashes = [[0u8; 32]; 3];
 //! throughput::hash_many(Mode::Plain, &batch, &mut hashes);
 //! assert_eq!(hashes[2], *blake3_servil_core::convenience::hash(&[2u8; 64]).as_bytes());
-//! # }
 //! # Ok(())
 //! # }
 //! ```
@@ -136,27 +132,27 @@
 //!
 //! - **A [`Hasher`] is 26 KiB**; box it where that matters.
 //! - **These single-threaded calls allocate nothing** (except on 512-bit SME2
-//!   CPUs under `std`, where the first flat-walk tree of 32 KiB or more on
-//!   each thread lazily allocates one reusable 64 KiB thread-local scratch
-//!   block; without `std`, or during thread-local teardown after that block is
-//!   destroyed, that 64 KiB scratch sits on the stack instead):
+//!   CPUs, where the first flat-walk tree of 32 KiB or more on each thread
+//!   lazily allocates one reusable 64 KiB thread-local scratch block; during
+//!   thread-local teardown after that block is destroyed, that 64 KiB scratch
+//!   sits on the stack instead):
 //!   [`convenience::hash`], [`throughput::hash`], [`throughput::hash_many`],
 //!   [`Hasher::update`](convenience::Hasher::update) and
 //!   [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
-//!   With `std`, `Hasher::update_reader` uses a 64 KiB stack buffer for the
-//!   first read (even on immediate EOF), and promotes to a 1 MiB heap buffer
-//!   once 65,536 bytes or more are read before EOF, freed when it returns.
-//!   `throughput::hash_each` (with `std`) keeps reusable per-thread `Vec`
-//!   storage for messages of 2 to 15 chunks (16 bytes per message and 32 bytes
-//!   per chunk of payload, plus `Vec` capacity): its first such collection and
-//!   a larger one grow that storage, and a repeated collection on a live
-//!   thread allocates nothing; during thread-local teardown after that storage
-//!   is destroyed, a collection with multi-chunk items falls back to
-//!   call-local `Vec`s.
+//!   `Hasher::update_reader` uses a 64 KiB stack buffer for the first read
+//!   (even on immediate EOF), and promotes to a 1 MiB heap buffer once
+//!   65,536 bytes or more are read before EOF, freed when it returns.
+//!   `throughput::hash_each` keeps reusable per-thread `Vec` storage for
+//!   messages of 2 to 15 chunks (16 bytes per message and 32 bytes per chunk
+//!   of payload, plus `Vec` capacity): its first such collection and a larger
+//!   one grow that storage, and a repeated collection on a live thread
+//!   allocates nothing; during thread-local teardown after that storage is
+//!   destroyed, a collection with multi-chunk items falls back to call-local
+//!   `Vec`s.
 //! - **Grouped incremental calls** use bounded stack tables and tree buffers.
-//!   `throughput::update_each` (with `std`) allocates and frees nothing beyond
-//!   the one-time per-thread SME2 flat-walk scratch noted above if a fresh
-//!   thread hashes a whole 32 KiB+ piece on a 512-bit SME2 CPU.
+//!   `throughput::update_each` allocates and frees nothing beyond the one-time
+//!   per-thread SME2 flat-walk scratch noted above if a fresh thread hashes a
+//!   whole 32 KiB+ piece on a 512-bit SME2 CPU.
 //! - **Once per process**: the startup self-test's buffers on the calling
 //!   thread's stack while it runs (plus the SME2 flat-walk scratch noted above
 //!   on 512-bit SME2 CPUs).
@@ -192,40 +188,26 @@
 //! for this machine on fixed inputs and compares the outputs with fixed
 //! values official BLAKE3 generated (on ARM64, all but the kernels for
 //! batches of short messages of unequal lengths). A mismatch stops the process, which no
-//! caller can catch: with `std` it writes a best-effort diagnostic directly to
-//! file descriptor 2 (bypassing Rust's stderr lock and skipping an
-//! already-full pipe) and aborts; without it, the CPU's trap instruction stops
-//! it. Other threads that call `initialize` meanwhile wait for it (parked via
-//! `std::sync::Once` under `std`; spinning without `std`, so `no_std` programs
-//! with strict fixed-priority scheduling should call `initialize` before
-//! starting higher-priority callers, and programs that `fork` should finish
+//! caller can catch: it writes a best-effort diagnostic directly to file
+//! descriptor 2 (bypassing Rust's stderr lock and skipping an already-full
+//! pipe) and aborts. Other threads that call `initialize` meanwhile wait for
+//! it (parked via `std::sync::Once`; programs that `fork` should finish
 //! `initialize` before forking).
 //!
-//! # Cargo Features
+//! # Build requirements
 //!
-//! The `std` feature (the only feature enabled by default) enables the
-//! [`Write`] implementation and `Hasher::update_reader` for [`Hasher`],
-//! the [`Read`] and [`Seek`] implementations for [`OutputReader`], owned
-//! `Batch`/`Packed` builders, and the `hash_each`/`update_each` calls.
-//!
-//! All kernels are assembled directly by `rustc` via
+//! This crate requires `std` and runs on 64-bit little-endian x86-64 Linux
+//! and AArch64 Linux/macOS. All kernels are assembled directly by `rustc` via
 //! `core::arch::global_asm!` (no external C compiler or `cc` build dependency
 //! is required for the Rust libraries). This crate runs its assembly or not at
-//! all: for portable Rust or other targets, use official BLAKE3.
+//! all: for `no_std`, portable Rust, or other targets, use official BLAKE3.
 //!
 //! [BLAKE3]: https://blake3.io
 //! [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
 //! [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
 //! [`Seek`]: https://doc.rust-lang.org/std/io/trait.Seek.html
 
-#![cfg_attr(not(feature = "std"), no_std)]
-
-// The tests use std in every build, the no_std one included.
-#[cfg(all(test, not(feature = "std")))]
-#[macro_use]
-extern crate std;
-
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod lifecycle_counts;
 #[cfg(test)]
 mod test;
@@ -236,7 +218,6 @@ mod asm;
 mod block;
 pub mod convenience;
 mod ct;
-#[cfg(feature = "std")]
 mod each;
 pub mod throughput;
 
@@ -257,9 +238,9 @@ mod avx512_32;
 #[path = "ffi_chunk_root.rs"]
 mod chunk_root;
 mod ffi_counter;
-#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
 mod ffi_output;
-#[cfg(all(feature = "std", blake3_neon))]
+#[cfg(blake3_neon)]
 #[path = "ffi_output_aarch64.rs"]
 mod ffi_output;
 mod ffi_packed;
@@ -277,7 +258,6 @@ mod ffi_partial;
 #[path = "ffi_sse41.rs"]
 mod sse41;
 
-#[cfg(feature = "std")]
 mod io;
 mod many;
 mod pair;
@@ -321,7 +301,7 @@ pub(crate) enum Ran {
     Gathered = 512,
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     /// The kinds this thread's calls ran since the test last cleared it.
     pub(crate) static RAN: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
@@ -333,7 +313,7 @@ std::thread_local! {
     pub(crate) static KERNEL_HASH_MANY_CALLS: core::cell::RefCell<std::vec::Vec<(usize, usize)>> = const { core::cell::RefCell::new(std::vec::Vec::new()) };
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 #[inline(always)]
 pub(crate) fn record_hash_many_call(blocks: usize, count: usize) {
     let _ = KERNEL_HASH_MANY_CALLS.try_with(|v| v.borrow_mut().push((blocks, count)));
@@ -344,7 +324,7 @@ pub(crate) fn record_hash_many_call(blocks: usize, count: usize) {
 #[inline(always)]
 #[allow(dead_code)]
 pub(crate) fn ran(kind: Ran) {
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     let _ = RAN.try_with(|r| r.set(r.get() | kind as u32));
     let _ = kind;
 }
@@ -406,7 +386,7 @@ pub(crate) fn counted(what: Counted) {
     let _ = what;
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     /// The assembly entry points this thread's calls ran since the test
     /// last cleared it, by address.
@@ -418,7 +398,7 @@ std::thread_local! {
 #[inline(always)]
 #[allow(dead_code)]
 pub(crate) fn ran_kernel(entry: *const ()) {
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     let _ = RAN_ENTRIES.try_with(|r| r.borrow_mut().insert(entry as usize));
     let _ = entry;
 }
@@ -842,7 +822,6 @@ impl fmt::Display for HexError {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::error::Error for HexError {}
 
 // IMPLEMENTATION NOTE
@@ -1097,7 +1076,6 @@ pub fn initialize() {
 /// Scheduling and storage setup shared with `blake3-servil`'s workers.
 /// Hashing goes through the checked calls on `throughput::TreeHasher`.
 #[doc(hidden)]
-#[cfg(feature = "std")]
 pub mod thread_support {
     pub use crate::each::prepare_thread as prepare_collection_thread;
     pub use crate::many::{assert_slots, slot_len};
@@ -1149,7 +1127,6 @@ pub(crate) mod domain {
             self.flags
         }
 
-        #[cfg(any(feature = "std", blake3_sse41_ffi))]
         #[inline(always)]
         pub(crate) const fn is_plain(&self) -> bool {
             self.flags == 0
@@ -1239,11 +1216,11 @@ fn hash_serial_from(platform: Platform, input: &[u8], key: &CVWords, flags: u8, 
     // One comparison on the path of a chunk or less: everything else is
     // out of line, so that path's code stays as small as it was (a call
     // after other work fetches every line of it from DRAM).
-    #[cfg(all(blake3_neon, feature = "std"))]
+    #[cfg(blake3_neon)]
     if cold && (CHUNK_LEN + 1..PREFETCH_BELOW).contains(&input.len()) {
         prefetch_cold(input.len(), turn.platform(), false);
     }
-    #[cfg(not(all(blake3_neon, feature = "std")))]
+    #[cfg(not(blake3_neon))]
     let _ = cold;
     hash_serial_on(input, key, flags, turn.platform())
 }
@@ -1264,13 +1241,13 @@ fn hash_serial_from(platform: Platform, input: &[u8], key: &CVWords, flags: u8, 
 /// dropped); a rolled four-lane NEON path for calls after a pause (1.3 KB,
 /// 1.2-1.5x slower: a four-lane NEON BLAKE3 is bound by its chains'
 /// latency, where the hybrids' integer lanes fill the idle issue slots).
-#[cfg(all(blake3_neon, feature = "std"))]
+#[cfg(blake3_neon)]
 const PREFETCH_BELOW: usize = 64 * 1024;
 
 /// Prefetch the kernels hashing `len` bytes runs, for a call now and then:
 /// a one-shot call's (prefetch_kernels), or with `fresh_hasher` a fresh
 /// Hasher's first update's (prefetch_update_kernels).
-#[cfg(all(blake3_neon, feature = "std"))]
+#[cfg(blake3_neon)]
 // Cold for layout: the path of a chunk or less falls through past its
 // call, on the lines it had before the call existed.
 #[cold]
@@ -1285,7 +1262,7 @@ fn prefetch_cold(len: usize, platform: Platform, fresh_hasher: bool) {
 
 /// Prefetch the code of the kernels hashing `len` bytes on `platform`
 /// runs: SME2's from 16 chunks, else the hybrids', chunks to root.
-#[cfg(all(blake3_neon, feature = "std"))]
+#[cfg(blake3_neon)]
 fn prefetch_kernels(len: usize, platform: Platform) {
     #[cfg(blake3_sme2)]
     if matches!(platform, Platform::SME2) && len >= SME2_SIZED_LEN {
@@ -1312,7 +1289,7 @@ fn prefetch_kernels(len: usize, platform: Platform) {
 /// Prefetch the code a fresh Hasher's update of `len` bytes runs: the
 /// subtrees its loop cuts (hasher::subtree_len from counter 0, up to the last
 /// chunk, which waits in the chunk state), each one's kernels.
-#[cfg(all(blake3_neon, feature = "std"))]
+#[cfg(blake3_neon)]
 fn prefetch_update_kernels(len: usize, platform: Platform) {
     if !neon_hybrid::sha3_detected() {
         return;
@@ -1543,7 +1520,6 @@ impl fmt::Debug for OutputReader {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::io::Read for OutputReader {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -1555,7 +1531,6 @@ impl std::io::Read for OutputReader {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::io::Seek for OutputReader {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         let max_position = u64::MAX as i128;

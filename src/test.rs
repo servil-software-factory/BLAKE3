@@ -11,7 +11,6 @@ pub(crate) use crate::test_support::*;
 /// official's AVX2 and AVX-512 batch kernels). A new kernel without the
 /// prefix fails here, on every machine, before it can meet official's.
 #[test]
-#[cfg(feature = "std")]
 fn test_every_assembly_symbol_carries_the_crate_prefix() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("c");
     let mut files = 0;
@@ -36,7 +35,7 @@ fn test_every_assembly_symbol_carries_the_crate_prefix() {
 /// official linked into this binary (a dev-dependency): each of servil's
 /// bindings reaches an entry of its own, and both crates hash alike.
 #[test]
-#[cfg(all(feature = "std", target_arch = "x86_64", blake3_sse41_ffi))]
+#[cfg(all(target_arch = "x86_64", blake3_sse41_ffi))]
 fn test_official_kernels_and_ours_stay_apart() {
     // Official's names, as its own assembly exports them.
     unsafe extern "C" {
@@ -128,7 +127,6 @@ pub const TEST_CASES_MAX: usize = 100 * CHUNK_LEN;
 /// one, and a test on detect()'s alone never reaches them (an EPYC 9255,
 /// October 22: spare_lane's partial chunk and xof_many's per-block loop
 /// went untested there).
-#[cfg(feature = "std")]
 pub(crate) fn every_platform() -> Vec<crate::platform::Platform> {
     use crate::platform::Platform;
     #[allow(unused_mut)]
@@ -149,7 +147,7 @@ pub(crate) fn every_platform() -> Vec<crate::platform::Platform> {
 /// 2, 4 and 8 chunks take the kernel at their own width. The digests are the test vectors' either
 /// way, so the decision alone can catch a mutant that drops the rounding.
 #[test]
-#[cfg(all(target_arch = "x86_64", blake3_sse41_ffi, feature = "std"))]
+#[cfg(all(target_arch = "x86_64", blake3_sse41_ffi))]
 fn test_whole_chunks_round_up_to_the_lanes() {
     use crate::{CHUNK_LEN, Ran};
     // The startup self-test first: it runs inside a process's first call,
@@ -211,7 +209,7 @@ fn test_whole_chunks_round_up_to_the_lanes() {
 /// is tested on a machine whose chunks never reach it (an i7's AVX2 gets
 /// at most 8 chunks a call; AVX-512's 16 and 32 reach it in real calls).
 #[test]
-#[cfg(all(target_arch = "x86_64", blake3_avx2_ffi, feature = "std"))]
+#[cfg(all(target_arch = "x86_64", blake3_avx2_ffi))]
 fn test_counts_past_the_widest_kernel_split_into_groups_and_a_rounded_rest() {
     use crate::platform::Platform;
     use crate::{BLOCK_LEN, CHUNK_LEN, IV, IncrementCounter, OUT_LEN, PARENT, Ran};
@@ -330,7 +328,6 @@ fn test_the_paths_chosen_exactly() {
     // Verify `compress_chunks_parallel` dispatches `(Platform::SSE41, 4)` to
     // the 4-lane SSE4.1 partial kernel rather than falling through to 8-lane
     // AVX2 (tested directly so AVX-512 hosts exercise the SSE4.1 arm too).
-    #[cfg(feature = "std")]
     if crate::platform::sse41_detected() {
         let input = std::vec![0x3du8; 3 * CHUNK_LEN + 500];
         let mut out = [0u8; 4 * crate::OUT_LEN];
@@ -340,7 +337,7 @@ fn test_the_paths_chosen_exactly() {
         let sse41_entry = crate::ffi_partial::entry_sse41() as usize;
         assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&sse41_entry)), "SSE4.1 3+partial must run partial_sse41");
     }
-    #[cfg(all(feature = "std", blake3_avx2_ffi))]
+    #[cfg(blake3_avx2_ffi)]
     if crate::platform::avx2_detected() {
         let input = [0x5au8; 5 * crate::CHUNK_LEN + 500];
         let mut out = [0u8; 6 * crate::OUT_LEN];
@@ -350,7 +347,7 @@ fn test_the_paths_chosen_exactly() {
         let avx2_entry = crate::ffi_partial::entry_avx2() as usize;
         assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&avx2_entry)), "AVX2 5+partial must run partial_avx2");
     }
-    #[cfg(all(feature = "std", blake3_avx512_ffi))]
+    #[cfg(blake3_avx512_ffi)]
     if crate::platform::avx512_detected() {
         let [(_, p4), (_, p8), (_, p16)] = crate::ffi_partial::entries_avx512();
         let all_partial = [crate::ffi_partial::entry_sse41() as usize, crate::ffi_partial::entry_avx2() as usize, p4 as usize, p8 as usize, p16 as usize];
@@ -423,7 +420,6 @@ fn test_the_paths_chosen_exactly() {
 /// chunks it takes, with no partial chunk and with partial ones on each
 /// side of the thresholds spare_lane and pair choose by.
 #[test]
-#[cfg(feature = "std")]
 fn test_compress_chunks_parallel_every_cpu_platform() {
     use crate::platform::MAX_SIMD_DEGREE;
     let mut input = vec![0u8; MAX_SIMD_DEGREE * CHUNK_LEN];
@@ -466,7 +462,6 @@ fn test_compress_chunks_parallel_every_cpu_platform() {
 /// own take its loop over compress_xof (SSE4.1 and AVX2 on x86), which a
 /// test of detect()'s platform alone leaves out on an AVX-512 machine.
 #[test]
-#[cfg(feature = "std")]
 fn test_xof_many_every_cpu_platform() {
     let mut block = [0; BLOCK_LEN];
     let block_len = 42;
@@ -500,7 +495,6 @@ fn test_xof_many_every_cpu_platform() {
 /// `out`'s whole groups of four blocks and returns the bytes filled. Every
 /// machine runs it (x86-64 on its own kernels), so the constant is
 /// generated and checked on any of them.
-#[cfg(feature = "std")]
 pub(crate) fn xof_groups_sweep(xof: &mut dyn FnMut(&crate::CVWords, &[u8; BLOCK_LEN], u8, u64, u8, &mut [u8]) -> usize) {
     let cv: crate::CVWords = core::array::from_fn(|i| 0x9E37_79B9u32.wrapping_mul(i as u32 + 3));
     let mut block = [0u8; BLOCK_LEN];
@@ -524,7 +518,7 @@ pub(crate) fn xof_groups_sweep(xof: &mut dyn FnMut(&crate::CVWords, &[u8; BLOCK_
 
 /// The groups' sweep on x86-64's kernels, so the constant is checked here.
 #[test]
-#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 fn test_xof_groups_sweep_on_this_cpu() {
     xof_groups_sweep(&mut |cv, block, block_len, counter, flags, out| {
         let done = out.len() / (4 * BLOCK_LEN) * 4 * BLOCK_LEN;
@@ -587,7 +581,6 @@ pub fn test_xof_many_fn(xof_many_function: XofManyFunction) {
 /// A reader cloned mid-output carries on as the original does, from the
 /// same position, each then independent; an empty fill reads nothing and
 /// moves nothing (BLAKE3 #238: no test cloned a reader or filled nothing).
-#[cfg(feature = "std")]
 #[test]
 fn test_xof_clone_and_empty_fill() {
     let mut golden = Golden::new("xof_clone_and_empty_fill");
@@ -624,7 +617,6 @@ fn test_xof_clone_and_empty_fill() {
 /// tail is one block alone, a cached head and an empty fill none. The guards
 /// that keep it so are speed alone (the bytes are right either way), so
 /// the count is what catches a mutant of them (BLAKE3 #219, #238).
-#[cfg(feature = "std")]
 #[test]
 fn test_fill_computes_each_block_once() {
     let blocks = |call: &mut dyn FnMut()| {
@@ -648,7 +640,6 @@ fn test_fill_computes_each_block_once() {
 
 /// Sequential short reads share the current block; seeks invalidate it,
 /// and cloning a reader preserves both its position and its cached bytes.
-#[cfg(feature = "std")]
 #[test]
 fn test_xof_partial_block_cache_seeks_and_clones() {
     for platform in every_platform() {
@@ -692,7 +683,6 @@ fn test_xof_partial_block_cache_seeks_and_clones() {
 /// the fallback; it is in an unsafe fn, which cargo-mutants never mutates).
 /// Block counts of 1, 2, 3 and 16 (a whole chunk), one to five inputs,
 /// counters incremented or not, the chunk flags at start and end.
-#[cfg(feature = "std")]
 #[test]
 fn test_pair_hash_many_blocks_every_platform() {
     use crate::{CHUNK_END, CHUNK_START, IV};
@@ -750,7 +740,6 @@ fn test_xof_seek() {
     reader.fill(&mut out2);
     assert_eq!(&out[303..][..102], &out2[..]);
 
-    #[cfg(feature = "std")]
     {
         use std::io::prelude::*;
         let mut reader = hasher.finalize_xof();
@@ -802,7 +791,6 @@ fn test_xof_ends_at_its_last_byte() {
     reader.fill(b);
     assert_eq!(last, again);
     assert_eq!(reader.position(), u64::MAX);
-    #[cfg(feature = "std")]
     {
         use std::io::prelude::*;
         assert_eq!(reader.read(&mut [0u8; 9]).unwrap(), 0, "the end, as a file's");
@@ -864,7 +852,6 @@ fn test_hex_encoding_decoding() {
     hasher.update(b"foo");
     let digest = hasher.finalize();
     assert_eq!(digest.to_hex().as_str(), digest_str);
-    #[cfg(feature = "std")]
     assert_eq!(digest.to_string(), digest_str);
 
     // Test round trip
@@ -882,16 +869,13 @@ fn test_hex_encoding_decoding() {
     // Test errors
     let bad_len = "04e0bb39f30b1";
     let _result = crate::Hash::from_hex(bad_len).unwrap_err();
-    #[cfg(feature = "std")]
     assert_eq!(_result.to_string(), "expected 64 hex bytes, received 13");
 
     let bad_char = "Z4e0bb39f30b1a3feb89f536c93be15055482df748674b00d26e5a75777702e9";
     let _result = crate::Hash::from_hex(bad_char).unwrap_err();
-    #[cfg(feature = "std")]
     assert_eq!(_result.to_string(), "invalid hex character: 'Z'");
 
     let _result = crate::Hash::from_hex([128; 64]).unwrap_err();
-    #[cfg(feature = "std")]
     assert_eq!(_result.to_string(), "invalid hex character: 0x80");
 }
 
@@ -999,7 +983,6 @@ fn test_block_buffer_alignment() {
 }
 
 #[test]
-#[cfg(feature = "std")]
 fn test_update_reader_keeps_every_byte_across_errors() {
     // A reader that fails (WouldBlock) after given offsets, in short reads,
     // and a caller that retries until the end: every byte read before each
@@ -1040,7 +1023,6 @@ fn test_update_reader_keeps_every_byte_across_errors() {
 }
 
 #[test]
-#[cfg(feature = "std")]
 fn test_update_reader_interrupted() -> std::io::Result<()> {
     use std::io;
     struct InterruptingReader<'a> {
@@ -1076,7 +1058,6 @@ fn test_update_reader_interrupted() -> std::io::Result<()> {
 // BLAKE3-Servil's unsafe paths on small inputs: the batch tables and padded
 // lanes of many.rs, and the pool's jobs from concurrent callers. Each
 // against crate::convenience::hash().
-#[cfg(feature = "std")]
 mod unsafe_paths {
     use crate::*;
 
@@ -1108,7 +1089,7 @@ mod unsafe_paths {
 // after one), outputs likewise, so a kernel that reads or writes one byte
 // outside its buffers stops the test with a fault. The assembly kernels'
 // accesses are invisible to the sanitizers; these are not.
-#[cfg(all(feature = "std", any(target_arch = "aarch64", target_arch = "x86_64"), any(target_vendor = "apple", target_os = "linux")))]
+#[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), any(target_vendor = "apple", target_os = "linux")))]
 pub(crate) mod guard_pages {
     use crate::*;
 
@@ -1520,7 +1501,6 @@ pub(crate) mod guard_pages {
 /// finalize midway and after more
 /// input, and subtrees at input offsets, against one-shot hashes.
 #[test]
-#[cfg(feature = "std")]
 fn test_hasher_gathers() {
     let mut input = vec![0u8; 300_000];
     paint_test_input(&mut input);
@@ -1555,7 +1535,6 @@ fn test_hash_comparisons_and_formats() {
     assert!(a == a.as_bytes()[..] && a != b.as_bytes()[..] && a != a.as_bytes()[..31]);
     let hex = a.to_hex();
     assert_eq!(hex.as_str(), "17762fddd969a453925d65717ac3eea21320b66b54342fde15128d6caf21215f");
-    #[cfg(feature = "std")]
     {
         assert_eq!(std::format!("{a}"), hex.as_str());
         assert_eq!(std::format!("{a:?}"), std::format!("Hash({:?})", hex.as_str()));
@@ -1609,7 +1588,6 @@ fn test_stack_vec_holds_its_elements_and_refuses_one_too_many() {
     assert_eq!(*collected, [1, 2, 3]);
     let nothing: StackVec<u8, 0> = Default::default();
     assert!(nothing.is_empty() && StackVec::<u8, 3>::default().is_empty());
-    #[cfg(feature = "std")]
     {
         let mut two = StackVec::<u8, 3>::new();
         two.extend([1, 2]);
@@ -1661,7 +1639,6 @@ fn test_stack_vec_holds_its_elements_and_refuses_one_too_many() {
 /// does. (BLAKE3 PR #484: a hash derived over the byte array missed the
 /// lookup, and a Display that wrote the 64 characters ignored `{:.8}`.)
 #[test]
-#[cfg(feature = "std")]
 fn test_hex_hash_keeps_the_contracts_of_its_str() {
     use std::hash::BuildHasher;
     let a = crate::Hash::from_bytes([0xab; 32]).to_hex();
@@ -1709,7 +1686,6 @@ fn test_every_view_of_a_hex_hash_is_its_characters() {
 /// A Hasher's Debug form names its flags and platform, and leaves out
 /// its bytes and chaining values (they may be secret).
 #[test]
-#[cfg(feature = "std")]
 fn test_debug_leaves_out_the_bytes() {
     let mut hasher = crate::Hasher::new(crate::Mode::Keyed(&[0xab; 32]), None);
     hasher.update(&[0xab; 70]);
@@ -1721,7 +1697,6 @@ fn test_debug_leaves_out_the_bytes() {
 /// A Hasher as an io::Write: write takes the whole input, and the digest
 /// is update's.
 #[test]
-#[cfg(feature = "std")]
 fn test_hasher_io_write() {
     use std::io::Write;
     let mut input = [0u8; 3000];
@@ -1740,7 +1715,7 @@ fn test_hasher_io_write() {
 /// see, so this is the test that holds them where measurement put them.
 /// On a CPU with SME2 (every kernel present); the recorded entry points
 /// are the tests' (`ran_kernel`).
-#[cfg(all(blake3_sme2, feature = "std"))]
+#[cfg(blake3_sme2)]
 mod dispatch {
     use crate::{CHUNK_LEN, RAN, RAN_ENTRIES, Ran};
     use std::collections::BTreeSet;
@@ -2036,7 +2011,7 @@ fn test_grouped_hash() {
 /// prefetch limit, on every platform: they look up the kernels' plans by
 /// length, and a lookup out of range would end the program.
 #[test]
-#[cfg(all(blake3_neon, feature = "std"))]
+#[cfg(blake3_neon)]
 fn test_cold_prefetches_every_length() {
     for platform in every_platform() {
         for len in (0..crate::PREFETCH_BELOW).step_by(17) {
@@ -2054,7 +2029,7 @@ fn test_cold_prefetches_every_length() {
 /// update prefetch, the warm one-shot path never. The NEON hybrids' paths:
 /// SME2's own prefetch is the SME2 rows' (the hybrids run on every AArch64
 /// core with the SHA-3 extension).
-#[cfg(all(blake3_neon, feature = "std"))]
+#[cfg(blake3_neon)]
 mod prefetch_counts {
     use crate::platform::{PREFETCHED, Platform};
     use crate::{CHUNK_LEN, IV, RAN_ENTRIES};

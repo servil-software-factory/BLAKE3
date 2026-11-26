@@ -6,10 +6,8 @@
 /// Dropped, it releases a thread a test holds on its channel (`recv`): so
 /// a fault in the test fails it at once where it would strand the held
 /// thread, and the test with it, until the clock.
-#[cfg(any(feature = "std", blake3_has_std))]
 #[allow(dead_code)] // The thread crate's tests hold threads with it.
 pub(crate) struct Released(pub(crate) std::sync::mpsc::Sender<()>);
-#[cfg(any(feature = "std", blake3_has_std))]
 impl Drop for Released {
     fn drop(&mut self) {
         let _ = self.0.send(());
@@ -18,7 +16,6 @@ impl Drop for Released {
 
 /// `bytes` copied into whole blocks, zero after them: a message as the
 /// throughput calls take one.
-#[cfg(any(feature = "std", blake3_has_std))]
 pub(crate) fn message(bytes: &[u8]) -> std::vec::Vec<crate::throughput::Block> {
     let mut blocks = std::vec![crate::throughput::Block::ZERO; bytes.len().div_ceil(crate::BLOCK_LEN).max(1)];
     crate::throughput::Block::bytes_mut(&mut blocks)[..bytes.len()].copy_from_slice(bytes);
@@ -26,14 +23,12 @@ pub(crate) fn message(bytes: &[u8]) -> std::vec::Vec<crate::throughput::Block> {
 }
 
 /// Each of `items` copied into blocks (`message`).
-#[cfg(any(feature = "std", blake3_has_std))]
 pub(crate) fn messages(items: &[&[u8]]) -> std::vec::Vec<std::vec::Vec<crate::throughput::Block>> {
     items.iter().map(|i| message(i)).collect()
 }
 
 /// `owned`'s messages (from `message`) as hash_each's items, `items`'
 /// lengths.
-#[cfg(any(feature = "std", blake3_has_std))]
 pub(crate) fn items<'a>(owned: &'a [std::vec::Vec<crate::throughput::Block>], items: &[&[u8]]) -> std::vec::Vec<(&'a [crate::throughput::Block], usize)> {
     owned.iter().zip(items).map(|(b, i)| (&b[..], i.len())).collect()
 }
@@ -47,16 +42,13 @@ pub(crate) fn blocks(bytes: &[u8]) -> std::vec::Vec<crate::throughput::Block> {
 }
 
 // Golden, the fixed values' check, shared with the integration tests.
-#[cfg(any(feature = "std", blake3_has_std))]
 #[path = "../tests/common/golden.rs"]
 mod golden;
-#[cfg(any(feature = "std", blake3_has_std))]
 pub(crate) use golden::Golden;
 
 /// Official BLAKE3 1.8.7, the generator of the fixed values: its public
 /// calls, and its hidden portable kernels (`blake3::platform`) for the
 /// compression-level sweeps.
-#[cfg(any(feature = "std", blake3_has_std))]
 pub(crate) mod official {
     use std::vec::Vec;
     fn portable() -> blake3::platform::Platform {
@@ -129,7 +121,7 @@ pub fn paint_test_input(buf: &mut [u8]) {
 
 /// Buffers between inaccessible pages, for the tests that place inputs
 /// and outputs flush against one (each crate's guard-page tests).
-#[cfg(all(any(feature = "std", blake3_has_std), any(target_arch = "aarch64", target_arch = "x86_64"), any(target_vendor = "apple", target_os = "linux")))]
+#[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), any(target_vendor = "apple", target_os = "linux")))]
 #[allow(dead_code)]
 pub(crate) mod guard {
     /// `len` bytes with an inaccessible page before and after them, the

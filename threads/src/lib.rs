@@ -29,20 +29,17 @@
 //! assert_eq!(hash1, hash2);
 //!
 //! // Extended output. OutputReader also implements Read and Seek.
-//! # #[cfg(feature = "std")] {
 //! let mut output = [0; 1000];
 //! let mut hasher = blake3_servil::convenience::Hasher::new(blake3_servil::Mode::Plain, None);
 //! hasher.update(b"foobarbaz");
 //! let mut output_reader = hasher.finalize_xof();
 //! output_reader.fill(&mut output);
 //! assert_eq!(hash1, output[..32]);
-//! # }
 //!
 //! // Print a hash as hex.
 //! println!("{}", hash1);
 //!
 //! // Many short messages in one call: a Batch lays them out in Blocks.
-//! # #[cfg(feature = "std")] {
 //! use blake3_servil::{throughput::{self, Batch}, Mode};
 //! let mut batch = Batch::new(64, 3);
 //! for i in 0..3 {
@@ -51,7 +48,6 @@
 //! let mut hashes = [[0u8; 32]; 3];
 //! throughput::hash_many(Mode::Plain, &batch, &mut hashes);
 //! assert_eq!(hashes[2], *blake3_servil::convenience::hash(&[2u8; 64]).as_bytes());
-//! # }
 //! # Ok(())
 //! # }
 //! ```

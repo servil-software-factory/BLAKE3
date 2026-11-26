@@ -337,7 +337,7 @@ fn flush_held(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usiz
     hash_held(hashers, &list);
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     // Actual cohorts passed to the shared-key or independent-parent body.
     static HELD_GROUPS: core::cell::RefCell<Vec<Vec<usize>>> = const { core::cell::RefCell::new(Vec::new()) };
@@ -349,7 +349,7 @@ std::thread_local! {
 /// count and the platform, all public, choose; key values never determine
 /// grouping, allocation or dispatch. Every other target compiles `hash_held`
 /// as it was.
-#[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
+#[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
 fn independent_lanes(hashers: &mut [Hasher], held: &[usize]) -> bool {
     let Some(&first) = held.first() else { return false };
     let platform = hashers[first].platform();
@@ -368,7 +368,7 @@ fn independent_lanes(hashers: &mut [Hasher], held: &[usize]) -> bool {
     true
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     /// Most recent `hash_cohort::<N>` workspace tier used on this thread.
     static LAST_COHORT_TIER: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
@@ -379,7 +379,6 @@ std::thread_local! {
 /// hashers' groups hash together; a keyed or key-derivation hasher's group
 /// hashes alone, since its key is secret and must not decide the work
 /// (BLAKE3 #312): the mode alone, public, groups them.
-#[cfg(feature = "std")]
 fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
     #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     if independent_lanes(hashers, held) {
@@ -450,13 +449,12 @@ impl<const N: usize> HeldWorkspace<N> {
 /// Hash 1..=N distinct held stages: plain hashers together, or one keyed
 /// or derive-key hasher. Acquires an SME2 turn for the cohort and records
 /// test pass counters, then delegates to [`hash_cohort_on`].
-#[cfg(feature = "std")]
 #[inline(never)]
 fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
     let first = alike[0];
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     let _ = HELD_GROUPS.try_with(|groups| groups.borrow_mut().push(alike.to_vec()));
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     crate::counted(crate::Counted::HeldPass);
     let turn = crate::platform::Sme2Turn::take(hashers[first].platform(), true);
     hash_cohort_on::<N>(hashers, alike, turn.platform());
@@ -465,13 +463,12 @@ fn hash_cohort<const N: usize>(hashers: &mut [Hasher], alike: &[usize]) {
 /// Hash one tile of 1..=N distinct held stages on `platform` (with any SME2
 /// turn held by the caller across tiles). Keeps chunks and each parent level
 /// in a bounded `HeldWorkspace<N>` on the stack.
-#[cfg(feature = "std")]
 // Keep the workspace frame out of empty turns and the other mode's caller.
 #[inline(never)]
 fn hash_cohort_on<const N: usize>(hashers: &mut [Hasher], alike: &[usize], platform: Platform) {
     use crate::{BLOCK_LEN, PARENT};
     let first = alike[0];
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     let _ = LAST_COHORT_TIER.try_with(|t| t.set(N));
     let domain = hashers[first].domain();
     let flags = domain.flags();
@@ -558,11 +555,6 @@ fn hash_cohort_on<const N: usize>(hashers: &mut [Hasher], alike: &[usize], platf
         }
         hashers[i].take_held(&result);
     }
-}
-
-#[cfg(not(feature = "std"))]
-fn hash_held(_: &mut [Hasher], held: &[usize]) {
-    assert!(held.is_empty(), "nothing held without std");
 }
 
 /// Messages of this many chunks or more fill the lanes alone.
@@ -728,11 +720,11 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         }
         if k > 0 {
             for group in same_blocks.chunks(GROUP) {
-                #[cfg_attr(not(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux")), allow(unused_mut))]
+                #[cfg_attr(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")), allow(unused_mut))]
                 let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
-                #[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+                #[cfg(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux"))]
                 let padded = crate::ffi_output::pad_by_blocks_inputs(&mut inputs, platform);
-                #[cfg(all(target_arch = "x86_64", not(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))))]
+                #[cfg(all(target_arch = "x86_64", not(all(blake3_avx512_ffi, target_os = "linux"))))]
                 let padded = group.len();
                 let mut lanes = [0u8; GROUP * OUT_LEN];
                 crate::counted(crate::Counted::ByBlocksCall);
@@ -766,9 +758,9 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     if last_lanes {
         return;
     }
-    #[cfg(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux"))]
     let serial_start = crate::ffi_output::finish_last_blocks_order(&order, items, &cvs, counter, flags, flags_end, out, platform);
-    #[cfg(not(all(target_arch = "x86_64", feature = "std", blake3_avx512_ffi, target_os = "linux")))]
+    #[cfg(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")))]
     let serial_start = 0usize;
     for &i in &order[serial_start..] {
         let item = items[i];
@@ -1153,7 +1145,6 @@ fn left_len(n: usize) -> usize {
 mod test {
     use super::*;
 
-    #[cfg(feature = "std")]
     #[test]
     #[should_panic(expected = "only plain hashers share a cohort")]
     fn a_shared_cohort_refuses_a_keyed_stage() {
@@ -1169,7 +1160,6 @@ mod test {
     /// Plain hashers always carry IV by `Domain` construction, and keyed or
     /// derive-key hashers beside them in the same turn never leak their keys
     /// into the plain cohort.
-    #[cfg(feature = "std")]
     #[test]
     fn a_plain_cohort_keeps_iv_beside_keyed_hashers() {
         crate::initialize();
@@ -1216,7 +1206,7 @@ mod test {
         });
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux", feature = "std"))]
+    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     #[test]
     fn finalize_each_groups_only_full_output_lanes() {
         crate::initialize();
@@ -1434,7 +1424,6 @@ mod test {
 
     /// A refused call leaves no mark: a program that catches the panic
     /// may name the same hashers in its next call.
-    #[cfg(feature = "std")]
     #[test]
     fn a_refused_finalize_each_leaves_no_hasher_marked() {
         crate::initialize();
@@ -1459,7 +1448,6 @@ mod test {
 
     /// A turn that panics part-way leaves no hasher holding a full stage:
     /// the hasher's next update has room, and its next turn ends.
-    #[cfg(feature = "std")]
     #[test]
     fn a_turn_that_unwinds_leaves_no_stage_held() {
         crate::initialize();
@@ -1896,7 +1884,6 @@ mod test {
     /// the table, with the rest of each piece gathered after. A flush at
     /// each outlasting piece would take a pass per hasher. The digests
     /// agree with the official implementation.
-    #[cfg(feature = "std")]
     #[test]
     fn outlasting_pieces_wait_for_a_full_table() {
         crate::initialize();
@@ -1925,7 +1912,6 @@ mod test {
 
     /// Public mode and independent-parent availability choose the held
     /// passes; equal and distinct secret keys always take the same work.
-    #[cfg(feature = "std")]
     #[test]
     fn held_groups_pass_by_mode_not_key() {
         crate::initialize();
@@ -2009,7 +1995,6 @@ mod test {
     /// With public shape fixed, changing key equality or the number of
     /// matching leading words changes neither cohorts nor kernel entries.
     /// This checks dispatch, not instruction-level constant-time execution.
-    #[cfg(feature = "std")]
     #[test]
     fn held_dispatch_ignores_key_equality_and_prefixes() {
         crate::initialize();
@@ -2172,7 +2157,6 @@ mod test {
 
     /// Large same-key and distinct-key turns take the same passes. A
     /// platform without independent parent lanes uses public-mode cohorts.
-    #[cfg(feature = "std")]
     #[test]
     fn held_passes_do_not_depend_on_keys() {
         crate::initialize();
@@ -2366,7 +2350,6 @@ mod test {
     /// `hash_held` picks the smallest `hash_cohort_on::<N>` workspace tier (1
     /// for a singleton, 16-stage L1D-hot tiles for 2..=128) for plain cohorts
     /// across every `std` platform.
-    #[cfg(feature = "std")]
     #[test]
     fn hash_held_selects_smallest_cohort_tier() {
         crate::initialize();
@@ -2426,7 +2409,6 @@ mod test {
     /// parent flushes and odd-leaf compaction), and all three `Mode`s match the
     /// reference implementation and exercise batched partial-chunk and
     /// parent/root rounds.
-    #[cfg(feature = "std")]
     #[test]
     fn hash_each_middle_all_chunk_counts_partial_tails_and_modes() {
         crate::initialize();

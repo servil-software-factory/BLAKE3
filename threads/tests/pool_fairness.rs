@@ -13,7 +13,6 @@
 //! runs on purpose with the machine to itself (`cargo nextest run -P
 //! machine`); the order the pool serves sources in, which makes the
 //! shares fair, has its own test with no clock (lanes::sources::test).
-#![cfg(feature = "std")]
 
 use blake3_servil::Mode;
 use blake3_servil::throughput::{Block, hash_each_multithreaded, hash_multithreaded};

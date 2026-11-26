@@ -143,7 +143,7 @@ mod test {
     use super::*;
 
     #[test]
-    #[cfg(all(target_os = "linux", feature = "std"))]
+    #[cfg(target_os = "linux")]
     fn test_wide_dispatch_groups_tails_and_bounds() {
         if !crate::platform::avx512_detected() {
             return;
@@ -220,7 +220,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(all(target_os = "linux", feature = "std"))]
+    #[cfg(target_os = "linux")]
     fn test_parent16_dispatch_and_legacy_incrementing_route() {
         if !crate::platform::avx512_detected() {
             return;

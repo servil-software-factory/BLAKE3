@@ -276,21 +276,21 @@ pub(crate) fn self_test(platform: crate::platform::Platform) -> usize {
 
 /// Exported entry point of the 4-lane SSE4.1 partial-chunk kernel for tests
 /// checking non-AVX-512 `compress_chunks_parallel` dispatch.
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) fn entry_sse41() -> *const () {
     blake3_servil_partial_sse41 as *const ()
 }
 
 /// Exported entry point of the 8-lane AVX2 partial-chunk kernel for tests
 /// checking exact partial-kernel dispatch boundaries (#557).
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) fn entry_avx2() -> *const () {
     blake3_servil_partial_avx2 as *const ()
 }
 
 /// Exported entry points of the AVX-512 partial-chunk kernels for
 /// `self_test::test_self_test_run_checks_every_case`.
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 3] {
     [
         ("partial_avx512_4", blake3_servil_partial_avx512_4 as *const ()),
@@ -391,7 +391,7 @@ fn hash_many_rounded_slow<const N: usize>(
         while padded.len() < lanes {
             padded.push(last);
         }
-        #[cfg(all(test, feature = "std"))]
+        #[cfg(test)]
         crate::ROUNDED_WIDTH.with(|w| w.set(w.get() | padded.len()));
         let mut scratch = [0u8; 32 * OUT_LEN];
         platform.hash_many(&padded, key, counter, increment_counter, flags, flags_start, flags_end, &mut scratch[..lanes * OUT_LEN]);
@@ -424,7 +424,6 @@ pub(crate) fn first_chunk_to_core(stage_empty: bool, hold: bool, is_plain: bool,
 /// AVX-512 packs eligible `ffi_output::input` descriptors independently and
 /// runs 16-lane `output16` on every complete 16-pack). Key values never select
 /// grouping or dispatch (#404).
-#[cfg(feature = "std")]
 pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     const FINALIZE_BATCH: usize = 128;
     const FULL_CHUNK_BATCH: usize = 32;
@@ -432,15 +431,15 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
     const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
     let platform = crate::platform::Platform::detect();
     let block_lanes = crate::pair::takes_platform(platform);
-    #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     let output_width = crate::ffi_output::lanes(platform);
-    #[cfg(all(test, feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(all(test, blake3_avx512_ffi, target_os = "linux"))]
     let mut counted_output_turn = false;
     for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
         let mut full_chunks = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut short_plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut short_plain_max_len = 0usize;
-        #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
         let mut output_slots = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         for (k, &i) in w_chunk.iter().enumerate() {
@@ -457,7 +456,7 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                     continue;
                 }
             }
-            #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+            #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
             if output_width != 0 && crate::ffi_output::input(&hashers[i]).is_some() {
                 output_slots.push(k);
                 continue;
@@ -509,7 +508,7 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                 o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
             }
         }
-        #[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
         {
             let done = if output_slots.len() >= 4 {
                 #[cfg(test)]

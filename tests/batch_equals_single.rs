@@ -1,4 +1,3 @@
-#![cfg(feature = "std")]
 use blake3_servil_core::{Mode, convenience::hash_with, initialize, throughput::*};
 
 fn check<P: Prepared>(mode: Mode, batch: &P, expected: &[[u8; 32]]) {

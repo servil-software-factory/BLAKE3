@@ -291,8 +291,7 @@ def an_optional_feature_gpl_crate(stage):
     _write_path_crate(outside, "opt_gpl", "GPL-3.0-only")
     manifest = stage / "release" / "checkout" / "Cargo.toml"
     lock = stage / "release" / "Cargo.lock"
-    edit(manifest, r"^\[features\]\n", '[features]\npolicy_control_feature = ["dep:opt_gpl"]\n')
-    edit(manifest, r"^\[dependencies\]\n", '[dependencies]\nopt_gpl = { path = "../../outside/opt_gpl", optional = true }\n')
+    edit(manifest, r"^\[dependencies\]\n", '[features]\npolicy_control_feature = ["dep:opt_gpl"]\n\n[dependencies]\nopt_gpl = { path = "../../outside/opt_gpl", optional = true }\n')
     edit(lock, r'(name = "blake3-servil-core"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "opt_gpl",\n')
     with open(lock, "a") as f:
         f.write('\n[[package]]\nname = "opt_gpl"\nversion = "0.1.0"\n')

@@ -28,14 +28,12 @@ pub const MAX_SIMD_DEGREE: usize = 16;
 /// Another crate can ask which platform it was given:
 ///
 /// ```
-/// # #[cfg(feature = "std")] {
 /// use blake3_servil_core::thread_support::Platform;
 /// blake3_servil_core::initialize();
 /// #[cfg(target_arch = "x86_64")]
 /// let _ = matches!(Platform::detect(), Platform::AVX2 { .. });
 /// #[cfg(target_arch = "aarch64")]
 /// let _ = matches!(Platform::detect(), Platform::NEON { .. });
-/// # }
 /// ```
 ///
 /// and cannot make one (the same names, so this fails for that reason):
@@ -161,7 +159,6 @@ const fn with_platform(detected: u16, platform: u8) -> u16 {
 }
 
 /// Whether [`crate::initialize`] has finished recording the process platform.
-#[cfg(any(all(blake3_sme2, feature = "std"), blake3_neon, feature = "std", test))]
 #[inline]
 pub(crate) fn is_initialized() -> bool {
     DETECTED.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes()[0] != 0
@@ -198,7 +195,6 @@ const fn x86_platform(avx512: bool, avx2: bool, sse41: bool) -> Option<Platform>
 }
 
 impl Platform {
-    #[cfg(any(feature = "std", blake3_neon))]
     #[inline]
     fn require_initialized() {
         if !is_initialized() {
@@ -413,7 +409,7 @@ impl Platform {
             if increment_counter.yes() { N == CHUNK_LEN } else { N <= CHUNK_LEN },
             "hash_many takes whole chunks at incrementing counters, or 1 to 16 blocks at one counter"
         );
-        #[cfg(all(test, feature = "std"))]
+        #[cfg(test)]
         {
             crate::counted(crate::Counted::HashManyCall);
             crate::record_hash_many_call(N / BLOCK_LEN, inputs.len());
@@ -493,7 +489,7 @@ impl Platform {
 
     /// The SSE41 platform where this build has its kernels and the CPU its
     /// instructions.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub fn sse41() -> Option<Self> {
         Self::require_initialized();
         #[cfg(blake3_sse41_ffi)]
@@ -505,7 +501,7 @@ impl Platform {
 
     /// The AVX2 platform where this build has its kernels and the CPU its
     /// instructions.
-    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     pub fn avx2() -> Option<Self> {
         Self::require_initialized();
         #[cfg(blake3_avx2_ffi)]
@@ -517,7 +513,6 @@ impl Platform {
 
     #[cfg(blake3_avx512_ffi)]
     #[cfg(target_arch = "x86_64")]
-    #[cfg(feature = "std")]
     pub fn avx512() -> Option<Self> {
         Self::require_initialized();
         if avx512_detected() { Some(Self::AVX512) } else { None }
@@ -531,7 +526,6 @@ impl Platform {
     }
 
     #[cfg(blake3_sme2)]
-    #[cfg(feature = "std")]
     pub fn sme2() -> Option<Self> {
         // Issue Platform::SME2 only when the startup self-test actually tested
         // SME2 (recorded as the process platform) and this thread's SVL is 512 bits.
@@ -539,7 +533,7 @@ impl Platform {
     }
 }
 
-#[cfg(all(blake3_sme2, feature = "std"))]
+#[cfg(blake3_sme2)]
 #[inline(always)]
 const fn sme2_allowed(detected: Platform, thread_ok: bool) -> bool {
     matches!(detected, Platform::SME2) && thread_ok
@@ -759,7 +753,7 @@ pub fn sse41_detected() -> bool {
 /// fetches its kernel's lines from DRAM one miss after another: hash() of
 /// 8 KiB took 4.8 us so on an M4 Max, and 2.8 with this prefetch (job 971),
 /// where code already near costs it a few cycles a line.
-#[cfg(all(blake3_neon, feature = "std"))]
+#[cfg(blake3_neon)]
 #[inline]
 pub(crate) fn prefetch_code((start, end): (usize, usize)) {
     debug_assert!(start < end && end - start < 64 * 1024, "a kernel's code");
@@ -799,7 +793,7 @@ pub(crate) fn prefetch_code((start, end): (usize, usize)) {
     });
 }
 
-#[cfg(all(test, blake3_neon, feature = "std"))]
+#[cfg(all(test, blake3_neon))]
 std::thread_local! {
     /// The tests' record of prefetch_code on this thread since they last
     /// took it, while one asks (Some): each range, and the steps of four
@@ -921,9 +915,9 @@ mod detected_test {
     #[should_panic(expected = "whole blocks only")]
     fn test_xof_many_rejects_partial_block_output() {
         let mut out = [0u8; 63];
-        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         let platform = super::Platform::sse41().unwrap_or_else(super::Platform::detect);
-        #[cfg(not(all(feature = "std", target_arch = "x86_64")))]
+        #[cfg(not(target_arch = "x86_64"))]
         let platform = super::Platform::detect();
         platform.xof_many(crate::IV, &[0u8; 64], 0, 0, crate::ROOT, &mut out);
     }
@@ -935,7 +929,6 @@ mod detected_test {
         assert!(!super::sme2_svl_ok(0));
         assert!(!super::sme2_svl_ok((crate::sme2::GROUP as u64) / 2));
         assert!(!super::sme2_svl_ok((crate::sme2::GROUP as u64) * 2));
-        #[cfg(feature = "std")]
         {
             assert!(super::sme2_allowed(super::Platform::SME2, true));
             assert!(!super::sme2_allowed(super::Platform::SME2, false));
@@ -945,7 +938,7 @@ mod detected_test {
         }
     }
 
-    #[cfg(all(blake3_avx512_ffi, unix, target_arch = "x86_64", feature = "std"))]
+    #[cfg(all(blake3_avx512_ffi, unix, target_arch = "x86_64"))]
     #[test]
     fn test_avx512_xof_many_rejects_partial_block_output() {
         if !super::avx512_detected() {
@@ -1100,7 +1093,7 @@ mod x86_features_test {
     /// The wide bit agrees with the kernel's own reading of this CPU
     /// (/proc/cpuinfo's vendor and family), and comes only with AVX-512.
     #[test]
-    #[cfg(all(target_os = "linux", feature = "std"))]
+    #[cfg(target_os = "linux")]
     fn test_wide_bit_matches_cpuinfo() {
         use super::x86_bits::*;
         let features = super::read_x86_features();

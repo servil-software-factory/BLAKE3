@@ -42,14 +42,12 @@ use crate::throughput::{Cv, TreeHasher};
 /// assert_eq!(hasher.finalize(), blake3_servil_core::convenience::hash(b"foobarbaz"));
 ///
 /// // Extended output. OutputReader also implements Read and Seek.
-/// # #[cfg(feature = "std")] {
 /// let mut output = [0; 1000];
 /// let mut hasher = blake3_servil_core::convenience::Hasher::new(blake3_servil_core::Mode::Plain, None);
 /// hasher.update(b"foobarbaz");
 /// let mut output_reader = hasher.finalize_xof();
 /// output_reader.fill(&mut output);
 /// assert_eq!(&output[..32], blake3_servil_core::convenience::hash(b"foobarbaz").as_bytes());
-/// # }
 /// # Ok(())
 /// # }
 /// ```
@@ -134,7 +132,6 @@ mod stage {
             self.len == 0
         }
 
-        #[cfg(any(feature = "std", test))]
         #[inline(always)]
         pub(crate) fn clear(&mut self) {
             self.len = 0;
@@ -144,7 +141,7 @@ mod stage {
         /// a block or less and whole in the stage. An empty stage's is a block
         /// of zeros apart (a new Hasher's stage is unwritten, and a reset one's
         /// holds the last message).
-        #[cfg(any(blake3_sse41_ffi, all(blake3_neon, feature = "std")))]
+        #[cfg(any(blake3_sse41_ffi, blake3_neon))]
         #[inline(always)]
         pub(crate) fn first_block(&self) -> &[u8; BLOCK_LEN] {
             static EMPTY: [u8; BLOCK_LEN] = [0; BLOCK_LEN];
@@ -198,7 +195,7 @@ mod stage {
             f(bytes);
         }
 
-        #[cfg(all(test, feature = "std"))]
+        #[cfg(test)]
         pub(crate) fn fill_from_for_test(&mut self, start: usize, byte: u8) {
             self.buf[start..].fill(core::mem::MaybeUninit::new(byte));
         }
@@ -206,7 +203,7 @@ mod stage {
         /// # Safety
         ///
         /// The test caller must have initialized `self.buf[i]` before reading it.
-        #[cfg(all(test, feature = "std"))]
+        #[cfg(test)]
         pub(crate) unsafe fn byte_for_test(&self, i: usize) -> u8 {
             // Sound: caller's precondition.
             unsafe { self.buf[i].assume_init() }
@@ -355,19 +352,16 @@ impl Hasher {
     }
 
     /// The prepared mode (immutable key words and domain flags).
-    #[cfg(feature = "std")]
     #[inline(always)]
     pub(crate) fn domain(&self) -> &Domain {
         &self.core.domain
     }
 
-    #[cfg(feature = "std")]
     #[inline(always)]
     pub(crate) fn is_plain(&self) -> bool {
         self.core.domain.is_plain()
     }
 
-    #[cfg(feature = "std")]
     #[inline(always)]
     pub(crate) fn platform(&self) -> Platform {
         self.core.chunk_state.platform()
@@ -375,36 +369,34 @@ impl Hasher {
 
     /// Mark this hasher as participating in an active `finalize_each` call;
     /// returns `true` if it was already marked.
-    #[cfg(feature = "std")]
     #[inline(always)]
     pub(crate) fn mark_finishing(&mut self) -> bool {
         core::mem::replace(&mut self.finishing, true)
     }
 
-    #[cfg(feature = "std")]
     #[inline(always)]
     pub(crate) fn clear_finishing(&mut self) {
         self.finishing = false;
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     pub(crate) fn set_platform_for_test(&mut self, platform: Platform) {
         self.core.chunk_state.set_platform(platform);
     }
 
-    #[cfg(any(all(test, feature = "std"), all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))))]
+    #[cfg(any(test, any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
     #[inline(always)]
     pub(crate) fn staged_len(&self) -> usize {
         self.stage.len()
     }
 
-    #[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
+    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     #[inline(always)]
     pub(crate) fn chunk_state(&self) -> &ChunkState {
         &self.core.chunk_state
     }
 
-    #[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
+    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     #[inline(always)]
     pub(crate) fn stage_first_block(&self) -> &[u8; BLOCK_LEN] {
         self.stage.first_block()
@@ -412,14 +404,12 @@ impl Hasher {
 
     /// True when the whole message is plain mode, at most one chunk, and
     /// sits completely in the stage (`finalize_each` batching).
-    #[cfg(feature = "std")]
     #[inline(always)]
     pub(crate) fn is_plain_single_chunk_staged(&self) -> bool {
         self.stage.len() <= CHUNK_LEN && self.core.count() == 0 && self.core.domain.is_plain()
     }
 
     /// The bytes gathered in the stage.
-    #[cfg(feature = "std")]
     pub(crate) fn staged_bytes(&self) -> &[u8] {
         self.stage.as_bytes()
     }
@@ -497,20 +487,13 @@ impl Hasher {
     }
 
     /// A whole group in the stage: its first chunk's counter and its bytes.
-    #[cfg(feature = "std")]
     pub(crate) fn held_group(&self) -> Option<(u64, &[u8; STAGE_LEN])> {
         (self.stage.len() == STAGE_LEN).then(|| (self.core.count() / CHUNK_LEN as u64, self.stage.as_bytes().try_into().unwrap()))
-    }
-
-    #[cfg(not(feature = "std"))]
-    pub(crate) fn held_group(&self) -> Option<(u64, &[u8; STAGE_LEN])> {
-        None
     }
 
     /// The held group's subtree, as [`HasherCore::push_group`] takes it
     /// (its two halves' values at chunk zero, else its own), into the
     /// core; the stage empty again.
-    #[cfg(feature = "std")]
     pub(crate) fn take_held(&mut self, result: &[u8; BLOCK_LEN]) {
         assert_eq!(self.stage.len(), STAGE_LEN, "a held group fills the stage");
         self.stage.clear();
@@ -567,7 +550,6 @@ impl Hasher {
     /// The root hash, for a caller that then resets the Hasher
     /// (`finalize_each`): a message whole in the stage as `finalize` hashes
     /// it, any other finished in place, with no copy of the core.
-    #[cfg(feature = "std")]
     pub(crate) fn take_root_hash(&mut self) -> Hash {
         if self.core.count() == 0 {
             return self.finalize();
@@ -577,7 +559,6 @@ impl Hasher {
 
     /// The root's output, the state finished in place: the Hasher is then
     /// finished, to be reset or dropped (`finalize_each`, which resets it).
-    #[cfg(feature = "std")]
     pub(crate) fn take_output(&mut self) -> Output {
         self.stage.take_with(|staged| {
             self.core.update(staged);
@@ -601,7 +582,6 @@ impl Hasher {
 
     /// The `Hasher` back in its initial state, its mode kept: what
     /// `finalize_each` leaves the hashers it finishes in.
-    #[cfg(any(feature = "std", test))]
     pub(crate) fn reset(&mut self) {
         self.core.reset();
         self.stage.clear();
@@ -652,7 +632,7 @@ impl Hasher {
         // Under 16 KiB it waits whole in the stage for `finalize`, which
         // hashes it with the one-shot call's kernels; from 16 KiB it goes
         // to the core now.
-        #[cfg(all(blake3_neon, feature = "std"))]
+        #[cfg(blake3_neon)]
         if self.count() == 0 && (CHUNK_LEN + 1..PREFETCH_BELOW).contains(&input.len()) {
             prefetch_cold(input.len(), self.core.chunk_state.platform(), input.len() >= STAGE_LEN);
         }
@@ -766,7 +746,6 @@ impl Hasher {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "std")]
     pub fn update_reader(&mut self, reader: impl std::io::Read) -> std::io::Result<&mut Self> {
         io::copy_wide(reader, self)?;
         Ok(self)
@@ -787,7 +766,6 @@ impl HasherCore {
     }
 
     /// Back to the empty message, with the same domain and platform.
-    #[cfg(any(feature = "std", test))]
     pub(crate) fn reset(&mut self) -> &mut Self {
         self.chunk_state = ChunkState::new(self.domain.key(), 0, self.domain.flags(), self.chunk_state.platform());
         self.cv_stack.clear();
@@ -805,14 +783,12 @@ impl HasherCore {
     // doesn't assume that). The principle is the same: each CV that should
     // remain in the stack is represented by a 1-bit in the total number of
     // chunks (or bytes) so far.
-    #[cfg(feature = "std")]
     fn merge_cv_stack(&mut self, chunk_counter: u64) {
         let post_merge_stack_len = hasher::ones(chunk_counter);
         let kernels = kernels_on(&self.domain, &self.chunk_state, self.chunk_state.platform(), None);
         self.cv_stack.merge(&kernels, post_merge_stack_len);
     }
 
-    #[cfg(feature = "std")]
     fn push_cv(&mut self, new_cv: &CVBytes, chunk_counter: u64) {
         self.merge_cv_stack(chunk_counter);
         self.cv_stack.push(*new_cv);
@@ -824,7 +800,6 @@ impl HasherCore {
     /// the pool's task computes it: at chunk zero its two halves' values
     /// (the group may be the root's), elsewhere its own. The group is one
     /// whole subtree, so nothing of it reaches the chunk state.
-    #[cfg(feature = "std")]
     pub fn push_group(&mut self, result: &[u8; BLOCK_LEN]) {
         const CHUNKS: u64 = (STAGE_LEN / CHUNK_LEN) as u64;
         check_input_room(self.count(), STAGE_LEN);
@@ -904,7 +879,6 @@ impl fmt::Debug for Hasher {
     }
 }
 
-#[cfg(feature = "std")]
 impl std::io::Write for Hasher {
     /// This is equivalent to [`update`](#method.update).
     #[inline]
@@ -950,7 +924,6 @@ mod test {
     /// "After a panic" asks) hashes its next message. (A hook that caught
     /// the panic and hashed the subtree itself passed every test, once the
     /// turn's callback test went with `update_each_with`: BLAKE3 #476.)
-    #[cfg(feature = "std")]
     #[test]
     fn a_callbacks_panic_comes_out_of_update_with() {
         crate::initialize();
@@ -992,7 +965,6 @@ mod test {
     /// the threshold the callback is asked
     /// (`pool_halves_use_the_subtrees_nonzero_place`), and above it too.
     #[test]
-    #[cfg(feature = "std")]
     fn an_update_below_the_pools_threshold_is_the_serial_update() {
         crate::initialize();
         let mut input = std::vec![0u8; 16 * STAGE_LEN];
@@ -1056,7 +1028,6 @@ mod test {
     /// callback is silent either way, the hooks holding each subtree to
     /// the threshold again, and only the rows tell.)
     #[test]
-    #[cfg(feature = "std")]
     fn a_staged_group_is_held_to_the_threshold_by_its_own_length() {
         crate::initialize();
         let input = painted();
@@ -1146,7 +1117,6 @@ mod test {
     /// in unused destination storage, making the performance invariant
     /// deterministic rather than a timing assertion.
     #[test]
-    #[cfg(feature = "std")]
     fn clone_from_copies_only_the_live_stage_prefix() {
         crate::initialize();
         let input = painted();
@@ -1213,7 +1183,6 @@ mod test {
     /// first part (a block, a chunk, the stage, beyond it), fed whole and
     /// in pieces of 7 bytes, in every mode.
     #[test]
-    #[cfg(feature = "std")]
     fn finalize_leaves_the_hasher_as_it_was_and_later_updates_extend_the_message() {
         crate::initialize();
         let input = painted();
@@ -1252,7 +1221,6 @@ mod test {
     /// and when its bytes arrive by the path that skips `update`'s own
     /// first block (`gather`, as `update_with` calls it).
     #[test]
-    #[cfg(feature = "std")]
     fn a_block_or_less_is_padded_whatever_the_hasher_held_before() {
         crate::initialize();
         let input = painted();
@@ -1295,7 +1263,6 @@ mod test {
     }
 
     /// The assembly entry points `f` runs on this thread.
-    #[cfg(feature = "std")]
     fn entries_run(f: &mut dyn FnMut()) -> std::collections::BTreeSet<usize> {
         crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
         f();
@@ -1310,7 +1277,6 @@ mod test {
     /// The control: a message a turn left in its chunk state on x86-64
     /// finishes by other kernels, so the record does tell.
     #[test]
-    #[cfg(feature = "std")]
     fn a_message_whole_in_the_stage_runs_the_one_shot_calls_kernels() {
         crate::initialize();
         let input = painted();
@@ -1372,7 +1338,7 @@ mod test {
     /// more, or into a stage that holds bytes, takes the longer path. The
     /// digest is the same either way, so the count tells (BLAKE3 #219).
     #[test]
-    #[cfg(all(feature = "std", blake3_sse41_ffi))]
+    #[cfg(blake3_sse41_ffi)]
     fn an_update_of_a_block_or_less_into_an_empty_stage_is_stored_padded() {
         crate::initialize();
         let input = painted();
@@ -1404,7 +1370,6 @@ mod test {
     /// copied, and the Hasher goes on to the same digests after. In every
     /// mode, at lengths around the groups.
     #[test]
-    #[cfg(feature = "std")]
     fn later_groups_are_rows_and_finalize_hashes_the_tail_apart() {
         crate::initialize();
         let mut input = std::vec![0u8; 8 * STAGE_LEN];
@@ -1452,7 +1417,6 @@ mod test {
     /// core (x86-64) and later bytes in the stage, `finalize` takes the
     /// copy of the core: the digest is right, and no tail is hashed apart.
     #[test]
-    #[cfg(feature = "std")]
     fn finalize_after_a_turn_that_left_a_chunk_in_the_core() {
         crate::initialize();
         let input = painted();
@@ -1514,10 +1478,8 @@ mod test {
             (65536 + 6 * STAGE_LEN, 0, 0),
         ] {
             let from = h.count() as usize;
-            #[cfg(feature = "std")]
             crate::COUNTED.with(|c| c[crate::Counted::Staged as usize].set(0));
             h.update(&input[from..end]);
-            #[cfg(feature = "std")]
             assert_eq!(crate::COUNTED.with(|c| c[crate::Counted::Staged as usize].get()), copies, "copies into the stage, after {end} bytes");
             let _ = copies;
             assert_eq!(h.stage.len(), staged, "after {end} bytes");
@@ -1572,7 +1534,6 @@ mod test {
         h.update(&[0u8; 1]);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     #[should_panic(expected = "BLAKE3 messages contain at most 2^64 - 1 bytes")]
     fn push_group_refuses_group_past_u64_max() {
@@ -1598,7 +1559,6 @@ mod test {
     /// for the caller to hash the group beside other hashers' groups.
     /// Holding is std's (update_each): without it held_group is None.
     #[test]
-    #[cfg(feature = "std")]
     fn test_gather_part_holds_a_whole_group() {
         let input = painted();
         let mut h = Hasher::new(Mode::Plain, None);
@@ -1610,7 +1570,7 @@ mod test {
         assert_eq!((counter, &bytes[..]), ((STAGE_LEN / CHUNK_LEN) as u64, &input[STAGE_LEN..2 * STAGE_LEN]));
     }
 
-    #[cfg(all(blake3_sme2, feature = "std"))]
+    #[cfg(blake3_sme2)]
     #[test]
     fn set_platform_for_test_updates_chunk_state_platform() {
         crate::initialize();

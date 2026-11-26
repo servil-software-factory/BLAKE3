@@ -252,7 +252,7 @@ pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
     })
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     /// Widths (`8` or `16`) passed to `hash_group` on this thread, for dispatch tests.
     pub(crate) static OUTPUT_CALLS: core::cell::RefCell<std::vec::Vec<usize>> = const { core::cell::RefCell::new(std::vec::Vec::new()) };
@@ -262,7 +262,7 @@ std::thread_local! {
 /// borrows a readable padded block/CV, length 0..64. All counters are zero.
 pub(crate) unsafe fn hash_group<const W: usize>(inputs: &[Input<'_>; W], out: &mut [[u8; OUT_LEN]]) {
     assert_eq!(out.len(), W, "one compression output per lane");
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     let _ = OUTPUT_CALLS.try_with(|c| c.borrow_mut().push(W));
     if W == 16 {
         crate::ran_kernel(blake3_servil_output16 as *const ());

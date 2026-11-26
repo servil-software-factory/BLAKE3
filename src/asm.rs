@@ -21,10 +21,10 @@ global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_avx512.s")), options(
 #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_avx512_32.s")), options(raw));
 
-#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_output16.s")), options(raw));
 
-#[cfg(all(feature = "std", blake3_avx512_ffi, target_os = "linux"))]
+#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_output8.s")), options(raw));
 
 #[cfg(blake3_avx2_ffi)]
@@ -54,8 +54,8 @@ global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_counter_sme2.s")), op
 #[cfg(blake3_sme2)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_sme2_hybrid.s")), options(raw));
 
-#[cfg(all(feature = "std", blake3_neon))]
+#[cfg(blake3_neon)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_output_neon.s")), options(raw));
 
-#[cfg(all(feature = "std", blake3_sme2))]
+#[cfg(blake3_sme2)]
 global_asm!(include_str!(concat!(env!("OUT_DIR"), "/blake3_output_sme2.s")), options(raw));

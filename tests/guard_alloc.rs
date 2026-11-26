@@ -6,7 +6,7 @@
 //! buffers with exact capacity). Note that types with internal block/line
 //! padding (such as `Packed`) still have logical padding before the allocation
 //! end; this test targets exact-sized byte buffers and slice boundaries.
-#![cfg(all(feature = "std", unix))]
+#![cfg(unix)]
 
 #[path = "../tools/guard_alloc_common.rs"]
 mod guard_alloc_common;

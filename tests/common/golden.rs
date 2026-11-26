@@ -11,7 +11,7 @@
 //! are added and the others must equal them, so the constant is the same
 //! on every machine.
 
-// Named in full: the library is no_std, its tests std.
+// Named in full so the helper has no extra imports.
 #[allow(unused_imports)]
 use std::{println, vec::Vec};
 

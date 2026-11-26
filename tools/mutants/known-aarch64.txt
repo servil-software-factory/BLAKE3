@@ -117,7 +117,6 @@ src/lib.rs	replace >= with < in hash_serial_from	1	speed: moves a threshold betw
 src/lib.rs	replace >= with < in prefetch_kernels	1	speed: whether and what to prefetch after a pause (no effect on results)
 src/lib.rs	replace >= with < in prefetch_update_kernels	1	speed: whether and what to prefetch after a pause (no effect on results)
 src/lib.rs	replace ran with ()	1	test-only: the tests' record of what ran (crate::ran); no shipped build has it. The tests that read it are x86-64's (the lane widths and the batch paths), and those machines catch this
-src/lib.rs	replace record_hash_many_call with ()	1	test-only: records (blocks, count) in KERNEL_HASH_MANY_CALLS for x86-64 batch-rounding tests; no shipped build has it and no AArch64 test reads it
 src/lib.rs	replace | with & in ran	1	test-only: the tests' record of what ran (crate::ran); no shipped build has it. The tests that read it are x86-64's (the lane widths and the batch paths), and those machines catch this
 src/lib.rs	replace | with ^ in Hash::from_hex	1	equivalent: `high << 4 | low` joins a high nibble and a value below 16 for every text that is accepted, and a refused text's bytes are never returned
 src/lib.rs	replace | with ^ in Hash::from_hex::hex_val	2	equivalent: a character is a digit or a letter, never both, so the two masks are never both set, and neither are the two values they select
@@ -412,21 +411,15 @@ src/self_test.rs	replace & with | in compiled_features_present	2	same code: ever
 src/self_test.rs	replace && with || in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace * with +	5	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace * with + in chain	1	equivalent: the case has one message, so its length scales only message 0's offset, 0
-src/self_test.rs	replace * with + in test::wide_reference	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace * with /	5	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace * with / in test::wide_reference	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace + with *	7	x86 only: compiled out on AArch64 (CI's x86 tests reach it) (the x86 cases' lengths)
 src/self_test.rs	replace + with -	6	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace += with *= in run	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace += with -= in run	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace << with >> in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace == with != in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace == with != in ensure_slow	1	no_std only: #[cfg(not(feature = "std"))] spin-wait arm is compiled out in default std builds
 src/self_test.rs	replace ^= with &= in run	1	test-only: the planted wrong digest's flip; as &= 1 the byte still changes wherever it is above 1, as every planted case's last byte is, so the digest is still wrong and the test still sees it
 src/self_test.rs	replace compiled_features_present with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/self_test.rs	replace test::ours -> usize with 0	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace test::ours -> usize with 1	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace test::wide_reference with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace < with <= in last_max	1	equivalent: `whole` is a multiple of 1024 and `room` (2^64 - 1 less a multiple of 1024) never is, so the two are never equal and either branch gives the smaller
 src/throughput.rs	replace >= with < in TreeHasher::hash_counter_range	1	[cpu lacks sme2] speed: whether hash_counter_range takes the SME2 turn (caught on SME2 hosts)

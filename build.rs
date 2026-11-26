@@ -262,7 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // As of Rust 1.80, unrecognized config names are warnings. Give Cargo all of our config names.
     // `shuttle` gates tests/shuttle_*.rs (RUSTFLAGS="--cfg shuttle"); the
     // library compiles the same either way.
-    let all_cfgs = ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "blake3_has_std", "shuttle"];
+    let all_cfgs = ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "shuttle"];
     for cfg_name in all_cfgs {
         println!("cargo::rustc-check-cfg=cfg({cfg_name}, values(none()))");
     }
@@ -282,10 +282,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage_asm(&out_dir, "c/blake3_avx512_32.S", "blake3_avx512_32.s", false, "avx512_32");
         stage_asm(&out_dir, "c/blake3_packed_x86-64_unix.S", "blake3_packed_x86.s", false, "packed_x86");
         stage_asm(&out_dir, "c/blake3_counter_x86-64_unix.S", "blake3_counter_x86.s", false, "counter_x86");
-        if env::var_os("CARGO_FEATURE_STD").is_some() {
-            stage_asm(&out_dir, "c/blake3_output16.S", "blake3_output16.s", false, "output16");
-            stage_asm(&out_dir, "c/blake3_output8.S", "blake3_output8.s", false, "output8");
-        }
+        stage_asm(&out_dir, "c/blake3_output16.S", "blake3_output16.s", false, "output16");
+        stage_asm(&out_dir, "c/blake3_output8.S", "blake3_output8.s", false, "output8");
     }
 
     if arch == "aarch64" {
@@ -299,10 +297,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage_asm(&out_dir, "c/blake3_packed_sme2_aarch64.S", "blake3_packed_sme2.s", is_apple, "packed_sme2");
         stage_asm(&out_dir, "c/blake3_counter_sme2_aarch64.S", "blake3_counter_sme2.s", is_apple, "counter_sme2");
         stage_asm(&out_dir, "c/blake3_sme2_hybrid_aarch64.S", "blake3_sme2_hybrid.s", is_apple, "sme2_hybrid");
-        if env::var_os("CARGO_FEATURE_STD").is_some() {
-            stage_asm(&out_dir, "c/blake3_output_neon_aarch64.S", "blake3_output_neon.s", is_apple, "output_neon");
-            stage_asm(&out_dir, "c/blake3_output_sme2_aarch64.S", "blake3_output_sme2.s", is_apple, "output_sme2");
-        }
+        stage_asm(&out_dir, "c/blake3_output_neon_aarch64.S", "blake3_output_neon.s", is_apple, "output_neon");
+        stage_asm(&out_dir, "c/blake3_output_sme2_aarch64.S", "blake3_output_sme2.s", is_apple, "output_sme2");
     }
 
     println!("cargo::rerun-if-changed=build.rs");

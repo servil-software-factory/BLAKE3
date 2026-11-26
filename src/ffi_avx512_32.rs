@@ -124,12 +124,12 @@ pub(crate) unsafe fn self_test(previous: &[u8; 32]) -> usize {
     checked
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) fn parent_entry() -> *const () {
     blake3_servil_avx512_p16 as *const ()
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) fn entries() -> [(&'static str, *const ()); 3] {
     [
         ("AVX-512 k32", blake3_servil_avx512_k32 as *const ()),
