@@ -7,9 +7,13 @@
 //! - Cold small/medium files (`< 4 MiB`) stream asynchronously through
 //!   `io_uring` into recycled buffers (promoting to streaming hashing if a
 //!   small-hinted file grows past 4 MiB).
-//! - Cached large files (`>= 512 KiB`, first page resident via `mincore`) are
-//!   mapped and loaned zero-copy to `Pipeline::lent`, then held mapped up to
-//!   `HOLD_PAGES` until exit to avoid `munmap` TLB shootdowns.
+//! - In the multi-file warm mapped path (when `--no-mmap` is off, `mmap`
+//!   succeeds, and sub-4 MiB files are not already claimed by an active cold
+//!   `io_uring` ring), cached files (`>= 512 KiB`, first page resident via
+//!   `mincore`) are mapped without copying into rooms: `512 KiB..4 MiB` hash
+//!   directly via `hash_slice_32`, while `>= 4 MiB` transfer `Mmap` ownership
+//!   through `WarmLargePipe` (`Pipeline::owned`); completed maps are held up
+//!   to `HOLD_PAGES` until exit to avoid `munmap` TLB shootdowns.
 //! - Cold large files (`>= 4 MiB`, not resident in page cache) stream
 //!   directly from storage into 64 KiB `Pipeline::room()`s via batched
 //!   `IORING_OP_READ`s, overlapping NVMe DMA with all-core subtree hashing.
@@ -691,7 +695,7 @@ fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> err::Result<
     Ok(output_reader)
 }
 
-const HOLD_PAGES: u64 = 1 << 18;
+pub(crate) const HOLD_PAGES: u64 = 1 << 18;
 
 pub(crate) fn hold(map: mmap::Mmap) {
     use std::sync::atomic::{AtomicU64, Ordering};

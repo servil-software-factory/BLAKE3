@@ -987,9 +987,9 @@ fn run_hybrid_worker(
             while sink.open && (c.free_slot_ids.is_empty() || c.ring.sq_space_left() == 0) {
                 c.step_ring(true, args, &mut warm_batch, &mut sink);
             }
-            if !sink.open {
-                break;
-            }
+        }
+        if !sink.open {
+            break;
         }
 
         let i = next.fetch_add(1, Ordering::Relaxed);
@@ -1991,5 +1991,93 @@ mod test {
         drop(held);
         assert_eq!(got2.into_iter().map(Option::unwrap).collect::<Vec<_>>(), want);
         assert_eq!(super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed), 0, "exhausted DirectPermits must prevent O_DIRECT oversubscription");
+    }
+
+    #[test]
+    fn warm_large_pipe_stops_claiming_new_operands_after_sink_closes() {
+        // Pool of 1 runs `Pipeline::owned` inline, so operand 0 completes
+        // before the next iteration's top-of-loop `WarmLargePipe::drain`.
+        // That makes the sink close deterministically at `next == 1`, proving
+        // the worker checks `sink.open` before calling `next.fetch_add` for
+        // operand 1 (preventing opening a subsequent operand such as a
+        // blocking FIFO; #564).
+        blake3::initialize_multithreaded(std::num::NonZeroUsize::new(1));
+        let dir = crate::tempfile::tempdir().unwrap();
+        let warm0 = dir.path().join("warm-stop-0.bin");
+        let warm1 = dir.path().join("warm-stop-1.bin");
+        let data = vec![0x3Au8; 4 * 1024 * 1024];
+        std::fs::write(&warm0, &data).unwrap();
+        std::fs::write(&warm1, &data).unwrap();
+        // Touch the first page via read so `mincore` sees operand 0 resident.
+        let _ = std::fs::read(&warm0).unwrap();
+
+        let paths = vec![warm0, warm1];
+        let args = crate::Args::for_test_plain_threads(paths.clone(), 1);
+        let mapped_before = crate::MAPPED.load(Ordering::Relaxed);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut closed_at = None;
+        super::run_hybrid_worker(&args, &paths, None, 16, 1, 1, true, &next, &mut |idx, res| {
+            assert_eq!(idx, 0);
+            assert_eq!(res.unwrap(), blake3::convenience::hash(&data));
+            closed_at = Some(next.load(Ordering::Relaxed));
+            false
+        });
+        assert!(crate::MAPPED.load(Ordering::Relaxed) > mapped_before, "operand 0 must take the warm mapped WarmLargePipe route");
+        assert_eq!(closed_at, Some(1), "top-of-loop WarmLargePipe::drain must close the sink after operand 0 before claiming operand 1");
+        assert_eq!(next.load(Ordering::Relaxed), 1, "worker must not claim operand 1 after WarmLargePipe::drain closes sink (#564)");
+    }
+
+    #[test]
+    fn warm_large_pipe_retains_returned_maps_up_to_hold_budget() {
+        // Pool of 1 completes submissions deterministically in submission
+        // order (0, 1, 2), so the first two maps fill the remaining `HOLD_PAGES`
+        // budget exactly and the third overflows and is unmapped.
+        blake3::initialize_multithreaded(std::num::NonZeroUsize::new(1));
+        let dir = crate::tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        let mut expected = Vec::new();
+        for n in 0..3u8 {
+            let p = dir.path().join(format!("warm-hold-{n}.bin"));
+            let mut buf = vec![n.wrapping_add(0x41); 4 * 1024 * 1024 + usize::from(n) * 13];
+            buf[0] = n;
+            std::fs::write(&p, &buf).unwrap();
+            expected.push(blake3::convenience::hash(&buf));
+            paths.push(p);
+        }
+
+        // Sound: query system page size (no memory argument).
+        let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).expect("positive page size");
+        let first_two_pages: u64 = paths[..2].iter().map(|p| std::fs::metadata(p).unwrap().len().div_ceil(page)).sum();
+        // Pre-fill `hold()` with one untouched sparse mapping so remaining
+        // budget matches the first two files exactly and rejects the third.
+        let filler_pages = crate::HOLD_PAGES.checked_sub(first_two_pages).expect("HOLD_PAGES exceeds two 4 MiB files");
+        let filler_path = dir.path().join("warm-hold-filler.bin");
+        let filler = std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&filler_path).unwrap();
+        filler.set_len(filler_pages * page).unwrap();
+        let args = crate::Args::for_test_plain_threads(paths.clone(), 1);
+        let filler_map = args.map(&filler).expect("mmap sparse filler");
+        drop(filler);
+        crate::hold(filler_map);
+
+        let mut wp = super::WarmLargePipe::new(blake3::Mode::Plain);
+        let mut got = vec![None; paths.len()];
+        let mut done = |idx: usize, res: crate::err::Result<blake3::Hash>| {
+            got[idx] = Some(res.unwrap());
+            true
+        };
+        let mut sink = super::Sink { done: &mut done, open: true };
+        for (idx, p) in paths.iter().enumerate() {
+            let file = std::fs::File::open(p).unwrap();
+            let map = args.map(&file).expect("mmap warm 4 MiB file");
+            drop(file);
+            wp.submit_owned(idx, map.len() as u64, map, &mut sink);
+        }
+        wp.finish(&mut sink);
+        drop(wp);
+
+        assert_eq!(got.into_iter().map(Option::unwrap).collect::<Vec<_>>(), expected);
+        let maps = std::fs::read_to_string("/proc/self/maps").expect("read /proc/self/maps");
+        let retained: Vec<bool> = paths.iter().map(|p| maps.contains(p.file_name().unwrap().to_str().unwrap())).collect();
+        assert_eq!(retained, vec![true, true, false], "WarmLargePipe must retain live Mmaps up to exact HOLD_PAGES budget and unmap past it (#564)");
     }
 }
