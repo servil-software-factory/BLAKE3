@@ -98,10 +98,6 @@ criteria = "agent-safe-to-run"
 version = "0.2.189"
 criteria = "agent-safe-to-deploy"
 
-[[exemptions.log]]
-version = "0.4.35"
-criteria = "agent-safe-to-run"
-
 [[exemptions.owo-colors]]
 version = "3.5.0"
 criteria = "agent-safe-to-run"
@@ -110,16 +106,8 @@ criteria = "agent-safe-to-run"
 version = "0.8.1"
 criteria = "agent-safe-to-run"
 
-[[exemptions.smallvec]]
-version = "1.16.5"
-criteria = "agent-safe-to-run"
-
 [[exemptions.syn]]
 version = "2.0.119"
-criteria = "agent-safe-to-run"
-
-[[exemptions.tracing]]
-version = "0.1.44"
 criteria = "agent-safe-to-run"
 
 [[exemptions.wasi]]
@@ -127,14 +115,6 @@ version = "0.11.0+wasi-snapshot-preview1"
 criteria = "agent-safe-to-run"
 
 [[exemptions.windows-core]]
-version = "0.100.0"
-criteria = "agent-safe-to-run"
-
-[[exemptions.windows-implement]]
-version = "0.100.0"
-criteria = "agent-safe-to-run"
-
-[[exemptions.windows-interface]]
 version = "0.100.0"
 criteria = "agent-safe-to-run"
 

@@ -46,6 +46,12 @@ criteria = "agent-safe-to-run"
 version = "2.0.0"
 notes = "Full review of src/lib.rs (no_std, zero unsafe, no build.rs, no OS/FS/network). Pure safe fundamental numeric trait hierarchy."
 
+[[audits.log]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-deploy"
+delta = "0.4.29 -> 0.4.35"
+notes = "Shipped-code delta review off Mozilla 0.4.29 safe-to-deploy: adds alloc feature for Box<dyn Log>/set_boxed_logger, Key::from_str_static/to_static_str via value-comparing MaybeStaticStr, Display-based ToValue for std::net address types, and typo fixes; zero new unsafe."
+
 [[audits.pin-project-lite]]
 who = "Devon Jonte (AI coding agent)"
 criteria = "agent-safe-to-run"
@@ -88,11 +94,35 @@ criteria = "agent-safe-to-run"
 delta = "1.0.22 -> 1.0.23"
 notes = "Sets RUSTVERSION=1 when running rustc --version in build.rs plus docs/CI updates."
 
+[[audits.smallvec]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-deploy"
+delta = "1.15.2 -> 1.16.5"
+notes = "Shipped-code delta review off Mozilla 1.15.2 safe-to-deploy: adds PhantomData<A::Item> fixing #[may_dangle] dropck soundness for zero-len inline arrays, makes try_grow(new_cap < len) a no-op, splits push spilled/inline paths, and rewrites retain with a Miri-sound PanicGuard (advances read before drop_in_place, non-overlapping copy with read > write)."
+
+[[audits.tracing]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-deploy"
+delta = "0.1.41 -> 0.1.44"
+notes = "Shipped-code delta review off Mozilla 0.1.41 safe-to-deploy: adds record_all!/valueset_all!, fixes STATIC_MAX_LEVEL fallthrough from unset release_max_level_* to max_level_*, no_std cleanup (removing src/stdlib.rs), and FieldName stripping ASCII 'r#' with sound from_utf8_unchecked (ASCII r/# cannot split multi-byte UTF-8 and assert!(write == N))."
+
 [[audits.unicode-ident]]
 who = "Devon Jonte <devonjonte@users.noreply.github.com>"
 criteria = "agent-safe-to-run"
 version = "1.0.24"
 notes = "Full review of src/lib.rs (no_std, no build.rs) and static table bounds verification on src/tables.rs: CHUNK=64, LEAF.len()=7808, max(TRIE_START)=max(TRIE_CONTINUE)=242, giving max get_unchecked offset 242*32+63=7807 < 7808."
+
+[[audits.windows-implement]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-run"
+version = "0.100.0"
+notes = "Full line-by-line review of Cargo.toml and src/{lib,gen}.rs (1,026 LOC): build = false, pure proc-macro transforming #[implement(...)] structs into COM vtable/QueryInterface tokens; zero unsafe executed at compile time, zero host FS/network/env/process calls in shipped macro paths."
+
+[[audits.windows-interface]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-run"
+version = "0.100.0"
+notes = "Full line-by-line review of Cargo.toml and src/{lib,guid,generation}.rs (774 LOC): build = false, pure proc-macro transforming #[interface('guid')] traits into COM struct/vtable tokens; zero unsafe executed at compile time, zero host FS/network/env/process calls in shipped macro paths."
 
 [[audits.windows-link]]
 who = "Devon Jonte (AI coding agent)"
