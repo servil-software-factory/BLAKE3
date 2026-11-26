@@ -3409,9 +3409,7 @@ pub(crate) mod sources {
             if pool.sme2 {
                 wake_sme2();
             }
-            if self.waiting() >= 2 {
-                wake_speculative(&pool.park, self.front_action_near());
-            }
+            wake_on_publish(&pool.park, self);
         }
 
         /// Whether the action currently at the head of this source's waiting
@@ -3721,6 +3719,20 @@ pub(crate) mod sources {
         true
     }
 
+    /// Speculative wake on action publication: at 2+ waiting actions, wakes
+    /// via `wake_speculative`; at 1 waiting action on a multi-place topology,
+    /// wakes one local worker when the caller's own cache place has zero awake
+    /// workers so concurrent callers on separate L3 caches do not serialize
+    /// behind a remote worker (BLAKE3 #556).
+    fn wake_on_publish(park: &crate::park::Park, source: &Source) {
+        let waiting = source.waiting();
+        if waiting >= 2 {
+            wake_speculative(park, source.front_action_near());
+        } else if waiting == 1 {
+            park.wake_if_place_asleep();
+        }
+    }
+
     /// Speculative publication / worker-chain wake: prefers the waker's own
     /// place when `near` is set without spilling to remote caches; spills
     /// across places when `near` is false. Progress waits (`wake_for_waiting`)
@@ -3934,6 +3946,41 @@ pub(crate) mod sources {
             wake_speculative(&park, source.front_action_near());
             assert_eq!(park.parked_count(), 0, "speculative far wake spills to remote worker");
             assert!(source.take().is_some());
+        }
+
+        #[test]
+        #[cfg(not(shuttle))]
+        fn wake_on_publish_wakes_asleep_place_at_one_waiting_and_never_at_zero() {
+            unsafe fn noop(_: *const (), _: u64, _: Platform) {}
+            std::thread_local! {
+                static PLACE_HERE: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+            }
+            let source = Source::with_actions(4);
+            let park = crate::park::test::park_with(4, 4, &[2, 3]);
+            // Place 0 = {0, 1} (awake), Place 1 = {2, 3} (both parked).
+            park.set_places(
+                vec![vec![0b0011u64].into_boxed_slice(), vec![0b1100u64].into_boxed_slice()].into_boxed_slice(),
+                vec![vec![0b1111u64].into_boxed_slice(), vec![0b1111u64].into_boxed_slice()].into_boxed_slice(),
+                || PLACE_HERE.with(|p| p.get()),
+            );
+            PLACE_HERE.with(|p| p.set(1));
+            // Zero waiting: wakes nobody even though place 1 is asleep.
+            wake_on_publish(&park, &source);
+            assert_eq!(park.parked_count(), 2, "zero waiting must not wake an asleep place");
+
+            // One waiting: wakes exactly one local worker in asleep place 1,
+            // and leaves the second local worker parked on re-check.
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[1], false) };
+            wake_on_publish(&park, &source);
+            assert_eq!(park.parked_count(), 1, "one waiting wakes one local worker in an asleep place");
+            wake_on_publish(&park, &source);
+            assert_eq!(park.parked_count(), 1, "once a local worker is awake, one waiting wakes nobody");
+
+            // Two waiting with far hint: wakes the remaining worker via wake_speculative.
+            unsafe { source.publish_actions(noop, core::ptr::null(), &[2], false) };
+            wake_on_publish(&park, &source);
+            assert_eq!(park.parked_count(), 0, "two waiting triggers speculative wake");
+            assert!(source.take().is_some() && source.take().is_some());
         }
 
         #[test]
