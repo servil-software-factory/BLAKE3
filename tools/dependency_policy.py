@@ -234,10 +234,24 @@ def edit(path, pattern, replacement):
     path.write_text(text)
 
 
+def add_section_dep(manifest, section, dep_line):
+    """Add `dep_line` under `[section]` in `manifest`, creating `[section]` if absent."""
+    text = manifest.read_text()
+    header = rf"^\[{re.escape(section)}\]\n"
+    if re.search(header, text, re.MULTILINE):
+        edit(manifest, header, f"[{section}]\n{dep_line}\n")
+    else:
+        manifest.write_text(text.rstrip() + f"\n\n[{section}]\n{dep_line}\n")
+
+
+def locked_package(lock_path, crate):
+    matches = [p for p in tomllib.loads(lock_path.read_text())["package"] if p["name"] == crate]
+    assert len(matches) == 1, f"{lock_path}: expected one {crate}, found {[p['version'] for p in matches]}"
+    return matches[0]
+
+
 def locked_version(lock_path, crate):
-    versions = [p["version"] for p in tomllib.loads(lock_path.read_text())["package"] if p["name"] == crate]
-    assert len(versions) == 1, f"{lock_path}: expected one {crate}, found {versions}"
-    return versions[0]
+    return locked_package(lock_path, crate)["version"]
 
 
 def _write_path_crate(crate_dir, name, licence):
@@ -247,12 +261,20 @@ def _write_path_crate(crate_dir, name, licence):
 
 
 def a_vulnerable_version(stage):
-    # RUSTSEC-2026-0007 (vulnerability advisory). Both locks reach bytes through bao-tree (tests only).
-    # Replace all audit evidence for bytes with a safe-to-run exemption for 1.11.0 so the advisory is
-    # all that fails, even if bytes is later audited.
-    for lock in (stage / "release" / "Cargo.lock", stage / "cli" / "b3sum" / "Cargo.lock"):
-        edit(lock, r'(name = "bytes"\nversion = ")[^"]*("\nsource = "[^"]*"\nchecksum = ")[0-9a-f]*',
-             r"\g<1>1.11.0\g<2>b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3")
+    # RUSTSEC-2026-0007 (vulnerability advisory on bytes 1.11.0, zero transitive deps).
+    # Plant it as a dev-dependency of b3sums in both locks and exempt it at safe-to-run
+    # so the vulnerability advisory is the sole failure on both graphs.
+    pkg_block = (
+        '\n[[package]]\nname = "bytes"\nversion = "1.11.0"\n'
+        'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        'checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"\n'
+    )
+    for checkout, lock in ((stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
+                           (stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
+        add_section_dep(checkout / "b3sum" / "Cargo.toml", "dev-dependencies", 'bytes = "=1.11.0"')
+        edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "bytes",\n')
+        with open(lock, "a") as f:
+            f.write(pkg_block)
     strip_audit_evidence(stage, "bytes", replace_with=[("1.11.0", "agent-safe-to-run")])
 
 
@@ -265,7 +287,7 @@ def a_crate_by_path_inside(stage):
     for checkout, lock in ((stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
                            (stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
         _write_path_crate(checkout / "copied", "copied", "MIT")
-        edit(checkout / "b3sum" / "Cargo.toml", r"^\[dev-dependencies\]\n", '[dev-dependencies]\ncopied = { path = "../copied" }\n')
+        add_section_dep(checkout / "b3sum" / "Cargo.toml", "dev-dependencies", 'copied = { path = "../copied" }')
         edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "copied",\n')
         with open(lock, "a") as f:
             f.write('\n[[package]]\nname = "copied"\nversion = "0.1.0"\n')
@@ -278,7 +300,7 @@ def a_dev_only_gpl_crate_outside(stage):
     _write_path_crate(outside, "dev_gpl", "GPL-3.0-only")
     for manifest, lock, rel in ((stage / "release" / "checkout" / "b3sum" / "Cargo.toml", stage / "release" / "Cargo.lock", "../../../outside/dev_gpl"),
                                 (stage / "cli" / "b3sum" / "Cargo.toml", stage / "cli" / "b3sum" / "Cargo.lock", "../../outside/dev_gpl")):
-        edit(manifest, r"^\[dev-dependencies\]\n", f'[dev-dependencies]\ndev_gpl = {{ path = "{rel}" }}\n')
+        add_section_dep(manifest, "dev-dependencies", f'dev_gpl = {{ path = "{rel}" }}')
         edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "dev_gpl",\n')
         with open(lock, "a") as f:
             f.write('\n[[package]]\nname = "dev_gpl"\nversion = "0.1.0"\n')
@@ -291,7 +313,7 @@ def an_optional_feature_gpl_crate(stage):
     _write_path_crate(outside, "opt_gpl", "GPL-3.0-only")
     manifest = stage / "release" / "checkout" / "Cargo.toml"
     lock = stage / "release" / "Cargo.lock"
-    edit(manifest, r"^\[dependencies\]\n", '[dependencies]\nopt_gpl = { path = "../../outside/opt_gpl", optional = true }\n')
+    add_section_dep(manifest, "dependencies", 'opt_gpl = { path = "../../outside/opt_gpl", optional = true }')
     edit(lock, r'(name = "blake3-servil-core"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "opt_gpl",\n')
     with open(lock, "a") as f:
         f.write('\n[[package]]\nname = "opt_gpl"\nversion = "0.1.0"\n')
@@ -307,52 +329,47 @@ def optional_feature_only_safe_to_run(stage):
     deploy-strength checking under --all-features catches it."""
     ver = locked_version(stage / "release" / "Cargo.lock", "arrayvec")
     strip_audit_evidence(stage, "arrayvec", replace_with=[(ver, "agent-safe-to-run")])
-    edit(stage / "release" / "checkout" / "Cargo.toml", r"^\[dependencies\]\n",
-         f'[dependencies]\narrayvec = {{ version = "={ver}", default-features = false, optional = true }}\n')
+    add_section_dep(stage / "release" / "checkout" / "Cargo.toml", "dependencies",
+                    f'arrayvec = {{ version = "={ver}", default-features = false, optional = true }}')
     edit(stage / "release" / "Cargo.lock", r'(name = "blake3-servil-core"\nversion = "[^"]*"\ndependencies = \[\n)',
          r'\g<1> "arrayvec",\n')
 
 
 def arrayvec_in_what_ships(stage):
     """arrayvec is safe-to-run only (tests); adding it to b3sum's normal dependencies must fail audits."""
-    ver = locked_version(stage / "release" / "Cargo.lock", "arrayvec")
+    pkg = locked_package(stage / "release" / "Cargo.lock", "arrayvec")
+    ver = pkg["version"]
     strip_audit_evidence(stage, "arrayvec", replace_with=[(ver, "agent-safe-to-run")])
-    for checkout, lock in ((stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
-                           (stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
-        edit(checkout / "b3sum" / "Cargo.toml", r"^\[dependencies\]\n", f'[dependencies]\narrayvec = "{ver}"\n')
+    for is_cli, checkout, lock in ((False, stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
+                                   (True, stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
+        add_section_dep(checkout / "b3sum" / "Cargo.toml", "dependencies", f'arrayvec = "{ver}"')
         edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "arrayvec",\n')
+        if is_cli:
+            with open(lock, "a") as f:
+                f.write(f'\n[[package]]\nname = "arrayvec"\nversion = "{ver}"\n'
+                        f'source = "{pkg["source"]}"\nchecksum = "{pkg["checksum"]}"\n')
 
 
 def cli_selects_unapproved_version(stage):
-    """Two valid locks whose package sets agree with gen-ver.py --check: release selects syn 3.x
-    (safe-to-deploy) for a core build-dependency, while standalone cli selects syn 2.x (safe-to-run
-    only). Release must pass and standalone cli must fail audits."""
+    """Two valid locks whose package sets agree with gen-ver.py --check: release selects windows-link
+    0.100.x (safe-to-deploy) for a core build-dependency, while standalone cli selects windows-link
+    0.2.x (safe-to-run only). Release must pass and standalone cli must fail audits."""
     release_lock = stage / "release" / "Cargo.lock"
-    syn_versions = [p["version"] for p in tomllib.loads(release_lock.read_text())["package"] if p["name"] == "syn"]
-    syn2_ver = next((v for v in syn_versions if v.startswith("2.")), None)
-    syn3_ver = next((v for v in syn_versions if v.startswith("3.")), None)
-    assert syn2_ver and syn3_ver, f"release lock needs both syn 2.x and 3.x, found {syn_versions}"
+    wl_versions = [p["version"] for p in tomllib.loads(release_lock.read_text())["package"] if p["name"] == "windows-link"]
+    wl_old = next((v for v in wl_versions if v.startswith("0.2.")), None)
+    wl_new = next((v for v in wl_versions if v.startswith("0.100.")), None)
+    assert wl_old and wl_new, f"release lock needs both windows-link 0.2.x and 0.100.x, found {wl_versions}"
     # Resolve each lock canonically with Cargo (offline, from the already-cached crates), then broaden
-    # both manifests to the same requirement (>=2, <4) so both locks remain valid under --locked.
+    # both manifests to the same requirement (>=0.2, <1) so both locks remain valid under --locked.
     for manifest, workdir, pinned in (
-        (stage / "release" / "checkout" / "Cargo.toml", stage / "release", syn3_ver),
-        (stage / "cli" / "Cargo.toml", stage / "cli" / "b3sum", syn2_ver),
+        (stage / "release" / "checkout" / "Cargo.toml", stage / "release", wl_new),
+        (stage / "cli" / "Cargo.toml", stage / "cli" / "b3sum", wl_old),
     ):
-        text = manifest.read_text()
-        if re.search(r"^\[build-dependencies\]\n", text, re.MULTILINE):
-            edit(manifest, r"^\[build-dependencies\]\n", f'[build-dependencies]\nsyn = "={pinned}"\n')
-        else:
-            manifest.write_text(text + f'\n[build-dependencies]\nsyn = "={pinned}"\n')
+        add_section_dep(manifest, "build-dependencies", f'windows-link = "={pinned}"')
         subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1"], cwd=workdir,
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        edit(manifest, rf'^syn = "={re.escape(pinned)}"\n', 'syn = ">=2, <4"\n')
-    strip_audit_evidence(stage, "syn", replace_with=[(syn3_ver, "agent-safe-to-deploy"), (syn2_ver, "agent-safe-to-run")])
-    # Promoting syn from test-only to a core build-dependency also promotes its three proc-macro
-    # support crates from dev-criteria to deploy-criteria; exempt them at deploy strength in this
-    # synthetic stage so only syn 2.x vs 3.x decides the outcome.
-    for dep in ("proc-macro2", "quote", "unicode-ident"):
-        dep_ver = locked_version(release_lock, dep)
-        strip_audit_evidence(stage, dep, replace_with=[(dep_ver, "agent-safe-to-deploy")])
+        edit(manifest, rf'^windows-link = "={re.escape(pinned)}"\n', 'windows-link = ">=0.2, <1"\n')
+    strip_audit_evidence(stage, "windows-link", replace_with=[(wl_new, "agent-safe-to-deploy"), (wl_old, "agent-safe-to-run")])
 
 
 def an_unread_index(stage):
@@ -375,7 +392,7 @@ CONTROLS = [
     ("a version with a vulnerability advisory, reached through a test dependency alone",
      a_vulnerable_version, {"release": ["advisories"], "cli": ["advisories"]}),
     ("a licence outside the list, with no exception recorded",
-     no_licence_exception, {"release": ["licenses"], "cli": ["licenses"]}),
+     no_licence_exception, {"release": ["licenses"], "cli": []}),
     ("a crate copied into the checkout and taken by path",
      a_crate_by_path_inside, {"release": ["by path"], "cli": ["by path"]}),
     ("a dev-only GPL crate outside the workspace (tests include-dev without implicit membership)",

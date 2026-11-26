@@ -23,10 +23,6 @@ blake3 = { version = "=0.11.0+dev", path = "../threads", package = "blake3-servi
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[dev-dependencies]
-# bao-tree, the outboard's independent implementation (--outboard's tests).
-bao-tree = { version = "=0.17.0", default-features = false }
-
 # A panic stops the process at once (crash-only): nothing unwinds past a
 # thread's reads that the kernel still has in flight, whose buffers the
 # unwinding would free while the other threads go on hashing.

@@ -4,6 +4,8 @@ use std::io::{self, prelude::*};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+#[path = "../src/test_bao_ref.rs"]
+mod bao_ref;
 #[path = "../src/test_temp.rs"]
 mod tempfile;
 
@@ -952,7 +954,6 @@ fn test_outboard_files_are_bao_trees() {
     let dir = tempfile::tempdir().unwrap();
     let out_dir = dir.path().join("outboards");
     fs::create_dir(&out_dir).unwrap();
-    let block_size = bao_tree::BlockSize::from_chunk_log(4);
     let group = 16 * 1024;
     let lens = [0usize, 1, group, group + 1, 3 * group, 100_000, 64 * group, 64 * group + 1, 2_000_000];
     let mut files = Vec::new();
@@ -961,9 +962,10 @@ fn test_outboard_files_are_bao_trees() {
         let data: Vec<u8> = (0..len).map(|j| (j.wrapping_mul(37) ^ (j >> 7) ^ i) as u8).collect();
         let path = dir.path().join(format!("file-{i}"));
         fs::write(&path, &data).unwrap();
-        let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create(&data, block_size);
-        assert_eq!(theirs.root.as_bytes(), blake3::convenience::hash(&data).as_bytes());
-        expected.push((format!("{}  {}", theirs.root.to_hex(), path.to_string_lossy()), out_dir.join(format!("{}.obao4", theirs.root.to_hex())), theirs.data));
+        let theirs = bao_ref::create(&data);
+        assert_eq!(&theirs.root, blake3::convenience::hash(&data).as_bytes());
+        let root_hex = theirs.root_hex();
+        expected.push((format!("{root_hex}  {}", path.to_string_lossy()), out_dir.join(format!("{root_hex}.obao4")), theirs.data));
         files.push(path);
     }
     let mut args: Vec<OsString> = vec!["--outboard".into(), out_dir.clone().into()];
@@ -983,19 +985,21 @@ fn test_outboard_files_are_bao_trees() {
 
     // Standard input, and one thread.
     let data: Vec<u8> = (0..300_000usize).map(|j| (j * 13) as u8).collect();
-    let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create(&data, block_size);
+    let theirs = bao_ref::create(&data);
+    let root_hex = theirs.root_hex();
     let output = cmd!(b3sum_exe(), "--num-threads", "1", "--outboard", &out_dir).stdin_bytes(data.clone()).read().unwrap();
-    assert_eq!(output, format!("{}  -", theirs.root.to_hex()));
-    assert_eq!(fs::read(out_dir.join(format!("{}.obao4", theirs.root.to_hex()))).unwrap(), theirs.data);
+    assert_eq!(output, format!("{root_hex}  -"));
+    assert_eq!(fs::read(out_dir.join(format!("{root_hex}.obao4"))).unwrap(), theirs.data);
 
     // Keyed: the key on standard input, as ever.
     let key = [0x42u8; 32];
-    let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create_keyed(&data, block_size, &key);
+    let theirs = bao_ref::create_keyed(&data, &key);
+    let root_hex = theirs.root_hex();
     let big = dir.path().join("keyed-input");
     fs::write(&big, &data).unwrap();
     let output = cmd!(b3sum_exe(), "--keyed", "--no-names", "--outboard", &out_dir, &big).stdin_bytes(key.to_vec()).read().unwrap();
-    assert_eq!(output, theirs.root.to_hex().to_string());
-    assert_eq!(fs::read(out_dir.join(format!("{}.obao4", theirs.root.to_hex()))).unwrap(), theirs.data);
+    assert_eq!(output, root_hex);
+    assert_eq!(fs::read(out_dir.join(format!("{root_hex}.obao4"))).unwrap(), theirs.data);
 
     // An outboard's place is taken by name, never written through. A link
     // there is replaced, and its target left as it was. An outboard
@@ -1051,9 +1055,10 @@ fn test_outboard_files_are_bao_trees() {
         let data: Vec<u8> = (0..len).map(|j| (j.wrapping_mul(41) ^ (j >> 5) ^ i) as u8).collect();
         let path = many_dir.join(format!("f{i:03}"));
         fs::write(&path, &data).unwrap();
-        let theirs = bao_tree::io::outboard::PreOrderMemOutboard::create(&data, block_size);
-        lines.push(format!("{}  {}", theirs.root.to_hex(), path.to_string_lossy()));
-        outboards.push((format!("{}.obao4", theirs.root.to_hex()), theirs.data));
+        let theirs = bao_ref::create(&data);
+        let root_hex = theirs.root_hex();
+        lines.push(format!("{root_hex}  {}", path.to_string_lossy()));
+        outboards.push((format!("{root_hex}.obao4"), theirs.data));
         many.push(path);
         if i == 60 {
             many.push(missing.clone());

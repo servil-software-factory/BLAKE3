@@ -48,6 +48,7 @@ TEST_ONLY_FILES = frozenset({
     "threads/src/forms_test.rs",
     "b3sum/src/unit_tests.rs",
     "b3sum/src/test_temp.rs",
+    "b3sum/src/test_bao_ref.rs",
 })
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")

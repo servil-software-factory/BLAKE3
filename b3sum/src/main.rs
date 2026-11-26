@@ -28,6 +28,9 @@
 //! identity checks live in `file_end`.
 
 mod args;
+#[cfg(test)]
+#[path = "test_bao_ref.rs"]
+mod bao_ref;
 mod err;
 mod mmap;
 #[cfg(test)]
