@@ -210,4 +210,14 @@ pub unsafe extern "C" fn b3_hasher_finalize_xof(hasher: *mut B3Hasher, offset: u
 #[cfg(test)]
 mod test {
     include!("../../tools/require_nextest.rs");
+
+    #[test]
+    fn b3_version_matches_exact_build_version_with_trailing_nul() {
+        let ptr = super::b3_version();
+        assert!(!ptr.is_null());
+        // Sound: `b3_version()` returns a static NUL-terminated string.
+        let cstr = unsafe { core::ffi::CStr::from_ptr(ptr) };
+        assert_eq!(cstr.to_bytes(), blake3_servil::BUILD_VERSION.as_bytes());
+        assert_eq!(cstr.to_bytes_with_nul()[blake3_servil::BUILD_VERSION.len()], 0);
+    }
 }
