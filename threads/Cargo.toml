@@ -10,12 +10,6 @@ readme = "../README.md"
 edition = "2024"
 include = ["/src", "/build.rs", "/LICENSE-*"]
 
-[features]
-# 0.8's dependents name `std`; this crate always needs it (TRIAL: to go
-# with the bench's line, bench-hashes #169).
-default = ["std"]
-std = []
-
 [dependencies]
 # The one-thread library: the kernels and their proofs, the Hasher, the
 # direct and grouped calls. This crate re-exports it whole.

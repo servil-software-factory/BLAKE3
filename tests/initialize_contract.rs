@@ -9,7 +9,6 @@ fn a_call_before_initialize_panics() {
     blake3_servil_core::convenience::hash(b"");
 }
 
-#[cfg(feature = "std")]
 #[test]
 fn every_platform_constructor_before_initialize_panics() {
     use blake3_servil_core::thread_support::Platform;

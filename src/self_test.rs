@@ -33,9 +33,8 @@
 //! that differs names the failing path: the cases before it agreed.
 //!
 //! `initialize()`, which every program calls before any other call, runs
-//! it through `ensure`, in every build (std or not); other threads calling
-//! it wait (parked under `std`, spinning without `std`, once per process,
-//! for 0.1 to 0.2 ms). The cases call
+//! it through `ensure`; other threads calling it wait (parked via
+//! `std::sync::Once`, once per process, for 0.1 to 0.2 ms). The cases call
 //! the entry points' bodies from the undetected platform
 //! (`hash_serial_from` and its like), just past Platform::detect(), which
 //! panics until `initialize` has recorded the platform. It allocates nothing: its buffers (about 44 KiB) live on the
@@ -393,7 +392,7 @@ fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]
     }
     // A group of sixteen: on SME2 the kernel with a counter per group (as
     // Hasher::update_each hashes held groups).
-    #[cfg(all(blake3_sme2, feature = "std"))]
+    #[cfg(blake3_sme2)]
     if chunks.len() == crate::sme2::GROUP {
         let turn = crate::platform::Sme2Turn::take(platform, true);
         if matches!(turn.platform(), Platform::SME2) {
@@ -416,7 +415,7 @@ fn run() -> usize {
     if PLANTED_FAILURE.load(core::sync::atomic::Ordering::Relaxed) {
         panic!("a kernel's panic, planted by a test");
     }
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     if HOLD_RUN.load(core::sync::atomic::Ordering::Relaxed) {
         IN_RUN.store(true, core::sync::atomic::Ordering::Release);
         while HOLD_RUN.load(core::sync::atomic::Ordering::Acquire) {
@@ -461,7 +460,7 @@ fn run() -> usize {
         // wrapper checks its bounds, and builds all arguments on the stack.
         checked += unsafe { crate::avx512_32::self_test(&previous) };
     }
-    #[cfg(all(feature = "std", any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
+    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     {
         checked += crate::ffi_output::self_test(platform);
     }
@@ -506,11 +505,9 @@ fn compiled_features_present() {
 /// Stop the process: this build or this CPU computes wrong digests, and
 /// nothing may hash on. No caller can catch it; a panic can be caught
 /// (catch_unwind, a thread's join, an FFI boundary), and the program
-/// would go on hashing wrong digests (Zooko, October 24). With std, the
-/// reason to stderr, then abort (SIGABRT). Without std, the CPU's trap
-/// instruction (an illegal-instruction fault, SIGILL where there are
-/// signals): stable Rust, no library. On an architecture with no trap
-/// named here, a panic, to the program's panic handler.
+/// would go on hashing wrong digests (Zooko, October 24). Writes a
+/// best-effort reason to fd 2 (guarded by `poll` and `alarm(1)` under
+/// default `SIGALRM` handling), then calls `std::process::abort` (SIGABRT).
 /// The stop for a CPU this crate does not support: the same as a failed
 /// self-test's, uncatchable, the reason first.
 #[cfg(target_arch = "x86_64")]
@@ -520,8 +517,8 @@ pub(crate) fn unsupported(why: core::fmt::Arguments) -> ! {
 }
 
 /// Direct non-unwinding fail-stop for self-test mismatches in helper modules
-/// (`avx512_32`, `ffi_output`) so every startup mismatch terminates even in
-/// `no_std` non-unwinding builds.
+/// (`avx512_32`, `ffi_output`) so every startup mismatch terminates cleanly
+/// without unwinding.
 #[cold]
 pub(crate) fn fail(why: core::fmt::Arguments) -> ! {
     stop(why)
@@ -529,106 +526,72 @@ pub(crate) fn fail(why: core::fmt::Arguments) -> ! {
 
 #[cold]
 fn stop(why: core::fmt::Arguments) -> ! {
-    #[cfg(all(feature = "std", unix))]
-    {
-        use core::fmt::Write as _;
+    use core::fmt::Write as _;
 
-        struct StackBuf {
-            bytes: [u8; 320],
-            len: usize,
-        }
-        impl core::fmt::Write for StackBuf {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                for &b in s.as_bytes() {
-                    if let Some(slot) = self.bytes.get_mut(self.len) {
-                        *slot = b;
-                        self.len += 1;
-                    }
+    struct StackBuf {
+        bytes: [u8; 320],
+        len: usize,
+    }
+    impl core::fmt::Write for StackBuf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for &b in s.as_bytes() {
+                if let Some(slot) = self.bytes.get_mut(self.len) {
+                    *slot = b;
+                    self.len += 1;
                 }
-                Ok(())
             }
+            Ok(())
         }
-        #[repr(C)]
-        struct PollFd {
-            fd: i32,
-            events: i16,
-            revents: i16,
-        }
-        const POLLOUT: i16 = 0x0004;
-        #[cfg(target_os = "macos")]
-        type Nfds = u32;
-        #[cfg(not(target_os = "macos"))]
-        type Nfds = usize;
-        unsafe extern "C" {
-            fn alarm(seconds: u32) -> u32;
-            fn poll(fds: *mut PollFd, nfds: Nfds, timeout: i32) -> i32;
-            fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
-        }
-        // Best-effort diagnostic directly to fd 2, bypassing Rust's stderr
-        // mutex, with zero heap allocation and zero threads. Requiring exact
-        // `pfd.revents == POLLOUT` skips already-full pipes and broken/closed
-        // pipes (avoiding SIGPIPE in C hosts and b3sum). Arming `alarm(1)`
-        // before `write` bounds the rare TOCTOU race where another writer
-        // fills a blocking stderr pipe after `poll` (under default SIGALRM).
-        let mut buf = StackBuf { bytes: [0; 320], len: 0 };
-        let _ = buf.write_fmt(why);
-        let _ = buf.write_str("\n");
-        let mut pfd = PollFd { fd: 2, events: POLLOUT, revents: 0 };
-        // Sound: valid PollFd pointer and initialized stack slice of length `buf.len <= 320 <= PIPE_BUF`.
-        unsafe {
-            let _ = poll(&mut pfd, 1, 0);
-            if pfd.revents == POLLOUT {
-                let _ = alarm(1);
-                let _ = write(2, buf.bytes.as_ptr().cast(), buf.len);
-            }
-        }
-        std::process::abort()
     }
-    #[cfg(all(feature = "std", not(unix)))]
-    {
-        let _ = why;
-        std::process::abort()
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
     }
-    #[cfg(not(feature = "std"))]
-    {
-        let _ = why;
-        trap()
+    const POLLOUT: i16 = 0x0004;
+    #[cfg(target_os = "macos")]
+    type Nfds = u32;
+    #[cfg(not(target_os = "macos"))]
+    type Nfds = usize;
+    unsafe extern "C" {
+        fn alarm(seconds: u32) -> u32;
+        fn poll(fds: *mut PollFd, nfds: Nfds, timeout: i32) -> i32;
+        fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
     }
-}
-
-/// The CPU's own stop: an instruction defined to fault.
-#[cfg(not(feature = "std"))]
-#[inline(always)]
-fn trap() -> ! {
-    // Sound: each instruction faults where it is executed; nothing after
-    // it runs.
-    #[cfg(target_arch = "x86_64")]
+    // Best-effort diagnostic directly to fd 2, bypassing Rust's stderr
+    // mutex, with zero heap allocation and zero threads. Requiring exact
+    // `pfd.revents == POLLOUT` skips already-full pipes and broken/closed
+    // pipes (avoiding SIGPIPE in C hosts and b3sum). Arming `alarm(1)`
+    // before `write` bounds the rare TOCTOU race where another writer
+    // fills a blocking stderr pipe after `poll` (under default SIGALRM).
+    let mut buf = StackBuf { bytes: [0; 320], len: 0 };
+    let _ = buf.write_fmt(why);
+    let _ = buf.write_str("\n");
+    let mut pfd = PollFd { fd: 2, events: POLLOUT, revents: 0 };
+    // Sound: valid PollFd pointer and initialized stack slice of length `buf.len <= 320 <= PIPE_BUF`.
     unsafe {
-        core::arch::asm!("ud2", options(noreturn, nomem, nostack))
+        let _ = poll(&mut pfd, 1, 0);
+        if pfd.revents == POLLOUT {
+            let _ = alarm(1);
+            let _ = write(2, buf.bytes.as_ptr().cast(), buf.len);
+        }
     }
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        core::arch::asm!("udf #0", options(noreturn, nomem, nostack))
-    }
+    std::process::abort()
 }
 
 /// The self-test's progress in this process. A failed one stops the
 /// process (stop), so no state says so.
-#[cfg(not(feature = "std"))]
-const UNTESTED: u8 = 0;
-#[cfg(not(feature = "std"))]
-const RUNNING: u8 = 1;
 const PASSED: u8 = 2;
 static STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
-#[cfg(feature = "std")]
 static INIT: std::sync::Once = std::sync::Once::new();
 
 /// Test-only rendezvous hooks so a subprocess test can hold the real winner
 /// inside `run()` while real contending callers park in `INIT.call_once`.
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 static HOLD_RUN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 static IN_RUN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// A failure a test plants in the self-test's run (test builds only), as
@@ -663,40 +626,21 @@ impl Drop for Failed {
 #[cold]
 #[inline(never)]
 fn ensure_slow() {
-    #[cfg(feature = "std")]
-    {
-        // `std::sync::Once` allocates nothing on macOS or Linux (its waiter
-        // nodes live on contending threads' stacks) and parks waiters in the
-        // OS kernel rather than spinning. `run()` records the exact tested
-        // platform once inside this winning run so later `initialize()` calls
-        // on other threads never promote an untested backend or overwrite the
-        // verified process selection.
-        INIT.call_once(|| {
-            let failed = Failed;
-            run();
-            core::mem::forget(failed);
-            STATE.store(PASSED, core::sync::atomic::Ordering::Release);
-        });
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-        if STATE.compare_exchange(UNTESTED, RUNNING, Relaxed, Relaxed).is_ok() {
-            let failed = Failed;
-            run();
-            core::mem::forget(failed);
-            STATE.store(PASSED, Release);
-            return;
-        }
-        while STATE.load(Acquire) == RUNNING {
-            core::hint::spin_loop();
-        }
-        let state = STATE.load(Acquire);
-        assert!(state == PASSED, "the self-test's state is {state} after it ran");
-    }
+    // `std::sync::Once` allocates nothing on macOS or Linux (its waiter
+    // nodes live on contending threads' stacks) and parks waiters in the
+    // OS kernel rather than spinning. `run()` records the exact tested
+    // platform once inside this winning run so later `initialize()` calls
+    // on other threads never promote an untested backend or overwrite the
+    // verified process selection.
+    INIT.call_once(|| {
+        let failed = Failed;
+        run();
+        core::mem::forget(failed);
+        STATE.store(PASSED, core::sync::atomic::Ordering::Release);
+    });
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use super::*;
 
@@ -792,7 +736,7 @@ mod test {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
         }
-        #[cfg(all(feature = "std", blake3_neon))]
+        #[cfg(blake3_neon)]
         let expected = {
             let mut expected = expected;
             for (name, entry) in crate::ffi_output::entries_neon() {
@@ -884,7 +828,6 @@ mod test {
         want.extend(crate::neon_hybrid::entries());
         want.extend(crate::ffi_packed::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_counter::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
-        #[cfg(feature = "std")]
         want.extend(crate::ffi_output::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         #[cfg(blake3_sme2)]
         if crate::platform::sme2_detected() {
@@ -892,7 +835,6 @@ mod test {
             want.extend(crate::sme2::entries().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_packed::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_counter::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
-            #[cfg(feature = "std")]
             want.extend(crate::ffi_output::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
         }
         let ran = loop {
@@ -1028,8 +970,7 @@ mod test {
     }
 }
 
-/// The self-test's stop, in every test build (std or not: the tests use
-/// std in every build); a child process.
+/// The self-test's stop, verified in a child process.
 #[cfg(all(test, unix))]
 mod stops {
     use super::*;
@@ -1066,19 +1007,15 @@ mod stops {
         for (case, child) in children {
             let out = child.wait_with_output().unwrap();
             let stderr = std::string::String::from_utf8_lossy(&out.stderr);
-            let signal = if cfg!(feature = "std") { 6 } else { 4 };
-            assert_eq!(out.status.signal(), Some(signal), "case {case}: the child stops: {:?}\n{stderr}", out.status);
-            if cfg!(feature = "std") {
-                assert!(stderr.contains(&std::format!("self-test failed: case {case}, ")), "case {case}: it names the case: {stderr}");
-            }
+            assert_eq!(out.status.signal(), Some(6), "case {case}: the child stops: {:?}\n{stderr}", out.status);
+            assert!(stderr.contains(&std::format!("self-test failed: case {case}, ")), "case {case}: it names the case: {stderr}");
         }
     }
 
     /// A self-test that fails stops the process: no caller can catch it
-    /// and go on hashing wrong digests (with std an abort, SIGABRT; without
-    /// it the CPU's trap, SIGILL). Run in a child process of
-    /// this test binary, which plants a kernel's panic and calls the
-    /// self-test inside catch_unwind, as a careless caller might: the
+    /// and go on hashing wrong digests (aborts with SIGABRT). Run in a child
+    /// process of this test binary, which plants a kernel's panic and calls
+    /// the self-test inside catch_unwind, as a careless caller might: the
     /// child must die of SIGABRT, saying why. With the guard broken it
     /// would catch the panic and exit 0 (the mutation check had the guard
     /// OPEN: no test made the self-test fail).
@@ -1099,18 +1036,13 @@ mod stops {
             .expect("the test binary runs again");
         use std::os::unix::process::ExitStatusExt as _;
         let stderr = std::string::String::from_utf8_lossy(&out.stderr);
-        if cfg!(feature = "std") {
-            assert_eq!(out.status.signal(), Some(6), "the child aborts (SIGABRT): {:?}\n{stderr}", out.status);
-            assert!(stderr.contains("startup self-test failed"), "it says why: {stderr}");
-        } else {
-            assert_eq!(out.status.signal(), Some(4), "the child traps (SIGILL): {:?}\n{stderr}", out.status);
-        }
+        assert_eq!(out.status.signal(), Some(6), "the child aborts (SIGABRT): {:?}\n{stderr}", out.status);
+        assert!(stderr.contains("startup self-test failed"), "it says why: {stderr}");
     }
 
     /// A failed self-test must still abort promptly even when stderr is a
     /// full, undrained blocking pipe (where `eprintln!` or a blocking write
     /// would deadlock instead of terminating).
-    #[cfg(feature = "std")]
     #[test]
     fn test_stop_does_not_block_on_full_stderr_pipe() {
         use std::os::unix::io::FromRawFd as _;
@@ -1164,7 +1096,6 @@ mod stops {
     /// A failed self-test must bypass Rust's stderr mutex even when a *different*
     /// thread holds `std::io::stderr().lock()` on a writable stderr pipe, printing
     /// its diagnostic and aborting promptly instead of deadlocking.
-    #[cfg(feature = "std")]
     #[test]
     fn test_stop_bypasses_stderr_lock_held_by_another_thread() {
         use std::os::unix::process::ExitStatusExt as _;
@@ -1214,7 +1145,7 @@ mod stops {
     /// Mismatches in every wide AVX-512 case (`0`, `1`, `2`) and every
     /// independent-output self-test pass (16-lane before 8-lane overwrite, and
     /// the final pass) go directly to the non-unwinding fatal stop, even inside
-    /// `catch_unwind` and without `std`.
+    /// `catch_unwind`.
     #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     #[test]
     fn test_wide_and_output_self_test_mismatch_stops_the_process() {
@@ -1248,12 +1179,10 @@ mod stops {
                         crate::avx512_32::check_self_test,
                     );
                 }
-                #[cfg(feature = "std")]
                 "output-16" => {
                     crate::ffi_output::PLANTED_WRONG_OUTPUT.store(1, core::sync::atomic::Ordering::Relaxed);
                     crate::ffi_output::self_test(Platform::detect_unchecked());
                 }
-                #[cfg(feature = "std")]
                 "output-final" => {
                     crate::ffi_output::PLANTED_WRONG_OUTPUT.store(2, core::sync::atomic::Ordering::Relaxed);
                     crate::ffi_output::self_test(Platform::detect_unchecked());
@@ -1262,9 +1191,7 @@ mod stops {
             });
             std::process::exit(0);
         }
-        #[cfg_attr(not(feature = "std"), allow(unused_mut))]
         let mut cases: std::vec::Vec<(&str, &str)> = std::vec![("wide-0", "AVX-512 k32"), ("wide-1", "AVX-512 p32"), ("wide-2", "AVX-512 p16")];
-        #[cfg(feature = "std")]
         {
             let platform = Platform::detect_unchecked();
             let width = crate::ffi_output::lanes(platform);
@@ -1275,7 +1202,6 @@ mod stops {
                 cases.push(("output-final", "independent counter-zero compressions"));
             }
         }
-        let signal = if cfg!(feature = "std") { 6 } else { 4 };
         for (which, needle) in cases {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "self_test::stops::test_wide_and_output_self_test_mismatch_stops_the_process", "--nocapture", "--test-threads", "1"])
@@ -1283,17 +1209,14 @@ mod stops {
                 .output()
                 .expect("spawn child");
             let stderr = std::string::String::from_utf8_lossy(&out.stderr);
-            assert_eq!(out.status.signal(), Some(signal), "{which}: child must stop: {:?}\n{stderr}", out.status);
-            if cfg!(feature = "std") {
-                assert!(stderr.contains(needle), "{which}: stderr missing {needle:?}: {stderr}");
-            }
+            assert_eq!(out.status.signal(), Some(6), "{which}: child must stop: {:?}\n{stderr}", out.status);
+            assert!(stderr.contains(needle), "{which}: stderr missing {needle:?}: {stderr}");
         }
     }
 
     /// On a broken stderr pipe (no reader) with default `SIGPIPE` disposition
     /// (as in C hosts and `b3sum`), `stop()` must skip writing and terminate
     /// with `SIGABRT` (6) rather than `SIGPIPE` (13).
-    #[cfg(feature = "std")]
     #[test]
     fn test_stop_aborts_on_broken_stderr_pipe_with_default_sigpipe() {
         use std::os::unix::io::FromRawFd as _;
@@ -1328,7 +1251,6 @@ mod stops {
     /// including AArch64 SME2 `chunks_keyed` and 32 KiB `walk_on_stack` (#509).
     /// Unoptimized (`opt-level = 0`) builds reserve larger temporary frames for
     /// `Hasher` (`finalize_xof`) and are outside the 128 KiB stack budget.
-    #[cfg(feature = "std")]
     #[test]
     fn test_self_test_fits_in_128kib_thread_stack() {
         let checked = std::thread::Builder::new()

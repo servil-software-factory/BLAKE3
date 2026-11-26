@@ -5,7 +5,6 @@
 //! worker thread (matching BLINCS's stack-budget test, #509). Applies to
 //! optimized builds (`[profile.test]` `opt-level = 3` and `--release`).
 
-#[cfg(feature = "std")]
 #[test]
 fn cold_initialize_fits_in_128kib_thread_stack() {
     let expected = blake3::hash(b"cold-init-128k");

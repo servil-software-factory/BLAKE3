@@ -29,20 +29,17 @@
 //! assert_eq!(hash1, hash2);
 //!
 //! // Extended output. OutputReader also implements Read and Seek.
-//! # #[cfg(feature = "std")] {
 //! let mut output = [0; 1000];
 //! let mut hasher = blake3_servil::convenience::Hasher::new(blake3_servil::Mode::Plain, None);
 //! hasher.update(b"foobarbaz");
 //! let mut output_reader = hasher.finalize_xof();
 //! output_reader.fill(&mut output);
 //! assert_eq!(hash1, output[..32]);
-//! # }
 //!
 //! // Print a hash as hex.
 //! println!("{}", hash1);
 //!
 //! // Many short messages in one call: a Batch lays them out in Blocks.
-//! # #[cfg(feature = "std")] {
 //! use blake3_servil::{throughput::{self, Batch}, Mode};
 //! let mut batch = Batch::new(64, 3);
 //! for i in 0..3 {
@@ -51,7 +48,6 @@
 //! let mut hashes = [[0u8; 32]; 3];
 //! throughput::hash_many(Mode::Plain, &batch, &mut hashes);
 //! assert_eq!(hashes[2], *blake3_servil::convenience::hash(&[2u8; 64]).as_bytes());
-//! # }
 //! # Ok(())
 //! # }
 //! ```
@@ -88,7 +84,7 @@
 //! | One message in memory, repeated call after call | [`throughput::hash_multithreaded`] (on aligned [`Block`](throughput::Block)s), or on one thread [`throughput::TreeHasher::hash`] directly on caller-owned `&[u8]` slices without copying into aligned blocks (use [`throughput::update_multithreaded`] for large unaligned slices across cores) |
 //! | One message arriving in pieces | [`convenience::Hasher`], or for speed [`throughput::update_multithreaded`] |
 //! | Many messages of one length, in one buffer | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] |
-//! | Many 16- or 32-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] (fastest for already-prepared batches) or [`throughput::Packed`] (compact storage; expands on the stack internally, avoids refill copies in chains) |
+//! | Many 16-, 32-, or 48-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] (for data already in 64-byte padded slots) or [`throughput::Packed`] / `&[[u8; N]]` (compact storage; avoids refill copies in chains, loaded directly on AVX-512/NEON and expanded on SSE4.1) |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::Pipeline`] (`owned` for zero-copy caller-owned buffers such as `Vec<u8>` or `bytes::Bytes`, `room`/`commit` for streaming); on one thread, or holding each message's running state, [`throughput::update_each`] |
 //! | Continuous stream of messages or batches (single or mixed [`Mode`]s) | [`throughput::Pipeline`] (`message` for the pipeline's default mode, `message_with` for a per-message [`Mode`]) |
@@ -233,24 +229,28 @@
 //! before it panics (one load per call).
 //!
 //! `initialize` checks the build and the CPU before the process first
-//! hashes, in well under a millisecond. It runs every assembly kernel built
+//! hashes, in well under a millisecond. It runs the assembly kernels built
 //! for this machine on fixed inputs and compares the outputs with fixed
-//! values official BLAKE3 generated. A mismatch stops the process, which no
-//! caller can catch: with `std` it writes a best-effort diagnostic directly to
-//! file descriptor 2 (bypassing Rust's stderr lock and skipping an
-//! already-full pipe) and aborts; without it, the CPU's trap instruction stops
-//! it. Other threads that call `initialize` meanwhile wait for it (parked via
+//! values official BLAKE3 generated (on ARM64, all but the kernels for
+//! batches of short messages of unequal lengths). A mismatch stops the
+//! process, which no caller can catch: it writes a best-effort diagnostic
+//! directly to file descriptor 2 (bypassing Rust's stderr lock, skipping an
+//! already-full or broken pipe, and bounding the write with `alarm(1)`
+//! under default `SIGALRM` handling) and calls `std::process::abort`. Other
+//! threads that call `initialize` meanwhile wait for it (parked via
 //! `std::sync::Once`).
 //!
-//! # Cargo Features
+//! # Build requirements
 //!
-//! This crate needs the standard library; the core alone builds without
-//! it.
+//! Both `blake3-servil` and `blake3-servil-core` require the standard library
+//! (neither defines a `std` Cargo feature or `no_std` mode; callers upgrading
+//! from `0.11.0` should drop `features = ["std"]`, and `default-features =
+//! false` does not opt out of `std`).
 //!
 //! All kernels are assembled directly by `rustc` via
 //! `core::arch::global_asm!` (no external C compiler or `cc` build dependency
 //! is required for the Rust libraries). This crate runs its assembly or not at
-//! all: for portable Rust or other targets, use official BLAKE3.
+//! all: for `no_std`, portable Rust, or other targets, use official BLAKE3.
 //!
 //! [BLAKE3]: https://blake3.io
 

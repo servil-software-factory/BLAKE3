@@ -252,27 +252,27 @@ pub(crate) fn self_test(platform: Platform) -> usize {
 
 /// Exported entry points of the counter-range kernels compiled for this target,
 /// for `self_test::test_self_test_runs_every_kernel`.
-#[cfg(all(test, feature = "std", blake3_neon))]
+#[cfg(all(test, blake3_neon))]
 pub(crate) fn entries_neon() -> [(&'static str, *const ()); 1] {
     [("neon_p11_counter", ffi_neon::blake3_servil_neon_p11_counter as *const ())]
 }
 
-#[cfg(all(test, feature = "std", blake3_sme2))]
+#[cfg(all(test, blake3_sme2))]
 pub(crate) fn entries_sme2() -> [(&'static str, *const ()); 1] {
     [("sme2_counter", ffi_sme2::blake3_servil_sme2_counter as *const ())]
 }
 
-#[cfg(all(test, feature = "std", blake3_avx2_ffi))]
+#[cfg(all(test, blake3_avx2_ffi))]
 pub(crate) fn entries_avx2() -> [(&'static str, *const ()); 1] {
     [("avx2_counter", ffi_x86::blake3_servil_avx2_counter as *const ())]
 }
 
-#[cfg(all(test, feature = "std", blake3_avx512_ffi, target_arch = "x86_64"))]
+#[cfg(all(test, blake3_avx512_ffi, target_arch = "x86_64"))]
 pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 1] {
     [("avx512_counter", ffi_x86::blake3_servil_avx512_counter as *const ())]
 }
 
-#[cfg(all(test, feature = "std", blake3_sme2))]
+#[cfg(all(test, blake3_sme2))]
 pub(crate) unsafe fn call_sme2_counter(template: *const u32, key: *const u32, base_and_word: u64, flags_and_len: u64, out: *mut u8, groups: u64) -> u64 {
     // Sound: caller verified SME2 support and provided valid buffers covering
     // 16 `u32` template words, 8 `u32` key words, and `16 * groups` outputs.
@@ -302,7 +302,7 @@ mod ffi_neon {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::Mode;

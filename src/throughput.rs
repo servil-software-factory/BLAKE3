@@ -12,7 +12,7 @@
 //!   cannot go wrong. Bytes already in place become blocks with no copy
 //!   through [`Block::from_bytes`], and a batch through
 //!   [`Batch::from_blocks`] where its messages fill their blocks.
-//!   `update_each` (with `std`) and [`TreeHasher::hash`] take byte slices of any
+//!   [`update_each`] and [`TreeHasher::hash`] take byte slices of any
 //!   length and alignment directly (without the caller copying them
 //!   into aligned [`Block`]s); `update_each` copies short pieces into a
 //!   [`Hasher`](crate::convenience::Hasher), and `TreeHasher::hash`
@@ -23,10 +23,8 @@
 //! For one call per hash, any slice, the result returned, see the
 //! [`convenience`](crate::convenience) API.
 
-#[cfg(feature = "std")]
 pub use crate::block::Packed;
 pub use crate::block::{Batch, Block, Part, Prepared};
-#[cfg(feature = "std")]
 pub use crate::each::{finalize_each, hash_each, update_each};
 
 use crate::{CHUNK_LEN, ContextKey, DERIVE_KEY_CONTEXT, Hash, IV, Mode, OUT_LEN};
@@ -39,12 +37,10 @@ use crate::{CHUNK_LEN, ContextKey, DERIVE_KEY_CONTEXT, Hash, IV, Mode, OUT_LEN};
 ///
 /// ```
 /// # blake3_servil_core::initialize();
-/// # #[cfg(feature = "std")] {
 /// use blake3_servil_core::{Mode, convenience, throughput::{self, Batch}};
 /// let mut message = Batch::new(100, 1);
 /// message.set(0, &[7u8; 100]);
 /// assert_eq!(throughput::hash(Mode::Plain, message.blocks(), 100), convenience::hash(&[7u8; 100]));
-/// # }
 /// ```
 // Inlined, so a constant mode folds to its constants (as
 // convenience::hash is: no mode stored for the call to read). Always:
@@ -62,7 +58,7 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// `out[i]` becomes the [`hash`] of message `i`, one digest a message. This
 /// is the shape of a Merkle tree's layer: leaves of one size, or nodes of
 /// two 32-byte children, which the layer below writes straight into the
-/// next layer's batch (`Batch::digests_mut`, with `std`).
+/// next layer's batch (`Batch::digests_mut`).
 ///
 /// Such a tree is one of your own design, not BLAKE3's own tree: each
 /// node here is the hash of a whole 64-byte message, where BLAKE3's
@@ -74,7 +70,6 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 ///
 /// ```
 /// # blake3_servil_core::initialize();
-/// # #[cfg(feature = "std")] {
 /// use blake3_servil_core::{Mode, convenience, throughput::{self, Batch}};
 /// let mut leaves = Batch::new(256, 1000);
 /// for i in 0..1000 {
@@ -83,7 +78,6 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// let mut hashes = vec![[0u8; 32]; 1000];
 /// throughput::hash_many(Mode::Plain, &leaves, &mut hashes);
 /// assert_eq!(hashes[3], *convenience::hash(&[7u8; 256]).as_bytes());
-/// # }
 /// ```
 ///
 /// **Speed**: short messages hash several at a time, so a batch beats a
@@ -93,13 +87,12 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// same hashes over several cores, the crate `blake3-servil` has
 /// `hash_many_multithreaded`.
 ///
-/// A `Packed` of 16-, 32-, or 48-byte messages (with `std`, or a borrowed
-/// `&[[u8; N]]` slice in `no_std`) is a batch too, hashed directly from
+/// A `Packed` of 16-, 32-, or 48-byte messages (or a borrowed `&[[u8; N]]`
+/// slice) is a batch too, hashed directly from
 /// contiguous caller memory on full SIMD groups with no copy into [`Block`]s:
 ///
 /// ```
 /// # blake3_servil_core::initialize();
-/// # #[cfg(feature = "std")] {
 /// use blake3_servil_core::{Mode, convenience, throughput::{self, Packed}};
 /// let mut leaves = Packed::<32>::new(1000);
 /// for (i, leaf) in leaves.iter_mut().enumerate() {
@@ -108,7 +101,6 @@ pub fn hash(mode: Mode, input: &[Block], len: usize) -> Hash {
 /// let mut digests = Packed::<32>::new(1000); // the next layer's input
 /// throughput::hash_many(Mode::Plain, &leaves, &mut digests);
 /// assert_eq!(digests[3], *convenience::hash(&leaves[3]).as_bytes());
-/// # }
 /// ```
 // Inlined, so a constant mode folds to its constants (as
 // convenience::hash is: no mode stored for the call to read).
@@ -703,7 +695,6 @@ impl TreeHasher {
     /// Try the whole-block lanes with separate readable inputs. Returns
     /// false without writing if this group takes the one-message path.
     #[doc(hidden)]
-    #[cfg(feature = "std")]
     pub fn try_hash_group_on<'a>(
         &self,
         platform: crate::platform::Platform,
@@ -719,7 +710,6 @@ impl TreeHasher {
     /// message of `items[i].1` bytes that starts `items[i].0`.
     ///
     /// Requires `out.len() == items.len()`.
-    #[cfg(feature = "std")]
     pub fn hash_each(&self, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LEN]]) {
         assert_eq!(items.len(), out.len(), "one digest per item");
         let platform = if self.on_this_core { crate::platform::Platform::own_core() } else { crate::platform::Platform::detect() };
@@ -919,7 +909,7 @@ pub const fn left_len(len: u64) -> u64 {
     (1u64 << (u64::BITS - 1 - chunks.leading_zeros())) * CHUNK_LEN as u64
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tree_test {
     use super::*;
     use std::vec::Vec;

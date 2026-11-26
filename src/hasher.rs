@@ -329,7 +329,6 @@ impl CvStack {
         self.wide &= !(1 << i);
     }
 
-    #[cfg(any(feature = "std", test))]
     pub fn clear(&mut self) {
         self.len = 0;
     }
@@ -652,7 +651,7 @@ impl ChunkState {
         self.chunk_counter += chunks;
     }
 
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     pub(crate) fn set_platform(&mut self, platform: Platform) {
         self.platform = platform;
     }
@@ -1174,7 +1173,7 @@ mod test {
     /// `dcd5836d` found a 16 KiB frame in `condense` overflowed a 32 KiB
     /// reader stack; tiled Layer 1 + 4 KiB/2 KiB ping-pong keeps `condense`
     /// to 6 KiB, and 1 live row uses `get`'s 2 KiB frame).
-    #[cfg(all(feature = "std", not(debug_assertions)))]
+    #[cfg(not(debug_assertions))]
     #[test]
     fn finalize_with_live_rows_fits_a_small_reader_stack() {
         crate::initialize();
@@ -1266,7 +1265,6 @@ mod test {
         stack.push_row_with(&k, |_| 4);
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn push_row_with_does_not_publish_on_panic() {
         let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
@@ -1281,7 +1279,6 @@ mod test {
         assert_eq!((stack.len(), stack.wide), (1, before_wide));
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn push_row_with_colliding_row_preserves_values_on_panic_or_bad_width() {
         let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };

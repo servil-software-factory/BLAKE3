@@ -103,7 +103,7 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
             // padded 16-lane `output16` call than `avx2_packed` (8) + a second
             // kernel call for the remaining 2..=7 messages; keep AVX2 for `8..=9`.
             let rem = outputs.len() - done;
-            let prefer_output16 = cfg!(all(feature = "std", target_os = "linux")) && (10..16).contains(&rem);
+            let prefer_output16 = cfg!(target_os = "linux") && (10..16).contains(&rem);
             matches!(platform, Platform::AVX512 { .. }) && !prefer_output16
         }
         #[cfg(not(all(blake3_avx512_ffi, target_arch = "x86_64")))]
@@ -185,7 +185,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
         // On AVX-512 Linux std, 43 = 2*16 + 11 dispatches the 11-message tail
         // through padded `output16` instead of `avx2_packed`; also exercise an
         // 8-message packed batch so `avx2_packed{16,32,48}` is verified at startup.
-        #[cfg(all(feature = "std", blake3_avx512_ffi, blake3_avx2_ffi, target_arch = "x86_64", target_os = "linux"))]
+        #[cfg(all(blake3_avx512_ffi, blake3_avx2_ffi, target_arch = "x86_64", target_os = "linux"))]
         if matches!(platform, Platform::AVX512) {
             let mut out8 = [[0u8; OUT_LEN]; 8];
             crate::many::hash_many_on(&slice[..8 * len], len, len, &key, crate::KEYED_HASH, &mut out8, platform);
@@ -199,7 +199,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
 
 /// Exported entry points of the packed kernels compiled for this target, for
 /// `self_test::test_self_test_runs_every_kernel`.
-#[cfg(all(test, feature = "std", blake3_neon))]
+#[cfg(all(test, blake3_neon))]
 pub(crate) fn entries_neon() -> [(&'static str, *const ()); 3] {
     [
         ("neon_p11_packed16", ffi_neon::blake3_servil_neon_p11_packed16 as *const ()),
@@ -208,7 +208,7 @@ pub(crate) fn entries_neon() -> [(&'static str, *const ()); 3] {
     ]
 }
 
-#[cfg(all(test, feature = "std", blake3_sme2))]
+#[cfg(all(test, blake3_sme2))]
 pub(crate) fn entries_sme2() -> [(&'static str, *const ()); 3] {
     [
         ("sme2_packed16", ffi_sme2::blake3_servil_sme2_packed16 as *const ()),
@@ -217,7 +217,7 @@ pub(crate) fn entries_sme2() -> [(&'static str, *const ()); 3] {
     ]
 }
 
-#[cfg(all(test, feature = "std", blake3_avx2_ffi))]
+#[cfg(all(test, blake3_avx2_ffi))]
 pub(crate) fn entries_avx2() -> [(&'static str, *const ()); 3] {
     [
         ("avx2_packed16", ffi_x86::blake3_servil_avx2_packed16 as *const ()),
@@ -226,7 +226,7 @@ pub(crate) fn entries_avx2() -> [(&'static str, *const ()); 3] {
     ]
 }
 
-#[cfg(all(test, feature = "std", blake3_avx512_ffi, target_arch = "x86_64"))]
+#[cfg(all(test, blake3_avx512_ffi, target_arch = "x86_64"))]
 pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 3] {
     [
         ("avx512_packed16", ffi_x86::blake3_servil_avx512_packed16 as *const ()),
@@ -250,7 +250,7 @@ mod ffi_x86 {
     }
 }
 
-#[cfg(all(test, feature = "std", blake3_sme2))]
+#[cfg(all(test, blake3_sme2))]
 pub(crate) unsafe fn call_sme2_packed(len: usize, input: *const u8, key: *const u32, flags: u32, out: *mut u8, groups: u64) -> u64 {
     // Sound: caller verified SME2 support and provided buffers covering `16 * groups` packed messages and outputs.
     unsafe {
@@ -281,7 +281,7 @@ mod ffi_neon {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::Mode;

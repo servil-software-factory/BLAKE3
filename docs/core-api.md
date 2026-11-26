@@ -11,7 +11,7 @@ Call `initialize()` once at startup before hashing. Hashing functions live in tw
 - `convenience` takes ordinary `&[u8]` slices and is tuned for occasional calls amid other work.
 - `throughput` takes 64-byte-aligned `Block`s and batches, writes into caller-supplied buffers, and is tuned for sustained back-to-back calls.
 
-Disable default features (`default-features = false`) for an allocator-free `no_std` build. The crate does not wipe what it held from memory.
+Requires `std` (neither `blake3-servil-core` nor `blake3-servil` defines a `std` Cargo feature or a `no_std` mode; for `no_std`, use official BLAKE3). The crate does not wipe what it held from memory.
 
 `blake3-servil` re-exports this crate and adds multithreading via a shared thread pool. [`capi/b3.h`](../capi/b3.h) provides the convenience API for C and C++.
 

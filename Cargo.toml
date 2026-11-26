@@ -16,15 +16,6 @@ links = "blake3_servil_core"
 # script, the pages users read, the licences, and the file the tests include.
 include = ["/src", "/c", "/build.rs", "/README.md", "/CHANGELOG.md", "/QUALITY.md", "/LICENSE-*", "/tools/require_nextest.rs"]
 
-[features]
-default = ["std"]
-
-# Enables std::io traits, including impl Write for Hasher, impl Read and Seek
-# for OutputReader, and the Hasher::update_reader method. This feature is
-# enabled by default. (Previously this also controlled runtime CPU feature
-# detection on x86, which now reads CPUID directly, with or without std.)
-std = []
-
 [dependencies]
 # BUILD_VERSION, in a crate of its own: its build script reruns on every
 # edit, and the library's, which assembles the kernels, does not.
@@ -73,6 +64,3 @@ complexity = { level = "allow", priority = -1 }
 style = { level = "allow", priority = -1 }
 perf = { level = "allow", priority = -1 }
 cast_possible_truncation = "deny"
-
-# The fairness probes (#213) use the pool, which needs std: the no_std
-# build (--no-default-features) leaves them out.

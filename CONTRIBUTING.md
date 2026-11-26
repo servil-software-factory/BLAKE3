@@ -165,7 +165,7 @@ official BLAKE3, which supports them, and
 support takes (dedicated hardware of ours to benchmark, optimize and
 test on, then the kernels and the gates). The Mac runner
 (`tools/runner/`) runs the Rust suites natively, on a Mac Mini M6. `sh tools/check-builds.sh`
-runs, in minutes, the builds the suites above leave out: without std, on
+runs, in minutes, the builds the suites above leave out: on
 one CPU without SME2, warnings as errors, and compile checks for x86-64.
 
 The supported targets are 64-bit Arm (Linux, macOS) and x86-64 (Linux),
@@ -269,7 +269,7 @@ message or pull request body where relevant):
    controls where `cargo-mutants` does not run):** Temporarily disable
    the safeguard or plant the fault your new check guards against, run
    it, and record the observed failure.
-3. **Non-default modes:** Exercise any `no_std`, optional-feature, or
+3. **Non-default modes:** Exercise any optional-feature or
    stamped-release branch your change touches rather than relying only
    on default/`+dev` runs.
 

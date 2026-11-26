@@ -5,7 +5,7 @@
 //! rounds, and `Platform::hash_many` SIMD calls is fixed by arithmetic. These
 //! tests assert those exact counts alongside digest equality on every machine,
 //! with no clock.
-#![cfg(all(test, feature = "std"))]
+#![cfg(test)]
 
 use crate::{Counted, Hasher, Mode, STAGE_LEN, platform::Platform, throughput};
 

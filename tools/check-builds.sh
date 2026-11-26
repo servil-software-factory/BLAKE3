@@ -1,12 +1,11 @@
 #!/bin/sh
 # The builds the Mac's and the VM's suites leave out, checked in minutes
 # on this machine (part of a candidate's gate, CONTRIBUTING.md): the library
-# without std, tested; the library on one CPU without SME2, tested;
-# warnings as errors for the library and b3sum;
-# the C API, tested from Rust and from C;
-# compile/codegen checks for x86-64 and macOS AArch64 (via rustc's
-# global_asm!, with no external C compiler); and the stop for every other
-# target. Each failure stops the script.
+# on one CPU without SME2, tested; warnings as errors for the library and
+# b3sum; the C API, tested from Rust and from C; compile/codegen checks
+# for x86-64 and macOS AArch64 (via rustc's global_asm!, with no external
+# C compiler); and the stop for every other target. Each failure stops the
+# script.
 #
 #     sh tools/check-builds.sh
 set -eu
@@ -20,15 +19,12 @@ step() { echo "== $*"; "$@"; }
 step python3 tools/gen-ver.py --check
 step python3 tools/unsafe_reasons.py
 step sh -c 'base=$(git rev-parse --verify -q origin/next || git rev-parse --verify -q HEAD~1); [ -n "$base" ] || { echo "counts: cannot resolve base revision" >&2; exit 1; }; python3 tools/counts.py --check "$base"'
-RUSTFLAGS="-D warnings" step cargo nextest run --cargo-quiet --release --no-default-features
-# nextest skips doc tests: the examples without std too, where Batch is absent.
-step cargo test -q --release --doc --no-default-features
 # An example that must not compile names the compiler's reason
 # (compile_fail,E0308) where the compiler gives one a code. Stable
 # rustdoc takes any failure for it; with
 # this switch it holds each such example to its reason, in both crates.
 step sh -c 'RUSTC_BOOTSTRAP=1 cargo test -q --doc && cd threads && RUSTC_BOOTSTRAP=1 cargo test -q --doc'
-RUSTFLAGS="-D warnings" step cargo check -q --lib --no-default-features
+RUSTFLAGS="-D warnings" step cargo check -q --lib
 RUSTFLAGS="-D warnings" step cargo check -q --release --all-features --tests --examples
 # The crate with the pool (threads/). One CPU, as in a one-CPU container:
 # the pool has no worker thread, and the caller hashes everything (the
@@ -46,7 +42,6 @@ step sh -c 'cd threads && RUSTFLAGS="--cfg shuttle" cargo test -q --release --te
 step python3 tools/pipeline_model_controls.py
 # Shuttle's SC model cannot check the RCpc wake-publication barrier.
 step python3 tools/check-waker-order.py
-RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo nextest run --cargo-quiet --release --no-default-features'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --all-features --tests'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --tests --target x86_64-unknown-linux-gnu'
 RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path b3sum/Cargo.toml
@@ -61,20 +56,20 @@ done
 # The C API (capi/): its Rust tests, and b3.h compiled as C11 and run.
 RUSTFLAGS="-D warnings" step cargo nextest run --cargo-quiet --release --manifest-path capi/Cargo.toml
 RUSTFLAGS="-D warnings" step cargo check -q --tests --examples --target x86_64-unknown-linux-gnu
-RUSTFLAGS="-D warnings" step cargo check -q --tests --target x86_64-unknown-linux-gnu --no-default-features
 # A build for any other target stops in build.rs, naming official BLAKE3
-# (#160, #180): Windows, WebAssembly for the rest, and x86-64 Linux with
-# pointers of 32 bits (the x32 ABI: the right architecture and system,
-# and sizes this library does not check for). The build script
-# runs even where the target's standard library is absent; the Linux builds
-# above are the control.
-for target in x86_64-pc-windows-msvc wasm32-unknown-unknown x86_64-unknown-linux-gnux32; do
+# (#160, #180): Windows, WebAssembly for the rest, x86-64 Linux with
+# pointers of 32 bits (x32), and freestanding x86-64 Linux without std
+# (x86_64-unknown-linux-none). The build script runs even where the
+# target's standard library is absent; the Linux builds above are the
+# control.
+for target in x86_64-pc-windows-msvc wasm32-unknown-unknown x86_64-unknown-linux-gnux32 x86_64-unknown-linux-none; do
 	step sh -c "cargo check -q --keep-going --target $target 2>&1 | grep -q 'for $target, use official BLAKE3'"
 done
 # Assembly is built directly by rustc via core::arch::global_asm! (#487),
-# so building both shipped library crates (default, no_std, and macOS
-# AArch64 Mach-O codegen) requires no external C compiler at all.
-step sh -c 'no_cc="$CARGO_TARGET_DIR/no-cc"; rm -rf "$no_cc"; CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib --no-default-features && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --manifest-path threads/Cargo.toml --lib && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib --target aarch64-apple-darwin && CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib --no-default-features --target aarch64-apple-darwin && rm -rf "$no_cc"'
+# so building both shipped library crates standalone (core and threads, on
+# both Linux x86-64 and macOS AArch64 Mach-O codegen) requires no external C
+# compiler. Unset target-specific CC overrides so cc-rs could not bypass CC.
+step sh -c 'no_cc="$CARGO_TARGET_DIR/no-cc"; rm -rf "$no_cc"; env -u CC_x86_64_unknown_linux_gnu -u CC_aarch64_unknown_linux_gnu -u CC_aarch64_apple_darwin -u HOST_CC -u TARGET_CC CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" sh -c "cargo build -q --release --lib --target x86_64-unknown-linux-gnu && cargo build -q --release --manifest-path threads/Cargo.toml --lib --target x86_64-unknown-linux-gnu && cargo build -q --release --lib --target aarch64-apple-darwin && cargo build -q --release --manifest-path threads/Cargo.toml --lib --target aarch64-apple-darwin" && rm -rf "$no_cc"'
 # Every generated kernel file is its generator's output.
 step sh -c 'python3 tools/gen_neon_hybrid.py | cmp - c/blake3_neon_hybrid_aarch64.S && python3 tools/gen_sme2_hybrid.py | cmp - c/blake3_sme2_hybrid_aarch64.S'
 step sh -c 'python3 tools/gen_x86.py | cmp - c/blake3_partial_x86-64_unix.S'

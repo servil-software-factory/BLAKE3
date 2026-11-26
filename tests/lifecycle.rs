@@ -12,7 +12,6 @@
 //! public operation of the types walked here, and `tools/api.py --check`
 //! (tools/check-builds.sh) refuses an operation that is in neither: a
 //! new method or trait implementation joins the walk, or says why not.
-#![cfg(feature = "std")]
 use blake3_servil_core::{Mode, convenience::Hasher, initialize, throughput::*};
 use std::io::{Read, Seek, SeekFrom, Write};
 

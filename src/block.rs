@@ -67,14 +67,13 @@ impl core::fmt::Debug for Block {
 /// message starts a block, and every byte past each message's end is zero,
 /// since a `Batch` lets the program write only the messages' own bytes (so
 /// the bytes the batch kernels read in place, past a message, can never be
-/// wrong). It owns its blocks (`Batch::new`, with `std`), or borrows blocks
+/// wrong). It owns its blocks (`Batch::new`), or borrows blocks
 /// already in place whose messages fill them, with no bytes past their ends
 /// ([`Batch::from_blocks`]: a Merkle layer's 64-byte nodes, a mapped file's
 /// records).
 ///
 /// ```
 /// # blake3_servil_core::initialize();
-/// # #[cfg(feature = "std")] {
 /// use blake3_servil_core::{Mode, convenience, throughput::{self, Batch}};
 /// let mut batch = Batch::new(100, 3);
 /// for i in 0..3 {
@@ -88,7 +87,6 @@ impl core::fmt::Debug for Block {
 /// batch.message_mut(1).copy_from_slice(&[9u8; 100]);
 /// throughput::hash_many(Mode::Plain, &batch, &mut out);
 /// assert_eq!(out[1], *convenience::hash(&[9u8; 100]).as_bytes());
-/// # }
 /// ```
 ///
 /// # Trait implementations
@@ -99,10 +97,7 @@ impl core::fmt::Debug for Block {
 ///   at least one block per slot.
 #[derive(Clone)]
 pub struct Batch<'a> {
-    #[cfg(feature = "std")]
     blocks: std::borrow::Cow<'a, [Block]>,
-    #[cfg(not(feature = "std"))]
-    blocks: &'a [Block],
     message_len: usize,
 }
 
@@ -113,7 +108,6 @@ fn blocks_per(message_len: usize) -> usize {
     message_len.div_ceil(BLOCK_LEN).max(1)
 }
 
-#[cfg(feature = "std")]
 impl Batch<'static> {
     /// `count` messages of `message_len` bytes, every byte zero. The zeros
     /// are written now, so all of a `Batch`'s memory is resident from its
@@ -192,7 +186,6 @@ impl<'a> Batch<'a> {
 /// A line of the cache, the unit [`Packed`] storage is allocated in: 128
 /// bytes on a 128-byte boundary (Apple silicon's line; two of x86-64's,
 /// which its prefetchers fetch as a pair).
-#[cfg(feature = "std")]
 #[repr(C, align(128))]
 #[derive(Clone, Copy)]
 struct Line([u8; 128]);
@@ -225,13 +218,11 @@ struct Line([u8; 128]);
 ///   count or accessing trailing padding.
 /// - `Prepared` lends the contiguous 16-, 32-, or 48-byte messages directly to
 ///   batch calls.
-#[cfg(feature = "std")]
 pub struct Packed<const N: usize> {
     lines: std::vec::Vec<Line>,
     count: usize,
 }
 
-#[cfg(feature = "std")]
 impl<const N: usize> Packed<N> {
     const FITS: () = assert!(N == 16 || N == 32 || N == 48, "Packed holds messages of 16, 32, or 48 bytes");
 
@@ -251,7 +242,6 @@ impl<const N: usize> Packed<N> {
     }
 }
 
-#[cfg(feature = "std")]
 impl Packed<32> {
     /// Its digests two by two as 64-byte blocks: a Merkle layer's parents,
     /// each the pair of its children's digests, borrowed as a
@@ -266,7 +256,6 @@ impl Packed<32> {
     }
 }
 
-#[cfg(feature = "std")]
 impl<const N: usize> core::ops::Deref for Packed<N> {
     type Target = [[u8; N]];
     #[inline]
@@ -276,7 +265,6 @@ impl<const N: usize> core::ops::Deref for Packed<N> {
     }
 }
 
-#[cfg(feature = "std")]
 impl<const N: usize> core::ops::DerefMut for Packed<N> {
     #[inline]
     fn deref_mut(&mut self) -> &mut [[u8; N]] {
@@ -287,8 +275,8 @@ impl<const N: usize> core::ops::DerefMut for Packed<N> {
 
 /// The batch calls' input: messages of one length, prepared so that a
 /// call reads them as they are. [`Batch`] holds them in blocks, any
-/// length; `Packed` (with `std`), owned `Vec<[u8; N]>` / `Box<[[u8; N]]>`
-/// (with `std`), and borrowed `&[[u8; N]]` slices (`N` = 16, 32, or 48)
+/// length; `Packed`, owned `Vec<[u8; N]>` / `Box<[[u8; N]]>`
+/// and borrowed `&[[u8; N]]` slices (`N` = 16, 32, or 48)
 /// hold fixed-width messages end to end. Sealed: the crate's types and
 /// fixed-width byte-array collections/slices alone.
 pub trait Prepared: sealed::Sealed {
@@ -308,7 +296,6 @@ pub trait Prepared: sealed::Sealed {
     ///
     /// ```
     /// # blake3_servil_core::initialize();
-    /// # #[cfg(feature = "std")] {
     /// use blake3_servil_core::{Mode, throughput::{self, Batch, Prepared}};
     /// let mut batch = Batch::new(100, 8);
     /// for i in 0..8 {
@@ -319,7 +306,6 @@ pub trait Prepared: sealed::Sealed {
     /// throughput::hash_many(Mode::Plain, &batch.part(0..3), &mut parts[..3]);
     /// throughput::hash_many(Mode::Plain, &batch.part(3..8), &mut parts[3..]);
     /// assert_eq!(whole, parts);
-    /// # }
     /// ```
     fn part(&self, messages: core::ops::Range<usize>) -> Part<'_> {
         let slot = self.slot();
@@ -382,7 +368,6 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for super::Batch<'_> {}
     impl Sealed for super::Part<'_> {}
-    #[cfg(feature = "std")]
     impl<const N: usize> Sealed for super::Packed<N> {}
 }
 
@@ -401,7 +386,6 @@ impl Prepared for Batch<'_> {
     }
 }
 
-#[cfg(feature = "std")]
 impl<const N: usize> Prepared for Packed<N> {
     #[inline]
     fn bytes(&self) -> &[u8] {
@@ -435,9 +419,7 @@ macro_rules! impl_prepared_slice {
                     $n
                 }
             }
-            #[cfg(feature = "std")]
             impl sealed::Sealed for std::vec::Vec<[u8; $n]> {}
-            #[cfg(feature = "std")]
             impl Prepared for std::vec::Vec<[u8; $n]> {
                 #[inline]
                 fn bytes(&self) -> &[u8] {
@@ -452,9 +434,7 @@ macro_rules! impl_prepared_slice {
                     $n
                 }
             }
-            #[cfg(feature = "std")]
             impl sealed::Sealed for std::boxed::Box<[[u8; $n]]> {}
-            #[cfg(feature = "std")]
             impl Prepared for std::boxed::Box<[[u8; $n]]> {
                 #[inline]
                 fn bytes(&self) -> &[u8] {
@@ -475,7 +455,6 @@ macro_rules! impl_prepared_slice {
 
 impl_prepared_slice!(16, 32, 48);
 
-#[cfg(feature = "std")]
 impl Batch<'_> {
     /// Message `i`'s bytes, for writing: `message_len` of them, no more (a
     /// borrowed batch copies its blocks first).
@@ -531,7 +510,7 @@ impl Batch<'_> {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use super::*;
     use crate::Mode;
@@ -744,7 +723,7 @@ mod test {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod packed_test {
     use super::*;
     use crate::Mode;

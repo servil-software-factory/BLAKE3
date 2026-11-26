@@ -95,9 +95,9 @@ pub(crate) unsafe fn hash_many_blocks(
     out: &mut [u8],
 ) {
     assert!(inputs.len() <= out.len() / OUT_LEN && (1..=CHUNK_LEN / BLOCK_LEN).contains(&blocks));
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     let _ = BLOCKS_CALLS.try_with(|c| c.borrow_mut().push((blocks, inputs.len())));
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     crate::record_hash_many_call(blocks, inputs.len());
     if !takes_platform(platform) {
         // Elsewhere one input after another on the platform's compression
@@ -130,7 +130,7 @@ pub(crate) unsafe fn hash_many_blocks(
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     /// `(blocks, inputs.len())` calls to `hash_many_blocks` on this thread, for dispatch tests.
     pub(crate) static BLOCKS_CALLS: core::cell::RefCell<std::vec::Vec<(usize, usize)>> = const { core::cell::RefCell::new(std::vec::Vec::new()) };
