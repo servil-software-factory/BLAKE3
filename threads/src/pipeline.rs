@@ -65,78 +65,49 @@ const KIND_MULTI: u64 = 2;
 /// instead of `Shared::tree` without a worker-visible per-slot mode table.
 const MULTI_CUSTOM_BIT: u32 = 1u32 << 31;
 
-/// Fixed-capacity FIFO ring buffer over pre-allocated `Box<[MaybeUninit<X>]>`;
+/// Fixed-capacity FIFO ring buffer over pre-allocated `VecDeque<X>`;
 /// never reallocates after construction.
 struct Ring<X> {
-    buf: Box<[MaybeUninit<X>]>,
-    head: usize,
-    len: usize,
+    inner: std::collections::VecDeque<X>,
+    cap: usize,
 }
+
+// Moving the `VecDeque` handle never moves its heap buffer and `Ring` exposes
+// no pinned element projection, preserving `Pipeline<T, B, P>: Unpin` even for
+// `!Unpin` tags or owners (matching the previous boxed-slice backing).
+impl<X> Unpin for Ring<X> {}
 
 impl<X> Ring<X> {
     fn new(cap: usize) -> Self {
-        Ring { buf: (0..cap).map(|_| MaybeUninit::uninit()).collect(), head: 0, len: 0 }
+        Ring { inner: std::collections::VecDeque::with_capacity(cap), cap }
     }
 
     #[inline(always)]
     fn len(&self) -> usize {
-        self.len
+        self.inner.len()
     }
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.len == 0
+        self.inner.is_empty()
     }
 
     #[inline(always)]
     fn front(&self) -> Option<&X> {
-        // Sound: the `len` items from `head` on are written (push_back) and
-        // not yet read out.
-        if self.len == 0 { None } else { Some(unsafe { self.buf[self.head].assume_init_ref() }) }
+        self.inner.front()
     }
 
     #[inline(always)]
     fn push_back(&mut self, item: X) {
-        let cap = self.buf.len();
-        // In every build: one item more than the ring holds would be
-        // written over the oldest, a queued message or event lost in
-        // silence. Each ring's users keep within it (a slot, a piece or a
-        // room is in one ring once), and this holds them to that.
-        assert!(self.len < cap, "Ring capacity exceeded");
-        let idx = (self.head + self.len) % cap;
-        self.buf[idx].write(item);
-        self.len += 1;
+        // In every build: hold callers to the pre-allocated capacity so the
+        // queue never reallocates on the hot path or drops work silently.
+        assert!(self.inner.len() < self.cap, "Ring capacity exceeded");
+        self.inner.push_back(item);
     }
 
     #[inline(always)]
     fn pop_front(&mut self) -> Option<X> {
-        if self.len == 0 {
-            return None;
-        }
-        // Sound: as `front`; the item is read out once, since `head` moves
-        // past it.
-        let item = unsafe { self.buf[self.head].assume_init_read() };
-        self.head = (self.head + 1) % self.buf.len();
-        self.len -= 1;
-        Some(item)
-    }
-}
-
-impl<X> Drop for Ring<X> {
-    fn drop(&mut self) {
-        // Recursive drop guard ensures remaining initialized elements still
-        // drop if dropping an earlier element unwinds.
-        struct Rest<'a, X>(&'a mut Ring<X>);
-        impl<X> Drop for Rest<'_, X> {
-            fn drop(&mut self) {
-                while let Some(item) = self.0.pop_front() {
-                    let _rest = Rest(&mut *self.0);
-                    drop(item);
-                    core::mem::forget(_rest);
-                }
-            }
-        }
-        let _ = Rest(self);
+        self.inner.pop_front()
     }
 }
 
@@ -317,8 +288,8 @@ struct Rooms {
 }
 
 // Sound: `backing` owns the boxed `[u8]` buffer (with `buf` pointing to the
-// 64-byte-aligned `count * ROOM_LEN` slice inside it) until `Rooms::drop` runs
-// (after `PipeStorage`'s final holder drops and every worker task has
+// 64-byte-aligned `count * ROOM_LEN` slice inside it) until `Rooms::drop`
+// runs (after `PipeStorage`'s final holder drops and every worker task has
 // published completion); what may touch which bytes is governed by `refs`.
 unsafe impl Send for Rooms {}
 unsafe impl Sync for Rooms {}
@@ -1106,8 +1077,8 @@ process_static! {
 /// 32 bytes per action (at least 1,024 actions = 32 KiB) plus 128-byte
 /// completion lines sized to the rounded power-of-two tier (`cap / 64`
 /// slot lines and `clamp(cap / 64, 4, 256)` group lines), where action
-/// capacity rounds up to a power of two
-/// (`actions = messages * 64 + rooms + messages + 1 + clamp(messages, 4, 256)`).
+/// capacity rounds up to a power of two (`actions = messages * 64` when
+/// `rooms == 0`, else `messages * 64 + rooms + messages + 1 + clamp(messages, 4, 256)`).
 /// Because slots round to powers of two and match exact-tier first then
 /// best-fit (`actions_len() >= actions`), ascending `Limits` keep total
 /// retained action-ring capacity below twice the largest tier per peak
@@ -1507,6 +1478,28 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
     }
 }
 
+/// Validate `Limits` and compute `(p_cap, g_cap, actions_cap)` without
+/// allocating. Preserves the uniform public `Limits` contract (`messages > 0`
+/// and `messages + rooms < (1 << 29) - 1`, matching 29-bit action indices in
+/// `pack_arg`), including when `rooms == 0` allocates zero `PieceNode`s.
+/// For roomless pipelines (`rooms == 0`), each message slot holds either a
+/// split submission (at most `MAX_SLOT_PIECES = 64` actions) or a grouped
+/// short message (at most 1 group ticket, never both), so `m * 64` actions
+/// bound all unclaimed tickets without adding `g_cap`.
+fn pipeline_capacities(limits: Limits) -> (usize, usize, usize) {
+    assert!(limits.messages > 0, "Pipeline Limits.messages must be at least 1");
+    let m = limits.messages;
+    assert!(limits.messages.checked_add(limits.rooms).is_some_and(|sum| sum < (1 << 29) - 1), "Pipeline Limits beyond what an action can name");
+    let g_cap = m.clamp(4, 256);
+    let (p_cap, actions_cap) = if limits.rooms == 0 {
+        (0, m * MAX_SLOT_PIECES)
+    } else {
+        let p_cap = limits.rooms + m + 1;
+        (p_cap, m * MAX_SLOT_PIECES + p_cap + g_cap)
+    };
+    (p_cap, g_cap, actions_cap)
+}
+
 impl<T, B, P> Pipeline<T, B, P> {
     #[inline(always)]
     fn storage(&self) -> &PipeStorage {
@@ -1518,17 +1511,9 @@ impl<T, B, P> Pipeline<T, B, P> {
     fn create(mode: Mode, limits: Limits) -> Self {
         crate::lanes::require();
         prepare_thread();
-        assert!(limits.messages > 0, "Pipeline Limits.messages must be at least 1");
+        let (p_cap, g_cap, actions_cap) = pipeline_capacities(limits);
         let tree = TreeHasher::new(mode);
         let m = limits.messages;
-        // Each limit alone first: their sum, next, could wrap round to a
-        // small one (`rooms: usize::MAX` passed the check below so).
-        assert!(m < 1 << 29 && limits.rooms < 1 << 29, "Pipeline Limits beyond what an action can name");
-        let p_cap = limits.rooms + m + 1;
-        let g_cap = m.clamp(4, 256);
-        let actions_cap = m * MAX_SLOT_PIECES + p_cap + g_cap;
-        // An action names a slot, a piece or a group in 29 bits (pack_arg).
-        assert!(m < 1 << 29 && p_cap < 1 << 29, "Pipeline Limits beyond what an action can name");
         // Reserve a non-wrapping identity before acquiring storage or a source
         // slot, and keep exhaustion sticky at u64::MAX so a later caller cannot
         // wrap back to previously issued IDs.
@@ -1544,7 +1529,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         // BEFORE taking a PipeSlot lease, allocating PipeStorage, registering
         // the source, or bumping `sources::opened()`, so a layout panic in
         // caller-side construction cannot leak process resources.
-        let mut local_free_rooms = Ring::new(limits.rooms.max(1));
+        let mut local_free_rooms = Ring::new(limits.rooms);
         for i in 0..limits.rooms {
             local_free_rooms.push_back(u32::try_from(i).expect("room index fits u32"));
         }
@@ -3636,12 +3621,69 @@ mod test {
 
     #[test]
     fn contract_limits_beyond_what_an_action_names_panic() {
-        // The last of these wraps the sum of the two limits round to 1.
-        for limits in [Limits { messages: 1 << 29, rooms: 0 }, Limits { messages: 1, rooms: (1 << 29) - 2 }, Limits { messages: 1, rooms: usize::MAX }] {
-            let refused = std::panic::catch_unwind(|| Pipeline::<()>::new(Mode::Plain, limits)).err().expect("limits past 29 bits are refused");
+        // Test the allocation-free capacity validator directly so even a
+        // regression in the check cannot trigger a multi-GiB allocation on the
+        // test host; covers exact boundaries, wrapping sum, and just-below.
+        assert_eq!(pipeline_capacities(Limits { messages: (1 << 29) - 2, rooms: 0 }).0, 0);
+        assert_eq!(pipeline_capacities(Limits { messages: 64, rooms: 0 }), (0, 64, 64 * MAX_SLOT_PIECES));
+        assert_eq!(pipeline_capacities(Limits { messages: 63, rooms: 1 }), (65, 63, 63 * MAX_SLOT_PIECES + 65 + 63));
+        for limits in [
+            Limits { messages: (1 << 29) - 1, rooms: 0 },
+            Limits { messages: 1 << 29, rooms: 0 },
+            Limits { messages: 1, rooms: (1 << 29) - 2 },
+            Limits { messages: 1, rooms: usize::MAX },
+        ] {
+            let refused = std::panic::catch_unwind(|| pipeline_capacities(limits)).err().expect("limits past 29 bits are refused");
             let why = refused.downcast_ref::<&str>().copied().map(String::from).or_else(|| refused.downcast_ref::<String>().cloned()).unwrap_or_default();
             assert!(why.contains("Pipeline Limits beyond what an action can name"), "{limits:?}: {why}");
         }
+        // End-to-end constructor check on wrapping limit.
+        let refused = std::panic::catch_unwind(|| Pipeline::<()>::new(Mode::Plain, Limits { messages: 1, rooms: usize::MAX }))
+            .err()
+            .expect("constructor refuses limits past 29 bits");
+        let why = refused.downcast_ref::<&str>().copied().map(String::from).or_else(|| refused.downcast_ref::<String>().cloned()).unwrap_or_default();
+        assert!(why.contains("Pipeline Limits beyond what an action can name"), "{why}");
+    }
+
+    #[test]
+    fn ring_enforces_hard_capacity_limit() {
+        for cap in [0usize, 1, 3] {
+            let mut ring = Ring::<u32>::new(cap);
+            for i in 0..cap {
+                ring.push_back(u32::try_from(i).unwrap());
+            }
+            let over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ring.push_back(99)));
+            assert!(over.is_err(), "Ring::push_back must panic past logical cap {cap}");
+            let drained: Vec<u32> = std::iter::from_fn(|| ring.pop_front()).collect();
+            let want: Vec<u32> = (0..cap).map(|i| u32::try_from(i).unwrap()).collect();
+            assert_eq!(drained, want, "Ring contents preserved after rejected over-push at cap {cap}");
+        }
+        // Zero-sized elements distinguish the hard logical limit `self.cap`
+        // from `VecDeque::capacity()` (which is `usize::MAX` for ZSTs).
+        let mut zst_ring = Ring::<()>::new(3);
+        for _ in 0..3 {
+            zst_ring.push_back(());
+        }
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| zst_ring.push_back(()))).is_err(),
+            "Ring<()>::push_back must enforce logical cap, not VecDeque::capacity()"
+        );
+        assert_eq!(zst_ring.len(), 3);
+    }
+
+    #[test]
+    fn roomless_action_tier_boundary_64_vs_65() {
+        // Fresh process (nextest) with empty PipeSlot cache: (64, 0) fits in
+        // 4,096 actions exactly (64*64 = 4,096), whereas (65, 0) crosses into
+        // 8,192 (65*64 = 4,160).
+        crate::initialize_multithreaded(None);
+        let p64 = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 64, rooms: 0 });
+        assert_eq!(p64.storage().slot.get().source.actions_len(), 4096);
+        assert!(p64.storage().pieces.is_empty());
+        drop(p64);
+        let p65 = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 65, rooms: 0 });
+        assert_eq!(p65.storage().slot.get().source.actions_len(), 8192);
+        assert!(p65.storage().pieces.is_empty());
     }
 
     fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
@@ -3836,6 +3878,7 @@ mod test {
     fn public_types_preserve_auto_traits() {
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
+        fn assert_unpin<T: Unpin>() {}
         fn assert_unwind<T: core::panic::UnwindSafe + core::panic::RefUnwindSafe>() {}
         assert_send::<Lent<'_>>();
         assert_sync::<Lent<'_>>();
@@ -3843,6 +3886,8 @@ mod test {
         assert_send::<Room>();
         assert_sync::<Room>();
         assert_send::<Pipeline<u32>>();
+        assert_unpin::<Pipeline<core::marker::PhantomPinned>>();
+        assert_unpin::<Pipeline<u32, core::marker::PhantomPinned>>();
         assert_send::<Message>();
         assert_sync::<Message>();
         assert_send::<Event<u32>>();
@@ -4709,7 +4754,7 @@ mod test {
 
         let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
         let p_small = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-        assert_eq!(p_small.free_pieces.buf.len(), 1 + 2 + 1);
+        assert_eq!(p_small.free_pieces.cap, 1 + 2 + 1);
         assert_eq!(p_small.group_count, 4);
         assert_eq!(slot_tier(1024), 0);
         assert_eq!(slot_tier(2048), 1);
@@ -4723,7 +4768,12 @@ mod test {
         // Per-tier exact-hit and best-fit fallback across TWO eligible larger
         // tiers (2,048 and 16,384): distinguishes `min` from `max`/first-fit
         // and proves fallback picks the smallest larger free tier.
-        let p_mid = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 16, rooms: 0 });
+        let p_mid = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 17, rooms: 0 });
+        assert_eq!(p_mid.free_pieces.cap, 0, "roomless Pipeline allocates zero PieceNodes");
+        assert_eq!(p_mid.free_pieces.inner.capacity(), 0, "roomless free_pieces allocates zero backing buffer");
+        assert_eq!(p_mid.local_free_rooms.cap, 0, "roomless Pipeline allocates zero local_free_rooms");
+        assert_eq!(p_mid.local_free_rooms.inner.capacity(), 0, "roomless local_free_rooms allocates zero backing buffer");
+        assert!(p_mid.storage().pieces.is_empty(), "roomless PipeStorage has zero PieceNodes");
         assert_eq!(p_mid.storage().slot.get().source.actions_len(), 2048);
         let slot_mid = p_mid.storage().slot.get() as *const PipeSlot as usize;
         let p_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 200, rooms: 1 });
