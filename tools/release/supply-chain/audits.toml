@@ -100,6 +100,12 @@ criteria = "agent-safe-to-deploy"
 delta = "1.15.2 -> 1.16.5"
 notes = "Shipped-code delta review off Mozilla 1.15.2 safe-to-deploy: adds PhantomData<A::Item> fixing #[may_dangle] dropck soundness for zero-len inline arrays, makes try_grow(new_cap < len) a no-op, splits push spilled/inline paths, and rewrites retain with a Miri-sound PanicGuard (advances read before drop_in_place, non-overlapping copy with read > write)."
 
+[[audits.syn]]
+who = "Devon Jonte <devonjonte@users.noreply.github.com>"
+criteria = "agent-safe-to-run"
+delta = "2.0.98 -> 2.0.119"
+notes = "Shipped-code delta review of Cargo.toml and all 49 changed src/**/*.rs files (4,872 diff lines) off Google/Mozilla 2.0.98 safe-to-run plus independent adversarial check (GPT Astra): build = false, no_std/alloc/core import migration, ptr::eq and add(1)/sub(1) cursor cleanups in src/buffer.rs, fallible literal parsers returning Lit::Verbatim, Rust grammar updates ([const] trait bounds, builtin# types, attributed expr grouping, rejecting negative inherent impls), Punctuated::index checked_add underflow fix, and fold/visit_token_stream. Zero UB, zero host FS/network/env/process calls in shipped paths. Non-blocking note: #[cfg(fuzzing)] #[doc(hidden)] Lit::from_str_for_fuzzing pairs a dummy Literal::u8_unsuffixed(0) token (unreachable under ordinary Cargo builds)."
+
 [[audits.tracing]]
 who = "Devon Jonte <devonjonte@users.noreply.github.com>"
 criteria = "agent-safe-to-deploy"

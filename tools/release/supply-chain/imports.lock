@@ -344,6 +344,24 @@ criteria = ["safe-to-deploy", "agent-safe-to-deploy"]
 version = "1.13.2"
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
 
+[[audits.google.audits.syn]]
+who = "ChromeOS"
+criteria = ["safe-to-run", "agent-safe-to-run"]
+version = "1.0.107"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.syn]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = ["safe-to-run", "agent-safe-to-run"]
+delta = "1.0.107 -> 2.0.14"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
+[[audits.google.audits.syn]]
+who = "George Burgess IV <gbiv@google.com>"
+criteria = ["safe-to-run", "agent-safe-to-run"]
+delta = "2.0.14 -> 2.0.18"
+aggregated-from = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/refs/heads/main/cargo-vet/audits.toml?format=TEXT"
+
 [[audits.isrg.audits.cfg-if]]
 who = "David Cook <dcook@divviup.org>"
 criteria = ["safe-to-deploy", "agent-safe-to-deploy"]
@@ -476,6 +494,19 @@ who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = ["safe-to-deploy", "agent-safe-to-deploy"]
 delta = "1.15.1 -> 1.15.2"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.syn]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = ["safe-to-deploy", "agent-safe-to-deploy"]
+delta = "2.0.18 -> 2.0.26"
+notes = "Dependency update & internal refactorings"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.syn]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = ["safe-to-deploy", "agent-safe-to-deploy"]
+delta = "2.0.26 -> 2.0.98"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.tracing]]
 who = "Alex Franchuk <afranchuk@mozilla.com>"

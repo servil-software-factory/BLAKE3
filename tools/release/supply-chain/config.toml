@@ -106,10 +106,6 @@ criteria = "agent-safe-to-run"
 version = "0.8.1"
 criteria = "agent-safe-to-run"
 
-[[exemptions.syn]]
-version = "2.0.119"
-criteria = "agent-safe-to-run"
-
 [[exemptions.wasi]]
 version = "0.11.0+wasi-snapshot-preview1"
 criteria = "agent-safe-to-run"
