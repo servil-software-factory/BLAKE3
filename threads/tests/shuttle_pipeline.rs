@@ -278,6 +278,7 @@ mod lanes {
                 let mut waiting = self.waiting.lock().unwrap();
                 assert!(waiting.len() + args.len() <= self.actions, "more actions than the Source was made for");
                 waiting.extend(args.iter().map(|&arg| (run, context as usize, arg)));
+                PUBLISHED_ACTIONS.fetch_add(args.len(), std::sync::atomic::Ordering::Relaxed);
                 drop(waiting);
                 news();
             }
@@ -381,6 +382,8 @@ mod lanes {
         /// Actions the workers ran, over every schedule: a model whose
         /// caller ran them all would check nothing.
         pub(crate) static BY_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        /// Total actions published to any Shuttle Source.
+        pub(crate) static PUBLISHED_ACTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     }
 }
 
@@ -779,13 +782,106 @@ fn an_aborted_message_leaves_the_others_whole() {
     });
 }
 
+/// Two explicit-Plain messages share a room on a keyed-default Pipeline; a
+/// single non-blocking poll of `pipe.room()` triggers room-pressure dispatch
+/// into one shared group without awaiting room return, then immediately aborts
+/// the representative slot (`m1`) and reuses its slot with a distinct explicit
+/// key override (`Mode::Keyed(&key_other)`). Under `hold_back()`, a worker can
+/// be paused before hashing the dispatched group when `abort(m1)` runs, so
+/// `m1` must not reap (and allow `slot_trees[m1.slot]` to be overwritten with
+/// `key_other`) until the worker finishes hashing both `m1` and `m2`.
+fn an_aborted_override_representative_does_not_race_slot_reuse() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let key_default = [0x5au8; 32];
+    let key_other = [0xa5u8; 32];
+    let p1 = [0x11u8; 64];
+    let p2 = [0x22u8; 64];
+    let k3 = [0x33u8; 64];
+    let want_p2 = *blake3::hash(&p2).as_bytes();
+    let want_k3 = *blake3::keyed_hash(&key_other, &k3).as_bytes();
+    let saw_pending_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_flag = std::sync::Arc::clone(&saw_pending_abort);
+    check(move || {
+        let saw_flag = std::sync::Arc::clone(&saw_flag);
+        with_workers(2, || {
+            let mut pipe = Pipeline::<usize, ()>::new(Mode::Keyed(&key_default), Limits { messages: 2, rooms: 1 });
+            let mut r = block_on(pipe.room());
+            let mut m1 = block_on(pipe.message_with(Mode::Plain, 1, Some(p1.len() as u64)));
+            r.bytes_mut()[..p1.len()].copy_from_slice(&p1);
+            pipe.commit(&mut m1, &mut r, p1.len());
+            let mut m2 = block_on(pipe.message_with(Mode::Plain, 2, Some(p2.len() as u64)));
+            r.bytes_mut()[..p2.len()].copy_from_slice(&p2);
+            pipe.commit(&mut m2, &mut r, p2.len());
+            drop(r);
+
+            // Trigger room-pressure dispatch without waiting for room return:
+            // polling `pipe.room()` once flushes both sealed short messages
+            // into one shared Plain group (representative = m1's slot) and
+            // cancels the wait immediately while the worker may still be held.
+            let actions_before = lanes::sources::PUBLISHED_ACTIONS.load(std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut room_fut = std::pin::pin!(pipe.room());
+                let mut cx = Context::from_waker(Waker::noop());
+                let _ = room_fut.as_mut().poll(&mut cx);
+            }
+            let actions_after = lanes::sources::PUBLISHED_ACTIONS.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(actions_after - actions_before, 1, "room pressure must dispatch both explicit-Plain messages in one shared group");
+
+            // Abort representative `m1` immediately, before any room wait.
+            pipe.abort(m1);
+            let ev1 = match pipe.next_event() {
+                Some(ev) => ev,
+                None => {
+                    saw_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    loop {
+                        if let Some(ev) = pipe.next_event() {
+                            break ev;
+                        }
+                        block_on(pipe.ready());
+                    }
+                }
+            };
+            assert!(matches!(ev1, Event::Aborted { tag: 1, .. }), "representative m1 must abort");
+
+            // Reuse the reaped slot immediately with a distinct explicit key
+            // override, overwriting `slot_trees[m1.slot]` before awaiting any
+            // room or ending `m2`.
+            let mut m3 = block_on(pipe.message_with(Mode::Keyed(&key_other), 3, Some(k3.len() as u64)));
+            let mut r2 = block_on(pipe.room());
+            r2.bytes_mut()[..k3.len()].copy_from_slice(&k3);
+            pipe.commit(&mut m3, &mut r2, k3.len());
+            drop(r2);
+            pipe.end(m2);
+            pipe.end(m3);
+            let mut got = [None; 2];
+            for _ in 0..2 {
+                let ev = loop {
+                    if let Some(ev) = pipe.next_event() {
+                        break ev;
+                    }
+                    block_on(pipe.ready());
+                };
+                match ev {
+                    Event::Hashed { tag: 2, hash, .. } => got[0] = Some(*hash.as_bytes()),
+                    Event::Hashed { tag: 3, hash, .. } => got[1] = Some(*hash.as_bytes()),
+                    _ => panic!("unexpected event"),
+                }
+            }
+            assert_eq!(got[0], Some(want_p2), "second Plain message digest");
+            assert_eq!(got[1], Some(want_k3), "reused-slot distinct-key override digest");
+        });
+    });
+    assert!(saw_pending_abort.load(std::sync::atomic::Ordering::Relaxed), "scenario must exercise abort(m1) while the dispatched group is still in flight");
+}
+
 /// The scenarios, one after another in one test: the Pipeline's free
 /// storages and the Sources' registry are the process's, as in a program,
 /// and two models at once on two test threads would share them.
 #[test]
 fn the_pipeline_under_shuttle() {
     blake3_servil_core::initialize();
-    let scenarios: [(&str, fn()); 9] = [
+    let scenarios: [(&str, fn()); 10] = [
         ("messages_through_rooms_complete_with_their_own_digests", messages_through_rooms_complete_with_their_own_digests),
         ("owned_messages_complete_and_wake_the_caller", owned_messages_complete_and_wake_the_caller),
         ("a_pipeline_after_another_reuses_its_storage_soundly", a_pipeline_after_another_reuses_its_storage_soundly),
@@ -795,6 +891,7 @@ fn the_pipeline_under_shuttle() {
         ("an_aborted_message_leaves_the_others_whole", an_aborted_message_leaves_the_others_whole),
         ("batches_are_whole_when_their_events_come", batches_are_whole_when_their_events_come),
         ("a_pipeline_with_no_pool_slot_does_its_own_work", a_pipeline_with_no_pool_slot_does_its_own_work),
+        ("an_aborted_override_representative_does_not_race_slot_reuse", an_aborted_override_representative_does_not_race_slot_reuse),
     ];
     for (name, scenario) in scenarios {
         eprintln!("shuttle_pipeline: {name}");
