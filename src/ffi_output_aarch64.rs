@@ -11,7 +11,7 @@ use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, platf
 unsafe extern "C" {
     fn blake3_servil_neon_output8(inputs: *const Input<'_>, out: *mut u8, groups: u64);
 }
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 unsafe extern "C" {
     fn blake3_servil_sme2_chunks_keyed(
         chunks: *const *const u8,
@@ -26,7 +26,7 @@ unsafe extern "C" {
 #[cfg(test)]
 pub(crate) fn lanes(platform: Platform) -> usize {
     match platform {
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         Platform::SME2 => 16,
         Platform::NEON => 8,
     }
@@ -43,7 +43,7 @@ pub(crate) fn hash_groups_arm(inputs: &[Input<'_>], out: &mut [[u8; OUT_LEN]]) -
     let groups = inputs.len() / 8;
     if groups > 0 {
         crate::ran_kernel(blake3_servil_neon_output8 as *const ());
-        // Sound: `blake3_neon` guarantees AArch64 NEON; `inputs` holds
+        // Sound: `target_arch = "aarch64"` guarantees AArch64 NEON; `inputs` holds
         // `8 * groups` valid descriptors and `out` has exact room.
         unsafe { blake3_servil_neon_output8(inputs.as_ptr(), out.as_mut_ptr().cast(), groups as u64) };
     }
@@ -79,7 +79,7 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
     //    keyed/mixed stages together with zero key comparisons; on NEON (or if
     //    SME2 is busy / declined on nonzero TPIDR2_EL0 reserved bytes), each
     //    stage runs at full 16-chunk NEON width.
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     let leaves_done = {
         let turn = crate::platform::Sme2Turn::take(platform, true);
         if matches!(turn.platform(), Platform::SME2) {
@@ -118,11 +118,6 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
         } else {
             false
         }
-    };
-    #[cfg(not(blake3_sme2))]
-    let leaves_done = {
-        let _ = platform;
-        false
     };
     if !leaves_done {
         for (k, &i) in held.iter().enumerate() {
@@ -181,7 +176,7 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
     }
 }
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 const CHUNKS_KEYED_SELF_TEST_EXPECTED: u64 = 0x199d_615f_c41e_830b;
 
 /// Planted corruption selector for subprocess fail-stop tests:
@@ -190,7 +185,7 @@ const CHUNKS_KEYED_SELF_TEST_EXPECTED: u64 = 0x199d_615f_c41e_830b;
 #[cfg(test)]
 pub(crate) static PLANTED_WRONG_OUTPUT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn chunks_keyed_self_test_shape(mut hash: impl FnMut(&[[u8; CHUNK_LEN]; 32], &[u64; 2], &[[u32; 8]; 2], &[u8; 2], &mut [[u8; OUT_LEN]; 32])) -> u64 {
     // Initialize the 32 KiB input table in place (avoiding `core::array::from_fn`'s
@@ -220,7 +215,7 @@ fn chunks_keyed_self_test_shape(mut hash: impl FnMut(&[[u8; CHUNK_LEN]; 32], &[u
 pub(crate) fn self_test(platform: Platform) -> usize {
     let neon_answer = self_test_shape(|inputs, out| {
         crate::ran_kernel(blake3_servil_neon_output8 as *const ());
-        // Sound: `blake3_neon` guarantees AArch64 NEON; `inputs` and `out` hold 16 entries (2 groups of 8).
+        // Sound: `target_arch = "aarch64"` guarantees AArch64 NEON; `inputs` and `out` hold 16 entries (2 groups of 8).
         unsafe { blake3_servil_neon_output8(inputs.as_ptr(), out.as_mut_ptr().cast(), 2) };
         #[cfg(test)]
         if PLANTED_WRONG_OUTPUT.load(core::sync::atomic::Ordering::Relaxed) == 1 {
@@ -229,7 +224,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
     });
     check_self_test(neon_answer);
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     if matches!(platform, Platform::SME2) {
         let chunks_answer = chunks_keyed_self_test_shape(|chunks, counters, keys, flags, out| {
             let ptrs: [*const u8; 32] = core::array::from_fn(|i| chunks[i].as_ptr());
@@ -247,8 +242,6 @@ pub(crate) fn self_test(platform: Platform) -> usize {
         }
         return 2;
     }
-    #[cfg(not(blake3_sme2))]
-    let _ = platform;
     1
 }
 
@@ -264,15 +257,15 @@ pub(crate) fn entry8() -> *const () {
 pub(crate) fn entries_neon() -> [(&'static str, *const ()); 1] {
     [("blake3_servil_neon_output8", blake3_servil_neon_output8 as *const ())]
 }
-#[cfg(all(test, blake3_sme2))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn entry_chunks_keyed() -> *const () {
     blake3_servil_sme2_chunks_keyed as *const ()
 }
-#[cfg(all(test, blake3_sme2))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn entries_sme2() -> [(&'static str, *const ()); 1] {
     [("blake3_servil_sme2_chunks_keyed", blake3_servil_sme2_chunks_keyed as *const ())]
 }
-#[cfg(all(test, blake3_sme2))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) unsafe fn call_sme2_chunks_keyed(
     chunks: *const *const u8,
     counters: *const u64,
@@ -312,7 +305,7 @@ mod tests {
             }),
             answer
         );
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         {
             let ref_chunks = chunks_keyed_self_test_shape(|chunks, counters, keys, flags, out| {
                 for g in 0..2 {
@@ -376,7 +369,7 @@ mod tests {
         crate::initialize();
         for platform in crate::test::every_platform() {
             let expected_width = match platform {
-                #[cfg(blake3_sme2)]
+                #[cfg(target_arch = "aarch64")]
                 Platform::SME2 => 16,
                 Platform::NEON => 8,
             };
@@ -387,7 +380,7 @@ mod tests {
             assert_eq!(checked, if sme2 { 2 } else { 1 }, "startup families on {platform:?}");
             let entries = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
             assert!(entries.contains(&(entry8() as usize)), "eight-lane NEON startup on {platform:?}");
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             assert_eq!(entries.contains(&(entry_chunks_keyed() as usize)), sme2, "SME2 chunks_keyed startup on {platform:?}");
         }
     }
@@ -408,7 +401,7 @@ mod tests {
         }
         let exe = std::env::current_exe().expect("test binary path");
         let mut cases: Vec<(&str, &str)> = vec![("neon", "independent counter-zero compressions")];
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if matches!(Platform::detect_unchecked(), Platform::SME2) {
             cases.push(("sme2", "SME2 keyed chunks"));
         }

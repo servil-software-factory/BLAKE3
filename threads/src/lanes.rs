@@ -354,7 +354,7 @@ pub(crate) fn prepare_thread() {
     });
     let _ = sources::try_job_source();
     crate::prepare_collection_thread();
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     if matches!(Platform::detect(), Platform::SME2 { .. }) {
         blake3_servil_core::thread_support::prepare_sme2_scratch();
     }
@@ -800,7 +800,7 @@ fn cut_with_prefix(pieces: &mut Vec<Piece>, len: usize, threads: usize, prefix: 
 /// The SME2 thread's prefix for a call holding `turn`: [`sme2_prefix`]
 /// when the turn gave it SME2, else nothing.
 fn prefix_for(turn: &Sme2Turn, len: usize, threads: usize) -> usize {
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     if matches!(turn.platform(), Platform::SME2 { .. }) {
         return sme2_prefix(len, threads);
     }
@@ -820,7 +820,7 @@ const MAX_PREFIX_PIECE_LEN: usize = 1 << 20;
 /// A share below MAX_PIECE_LEN is no prefix: too little SME2 work to pay
 /// for the turn and the streaming session (VM, servil mt 256 KiB over
 /// sixteen threads, a 24 KiB prefix: +18-20%).
-#[cfg_attr(not(blake3_sme2), allow(dead_code))]
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 fn sme2_prefix(len: usize, threads: usize) -> usize {
     let share = len / (100 + (threads - 1) * 10000 / 165) * 100;
     if share >= MAX_PIECE_LEN { share } else { 0 }
@@ -971,7 +971,9 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
         |n| n.get(),
     );
     // With one thread, none beside the caller: no SME2 thread either.
-    let sme2 = threads > 1 && cfg!(blake3_sme2) && !matches!(pool_platform(), p if core::mem::discriminant(&p) == core::mem::discriminant(&Platform::detect()));
+    let sme2 = threads > 1
+        && cfg!(target_arch = "aarch64")
+        && !matches!(pool_platform(), p if core::mem::discriminant(&p) == core::mem::discriminant(&Platform::detect()));
     let pool = Pool { callers: AtomicUsize::new(0), threads, sme2, park: crate::park::Park::new(Pool::workers_of(threads), crate::park::FANOUT) };
     if threads > 1 {
         // Before any thread starts: a child forked from here on has none
@@ -4306,7 +4308,7 @@ fn sme2_serve() -> ! {
     assert!(SME2_THREAD.set(std::thread::current()).is_ok(), "one SME2 thread");
     // Prepare the flat-walk scratch before reporting parked, so the
     // first task on this worker allocates nothing.
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     blake3_servil_core::thread_support::prepare_sme2_scratch();
     loop {
         if let Some(item) = sources::take_stream_item() {
@@ -4482,7 +4484,7 @@ mod test {
         let mut platforms: Vec<Platform> = std::vec::Vec::new();
         #[cfg(target_arch = "x86_64")]
         platforms.extend([Platform::sse41(), Platform::avx2()].into_iter().flatten());
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         platforms.extend(Platform::avx512());
         let detected = Platform::detect();
         platforms.push(detected);
@@ -5263,7 +5265,7 @@ mod test {
         assert_eq!(pieces[0].len, 256 * 1024);
     }
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn sme2_prefix_hashes_through_the_public_call() {
         crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));

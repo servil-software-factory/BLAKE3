@@ -1278,7 +1278,7 @@ mod tree_test {
         let _ = batch.part(3..2);
     }
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn parent_cvs_and_hash_each_honor_a_held_sme2_turn() {
         crate::initialize();

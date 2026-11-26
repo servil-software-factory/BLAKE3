@@ -81,7 +81,7 @@ pub(crate) fn eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
         out != 0
     }
 
-    #[cfg(any(miri, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+    #[cfg(miri)]
     {
         eq_32_portable(a, b)
     }
@@ -97,7 +97,7 @@ pub(crate) fn eq_slice_32(a: &[u8; 32], b: &[u8]) -> bool {
     eq_32(a, b)
 }
 
-#[cfg(any(test, miri, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(any(test, miri))]
 #[inline]
 fn eq_32_portable(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut diff = 0u64;

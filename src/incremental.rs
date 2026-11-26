@@ -141,7 +141,6 @@ mod stage {
         /// a block or less and whole in the stage. An empty stage's is a block
         /// of zeros apart (a new Hasher's stage is unwritten, and a reset one's
         /// holds the last message).
-        #[cfg(any(blake3_sse41_ffi, blake3_neon))]
         #[inline(always)]
         pub(crate) fn first_block(&self) -> &[u8; BLOCK_LEN] {
             static EMPTY: [u8; BLOCK_LEN] = [0; BLOCK_LEN];
@@ -175,7 +174,7 @@ mod stage {
 
         /// Store `input` (at most `BLOCK_LEN` bytes) into an empty stage as one
         /// zero-padded block in the 16-byte pieces `finalize`'s kernel loads.
-        #[cfg(blake3_sse41_ffi)]
+        #[cfg(target_arch = "x86_64")]
         #[inline(always)]
         pub(crate) fn pad_first_block(&mut self, input: &[u8]) {
             assert!(self.len == 0 && input.len() <= BLOCK_LEN, "pad_first_block requires empty stage and at most one block");
@@ -271,7 +270,7 @@ impl hasher::Hooks for HasherHooks<'_> {
         // on the stack and about one merge runs on the core between SME2
         // kernels (about 0.2 us of other work between them puts the SME
         // unit in its slow state: `sme2`'s documentation).
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if self.pooled.is_none() && matches!(self.platform, Platform::SME2) && sme2::flat_takes(input.len()) {
             crate::counted(crate::Counted::Flat);
             // Sound: startup verified FEAT_SME2; SME2 assembly checks the calling thread's SVL at entry and falls back to NEON if != 512 bits.
@@ -389,13 +388,11 @@ impl Hasher {
         self.stage.len()
     }
 
-    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     #[inline(always)]
     pub(crate) fn chunk_state(&self) -> &ChunkState {
         &self.core.chunk_state
     }
 
-    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     #[inline(always)]
     pub(crate) fn stage_first_block(&self) -> &[u8; BLOCK_LEN] {
         self.stage.first_block()
@@ -447,7 +444,7 @@ impl Hasher {
             // scalar final blocks), while longer messages keep exact 16 KiB
             // group boundaries (#404). Non-consuming mid-chunk `finalize()` on a
             // staged plain first chunk rehashes that prefix fresh.
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             if crate::ffi_partial::first_chunk_to_core(self.stage.is_empty(), hold, self.core.domain.is_plain(), self.core.count(), input.len()) {
                 self.core.update_pooled(input, pooled);
                 return &[];
@@ -612,7 +609,7 @@ impl Hasher {
         // 2^64 - 1 byte domain even if the buffered chunk is full, so <= 64
         // bytes always fit; near the limit we fall through to `update_longer`
         // for the exact `check_input_room` check.
-        #[cfg(blake3_sse41_ffi)]
+        #[cfg(target_arch = "x86_64")]
         if input.len() <= BLOCK_LEN && self.stage.is_empty() && self.core.chunk_state.chunk_counter() < (1u64 << 54) - 1 {
             crate::counted(crate::Counted::PaddedFirstBlock);
             self.stage.pad_first_block(input);
@@ -631,7 +628,7 @@ impl Hasher {
         // Under 16 KiB it waits whole in the stage for `finalize`, which
         // hashes it with the one-shot call's kernels; from 16 KiB it goes
         // to the core now.
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         if self.count() == 0 && (CHUNK_LEN + 1..PREFETCH_BELOW).contains(&input.len()) {
             prefetch_cold(input.len(), self.core.chunk_state.platform(), input.len() >= STAGE_LEN);
         }
@@ -675,7 +672,7 @@ impl Hasher {
             // A block or less: one kernel call on the stage's first block.
             // Read the mode byte from `chunk_state` (same 64-byte-aligned
             // cache line as `fresh_key`, initialized from `domain`).
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             if self.stage.len() <= BLOCK_LEN {
                 // Sound: the platform's instructions were detected.
                 return Hash(unsafe {
@@ -973,9 +970,9 @@ mod test {
         let key = [0x52u8; 32];
         let platform = Platform::detect();
         let rows_here = (4..=hasher::ROW).contains(&platform.simd_degree());
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         let flat_here = matches!(platform, Platform::SME2);
-        #[cfg(not(blake3_sme2))]
+        #[cfg(not(target_arch = "aarch64"))]
         let flat_here = false;
         for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey("below the pool's threshold")] {
             let (mut serial, mut pooled) = (Hasher::new(mode, None), Hasher::new(mode, None));
@@ -1304,7 +1301,7 @@ mod test {
                 );
                 let mut out = [[0u8; OUT_LEN]];
                 assert_eq!(entries_run(&mut || crate::each::finalize_each(&mut hashers, &[0], &mut out)), one_shot, "finalize_each alone, len={len}");
-                #[cfg(not(blake3_neon))]
+                #[cfg(not(target_arch = "aarch64"))]
                 if (65..=CHUNK_LEN).contains(&len) {
                     let mut turn = Hasher::new(mode, None);
                     turn.gather_part(message, None, true);
@@ -1335,7 +1332,7 @@ mod test {
     /// more, or into a stage that holds bytes, takes the longer path. The
     /// digest is the same either way, so the count tells (BLAKE3 #219).
     #[test]
-    #[cfg(blake3_sse41_ffi)]
+    #[cfg(target_arch = "x86_64")]
     fn an_update_of_a_block_or_less_into_an_empty_stage_is_stored_padded() {
         crate::initialize();
         let input = painted();
@@ -1426,7 +1423,7 @@ mod test {
         for (h, len) in hashers.iter().zip([2500, 65]) {
             assert_eq!(*h.finalize().as_bytes(), crate::test::official::hash(mode, &input[..len]), "{len} bytes");
         }
-        if !cfg!(blake3_neon) {
+        if !cfg!(target_arch = "aarch64") {
             assert!(hashers[0].core.chunk_state.count() > 0 && hashers[0].stage.len() > 0, "a chunk in the core, bytes in the stage");
             assert_eq!(crate::COUNTED.with(|c| c[crate::Counted::TailApart as usize].get()), 0);
         }
@@ -1566,7 +1563,7 @@ mod test {
         assert_eq!((counter, &bytes[..]), ((STAGE_LEN / CHUNK_LEN) as u64, &input[STAGE_LEN..2 * STAGE_LEN]));
     }
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn set_platform_for_test_updates_chunk_state_platform() {
         crate::initialize();

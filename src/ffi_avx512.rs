@@ -38,7 +38,6 @@ pub unsafe fn hash_many<const N: usize>(
         // 32 whole chunks take the 32-input kernel, and groups of 16 parent
         // nodes the 16-input one; the rest, every other shape, and every
         // other CPU, the older kernel (BLAKE3 #119/#125).
-        #[cfg(target_os = "linux")]
         let (inputs, counter, out) = {
             let wide = crate::platform::wide_avx512();
             let done = if wide && N == crate::CHUNK_LEN {
@@ -99,13 +98,10 @@ pub unsafe fn hash_many<const N: usize>(
 /// The most blocks one call of the AVX-512 extended-output kernel makes:
 /// its proof covers 1 to 32 (tools/verify/prove_x86.py, xof_many), so a
 /// longer output takes one call per 32 blocks and every call stays within
-/// what is proved (#163). The kernel is in the Unix assembly alone, as
-/// `xof_many` below.
-#[cfg(unix)]
+/// what is proved (#163).
 pub const XOF_PROVED_BLOCKS: usize = 32;
 
 // Unsafe because this may only be called on platforms supporting AVX-512.
-#[cfg(unix)]
 pub unsafe fn xof_many(cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8, out: &mut [u8]) {
     assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
     for (i, part) in out.chunks_mut(XOF_PROVED_BLOCKS * BLOCK_LEN).enumerate() {
@@ -133,17 +129,15 @@ pub mod ffi {
             flags_end: u8,
             out: *mut u8,
         );
-        #[cfg(unix)]
         pub fn blake3_servil_xof_many_avx512(cv: *const u32, block: *const u8, block_len: u8, counter: u64, flags: u8, out: *mut u8, outblocks: usize);
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn test_wide_dispatch_groups_tails_and_bounds() {
         if !crate::platform::avx512_detected() {
             return;

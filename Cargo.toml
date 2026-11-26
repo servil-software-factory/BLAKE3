@@ -9,8 +9,9 @@ repository = "https://github.com/servil-software-factory/BLAKE3"
 license = "MIT OR Apache-2.0 OR TGPPL-1.0" # OR BOSL-1.0, see LICENSE-BOSL.txt
 readme = "README.md"
 edition = "2024"
-# Its build script tells the crates that depend on it what it built
-# (DEP_BLAKE3_SERVIL_CORE_SME2: the SME2 kernels).
+# The assembly kernels export unmangled `blake3_servil_*` global symbols; keeping
+# `links` tells Cargo to reject two copies of this crate in one dependency graph
+# at resolve time rather than colliding at link time.
 links = "blake3_servil_core"
 # What a build from crates.io needs: the library, its assembly and build
 # script, the pages users read, the licences, and the file the tests include.

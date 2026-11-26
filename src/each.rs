@@ -137,7 +137,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         marked.active = false;
         return;
     }
-    #[cfg(blake3_sse41_ffi)]
+    #[cfg(target_arch = "x86_64")]
     {
         crate::ffi_partial::finalize_each(hashers, which, out);
         marked.active = false;
@@ -148,7 +148,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
     // single-chunk hashers (keyed/derived/mixed `<= 64 B` staged or ChunkState-
     // resident -> NEON `output8` when >= 8, #336), and general hashers. Key
     // values never select grouping or dispatch.
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     {
         const FINALIZE_BATCH: usize = 128;
         const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
@@ -308,7 +308,6 @@ fn drain<'a>(hashers: &mut [Hasher], held: &mut crate::stack_vec::StackVec<usize
 /// messages in 4 KiB pieces, November 10, 2026), and from eight up they
 /// gain 2-3% there and 7-11% on an EPYC 9255. The count is public; no
 /// key decides the route.
-#[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
 const INDEPENDENT_MIN: usize = 3;
 
 /// Hash every queued stage after detaching the table so an unwind inside
@@ -333,11 +332,10 @@ std::thread_local! {
 /// count and the platform, all public, choose; key values never determine
 /// grouping, allocation or dispatch. Every other target compiles `hash_held`
 /// as it was.
-#[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
 fn independent_lanes(hashers: &mut [Hasher], held: &[usize]) -> bool {
     let Some(&first) = held.first() else { return false };
     let platform = hashers[first].platform();
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     if !matches!(platform, Platform::AVX2 | Platform::AVX512) {
         return false;
     }
@@ -364,7 +362,6 @@ std::thread_local! {
 /// hashes alone, since its key is secret and must not decide the work
 /// (BLAKE3 #312): the mode alone, public, groups them.
 fn hash_held(hashers: &mut [Hasher], held: &[usize]) {
-    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     if independent_lanes(hashers, held) {
         return;
     }
@@ -461,9 +458,9 @@ fn hash_cohort_on<const N: usize>(hashers: &mut [Hasher], alike: &[usize], platf
     let key = if domain.is_plain() { *crate::IV } else { *domain.key() };
     let mut work = HeldWorkspace::<N>::new();
     let (mut level, mut next) = work.buffers(alike.len());
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     let on_sme2 = matches!(platform, Platform::SME2);
-    #[cfg(not(blake3_sme2))]
+    #[cfg(not(target_arch = "aarch64"))]
     let on_sme2 = false;
     {
         let mut refs = crate::stack_vec::StackVec::<[&[u8; CHUNK_LEN]; ALONE_CHUNKS], N>::new();
@@ -479,7 +476,7 @@ fn hash_cohort_on<const N: usize>(hashers: &mut [Hasher], alike: &[usize], platf
         let mut counters = crate::stack_vec::StackVec::<u64, N>::new();
         counters.extend(alike.iter().map(|&i| hashers[i].held_group().unwrap().0));
         if on_sme2 {
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             // Sound: the turn detects SME2. Borrowed stages and stack output
             // are disjoint, with one counter per full 16-chunk stage.
             unsafe {
@@ -509,7 +506,7 @@ fn hash_cohort_on<const N: usize>(hashers: &mut [Hasher], alike: &[usize], platf
             // SME2's parent kernel reads a group of sixteen blocks through
             // one pointer: the level goes to it as the run of memory it
             // is, not as a table of sixteen borrows.
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             // Sound: the turn's platform is SME2 only where detection
             // found it.
             unsafe {
@@ -570,9 +567,9 @@ pub fn hash_each(mode: Mode, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LE
 
 /// The most items [`hash_by_blocks`] sorts at once: a stream task's
 /// members, or with SME2 its message kernel's table.
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 pub(crate) const BY_BLOCKS_AT_ONCE: usize = TABLE;
-#[cfg(not(blake3_sme2))]
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) const BY_BLOCKS_AT_ONCE: usize = 64;
 
 /// The digest of each of `items`, every one of up to a chunk, of any
@@ -612,7 +609,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     // the NEON lanes took 30-64% longer on an Apple M4 Max, jobs 2016 and
     // 2019). A table of one-block messages never reaches the threshold
     // (BY_BLOCKS_AT_ONCE of 64 bytes is under SME2_SIZED_LEN).
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     {
         let len = items[0].len();
         if counter == 0
@@ -685,16 +682,16 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     let order = &order[..n];
     // With SHA-3 the last block stays in the lanes too; other AArch64
     // CPUs keep the prefix kernels followed by scalar last blocks.
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     let last_lanes = crate::neon_hybrid::sha3_detected();
-    #[cfg(not(blake3_neon))]
+    #[cfg(not(target_arch = "aarch64"))]
     let last_lanes = false;
     let mut cvs = [*key; BY_BLOCKS_AT_ONCE];
     // chunk_by always advances and returns nonempty groups, even if a
     // changed predicate groups the wrong items; no mutable loop bound.
     for same_blocks in order.chunk_by(|&a, &b| whole(items[usize::from(a)]) == whole(items[usize::from(b)])) {
         let k = whole(items[usize::from(same_blocks[0])]);
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         if last_lanes {
             for group in same_blocks.chunks(GROUP) {
                 let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[usize::from(i)].as_ptr()).collect();
@@ -732,12 +729,10 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         }
         if k > 0 {
             for group in same_blocks.chunks(GROUP) {
-                #[cfg_attr(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")), allow(unused_mut))]
+                #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
                 let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[usize::from(i)].as_ptr()).collect();
-                #[cfg(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux"))]
+                #[cfg(target_arch = "x86_64")]
                 let padded = crate::ffi_output::pad_by_blocks_inputs(&mut inputs, platform);
-                #[cfg(all(target_arch = "x86_64", not(all(blake3_avx512_ffi, target_os = "linux"))))]
-                let padded = group.len();
                 let mut lanes = [0u8; GROUP * OUT_LEN];
                 crate::counted(crate::Counted::ByBlocksCall);
                 // Sound: each item holds more than k whole blocks; the
@@ -746,7 +741,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                 unsafe {
                     crate::pair::hash_many_blocks(platform, &inputs, k, key, counter, false, flags, CHUNK_START, 0, &mut lanes[..padded * OUT_LEN])
                 };
-                #[cfg(blake3_neon)]
+                #[cfg(target_arch = "aarch64")]
                 unsafe {
                     crate::neon_hybrid::hash_messages_raw(
                         inputs.as_ptr(),
@@ -770,9 +765,9 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     if last_lanes {
         return;
     }
-    #[cfg(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     let serial_start = crate::ffi_output::finish_last_blocks_order(&order, items, &cvs, counter, flags, flags_end, out, platform);
-    #[cfg(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")))]
+    #[cfg(not(target_arch = "x86_64"))]
     let serial_start = 0usize;
     for &i in &order[serial_start..] {
         let i = usize::from(i);
@@ -877,9 +872,9 @@ fn hash_each_middle<I: Item>(
 ) {
     let Shared { messages, cvs } = shared;
     messages.clear();
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     let last_lanes = crate::neon_hybrid::sha3_detected();
-    #[cfg(not(blake3_neon))]
+    #[cfg(not(target_arch = "aarch64"))]
     let last_lanes = false;
     let min_k = usize::from(!last_lanes);
     let mut slots = 0;
@@ -971,11 +966,11 @@ fn hash_each_middle<I: Item>(
     // batched Merkle parent/root rounds whenever either the chunk/root rounds
     // (`messages.len() >= 16`) or the first non-root parent round
     // (`first_parent_pairs >= 16`) can reach an SME2 group of 16 lanes.
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     let turn = crate::sme2::turn_for_each_middle(platform, items, messages);
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     let round_platform = turn.platform();
-    #[cfg(not(blake3_sme2))]
+    #[cfg(not(target_arch = "aarch64"))]
     let round_platform = platform;
     for k in 0..most_full {
         crate::counted(crate::Counted::EachRound);
@@ -1081,7 +1076,7 @@ fn hash_each_middle<I: Item>(
             }
         }
     }
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     drop(turn);
     messages.clear();
     cvs.clear();
@@ -1219,7 +1214,7 @@ mod test {
         });
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn finalize_each_groups_only_full_output_lanes() {
         crate::initialize();
@@ -1491,9 +1486,9 @@ mod test {
     // Expected routes are independent of the implementation's predicate:
     // all supported ARM platforms, AVX2 and AVX-512, but not SSE4.1.
     fn block_groups_expected(platform: Platform) -> bool {
-        #[cfg(blake3_sse41_ffi)]
+        #[cfg(target_arch = "x86_64")]
         return !matches!(platform, Platform::SSE41);
-        #[cfg(not(blake3_sse41_ffi))]
+        #[cfg(not(target_arch = "x86_64"))]
         {
             let _ = platform;
             true
@@ -1529,9 +1524,9 @@ mod test {
                 // A call where two or more items are of up to a chunk and one of
                 // them has a whole block before its last.
                 let small: Vec<usize> = lens.iter().copied().filter(|&n| n <= CHUNK_LEN).collect();
-                #[cfg(blake3_neon)]
+                #[cfg(target_arch = "aarch64")]
                 let last_lanes = crate::neon_hybrid::sha3_detected();
-                #[cfg(not(blake3_neon))]
+                #[cfg(not(target_arch = "aarch64"))]
                 let last_lanes = false;
                 let calls_expected: u64 = if block_groups_expected(platform) && small.len() >= 2 {
                     small
@@ -1693,7 +1688,7 @@ mod test {
         hashers[1].update(&bytes);
         assert_eq!((hashers[0].staged_len(), hashers[0].count() - hashers[0].staged_len() as u64), (300, 0), "a plain turn's first chunk stays staged");
         assert_eq!((hashers[1].staged_len(), hashers[1].count() - hashers[1].staged_len() as u64), (300, 0), "an update's first chunk waits in the stage");
-        let keyed_in_turn = if cfg!(blake3_neon) { (300, 0) } else { (0, 300) };
+        let keyed_in_turn = if cfg!(target_arch = "aarch64") { (300, 0) } else { (0, 300) };
         assert_eq!((hashers[2].staged_len(), hashers[2].count() - hashers[2].staged_len() as u64), keyed_in_turn, "a keyed turn's first chunk");
         assert_eq!(hashers[0].finalize(), crate::test::official::hash(Mode::Plain, &bytes));
         assert_eq!(hashers[1].finalize(), crate::test::official::hash(Mode::Plain, &bytes));
@@ -1800,7 +1795,7 @@ mod test {
     /// that a single `update` sent to the core. Each of those finishes
     /// alone, every digest lands in its own place, and every hasher is
     /// reset. One such message alone takes no block-group call.
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn a_finish_takes_the_staged_first_chunks_from_among_the_others() {
         crate::initialize();
@@ -1850,7 +1845,7 @@ mod test {
     /// call; a shorter table, or one with a message of another length,
     /// keeps the NEON lanes. The digests match the official implementation
     /// in every mode.
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn a_sized_table_of_whole_block_messages_takes_the_sme2_message_kernel() {
         if !crate::platform::sme2_detected() {
@@ -1944,10 +1939,7 @@ mod test {
             }
             passes
         };
-        #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
         let independent = crate::ffi_output::lanes(Platform::detect()) != 0;
-        #[cfg(not(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
-        let independent = false;
         assert_eq!(passes(&[Mode::Plain; 3]), 1, "plain hashers hash together");
         assert_eq!(passes(&[Mode::Plain, Mode::Keyed(&a), Mode::Plain]), if independent { 1 } else { 2 }, "public mixed-mode route");
         let same = passes(&[Mode::Keyed(&a); 3]);
@@ -2076,7 +2068,6 @@ mod test {
 
     /// Keyed and mixed-mode turns use independent parent lanes; plain
     /// turns share the fixed IV. Key values never select a different route.
-    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     #[test]
     fn test_held_key_groups_take_one_partition_pass() {
         let entry = |width| if width == 8 { crate::ffi_output::entry8() } else { crate::ffi_output::entry() };
@@ -2139,7 +2130,7 @@ mod test {
                     // Below INDEPENDENT_MIN a keyed hasher hashes alone, and the plain ones together.
                     let lanes = flavor != 0 && n >= INDEPENDENT_MIN;
                     assert_eq!(partitions, if flavor != 0 && !lanes { n as u64 } else { 1 }, "held partitions: {platform:?} n={n} flavor={flavor}");
-                    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+                    #[cfg(target_arch = "x86_64")]
                     {
                         assert_eq!(parent_entries.contains(&(entry(width) as usize)), lanes, "independent parent entry: {platform:?} n={n}");
                         if lanes && platform == crate::platform::Platform::AVX512 && crate::platform::avx2_detected() {
@@ -2151,9 +2142,8 @@ mod test {
                             );
                         }
                     }
-                    #[cfg(blake3_neon)]
+                    #[cfg(target_arch = "aarch64")]
                     {
-                        #[cfg(blake3_sme2)]
                         if matches!(platform, crate::platform::Platform::SME2) {
                             assert_eq!(
                                 parent_entries.contains(&(crate::ffi_output::entry_chunks_keyed() as usize)),
@@ -2182,10 +2172,7 @@ mod test {
             })
             .collect();
         for platform in crate::test::every_platform() {
-            #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
             let independent = crate::ffi_output::lanes(platform) != 0;
-            #[cfg(not(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon)))]
-            let independent = false;
             for n in [3, 600] {
                 for flavor in 0..3 {
                     let mode = |i| match flavor {
@@ -2425,7 +2412,7 @@ mod test {
                 .expect("held cohort must fit in 64 KiB stack");
             assert_eq!(first, if keyed_first { expected_keyed } else { expected_plain }, "cohort of {count} (keyed={keyed_first}) first");
             assert_eq!(last, expected_plain, "cohort of {count} (keyed={keyed_first}) last");
-            #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+            #[cfg(target_arch = "x86_64")]
             if keyed_first && count >= INDEPENDENT_MIN && matches!(Platform::detect(), Platform::AVX2 | Platform::AVX512) {
                 assert!(saw_independent, "mixed cohort of {count} must actually run held_groups (>16 tiled on 64 KiB stack)");
             }
@@ -2488,9 +2475,9 @@ mod test {
         let block_lanes = crate::pair::takes_platform(Platform::detect());
         #[cfg(target_arch = "aarch64")]
         let block_lanes = true;
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         let last_lanes = crate::neon_hybrid::sha3_detected();
-        #[cfg(not(blake3_neon))]
+        #[cfg(not(target_arch = "aarch64"))]
         let last_lanes = false;
 
         for count in [1usize, 2, 3, 17] {

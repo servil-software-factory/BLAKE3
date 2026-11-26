@@ -47,7 +47,6 @@ src/ffi_counter.rs	replace entries_neon -> [(&'static str, *const()); 1] with [(
 src/ffi_counter.rs	replace entries_neon -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	AArch64 only: compiled out on x86-64
 src/ffi_counter.rs	replace entries_sme2 -> [(&'static str, *const()); 1] with [("", Default::default()); 1]	1	AArch64 only: compiled out on x86-64
 src/ffi_counter.rs	replace entries_sme2 -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	AArch64 only: compiled out on x86-64
-src/ffi_counter.rs	replace || with && in hash_counter_groups	1	AArch64 only: NEON arm is compiled out on x86-64
 src/ffi_output.rs	delete match arm Platform::AVX512 in lanes	1	[cpu lacks avx512f avx512vl] code for another machine: this CPU is never the AVX512 platform, so the arm is never taken. AVX-512 machines catch it
 src/ffi_output.rs	replace && with || in held_groups_in	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
 src/ffi_output.rs	replace + with * in held_groups_in	4	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
@@ -63,7 +62,6 @@ src/ffi_output.rs	replace | with ^ in finish_last_blocks_simd	2	equivalent: doma
 src/ffi_output.rs	replace | with ^ in held_groups_in	1	equivalent: mode flags (0, 16, 32, 64) and PARENT (4) occupy disjoint bits
 src/ffi_output.rs	replace | with ^ in packed	3	equivalent: | and ^ agree on flag bits that never overlap: the mode's flags hold none of CHUNK_START, CHUNK_END and ROOT
 src/ffi_partial.rs	replace % with + in rotation	1	equivalent: k % 4 becomes k + 4, which adds 16 to each shuffle index; pshufb reads an index's low four bits (and bit 7, clear: the largest is 47), so the shuffle is the same
-src/ffi_partial.rs	replace && with || in lane_widths	1	[cpu has avx512f avx512vl amd_family_ge_1a] equivalent on this CPU: on Linux the condition is then wide_avx512() or true, and wide_avx512() holds here (AMD Zen 5 with AVX-512), so the widths are the same; other CPUs catch it
 src/ffi_partial.rs	replace > with >= in hash_many_rounded_slow	2	equivalent: a count equal to the widest kernel has no rest to round (rounded_lanes(0) is None), so neither the `if` nor the loop runs one more time with a result that differs
 src/ffi_partial.rs	replace | with ^ in rotation	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/hasher.rs	replace + with *	1	untested bound: `const DEPTH: usize = MAX_DEPTH + 1` (55 -> 53 or 54) holds lazy-merged stack entries up to 2^64 bytes; no test feeds >= 2^53 chunks (8 EiB)
@@ -93,7 +91,7 @@ src/lib.rs	delete ! in prefetch_update_kernels	2	same code: every test binary ha
 src/lib.rs	delete match arm Mode::Plain in Mode<'_>::key	1	equivalent: without the arm, Mode::Plain takes the general arm, which writes the same IV and flags into the room; the arm saves the copy
 src/lib.rs	replace % with + in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace % with / in prefetch_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/lib.rs	replace && with || in compress_chunks_parallel	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/lib.rs	replace && with || in compress_chunks_parallel	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace && with || in hash_serial_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace && with || in prefetch_kernels	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace && with || in prefetch_update_kernels	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -135,7 +133,6 @@ src/lib.rs	replace | with ^ in Hash::from_hex::hex_val	2	equivalent: a character
 src/lib.rs	replace | with ^ in OutputReader::fill	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in compress_parents_parallel	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/lib.rs	replace || with && in compress_chunks_parallel	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	delete match arm 2 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
 src/many.rs	delete match arm 3 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
 src/many.rs	delete match arm 4 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64

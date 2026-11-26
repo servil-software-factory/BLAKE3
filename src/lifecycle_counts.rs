@@ -62,9 +62,9 @@ fn update_each_aligned_16k_turns_cut_exact_rows() {
     let triple = [count(Counted::Row), count(Counted::Flat), count(Counted::HeldPass)];
     assert_eq!(count(Counted::Staged), 0, "aligned whole 16 KiB turn must not copy into stage");
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     let on_sme2 = matches!(Platform::detect(), Platform::SME2);
-    #[cfg(not(blake3_sme2))]
+    #[cfg(not(target_arch = "aarch64"))]
     let on_sme2 = false;
     let rows_here = (4..=crate::hasher::ROW).contains(&Platform::detect().simd_degree());
 
@@ -107,7 +107,7 @@ fn update_each_aligned_16k_turns_cut_exact_rows() {
 }
 
 /// Arithmetic work bounds for streaming `Hasher::update`:
-/// - On x86-64 (`blake3_sse41_ffi`), an initial <= 64 byte update takes
+/// - On x86-64 (`target_arch = "x86_64"`), an initial <= 64 byte update takes
 ///   `PaddedFirstBlock` once; on Arm it takes a single ordinary `Staged` copy.
 /// - After an initial 16 KiB group, feeding `3 * 16 KiB + 100 B` cuts exact
 ///   subtrees (2 rows on x86-64/NEON, or 1 flat walk for the 32 KiB subtree on
@@ -116,21 +116,21 @@ fn update_each_aligned_16k_turns_cut_exact_rows() {
 #[test]
 fn streaming_hasher_work_counts_match_arithmetic() {
     crate::initialize();
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     let on_sme2 = matches!(Platform::detect(), Platform::SME2);
-    #[cfg(not(blake3_sme2))]
+    #[cfg(not(target_arch = "aarch64"))]
     let on_sme2 = false;
 
     // 1. Short <= 64 byte first update.
     clear_counts();
     let mut small = Hasher::new(Mode::Plain, None);
     small.update(&[0x42u8; 37]);
-    #[cfg(blake3_sse41_ffi)]
+    #[cfg(target_arch = "x86_64")]
     {
         assert_eq!(count(Counted::PaddedFirstBlock), 1);
         assert_eq!(count(Counted::Staged), 0);
     }
-    #[cfg(not(blake3_sse41_ffi))]
+    #[cfg(not(target_arch = "x86_64"))]
     {
         assert_eq!(count(Counted::PaddedFirstBlock), 0);
         assert_eq!(count(Counted::Staged), 1);

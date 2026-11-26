@@ -594,28 +594,14 @@ const CORES_ASKED: u16 = 1 << 9;
 #[cold]
 #[inline(never)]
 fn ask_cores() -> bool {
-    let apple = read_apple_cores();
+    let apple = midr_implementer() == Some(0x61);
     crate::platform::DETECTED.fetch_or(CORES_ASKED | if apple { APPLE_CORES } else { 0 }, core::sync::atomic::Ordering::Relaxed);
     apple
 }
 
-/// [`apple_cores`], read from the system: asked once and kept beside the
-/// platform (on Linux the read is a trap the kernel emulates).
-#[cfg(not(target_vendor = "apple"))]
-fn read_apple_cores() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        midr_implementer() == Some(0x61)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
-
 /// The implementer byte of MIDR_EL1 (0x61 Apple, 0x41 Arm, 0xc0 Ampere),
-/// where the kernel lets a program read the register.
-#[cfg(all(not(target_vendor = "apple"), target_os = "linux"))]
+/// where the Linux kernel lets a program read the register.
+#[cfg(target_os = "linux")]
 fn midr_implementer() -> Option<u8> {
     use core::ffi::c_ulong;
     #[cfg_attr(all(target_env = "musl", target_feature = "crt-static"), link(name = "c", kind = "static", modifiers = "-bundle"))]
@@ -634,7 +620,7 @@ fn midr_implementer() -> Option<u8> {
         let midr: u64;
         // Sound: with HWCAP_CPUID the kernel answers this read at EL0.
         unsafe { core::arch::asm!("mrs {}, midr_el1", out(reg) midr, options(nomem, nostack, preserves_flags)) };
-        Some((midr >> 24) as u8)
+        Some(u8::try_from((midr >> 24) & 0xff).expect("masked to 8 bits"))
     }
 }
 
@@ -1242,11 +1228,11 @@ mod test {
         let apple = implementers.iter().all(|i| i.eq_ignore_ascii_case("0x61"));
         if has("cpuid") {
             assert_eq!(midr_implementer().map(|byte| std::format!("{byte:#04x}")), Some(implementers[0].to_ascii_lowercase()), "the register's byte");
-            assert_eq!(read_apple_cores(), apple, "implementers {implementers:?}");
+            assert_eq!(midr_implementer() == Some(0x61), apple, "implementers {implementers:?}");
             assert_eq!(apple_cores(), apple, "the answer, asked");
             assert_eq!(apple_cores(), apple, "the answer kept");
         } else {
-            assert_eq!((midr_implementer(), read_apple_cores(), apple_cores()), (None, false, false), "no register to read: not Apple's");
+            assert_eq!((midr_implementer(), apple_cores()), (None, false), "no register to read: not Apple's");
         }
         assert_eq!(sha3_detected(), has("sha3"));
         let want: &Family = if !has("sha3") {

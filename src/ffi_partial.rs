@@ -133,11 +133,7 @@ fn hash_chunks_with_partial<const W: usize>(
 /// earlier by `pair::takes`.
 #[inline]
 pub(crate) fn spare_lane(platform: Platform, whole: usize, partial: usize) -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    let wide = crate::platform::wide_avx512();
-    #[cfg(not(target_os = "linux"))]
-    let wide = false;
-    spare_lane_for(platform, wide, whole, partial)
+    spare_lane_for(platform, crate::platform::wide_avx512(), whole, partial)
 }
 
 #[inline]
@@ -302,18 +298,14 @@ pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 3] {
 pub(crate) fn lane_widths(platform: crate::platform::Platform) -> &'static [usize] {
     match platform {
         crate::platform::Platform::SSE41 => &[4],
-        #[cfg(blake3_avx2_ffi)]
         crate::platform::Platform::AVX2 => &[4, 8],
-        #[cfg(blake3_avx512_ffi)]
         crate::platform::Platform::AVX512 => {
-            if cfg!(target_os = "linux") && crate::platform::wide_avx512() {
+            if crate::platform::wide_avx512() {
                 &[4, 8, 16, 32]
             } else {
                 &[4, 8, 16]
             }
         }
-        #[allow(unreachable_patterns)]
-        _ => &[],
     }
 }
 
@@ -367,7 +359,7 @@ fn hash_many_rounded_slow<const N: usize>(
     flags_end: u8,
     out: &mut [u8],
 ) {
-    let widest = lane_widths(platform).last().copied().unwrap_or(usize::MAX);
+    let widest = *lane_widths(platform).last().expect("every x86-64 platform has non-empty lane widths");
     let mut inputs = inputs;
     let mut out = out;
     let mut counter = counter;
@@ -431,15 +423,13 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
     const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
     let platform = crate::platform::Platform::detect();
     let block_lanes = crate::pair::takes_platform(platform);
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
     let output_width = crate::ffi_output::lanes(platform);
-    #[cfg(all(test, blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(test)]
     let mut counted_output_turn = false;
     for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
         let mut full_chunks = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut short_plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut short_plain_max_len = 0usize;
-        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
         let mut output_slots = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
         for (k, &i) in w_chunk.iter().enumerate() {
@@ -456,7 +446,6 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                     continue;
                 }
             }
-            #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
             if output_width != 0 && crate::ffi_output::input(&hashers[i]).is_some() {
                 output_slots.push(k);
                 continue;
@@ -508,7 +497,6 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                 o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
             }
         }
-        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
         {
             let done = if output_slots.len() >= 4 {
                 #[cfg(test)]

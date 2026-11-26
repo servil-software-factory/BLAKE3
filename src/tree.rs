@@ -163,7 +163,7 @@ impl Kernels for PlatformKernels<'_> {
         // Whole subtrees of 256 KiB to 1 MiB (> DEGREE chunks) on SME2:
         // the flat walk keeps DEGREE chaining values (see
         // sme2::compress_subtree_flat).
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if matches!(self.platform, Platform::SME2) && crate::sme2::flat_subtree_takes(input.len()) {
             // Sound: startup verified FEAT_SME2 (assembly checks SVL at entry and falls back to NEON if != 512 bits),
             // and `out` holds `simd_degree()` values (`sme2::DEGREE`).
@@ -177,7 +177,7 @@ impl Kernels for PlatformKernels<'_> {
     fn children(&self, input: &[u8], ahead: usize, counter: u64) -> Option<[Cv; 2]> {
         // Whole subtrees of 32 KiB to 1 MiB on SME2: the flat walk down to
         // the two children, SME2 alone (see sme2::compress_subtree_flat_to_parent).
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if matches!(self.platform, Platform::SME2) && crate::sme2::flat_takes(input.len()) {
             // Sound: startup verified FEAT_SME2; SME2 assembly checks the calling thread's SVL at entry and falls back to NEON if != 512 bits.
             let block = unsafe { crate::sme2::compress_subtree_flat_to_parent(input, ahead, self.key, counter, self.flags) };
@@ -189,7 +189,7 @@ impl Kernels for PlatformKernels<'_> {
     #[inline(always)]
     fn chunk_root(&self, input: &[u8]) -> Cv {
         // The scalar kernel, on every AArch64 core (crate::hash_one_chunk_root).
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         return crate::hash_one_chunk_root(input, self.key, self.flags).0;
         // One kernel call that keeps off the stack (src/ffi_chunk_root.rs):
         // a caller's just-written message has none of our loads to hold back.
@@ -345,9 +345,9 @@ mod test {
             assert_eq!(k.subtree(&input[..chunks * CHUNK_LEN], 0, 0, &mut out[..k.degree()]), None, "{chunks} chunks");
         }
         let got = k.subtree(&input, 0, 0, &mut out[..k.degree()]);
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         let expect_some = matches!(platform, Platform::SME2);
-        #[cfg(not(blake3_sme2))]
+        #[cfg(not(target_arch = "aarch64"))]
         let expect_some = false;
         if expect_some {
             let n = got.expect("256-chunk subtree must use SME2 flat shortcut");
