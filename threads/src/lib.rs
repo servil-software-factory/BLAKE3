@@ -287,17 +287,8 @@ mod park_sync {
     pub use std::thread;
 }
 mod waker_sync {
-    pub use core::cell::UnsafeCell;
-    pub use std::sync::atomic::{AtomicUsize, Ordering, fence};
-    #[inline(always)]
-    pub fn spin() {
-        core::hint::spin_loop();
-    }
-    #[inline(always)]
-    pub unsafe fn with_mut<T, R>(cell: &UnsafeCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        // Sound: caller's safety contract guarantees exclusive access to `cell`.
-        f(unsafe { &mut *cell.get() })
-    }
+    pub use std::sync::Mutex;
+    pub use std::sync::atomic::{AtomicBool, Ordering, fence};
 }
 /// The primitives src/pipeline.rs runs on: the standard library's here,
 /// and Shuttle's in tests/shuttle_pipeline.rs, which compiles that file

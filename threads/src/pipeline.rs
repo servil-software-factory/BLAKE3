@@ -65,78 +65,44 @@ const KIND_MULTI: u64 = 2;
 /// instead of `Shared::tree` without a worker-visible per-slot mode table.
 const MULTI_CUSTOM_BIT: u32 = 1u32 << 31;
 
-/// Fixed-capacity FIFO ring buffer over pre-allocated `Box<[MaybeUninit<X>]>`;
+/// Fixed-capacity FIFO ring buffer over pre-allocated `VecDeque<X>`;
 /// never reallocates after construction.
 struct Ring<X> {
-    buf: Box<[MaybeUninit<X>]>,
-    head: usize,
-    len: usize,
+    inner: std::collections::VecDeque<X>,
+    cap: usize,
 }
 
 impl<X> Ring<X> {
     fn new(cap: usize) -> Self {
-        Ring { buf: (0..cap).map(|_| MaybeUninit::uninit()).collect(), head: 0, len: 0 }
+        Ring { inner: std::collections::VecDeque::with_capacity(cap), cap }
     }
 
     #[inline(always)]
     fn len(&self) -> usize {
-        self.len
+        self.inner.len()
     }
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.len == 0
+        self.inner.is_empty()
     }
 
     #[inline(always)]
     fn front(&self) -> Option<&X> {
-        // Sound: the `len` items from `head` on are written (push_back) and
-        // not yet read out.
-        if self.len == 0 { None } else { Some(unsafe { self.buf[self.head].assume_init_ref() }) }
+        self.inner.front()
     }
 
     #[inline(always)]
     fn push_back(&mut self, item: X) {
-        let cap = self.buf.len();
-        // In every build: one item more than the ring holds would be
-        // written over the oldest, a queued message or event lost in
-        // silence. Each ring's users keep within it (a slot, a piece or a
-        // room is in one ring once), and this holds them to that.
-        assert!(self.len < cap, "Ring capacity exceeded");
-        let idx = (self.head + self.len) % cap;
-        self.buf[idx].write(item);
-        self.len += 1;
+        // In every build: hold callers to the pre-allocated capacity so the
+        // queue never reallocates on the hot path or drops work silently.
+        assert!(self.inner.len() < self.cap, "Ring capacity exceeded");
+        self.inner.push_back(item);
     }
 
     #[inline(always)]
     fn pop_front(&mut self) -> Option<X> {
-        if self.len == 0 {
-            return None;
-        }
-        // Sound: as `front`; the item is read out once, since `head` moves
-        // past it.
-        let item = unsafe { self.buf[self.head].assume_init_read() };
-        self.head = (self.head + 1) % self.buf.len();
-        self.len -= 1;
-        Some(item)
-    }
-}
-
-impl<X> Drop for Ring<X> {
-    fn drop(&mut self) {
-        // Recursive drop guard ensures remaining initialized elements still
-        // drop if dropping an earlier element unwinds.
-        struct Rest<'a, X>(&'a mut Ring<X>);
-        impl<X> Drop for Rest<'_, X> {
-            fn drop(&mut self) {
-                while let Some(item) = self.0.pop_front() {
-                    let _rest = Rest(&mut *self.0);
-                    drop(item);
-                    core::mem::forget(_rest);
-                }
-            }
-        }
-        let _ = Rest(self);
+        self.inner.pop_front()
     }
 }
 
@@ -306,28 +272,29 @@ struct Rooms {
     /// `backing`, kept as a raw pointer so callers and workers alias disjoint
     /// sub-slices without violating `Box`'s uniqueness.
     buf: *mut u8,
-    /// Original `Box<[u8]>` backing allocation (`count * ROOM_LEN + 64` bytes
-    /// when `count > 0`, empty when `count == 0`), reconstructed via
-    /// `Box::from_raw` in `Drop`. Keeping 1-byte element alignment lets
-    /// `vec![0u8; size]` route through `alloc_zeroed` (`calloc` / OS lazy
-    /// demand-zero pages on standard allocators).
-    backing: *mut [u8],
+    /// Original `Box<[MaybeUninit<u8>]>` backing allocation (`count * ROOM_LEN + 64`
+    /// bytes when `count > 0`, empty when `count == 0`), reconstructed via
+    /// `Box::from_raw` in `Drop`. Keeping it uninitialized at allocation avoids
+    /// O(`rooms`) upfront zeroing on recycled heap pages (#563); each room is
+    /// zeroed lazily on its first checkout in `Pipeline::pop_cached_room`.
+    backing: *mut [MaybeUninit<u8>],
     count: usize,
     refs: Box<[AtomicUsize]>,
 }
 
-// Sound: `backing` owns the boxed `[u8]` buffer (with `buf` pointing to the
-// 64-byte-aligned `count * ROOM_LEN` slice inside it) until `Rooms::drop` runs
-// (after `PipeStorage`'s final holder drops and every worker task has
-// published completion); what may touch which bytes is governed by `refs`.
+// Sound: `backing` owns the boxed `[MaybeUninit<u8>]` buffer (with `buf`
+// pointing to the 64-byte-aligned `count * ROOM_LEN` slice inside it) until
+// `Rooms::drop` runs (after `PipeStorage`'s final holder drops and every
+// worker task has published completion); what may touch which bytes is
+// governed by `refs`.
 unsafe impl Send for Rooms {}
 unsafe impl Sync for Rooms {}
 
 impl Drop for Rooms {
     fn drop(&mut self) {
-        // Sound: `backing` came from `Box::into_raw` of a boxed `[u8]`, and
-        // `Rooms::drop` runs only once `PipeStorage` has zero live holders and
-        // zero in-flight worker tasks.
+        // Sound: `backing` came from `Box::into_raw` of a boxed
+        // `[MaybeUninit<u8>]`, and `Rooms::drop` runs only once `PipeStorage`
+        // has zero live holders and zero in-flight worker tasks.
         unsafe { drop(Box::from_raw(self.backing)) };
     }
 }
@@ -335,7 +302,7 @@ impl Drop for Rooms {
 impl Rooms {
     fn new(count: usize) -> Self {
         let size = if count == 0 { 0 } else { count.checked_mul(ROOM_LEN).and_then(|n| n.checked_add(64)).expect("rooms byte size fits usize") };
-        let backing = Box::into_raw(vec![0u8; size].into_boxed_slice());
+        let backing = Box::into_raw(Box::<[u8]>::new_uninit_slice(size));
         let raw = backing.cast::<u8>();
         // Sound: when `count == 0`, `align_offset(64)` is unused (no room
         // exists); when `count > 0`, `size == count * ROOM_LEN + 64` and
@@ -1089,17 +1056,16 @@ process_static! {
 /// # Memory
 ///
 /// A Pipeline allocates its per-pipeline storage (`Rooms` — 64 KiB each,
-/// using a 1-byte-aligned zeroed byte buffer whose layout allows OS lazy
-/// demand-zero paging under standard allocators such as `System`/`calloc`,
-/// though custom allocators that eagerly zero on allocation will fault
-/// those pages — plus its groups, piece nodes, slots, and completion
-/// buffers) at construction and frees all of it back to the allocator once
-/// the Pipeline and any surviving [`Room`]s have dropped. Completed
-/// [`Lent`] guards do not pin per-pipeline storage. Because freeing
-/// per-pipeline storage on drop makes repeated create/drop of equal limits
-/// slower than reusing one Pipeline, keep a Pipeline alive across requests
-/// (as `# Giving up a message` recommends) rather than creating and
-/// dropping one per short message.
+/// allocated uninitialized and zeroed lazily one Room at a time on its first
+/// checkout so unused Rooms pay no upfront `memset` even on recycled heap
+/// pages — plus its groups, piece nodes, slots, and completion buffers) at
+/// construction and frees all of it back to the allocator once the Pipeline
+/// and any surviving [`Room`]s have dropped. Completed [`Lent`] guards do not
+/// pin per-pipeline storage. Because freeing per-pipeline storage on drop
+/// makes repeated create/drop of equal limits slower than reusing one
+/// Pipeline, keep a Pipeline alive across requests (as `# Giving up a
+/// message` recommends) rather than creating and dropping one per short
+/// message.
 ///
 /// Only the worker-facing action ring, waker slot, and monotonic
 /// completion lines (`PipeSlot`) are retained for reuse by later Pipelines:
@@ -1230,6 +1196,10 @@ pub struct Pipeline<T, B = (), P = Batch<'static>> {
     /// FIFO ring of free rooms, refilled by a circular cursor scan over `rooms.refs`.
     local_free_rooms: Ring<u32>,
     room_cursor: usize,
+    /// Prefix of Room indices (`0..zeroed_rooms`) already zero-initialized on
+    /// first checkout; initial `local_free_rooms` hands out `0..limits.rooms`
+    /// in order before `try_take_room` can refill it (#563).
+    zeroed_rooms: u32,
     /// FIFO ring of free `PieceNode`s.
     free_pieces: Ring<u32>,
     /// Active slots with `room_streams[s].head_piece != NONE` (at most `m.min(p_cap)`),
@@ -1524,7 +1494,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         // Each limit alone first: their sum, next, could wrap round to a
         // small one (`rooms: usize::MAX` passed the check below so).
         assert!(m < 1 << 29 && limits.rooms < 1 << 29, "Pipeline Limits beyond what an action can name");
-        let p_cap = limits.rooms + m + 1;
+        let p_cap = if limits.rooms == 0 { 0 } else { limits.rooms + m + 1 };
         let g_cap = m.clamp(4, 256);
         let actions_cap = m * MAX_SLOT_PIECES + p_cap + g_cap;
         // An action names a slot, a piece or a group in 29 bits (pack_arg).
@@ -1599,6 +1569,7 @@ impl<T, B, P> Pipeline<T, B, P> {
             events,
             local_free_rooms,
             room_cursor: 0,
+            zeroed_rooms: 0,
             free_pieces,
             piece_slots,
             group_cursor: 0,
@@ -1717,6 +1688,14 @@ impl<T, B, P> Pipeline<T, B, P> {
     fn pop_cached_room(&mut self) -> Option<Room> {
         let idx = self.local_free_rooms.pop_front()?;
         self.room_cursor = (idx as usize + 1) % self.limits.rooms;
+        if idx >= self.zeroed_rooms {
+            assert_eq!(idx, self.zeroed_rooms, "initial room checkout must advance zeroed_rooms monotonically");
+            // Sound: `idx < limits.rooms`, room `idx` is uniquely owned here
+            // and has not been handed out or aliased yet; zeroing initializes
+            // all `ROOM_LEN` bytes before any `&[u8]` / `&mut [u8]` is formed.
+            unsafe { self.storage().rooms.room_ptr(idx as usize).write_bytes(0, ROOM_LEN) };
+            self.zeroed_rooms = idx + 1;
+        }
         self.storage().rooms.init_taken(idx);
         Some(self.make_room(idx))
     }
@@ -4709,7 +4688,7 @@ mod test {
 
         let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
         let p_small = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-        assert_eq!(p_small.free_pieces.buf.len(), 1 + 2 + 1);
+        assert_eq!(p_small.free_pieces.cap, 1 + 2 + 1);
         assert_eq!(p_small.group_count, 4);
         assert_eq!(slot_tier(1024), 0);
         assert_eq!(slot_tier(2048), 1);
@@ -4724,6 +4703,8 @@ mod test {
         // tiers (2,048 and 16,384): distinguishes `min` from `max`/first-fit
         // and proves fallback picks the smallest larger free tier.
         let p_mid = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 16, rooms: 0 });
+        assert_eq!(p_mid.free_pieces.cap, 0, "roomless Pipeline allocates zero PieceNodes");
+        assert!(p_mid.storage().pieces.is_empty(), "roomless PipeStorage has zero PieceNodes");
         assert_eq!(p_mid.storage().slot.get().source.actions_len(), 2048);
         let slot_mid = p_mid.storage().slot.get() as *const PipeSlot as usize;
         let p_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 200, rooms: 1 });
@@ -6133,5 +6114,47 @@ mod test {
             p2.abort(pad);
         }
         p2.abort(pad6);
+    }
+
+    #[test]
+    fn rooms_are_zeroed_lazily_on_first_checkout_even_after_dirty_reuse() {
+        crate::initialize_multithreaded(None);
+        // Dirty every byte of a 4-room Pipeline and drop it so the allocator
+        // can hand the same heap pages to the next Pipeline (#563).
+        {
+            let mut dirty = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 4 });
+            assert_eq!(dirty.zeroed_rooms, 0, "Rooms::new must not eagerly mark rooms zeroed");
+            let mut held = Vec::with_capacity(4);
+            for i in 0..4u32 {
+                let mut r = block_on(dirty.room());
+                assert_eq!(dirty.zeroed_rooms, i + 1, "zeroed_rooms advances one room at a time");
+                r.bytes_mut().fill(0xA5);
+                held.push(r);
+            }
+            drop(held);
+        }
+        // Fresh Pipeline with identical limits: first checkout of each room
+        // must see all-zero bytes (zeroing only the rooms actually checked out),
+        // while subsequent reuse of a room skips re-zeroing.
+        let mut fresh = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 4 });
+        assert_eq!(fresh.zeroed_rooms, 0);
+        let mut r0 = block_on(fresh.room());
+        assert_eq!(fresh.zeroed_rooms, 1, "checking out room 0 leaves rooms 1..4 unzeroed");
+        assert!(r0.bytes_mut().iter().all(|&b| b == 0), "first checkout of room 0 must be zeroed even after dirty heap reuse");
+        r0.bytes_mut().fill(0x5A);
+        let r1 = block_on(fresh.room());
+        assert_eq!(fresh.zeroed_rooms, 2);
+        let mut r1 = r1;
+        assert!(r1.bytes_mut().iter().all(|&b| b == 0), "first checkout of room 1 must be zeroed");
+        drop((r0, r1));
+        let r2 = block_on(fresh.room());
+        let r3 = block_on(fresh.room());
+        assert_eq!(fresh.zeroed_rooms, 4);
+        drop((r2, r3));
+        // Now all 4 rooms have been checked out once; reusing room 0 again
+        // keeps zeroed_rooms at 4 without re-zeroing.
+        let r0_again = block_on(fresh.room());
+        assert_eq!(fresh.zeroed_rooms, 4);
+        drop(r0_again);
     }
 }

@@ -1,31 +1,12 @@
-//! Shuttle model check of `src/waker.rs` (`WakerSlot`): causal race-freedom
-//! on `UnsafeCell<Option<Waker>>` and lost-wake freedom under concurrent
-//! finishers and re-registrations.
+//! Shuttle model check of `src/waker.rs` (`WakerSlot`): lost-wake freedom
+//! under concurrent finishers and re-registrations.
 //!
 //!     RUSTFLAGS="--cfg shuttle" cargo test --release --test shuttle_waker
 #![cfg(shuttle)]
 
 mod waker_sync {
-    pub use shuttle::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
-    pub struct UnsafeCell<T> {
-        busy: AtomicBool,
-        inner: core::cell::UnsafeCell<T>,
-    }
-    impl<T> UnsafeCell<T> {
-        pub fn new(v: T) -> Self {
-            Self { busy: AtomicBool::new(false), inner: core::cell::UnsafeCell::new(v) }
-        }
-    }
-    pub fn spin() {
-        shuttle::thread::yield_now();
-    }
-    pub unsafe fn with_mut<T, R>(cell: &UnsafeCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        assert!(!cell.busy.swap(true, Ordering::SeqCst), "concurrent mutable access to WakerSlot::waker");
-        shuttle::thread::yield_now();
-        let out = f(unsafe { &mut *cell.inner.get() });
-        assert!(cell.busy.swap(false, Ordering::SeqCst));
-        out
-    }
+    pub use shuttle::sync::Mutex;
+    pub use shuttle::sync::atomic::{AtomicBool, Ordering, fence};
 }
 
 #[path = "../src/waker.rs"]

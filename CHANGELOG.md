@@ -35,15 +35,12 @@ figure names its machine.
 - **Slower (short-lived equal-limits `Pipeline` churn):** freeing
   per-pipeline storage on drop means creating and dropping a fresh
   `Pipeline` per short message with identical `Limits` now allocates and
-  frees `PipeStorage` each time instead of reusing a cached arena. On
-  Ryzen 7 9700X (`x86-9700x`, `Limits { messages: 4, rooms: 8 }`, 64 B
-  room hash, 1 thread): creating and dropping a `Pipeline` per message
-  takes `2,205–2,256 ns` vs `295–304 ns` previously (~7.4×), whereas
-  reusing one `Pipeline` across requests stays unchanged at `165 ns` vs
-  `164–167 ns` (and steady-state `bench-hashes --cells all` shows no
-  regression on Ryzen 7 9700X or Apple M6). Keep a `Pipeline` alive
-  across requests rather than creating and dropping one per short
-  message.
+  frees `PipeStorage` each time instead of reusing a cached arena (each
+  64 KiB `Room` is allocated uninitialized and zeroed lazily on first
+  checkout, `#563`, so unused `Room`s pay no upfront `memset`). Keep a
+  `Pipeline` alive across requests rather than creating and dropping one
+  per short message (reusing one `Pipeline` across requests stays level
+  on Ryzen 7 9700X and Apple M6).
 
 # blake3-servil 0.11.0+2c43b150bd18c89b6c08a133446c51a3fe6981bc, against blake3-servil 0.10.0
 
