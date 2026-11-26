@@ -24,7 +24,6 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 
 /// Ceiling for reading a small-hinted file into a single contiguous `Vec<u8>`.
@@ -32,7 +31,6 @@ use std::os::fd::{AsRawFd, RawFd};
 pub(crate) const SMALL_MEM_CAP: usize = 4 << 20;
 
 /// Device and inode pair identifying an open Unix file description's target.
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StreamId {
     pub(crate) dev: u64,
@@ -40,7 +38,6 @@ pub(crate) struct StreamId {
 }
 
 /// File semantics relevant to descriptor aliasing and offset ownership.
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileKind {
     /// Regular file (`S_IFREG`).
@@ -56,7 +53,6 @@ pub(crate) enum FileKind {
 
 /// Metadata queried directly from an open file descriptor via `fstat` (needs
 /// no spare file descriptor).
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FdMeta {
     pub(crate) id: StreamId,
@@ -65,7 +61,6 @@ pub(crate) struct FdMeta {
     pub(crate) len: u64,
 }
 
-#[cfg(unix)]
 impl FdMeta {
     #[inline]
     pub(crate) fn is_file(self) -> bool {
@@ -82,7 +77,6 @@ fn is_ptmx_rdev(rdev: u64) -> bool {
 
 /// Whether `fd` is a non-cloning terminal whose pathname reopens the same
 /// stream (excludes cloning PTY masters such as `/dev/ptmx` / `posix_openpt`).
-#[cfg(unix)]
 fn is_reopenable_tty_fd(fd: RawFd, rdev: libc::dev_t) -> bool {
     // Sound: `isatty` queries an open fd without touching memory.
     if unsafe { libc::isatty(fd) } != 1 {
@@ -104,7 +98,6 @@ fn is_reopenable_tty_fd(fd: RawFd, rdev: libc::dev_t) -> bool {
 /// Refuse record-oriented sockets (non-`SOCK_STREAM` sockets such as
 /// `SOCK_SEQPACKET` / `SOCK_DGRAM`) whose short reads silently discard record
 /// tails instead of behaving like byte streams (#515).
-#[cfg(unix)]
 pub(crate) fn ensure_byte_stream_fd(fd: RawFd, mode_type: libc::mode_t) -> crate::err::Result<()> {
     if mode_type == libc::S_IFSOCK {
         let mut sock_type: libc::c_int = 0;
@@ -143,7 +136,6 @@ pub(crate) fn read_stream_to_end(reader: &mut impl Read, out: &mut Vec<u8>) -> i
 
 /// Query `(dev, ino, kind, len)` directly on `fd` using `fstat`, without
 /// duplicating the descriptor.
-#[cfg(unix)]
 pub(crate) fn fstat_fd(fd: RawFd) -> io::Result<FdMeta> {
     let mut st = core::mem::MaybeUninit::<libc::stat>::zeroed();
     // Sound: `st` is valid writable storage for `libc::stat`.
@@ -167,9 +159,7 @@ pub(crate) fn fstat_fd(fd: RawFd) -> io::Result<FdMeta> {
 /// operands and checkfile entries identically without repeated `getcwd` calls.
 #[derive(Clone, Debug)]
 pub(crate) struct StdinContext {
-    #[cfg(unix)]
     pub(crate) stdin: Option<FdMeta>,
-    #[cfg(unix)]
     cwd: Option<PathBuf>,
 }
 
@@ -182,7 +172,6 @@ pub(crate) enum InputRole {
     /// OS `stat` confirms it names the same consumable stdin stream (pipe,
     /// FIFO, Unix socket, or terminal). Must read from fd 0 directly rather
     /// than reopening the pathname.
-    #[cfg(unix)]
     StdinStreamAlias,
     /// macOS `/dev/stdin` or `/dev/fd/<N>` (for any descriptor `N`) when OS
     /// lookup confirms the path resolves to Darwin's `fd(4)` entry for a
@@ -197,20 +186,12 @@ pub(crate) enum InputRole {
 
 impl StdinContext {
     pub(crate) fn current() -> Self {
-        #[cfg(unix)]
-        {
-            let stdin = fstat_fd(0).ok();
-            let cwd = std::env::current_dir().ok();
-            Self { stdin, cwd }
-        }
-        #[cfg(not(unix))]
-        {
-            Self {}
-        }
+        let stdin = fstat_fd(0).ok();
+        let cwd = std::env::current_dir().ok();
+        Self { stdin, cwd }
     }
 
     /// The `(dev, ino)` of stdin if and only if stdin is a consumable stream.
-    #[cfg(unix)]
     pub(crate) fn stdin_stream_id(&self) -> Option<StreamId> {
         self.stdin.filter(|m| m.kind == FileKind::Stream).map(|m| m.id)
     }
@@ -221,7 +202,6 @@ impl StdinContext {
     /// symlinks to `/proc/self/fd`). Ordinary paths with a local directory
     /// named `dev` or `proc` (e.g. `dev/../fifo` under `/tmp/work`) are never
     /// nominated. This ONLY filters which operands get an OS `stat` check.
-    #[cfg(unix)]
     fn might_be_dev_or_proc(&self, path: &Path) -> bool {
         let mut cur = if path.is_absolute() {
             PathBuf::from("/")
@@ -262,7 +242,6 @@ impl StdinContext {
         if crate::is_stdin(path) {
             return InputRole::StdinDash;
         }
-        #[cfg(unix)]
         if self.might_be_dev_or_proc(path) {
             if let Some(stdin) = self.stdin
                 && stdin.kind == FileKind::Stream
@@ -277,29 +256,6 @@ impl StdinContext {
         }
         InputRole::Path
     }
-}
-
-/// Lexically normalize `path` against `cwd` without touching the filesystem.
-#[cfg(all(test, unix))]
-pub(crate) fn normalize_lexical(path: &Path, cwd: Option<&Path>) -> Option<PathBuf> {
-    let mut out = if path.is_absolute() { PathBuf::new() } else { cwd?.to_path_buf() };
-    for comp in path.components() {
-        match comp {
-            Component::Prefix(_) => {}
-            Component::RootDir => {
-                out.clear();
-                out.push("/");
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if out.parent().is_some() {
-                    out.pop();
-                }
-            }
-            Component::Normal(part) => out.push(part),
-        }
-    }
-    Some(out)
 }
 
 /// Verify via OS resolution that `path` resolves to a Darwin `fd(4)` entry
@@ -356,7 +312,6 @@ fn is_verified_darwin_regular_dev_fd(path: &Path) -> bool {
 /// Whether `path` currently resolves via OS `stat` to the exact same `(dev, ino)`
 /// AND file type (`S_IFMT`) as `target` (preserving symlinks, `..`, and trailing
 /// directory requirements), excluding cloning PTY master devices.
-#[cfg(unix)]
 pub(crate) fn path_matches_fd_meta(path: &Path, target: FdMeta) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|meta| {
@@ -371,7 +326,6 @@ pub(crate) fn path_matches_fd_meta(path: &Path, target: FdMeta) -> bool {
 
 /// Whether `path` currently resolves via OS `stat` to a stream matching `stream`
 /// (excluding cloning PTY master devices).
-#[cfg(unix)]
 pub(crate) fn path_matches_stream(path: &Path, stream: StreamId) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).is_ok_and(|meta| {
@@ -390,7 +344,6 @@ pub(crate) fn path_matches_stream(path: &Path, stream: StreamId) -> bool {
 /// `stat(path)` first so rejecting the checkfile's own FIFO does not block
 /// waiting for another writer, then re-verifies `fstat(fd)` after open to
 /// close pathname-swap TOCTOU races.
-#[cfg(unix)]
 pub(crate) fn open_checked(path: &Path, forbidden: Option<StreamId>) -> crate::err::Result<(File, FdMeta)> {
     if let Some(forbid) = forbidden
         && path_matches_stream(path, forbid)
@@ -486,34 +439,9 @@ pub(crate) fn read_sequential_capped(file: &mut File, buf: &mut Vec<u8>, cap: us
             buf.reserve(grow);
         }
         let avail = (buf.capacity() - buf.len()).min(cap - buf.len());
-        #[cfg(unix)]
-        let rc = {
-            // Sound: `buf.spare_capacity_mut()[..avail]` is valid writable
-            // storage inside `buf`'s allocation; the kernel writes at most `avail` bytes.
-            unsafe { libc::read(file.as_raw_fd(), buf.as_mut_ptr().add(buf.len()).cast(), avail) }
-        };
-        #[cfg(not(unix))]
-        let rc = {
-            let old = buf.len();
-            buf.resize(old + avail, 0);
-            match file.read(&mut buf[old..]) {
-                Ok(n) => {
-                    buf.truncate(old + n);
-                    if n == 0 {
-                        return Ok(true);
-                    }
-                    continue;
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                    buf.truncate(old);
-                    continue;
-                }
-                Err(e) => {
-                    buf.truncate(old);
-                    return Err(e);
-                }
-            }
-        };
+        // Sound: `buf.spare_capacity_mut()[..avail]` is valid writable
+        // storage inside `buf`'s allocation; the kernel writes at most `avail` bytes.
+        let rc = unsafe { libc::read(file.as_raw_fd(), buf.as_mut_ptr().add(buf.len()).cast(), avail) };
         if rc == 0 {
             return Ok(true);
         }
@@ -573,13 +501,11 @@ pub(crate) fn pread_rest_capped(file: &mut File, buf: &mut Vec<u8>, cap: usize) 
 /// Unix `RawFd` using `pread`, never modifying the underlying open file
 /// description's cursor. Used both for streaming promotion after positional
 /// reads and for macOS `/dev/stdin` / `/dev/fd/0` on regular files.
-#[cfg(unix)]
 pub(crate) struct PreadReader {
     fd: RawFd,
     offset: u64,
 }
 
-#[cfg(unix)]
 impl PreadReader {
     pub(crate) fn new(fd: RawFd, offset: u64) -> Self {
         Self { fd, offset }
@@ -591,7 +517,6 @@ impl PreadReader {
     }
 }
 
-#[cfg(unix)]
 impl Read for PreadReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
@@ -626,7 +551,6 @@ pub(crate) fn pread_all_into(fd: RawFd, out: &mut Vec<u8>) -> io::Result<()> {
 /// Hash `prefix` followed by the remainder of `file` starting at `prefix.len()`
 /// via positioned `pread` (or sequentially if `sequential` is true), keeping
 /// memory bounded regardless of reported size.
-#[cfg(unix)]
 pub(crate) fn finish_hash_streaming_from_prefix(mode: blake3::Mode<'_>, prefix: &[u8], file: &mut File, sequential: bool) -> io::Result<HashRead> {
     let mut hasher = blake3::convenience::Hasher::new(mode, None);
     crate::update(&mut hasher, prefix);
@@ -645,23 +569,7 @@ mod test {
     use super::*;
 
     #[test]
-    fn normalize_lexical_resolves_relative_and_dotdot_dev_paths() {
-        #[cfg(unix)]
-        {
-            assert_eq!(normalize_lexical(Path::new("stdin"), Some(Path::new("/dev"))), Some(PathBuf::from("/dev/stdin")));
-            assert_eq!(normalize_lexical(Path::new("./stdin"), Some(Path::new("/dev"))), Some(PathBuf::from("/dev/stdin")));
-            assert_eq!(normalize_lexical(Path::new("0"), Some(Path::new("/dev/fd"))), Some(PathBuf::from("/dev/fd/0")));
-            assert_eq!(normalize_lexical(Path::new("dev/stdin"), Some(Path::new("/"))), Some(PathBuf::from("/dev/stdin")));
-            assert_eq!(normalize_lexical(Path::new("proc/self/fd/0"), Some(Path::new("/"))), Some(PathBuf::from("/proc/self/fd/0")));
-            assert_eq!(normalize_lexical(Path::new("../dev/stdin"), Some(Path::new("/tmp"))), Some(PathBuf::from("/dev/stdin")));
-            assert_eq!(normalize_lexical(Path::new("/tmp/../dev/./fd/0"), Some(Path::new("/"))), Some(PathBuf::from("/dev/fd/0")));
-            assert_eq!(normalize_lexical(Path::new("0"), Some(Path::new("/proc/self/fd"))), Some(PathBuf::from("/proc/self/fd/0")));
-        }
-    }
-
-    #[test]
     fn root_cwd_nominates_relative_dev_and_proc_candidates() {
-        #[cfg(unix)]
         {
             let ctx = StdinContext { stdin: None, cwd: Some(PathBuf::from("/")) };
             assert!(ctx.might_be_dev_or_proc(Path::new("dev/stdin")));

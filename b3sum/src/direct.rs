@@ -20,33 +20,25 @@ pub(crate) const PIECE: usize = 2 << 20;
 /// is read directly.
 pub(crate) const DIRECT_MIN: u64 = 2 * PIECE as u64;
 
-/// A buffer a direct read can fill: PIECE bytes, 4096-byte aligned.
-pub(crate) struct Piece(*mut u8);
+#[repr(align(4096))]
+struct AlignedPiece {
+    _bytes: [u8; PIECE],
+}
+const _: () = assert!(core::mem::size_of::<AlignedPiece>() == PIECE && core::mem::align_of::<AlignedPiece>() == 4096);
 
-// Sound: the buffer is the Piece's own.
-unsafe impl Send for Piece {}
+/// A buffer a direct read can fill: PIECE bytes, 4096-byte aligned.
+pub(crate) struct Piece(Box<core::mem::MaybeUninit<AlignedPiece>>);
 
 impl Piece {
-    const LAYOUT: std::alloc::Layout = match std::alloc::Layout::from_size_align(PIECE, 4096) {
-        Ok(layout) => layout,
-        Err(_) => panic!(),
-    };
     pub(crate) fn new() -> Piece {
-        // Sound: the layout's size is not zero. Not zeroed: zeroing would
-        // touch every page (512 page faults, 0.7 ms on a Ryzen 7700X), and
-        // only bytes that a read has filled are ever read.
-        let at = unsafe { std::alloc::alloc(Self::LAYOUT) };
-        if at.is_null() {
-            std::alloc::handle_alloc_error(Self::LAYOUT);
-        }
-        Piece(at)
+        // Not zeroed: zeroing would touch every page (512 page faults, 0.7 ms
+        // on a Ryzen 7700X), and only bytes that a read has filled are ever read.
+        Piece(Box::new_uninit())
     }
-}
 
-impl Drop for Piece {
-    fn drop(&mut self) {
-        // Sound: allocated in `new` with this layout.
-        unsafe { std::alloc::dealloc(self.0, Self::LAYOUT) }
+    #[inline]
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr().cast()
     }
 }
 
@@ -118,12 +110,12 @@ pub(crate) fn read<T: Send>(
             let want = PIECE.min(len - i * PIECE);
             // Sound: the buffer holds PIECE writable bytes. A piece
             // starts on a multiple of PIECE, so of the drive's blocks.
-            let got = unsafe { libc::pread(file.as_raw_fd(), buffer.0.cast(), PIECE, (i * PIECE) as libc::off_t) };
+            let got = unsafe { libc::pread(file.as_raw_fd(), buffer.as_mut_ptr().cast(), PIECE, (i * PIECE) as libc::off_t) };
             if got != want as isize {
                 return failed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             // Sound: `want` initialized bytes of the buffer.
-            each(i, unsafe { core::slice::from_raw_parts(buffer.0, want) }, outs);
+            each(i, unsafe { core::slice::from_raw_parts(buffer.as_mut_ptr(), want) }, outs);
         }
     };
     if threads == 1 {

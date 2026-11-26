@@ -73,6 +73,13 @@ impl Deref for Mmap {
     }
 }
 
+impl AsRef<[u8]> for Mmap {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
 impl Drop for Mmap {
     fn drop(&mut self) {
         if self.len > 0 {

@@ -76,21 +76,12 @@ fn parse_nonzero_usize(flag: &str, val: &OsStr) -> Result<std::num::NonZeroUsize
 }
 
 fn split_long_eq(arg: &OsStr) -> Option<(&str, OsString)> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::{OsStrExt, OsStringExt};
-        let bytes = arg.as_bytes();
-        let eq = bytes.iter().position(|&b| b == b'=')?;
-        let name = std::str::from_utf8(&bytes[..eq]).ok()?;
-        let val = OsString::from_vec(bytes[eq + 1..].to_vec());
-        Some((name, val))
-    }
-    #[cfg(not(unix))]
-    {
-        let s = arg.to_str()?;
-        let (name, val) = s.split_once('=')?;
-        Some((name, OsString::from(val)))
-    }
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let bytes = arg.as_bytes();
+    let eq = bytes.iter().position(|&b| b == b'=')?;
+    let name = std::str::from_utf8(&bytes[..eq]).ok()?;
+    let val = OsString::from_vec(bytes[eq + 1..].to_vec());
+    Some((name, val))
 }
 
 fn reject_duplicate(flag: &str, seen: bool) -> Result<(), String> {

@@ -5,7 +5,7 @@
 //! - **Warm runs**: starts up to 12 threads; small files (`<= 16 KiB`) read via
 //!   `preadv2(RWF_NOWAIT)` into a core-local `MaybeUninit<Block>` arena and hash
 //!   16-at-a-time via `blake3::throughput::hash_each`; warm files `>= 4 MiB`
-//!   loan `&map` zero-copy to `Pipeline::lent` across the worker pool.
+//!   hand owned `Mmap`s zero-copy to `Pipeline::owned` across the worker pool.
 //! - **Cold runs**: the first `RWF_NOWAIT` miss opens that worker's
 //!   single-issuer `Uring` (`COOP_TASKRUN | SINGLE_ISSUER | DEFER_TASKRUN`).
 //!   Files `< 4 MiB` go straight onto it (the kernel's `io_read` serves
@@ -22,7 +22,7 @@
 use crate::Args;
 use crate::file_end::{self, CacheRead, InputRole, SMALL_MEM_CAP, StdinContext, StreamId};
 use crate::uring::{IoUringCqe, Uring};
-use blake3::throughput::{Block, Event, Lent, Limits, Message, Pipeline, ROOM_LEN, Room, block_on};
+use blake3::throughput::{Block, Event, Limits, Message, Pipeline, ROOM_LEN, Room, block_on};
 use core::cell::Cell;
 use core::future::Future;
 use core::mem::MaybeUninit;
@@ -603,23 +603,20 @@ fn finish_sync_hash(mode: blake3::Mode<'_>, file: &mut File, buf: &mut Vec<u8>) 
 }
 
 struct WarmLargePipe {
-    pipe: Pipeline<usize, ()>,
-    maps: Vec<(usize, Lent<'static>, crate::mmap::Mmap)>,
+    pipe: Pipeline<usize, crate::mmap::Mmap>,
     in_flight: usize,
 }
 
 impl WarmLargePipe {
     fn new(mode: blake3::Mode<'static>) -> Self {
-        Self { pipe: Pipeline::new(mode, Limits { messages: 16, rooms: 0 }), maps: Vec::with_capacity(16), in_flight: 0 }
+        Self { pipe: Pipeline::with_owners(mode, Limits { messages: 16, rooms: 0 }), in_flight: 0 }
     }
 
     fn drain(&mut self, sink: &mut Sink<'_>) {
         while let Some(ev) = self.pipe.next_event() {
             self.in_flight -= 1;
-            if let Event::Hashed { tag: idx, hash, .. } = ev {
-                if let Some(pos) = self.maps.iter().position(|x| x.0 == idx) {
-                    let (_, guard, map) = self.maps.swap_remove(pos);
-                    drop(guard);
+            if let Event::Hashed { tag: idx, hash, owner } = ev {
+                if let Some(map) = owner {
                     crate::hold(map);
                 }
                 sink.put(idx, Ok(hash));
@@ -627,18 +624,10 @@ impl WarmLargePipe {
         }
     }
 
-    fn submit_lent(&mut self, idx: usize, size: u64, map: crate::mmap::Mmap, sink: &mut Sink<'_>) {
+    fn submit_owned(&mut self, idx: usize, size: u64, map: crate::mmap::Mmap, sink: &mut Sink<'_>) {
         self.drain(sink);
         let m = block_on(self.pipe.message(idx, Some(size)));
-        // Sound: the map is kept beside the guard in `maps` until the
-        // message's event (drain), where the guard goes first; a guard dropped
-        // before its message is hashed stops the process (Lent), and so does a
-        // panic. The mapping is of a file: if another program cuts the file
-        // short meanwhile, the read faults and the process stops (README,
-        // --no-mmap).
-        let slice: &'static [u8] = unsafe { core::slice::from_raw_parts(map.as_ptr(), map.len()) };
-        let guard = unsafe { self.pipe.lent(m, slice) };
-        self.maps.push((idx, guard, map));
+        self.pipe.owned(m, map);
         self.in_flight += 1;
     }
 
@@ -1175,7 +1164,7 @@ fn run_hybrid_worker(
                 let pool_workers = if args.num_threads().is_some() { (total_threads - io_threads + 1).max(1) } else { total_threads };
                 crate::init_pool_once(pool_workers);
                 let wp = warm_pipe.get_or_insert_with(|| WarmLargePipe::new(args.mode));
-                wp.submit_lent(i, size, map, &mut sink);
+                wp.submit_owned(i, size, map, &mut sink);
                 continue;
             }
 

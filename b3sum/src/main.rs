@@ -25,7 +25,6 @@
 
 mod args;
 mod err;
-#[cfg(unix)]
 mod mmap;
 #[cfg(test)]
 #[path = "test_temp.rs"]
@@ -51,7 +50,6 @@ mod outboard;
 #[cfg(target_os = "linux")]
 mod uring;
 
-#[cfg(unix)]
 use file_end::StreamId;
 use file_end::{HashRead, InputRole, SMALL_MEM_CAP, StdinContext};
 
@@ -197,7 +195,6 @@ impl Args {
     /// shortened file stops the process when its lost pages are read
     /// (`explain_sigbus`). (BLAKE3 #432: the option was accepted and did
     /// nothing.)
-    #[cfg(unix)]
     pub(crate) fn map(&self, file: &impl std::os::fd::AsRawFd) -> Option<mmap::Mmap> {
         if self.inner.no_mmap {
             return None;
@@ -317,20 +314,11 @@ fn write_all_with(mut bytes: &[u8], mut write_once: impl FnMut(&[u8]) -> io::Res
 }
 
 fn write_all_stdout(bytes: &[u8]) -> (usize, io::Result<()>) {
-    #[cfg(unix)]
-    {
-        write_all_with(bytes, |chunk| {
-            // Sound: a write of `chunk`, a slice held here, to standard output.
-            let rc = unsafe { libc::write(1, chunk.as_ptr().cast(), chunk.len()) };
-            if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(rc as usize) }
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
-        write_all_with(bytes, |chunk| handle.write(chunk))
-    }
+    write_all_with(bytes, |chunk| {
+        // Sound: a write of `chunk`, a slice held here, to standard output.
+        let rc = unsafe { libc::write(1, chunk.as_ptr().cast(), chunk.len()) };
+        if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(rc as usize) }
+    })
 }
 
 #[inline]
@@ -390,7 +378,6 @@ pub(crate) fn stdin_named_twice(paths: &[PathBuf], stdin_ctx: &StdinContext) -> 
                 }
                 stream_refs += 1;
             }
-            #[cfg(unix)]
             InputRole::StdinStreamAlias => {
                 stream_refs += 1;
             }
@@ -461,7 +448,6 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext,
             if args.keyed() {
                 bail!("Cannot open `-` in keyed mode");
             }
-            #[cfg(unix)]
             if let Some(forbid) = forbidden
                 && stdin_ctx.stdin_stream_id() == Some(forbid)
             {
@@ -471,7 +457,6 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext,
             // file; if hashing did not move the descriptor cursor (mmap/pread/
             // direct/ring), advance fd 0 to the exact byte count hashed and
             // propagate any seek failure.
-            #[cfg(unix)]
             if let Some(file) = stdin_file() {
                 let hr = hash_open_file_ex(args, file)?;
                 if !hr.cursor_moved && hr.bytes_hashed > 0 {
@@ -483,7 +468,6 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext,
                 }
                 return Ok(hr.hash);
             }
-            #[cfg(unix)]
             if let Ok(meta) = file_end::fstat_fd(0) {
                 file_end::ensure_byte_stream_fd(0, meta.mode_type)?;
             }
@@ -491,7 +475,6 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext,
             update_from(&mut hasher, io::stdin())?;
             Ok(hasher.finalize())
         }
-        #[cfg(unix)]
         InputRole::StdinStreamAlias => {
             if args.keyed() {
                 bail!("Cannot open `-` in keyed mode");
@@ -514,16 +497,8 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext,
         #[cfg(target_os = "macos")]
         InputRole::DarwinRegularDevFd => hash_darwin_regular_dev_fd_hash(args, path),
         InputRole::Path => {
-            #[cfg(unix)]
-            {
-                let (file, _) = file_end::open_checked(path, forbidden)?;
-                Ok(hash_open_file_ex(args, file)?.hash)
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = forbidden;
-                Ok(hash_open_file_ex(args, File::open(path)?)?.hash)
-            }
+            let (file, _) = file_end::open_checked(path, forbidden)?;
+            Ok(hash_open_file_ex(args, file)?.hash)
         }
     }
 }
@@ -533,7 +508,6 @@ pub(crate) fn hash_path_hash(args: &Args, path: &Path, stdin_ctx: &StdinContext,
 /// caller moves it past the consumed bytes once hashed). Uses `fstat(0)`
 /// and `lseek(0, 0, SEEK_CUR)` first so no spare descriptor is touched
 /// unless needed.
-#[cfg(unix)]
 fn stdin_file() -> Option<File> {
     use std::os::fd::AsFd;
     let meta = file_end::fstat_fd(0).ok()?;
@@ -558,7 +532,6 @@ pub(crate) fn hash_open_file(args: &Args, file: File) -> err::Result<blake3::Has
 /// Hash an already-opened `file`, returning the digest along with exact byte
 /// count and whether the file descriptor's cursor was advanced.
 pub(crate) fn hash_open_file_ex(args: &Args, mut file: File) -> err::Result<HashRead> {
-    #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
         if let Ok(fd_meta) = file_end::fstat_fd(file.as_raw_fd()) {
@@ -579,7 +552,6 @@ pub(crate) fn hash_open_file_ex(args: &Args, mut file: File) -> err::Result<Hash
             return Ok(file_end::finish_hash_streaming_from_prefix(args.mode, &buf, &mut file, true)?);
         }
 
-        #[cfg(unix)]
         if let Ok(len) = usize::try_from(size)
             && len >= MAP_LEN
             && let Some(map) = args.map(&file)
@@ -657,13 +629,11 @@ fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> err::Result<
             if args.keyed() {
                 bail!("Cannot open `-` in keyed mode");
             }
-            #[cfg(unix)]
             if let Ok(meta) = file_end::fstat_fd(0) {
                 file_end::ensure_byte_stream_fd(0, meta.mode_type)?;
             }
             update_from(&mut hasher, io::stdin())?;
         }
-        #[cfg(unix)]
         InputRole::StdinStreamAlias => {
             if args.keyed() {
                 bail!("Cannot open `-` in keyed mode");
@@ -692,7 +662,6 @@ fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> err::Result<
         }
         InputRole::Path => {
             let mut file = File::open(path)?;
-            #[cfg(unix)]
             {
                 use std::os::fd::AsRawFd;
                 if let Ok(fd_meta) = file_end::fstat_fd(file.as_raw_fd()) {
@@ -709,15 +678,10 @@ fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> err::Result<
                 if !eof {
                     update_from(&mut hasher, file)?;
                 }
+            } else if let Some(map) = mapped(args, &file) {
+                update(&mut hasher, &map);
+                hold(map);
             } else {
-                #[cfg(unix)]
-                if let Some(map) = mapped(args, &file) {
-                    update(&mut hasher, &map);
-                    hold(map);
-                } else {
-                    update_from(&mut hasher, file)?;
-                }
-                #[cfg(not(unix))]
                 update_from(&mut hasher, file)?;
             }
         }
@@ -727,10 +691,8 @@ fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> err::Result<
     Ok(output_reader)
 }
 
-#[cfg(unix)]
 const HOLD_PAGES: u64 = 1 << 18;
 
-#[cfg(unix)]
 pub(crate) fn hold(map: mmap::Mmap) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static HELD: AtomicU64 = AtomicU64::new(0);
@@ -749,7 +711,6 @@ pub(crate) fn hold(map: mmap::Mmap) {
 #[cfg(test)]
 pub(crate) static MAPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(unix)]
 fn mapped(args: &Args, file: &File) -> Option<mmap::Mmap> {
     let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
     if len < MAP_LEN {
@@ -762,7 +723,6 @@ fn mapped(args: &Args, file: &File) -> Option<mmap::Mmap> {
     resident(&map).then_some(map)
 }
 
-#[cfg(unix)]
 pub(crate) fn resident(map: &mmap::Mmap) -> bool {
     let mut vec = 0u8;
     // Sound: one page of the map (a map is at least one byte here, the
@@ -771,7 +731,6 @@ pub(crate) fn resident(map: &mmap::Mmap) -> bool {
     rc == 0 && vec & 1 == 1
 }
 
-#[cfg(unix)]
 pub(crate) const MAP_LEN: usize = POOL_LEN;
 
 const POOL_LEN: usize = 512 << 10;
@@ -1197,7 +1156,6 @@ fn print_output(output: blake3::OutputReader, path: &Path, args: &Args, out: &mu
 }
 
 fn read_key_from_stdin() -> err::Result<[u8; blake3::KEY_LEN]> {
-    #[cfg(unix)]
     if let Ok(meta) = file_end::fstat_fd(0) {
         file_end::ensure_byte_stream_fd(0, meta.mode_type)?;
     }
@@ -1336,8 +1294,7 @@ fn hash_paths_32(
     args: &Args,
     paths: &[PathBuf],
     stdin_ctx: &StdinContext,
-    #[cfg(unix)] forbidden: Option<StreamId>,
-    #[cfg(not(unix))] forbidden: Option<()>,
+    forbidden: Option<StreamId>,
     on_ordered: &mut dyn FnMut(usize, err::Result<blake3::Hash>) -> bool,
 ) {
     if paths.is_empty() {
@@ -1576,14 +1533,12 @@ fn outboard_of(
             if matches!(mode, blake3::Mode::Keyed(_)) {
                 bail!("Cannot open `-` in keyed mode");
             }
-            #[cfg(unix)]
             if let Ok(meta) = file_end::fstat_fd(0) {
                 file_end::ensure_byte_stream_fd(0, meta.mode_type)?;
             }
             file_end::read_stream_to_end(&mut io::stdin().lock(), bytes)?;
             return Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes));
         }
-        #[cfg(unix)]
         InputRole::StdinStreamAlias => {
             if matches!(mode, blake3::Mode::Keyed(_)) {
                 bail!("Cannot open `-` in keyed mode");
@@ -1615,7 +1570,6 @@ fn outboard_of(
     }
     let mut file = File::open(path)?;
     let meta = file.metadata()?;
-    #[cfg(unix)]
     if meta.is_file() && meta.len() < MAP_LEN as u64 {
         read_to_its_end(&mut file, usize::try_from(meta.len()).expect("len < MAP_LEN"), bytes)?;
         return Ok(outboard::outboard(mode, bytes, threads, &mut rooms.cvs, nodes));
@@ -1626,7 +1580,6 @@ fn outboard_of(
     {
         return Ok(hash);
     }
-    #[cfg(unix)]
     if meta.len() > 0
         && let Some(map) = args.map(&file)
     {
@@ -1634,7 +1587,6 @@ fn outboard_of(
         hold(map);
         return Ok(hash);
     }
-    #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
         if let Ok(fd_meta) = file_end::fstat_fd(file.as_raw_fd()) {
@@ -1861,10 +1813,7 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
     #[cfg(target_os = "macos")]
     let mut darwin_pread = file_end::PreadReader::new(0, 0);
     let mut bufreader: io::BufReader<&mut dyn Read>;
-    #[cfg(unix)]
     let own: Option<StreamId>;
-    #[cfg(not(unix))]
-    let own: Option<()> = None;
     let checkfile_is_stdin;
     #[cfg(target_os = "macos")]
     let mut darwin_stdin_dash_pread = false;
@@ -1872,7 +1821,6 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
     match stdin_ctx.classify(path) {
         InputRole::StdinDash => {
             checkfile_is_stdin = true;
-            #[cfg(unix)]
             let _stdin_meta = {
                 let meta = file_end::fstat_fd(0)?;
                 file_end::ensure_byte_stream_fd(0, meta.mode_type)?;
@@ -1900,7 +1848,6 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
                 bufreader = io::BufReader::with_capacity(check_buf_cap, &mut stdin_lock);
             }
         }
-        #[cfg(unix)]
         InputRole::StdinStreamAlias => {
             checkfile_is_stdin = true;
             let meta = file_end::fstat_fd(0)?;
@@ -1923,7 +1870,6 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
         }
         InputRole::Path => {
             file = File::open(path)?;
-            #[cfg(unix)]
             let _meta = {
                 use std::os::fd::AsRawFd;
                 let meta = file_end::fstat_fd(file.as_raw_fd())?;
@@ -1932,10 +1878,6 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
                 checkfile_is_stdin = own.is_some() && own == stdin_ctx.stdin_stream_id();
                 meta
             };
-            #[cfg(not(unix))]
-            {
-                checkfile_is_stdin = false;
-            }
             #[cfg(target_os = "macos")]
             {
                 use std::os::fd::AsRawFd;
@@ -1966,11 +1908,9 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
     let is_the_checkfile = |entry: &Path| {
         match stdin_ctx.classify(entry) {
             InputRole::StdinDash => return checkfile_is_stdin,
-            #[cfg(unix)]
             InputRole::StdinStreamAlias => return checkfile_is_stdin,
             _ => {}
         }
-        #[cfg(unix)]
         if own.is_some_and(|own| file_end::path_matches_stream(entry, own)) {
             return true;
         }
@@ -1997,7 +1937,6 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
                 Err(e) => entries.push(Entry::ParseErr(e)),
                 Ok(parsed) if is_the_checkfile(&parsed.file_path) => entries.push(Entry::Own(parsed)),
                 Ok(parsed) if matches!(stdin_ctx.classify(&parsed.file_path), InputRole::StdinDash) => entries.push(Entry::Stdin(parsed)),
-                #[cfg(unix)]
                 Ok(parsed) if matches!(stdin_ctx.classify(&parsed.file_path), InputRole::StdinStreamAlias) => entries.push(Entry::Stdin(parsed)),
                 Ok(parsed) => {
                     let batch_idx = batch_paths.len();
@@ -2051,7 +1990,6 @@ fn check_one_checkfile(path: &Path, args: &Args, stdin_ctx: &StdinContext, files
     Ok(())
 }
 
-#[cfg(unix)]
 fn explain_sigbus() {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     extern "C" fn on_sigbus(_: libc::c_int) {
@@ -2075,13 +2013,9 @@ fn explain_sigbus() {
 }
 
 fn main() -> err::Result<()> {
-    #[cfg(unix)]
     // Sound: before any thread starts; a broken pipe then ends b3sum, as it
     // does other tools.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL)
-    };
-    #[cfg(unix)]
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     explain_sigbus();
     blake3::initialize();
     let args = Args::parse()?;

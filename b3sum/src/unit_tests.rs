@@ -366,7 +366,6 @@ fn cloning_ptmx_is_not_classified_as_stream_alias() {
     assert!(!crate::file_end::path_matches_stream(std::path::Path::new("/dev/ptmx"), meta.id), "/dev/ptmx must never match as a reopenable stream alias");
 }
 
-#[cfg(unix)]
 #[test]
 fn record_oriented_sockets_and_packet_pipes_are_rejected() {
     use std::os::fd::FromRawFd;

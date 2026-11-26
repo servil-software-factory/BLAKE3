@@ -60,7 +60,6 @@ impl NamedTempFile {
             let path = base.join(format!(".b3sum-test-file-{pid}-{id}"));
             let mut opts = OpenOptions::new();
             opts.read(true).write(true).create_new(true);
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
                 opts.mode(0o600);
