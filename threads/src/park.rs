@@ -132,6 +132,25 @@ impl Park {
         woken
     }
 
+    /// Best-effort speculative wake: if the workers have places (Linux
+    /// multi-L3 topologies, where `assign` installs at least two places) and
+    /// every worker in the caller's own place is currently parked, wake one
+    /// worker of that place. Concurrent local publishers can each observe all
+    /// local bits set and wake an extra local worker; progress never depends on
+    /// this check because the existing progress wake remains unconditional.
+    pub(crate) fn wake_if_place_asleep(&self) -> bool {
+        let Some((places, _, here)) = self.near.get() else {
+            return false;
+        };
+        let Some(mine) = places.get(here()) else {
+            return false;
+        };
+        if self.parked.iter().zip(mine.iter()).any(|(word, &mask)| mask != 0 && (word.load(Ordering::SeqCst) & mask) != mask) {
+            return false;
+        }
+        self.wake_one_of(Some(mine))
+    }
+
     /// Wake one parked worker of the waker's own place, if any (any
     /// worker, where the workers have no places): whether one was.
     pub(crate) fn wake_one_near(&self) -> bool {
@@ -332,6 +351,77 @@ pub(crate) mod test {
         let park = park_with(3, 4, &[1, 2]);
         assert!(park.wake_one_near());
         assert_eq!(park.parked_count(), 1);
+        HERE.with(|h| h.set(0));
+    }
+
+    /// `wake_if_place_asleep` wakes one local worker only when places are set
+    /// and every worker of the caller's place is parked; once one local worker
+    /// is awake (or without places, or for an empty/unlisted place), it wakes
+    /// nobody. Covers multi-word (>64 worker) place masks in both directions
+    /// (word-0 awake vs word-1 awake, and a word-1-only place).
+    #[test]
+    #[cfg(not(shuttle))]
+    fn wake_if_place_asleep_wakes_only_when_own_place_is_all_parked() {
+        let parked_in = |park: &Park, n: usize| (0..n).filter(|&w| (park.parked[w / 64].load(Ordering::SeqCst) >> (w % 64)) & 1 == 1).collect::<Vec<_>>();
+        // Without places, wakes nobody even when all workers are parked.
+        let no_places = park_with(3, 4, &[0, 1, 2]);
+        assert!(!no_places.wake_if_place_asleep());
+        assert_eq!(no_places.parked_count(), 3);
+
+        // Two places + an empty place: place 0 = {0, 1} (worker 0 awake,
+        // worker 1 parked), place 1 = {2, 3} (both parked), place 2 = {}.
+        let park = park_with(4, 4, &[1, 2, 3]);
+        let places: Box<[Box<[u64]>]> = [0b0011u64, 0b1100, 0].iter().map(|&w| vec![w].into_boxed_slice()).collect();
+        let beside: Box<[Box<[u64]>]> = [0b1111u64, 0b1111, 0].iter().map(|&w| vec![w].into_boxed_slice()).collect();
+        park.set_places(places, beside, || HERE.with(|h| h.get()));
+
+        // Place 0 already has worker 0 awake: worker 1 stays parked.
+        HERE.with(|h| h.set(0));
+        assert!(!park.wake_if_place_asleep());
+        assert_eq!(parked_in(&park, 4), [1, 2, 3]);
+
+        // Place 1 has both workers parked: wakes exactly one (worker 2);
+        // a second call sees worker 2 awake and leaves worker 3 parked.
+        HERE.with(|h| h.set(1));
+        assert!(park.wake_if_place_asleep());
+        assert_eq!(parked_in(&park, 4), [1, 3]);
+        assert!(!park.wake_if_place_asleep());
+        assert_eq!(parked_in(&park, 4), [1, 3]);
+
+        // Empty place (2) and unlisted place (9) wake nobody.
+        HERE.with(|h| h.set(2));
+        assert!(!park.wake_if_place_asleep());
+        HERE.with(|h| h.set(9));
+        assert!(!park.wake_if_place_asleep());
+        assert_eq!(parked_in(&park, 4), [1, 3]);
+
+        // Multi-word (>64 workers) with three places:
+        //   place 0 = {0, 65} (both parked -> wakes 0, then word-0 awake suppresses 65)
+        //   place 1 = {1, 66} (worker 1 parked, worker 66 awake -> word-1 awake suppresses 1)
+        //   place 2 = {67}    (word-1 only, parked -> wakes 67)
+        let big = park_with(70, 4, &[0, 1, 65, 67]);
+        let big_places: Box<[Box<[u64]>]> =
+            [vec![1u64 << 0, 1u64 << 1], vec![1u64 << 1, 1u64 << 2], vec![0u64, 1u64 << 3]].into_iter().map(Vec::into_boxed_slice).collect();
+        let big_beside = big_places.clone();
+        big.set_places(big_places, big_beside, || HERE.with(|h| h.get()));
+
+        // Place 1: word-0 worker 1 is parked, but word-1 worker 66 is awake -> no wake.
+        HERE.with(|h| h.set(1));
+        assert!(!big.wake_if_place_asleep());
+        assert_eq!(parked_in(&big, 70), [0, 1, 65, 67]);
+
+        // Place 2: word-0 mask is zero, word-1 worker 67 is parked -> wakes 67.
+        HERE.with(|h| h.set(2));
+        assert!(big.wake_if_place_asleep());
+        assert_eq!(parked_in(&big, 70), [0, 1, 65]);
+        assert!(!big.wake_if_place_asleep());
+
+        // Place 0: both words parked -> wakes 0; word-0 awake then suppresses 65.
+        HERE.with(|h| h.set(0));
+        assert!(big.wake_if_place_asleep());
+        assert_eq!(parked_in(&big, 70), [1, 65]);
+        assert!(!big.wake_if_place_asleep());
+        assert_eq!(parked_in(&big, 70), [1, 65]);
         HERE.with(|h| h.set(0));
     }
 
