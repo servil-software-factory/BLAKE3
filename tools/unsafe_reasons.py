@@ -48,6 +48,11 @@ TEST_ONLY_FILES = frozenset({
 })
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
+DEBUG_ASSERT = re.compile(r"\bdebug_assert(?:_eq|_ne)?\s*!")
+SOUND_RE = re.compile(r"Sound:\s*\S")
+DEBUG_ONLY_RE = re.compile(r"Debug-only:\s*\S")
+_RAW_STR_RE = re.compile(r"(?:[bc]?r)(#*)\"")
+_CHAR_RE = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\\n])'")
 
 
 def is_test_file(rel):
@@ -134,33 +139,21 @@ def _extract_cfg_exprs(attr_line):
     return exprs
 
 
-def is_test_mod_header(lines, i):
-    """True iff `lines[i]` opens an inline `mod <name> {` whose directly
-    attached attributes include a `#[cfg(...)]` requiring `test`."""
-    if not re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{", lines[i]):
+def line_has_test_cfg(code_line):
+    """True iff `code_line` is a `#[cfg(...)]` attribute line requiring `test`."""
+    s = code_line.strip()
+    if not s.startswith("#["):
         return False
-    # Walk immediately attached attributes / comments / blank lines above `lines[i]`.
-    k = i - 1
-    while k >= 0:
-        s = lines[k].strip()
-        if not s or s.startswith("//"):
-            k -= 1
-            continue
-        if s.startswith("#["):
-            for expr in _extract_cfg_exprs(s):
-                if cfg_requires_test(expr):
-                    return True
-            k -= 1
-            continue
-        break
-    return False
+    return any(cfg_requires_test(expr) for expr in _extract_cfg_exprs(s))
 
 
-def strip_code_preserving_lines(text):
-    """Return a parallel string with comments and string/raw-string/char
-    literals blanked out (preserving newlines), so token & brace scanning
-    never matches text inside strings or comments."""
-    out = []
+def split_code_and_comments(text):
+    """Return `(code_text, comment_text)` preserving line numbers:
+    - `code_text` blanks out comments and string/raw-string/char literals;
+    - `comment_text` keeps only real `//` and `/* ... */` comments (strings and
+      code are blanked out so string literals can never spoof a comment marker)."""
+    code_out = []
+    comm_out = []
     n = len(text)
     i = 0
     block_comment_depth = 0
@@ -169,93 +162,158 @@ def strip_code_preserving_lines(text):
         if block_comment_depth > 0:
             if ch == "/" and i + 1 < n and text[i + 1] == "*":
                 block_comment_depth += 1
-                out.append("  ")
+                code_out.append("  ")
+                comm_out.append("/*")
                 i += 2
             elif ch == "*" and i + 1 < n and text[i + 1] == "/":
                 block_comment_depth -= 1
-                out.append("  ")
+                code_out.append("  ")
+                comm_out.append("*/")
                 i += 2
             elif ch == "\n":
-                out.append("\n")
+                code_out.append("\n")
+                comm_out.append("\n")
                 i += 1
             else:
-                out.append(" ")
+                code_out.append(" ")
+                comm_out.append(ch)
                 i += 1
             continue
         if ch == "/" and i + 1 < n and text[i + 1] == "/":
             while i < n and text[i] != "\n":
-                out.append(" ")
+                code_out.append(" ")
+                comm_out.append(text[i])
                 i += 1
             continue
         if ch == "/" and i + 1 < n and text[i + 1] == "*":
             block_comment_depth = 1
-            out.append("  ")
+            code_out.append("  ")
+            comm_out.append("/*")
             i += 2
             continue
         # Raw strings: r"...", r#"..."#, br#"..."#, cr#"..."#
-        m_raw = re.match(r"(?:[bc]?r)(#*)\"", text[i:])
-        if m_raw and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+        if ch in ("r", "b", "c") and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            m_raw = _RAW_STR_RE.match(text, i)
+        else:
+            m_raw = None
+        if m_raw:
             hashes = m_raw.group(1)
             prefix_len = len(m_raw.group(0))
-            out.append(" " * prefix_len)
+            code_out.append(" " * prefix_len)
+            comm_out.append(" " * prefix_len)
             i += prefix_len
             end_pat = '"' + hashes
             while i < n:
                 if text.startswith(end_pat, i):
-                    out.append(" " * len(end_pat))
+                    code_out.append(" " * len(end_pat))
+                    comm_out.append(" " * len(end_pat))
                     i += len(end_pat)
                     break
-                out.append("\n" if text[i] == "\n" else " ")
+                ch2 = "\n" if text[i] == "\n" else " "
+                code_out.append(ch2)
+                comm_out.append(ch2)
                 i += 1
             continue
         # Regular / byte / C strings
         if ch == '"' or (ch in ("b", "c") and i + 1 < n and text[i + 1] == '"' and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))):
             if ch != '"':
-                out.append(" ")
+                code_out.append(" ")
+                comm_out.append(" ")
                 i += 1
-            out.append(" ")
+            code_out.append(" ")
+            comm_out.append(" ")
             i += 1
             while i < n:
                 if text[i] == "\\" and i + 1 < n:
-                    out.append(" ")
-                    out.append("\n" if text[i + 1] == "\n" else " ")
+                    ch2 = "\n" if text[i + 1] == "\n" else " "
+                    code_out.append(" " + ch2)
+                    comm_out.append(" " + ch2)
                     i += 2
                     continue
                 if text[i] == '"':
-                    out.append(" ")
+                    code_out.append(" ")
+                    comm_out.append(" ")
                     i += 1
                     break
-                out.append("\n" if text[i] == "\n" else " ")
+                ch2 = "\n" if text[i] == "\n" else " "
+                code_out.append(ch2)
+                comm_out.append(ch2)
                 i += 1
             continue
         # Char / byte-char literals (avoid colliding with lifetimes like `'a`)
         if ch == "'":
-            m_ch = re.match(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\\n])'", text[i:])
+            m_ch = _CHAR_RE.match(text, i)
             if m_ch:
-                out.append(" " * len(m_ch.group(0)))
+                pad = " " * len(m_ch.group(0))
+                code_out.append(pad)
+                comm_out.append(pad)
                 i += len(m_ch.group(0))
                 continue
-        out.append(ch)
+        code_out.append(ch)
+        comm_out.append("\n" if ch == "\n" else " ")
         i += 1
-    return "".join(out)
+    return "".join(code_out), "".join(comm_out)
+
+
+def strip_code_preserving_lines(text):
+    return split_code_and_comments(text)[0]
+
+
+def _skip_test_annotated_item(code_lines, i):
+    """Given `code_lines[i]` has a `#[cfg(...)]` requiring `test`, return the
+    next line index after the annotated item or statement (skipping stacked
+    attributes, doc comments, and the item's braced body or `;` terminator)."""
+    n = len(code_lines)
+    i += 1
+    # Advance past stacked outer attributes, blank lines, and comments.
+    while i < n:
+        s = code_lines[i].strip()
+        if not s or s.startswith("#["):
+            i += 1
+            continue
+        break
+    if i >= n:
+        return n
+    # Track balanced braces/parens/brackets of the annotated item or statement.
+    brace = 0
+    paren = 0
+    bracket = 0
+    seen_brace = False
+    while i < n:
+        for ch in code_lines[i]:
+            if ch == "{":
+                brace += 1
+                seen_brace = True
+            elif ch == "}":
+                brace -= 1
+                if seen_brace and brace <= 0 and paren <= 0 and bracket <= 0:
+                    return i + 1
+            elif ch == "(":
+                paren += 1
+            elif ch == ")":
+                paren -= 1
+            elif ch == "[":
+                bracket += 1
+            elif ch == "]":
+                bracket -= 1
+            elif ch == ";" and not seen_brace and brace == 0 and paren == 0 and bracket == 0:
+                return i + 1
+        i += 1
+    return n
 
 
 def non_test_lines(text):
     """Yield `(line_number_1based, raw_line, code_line)` for every line outside
-    test-only inline `mod ... { ... }` blocks, using string/comment-stripped
-    brace counting."""
+    test-only `#[cfg(...)]` modules, items, and statements, using
+    string/comment-stripped token and brace counting."""
     raw_lines = text.split("\n")
-    code_lines = strip_code_preserving_lines(text).split("\n")
+    code_text, _ = split_code_and_comments(text)
+    code_lines = code_text.split("\n")
     i = 0
     n = len(raw_lines)
     while i < n:
-        if is_test_mod_header(raw_lines, i):
-            depth = 0
-            while i < n:
-                depth += code_lines[i].count("{") - code_lines[i].count("}")
-                i += 1
-                if depth <= 0:
-                    break
+        if line_has_test_cfg(code_lines[i]):
+            i = _skip_test_annotated_item(code_lines, i)
             continue
         yield i + 1, raw_lines[i], code_lines[i]
         i += 1
@@ -263,16 +321,53 @@ def non_test_lines(text):
 
 def without_reason(text):
     """The lines (numbers from 1, and the line) of `text`'s unsafe blocks
-    that have no "Sound:" comment within REACH lines above, skipping
-    test-only `#[cfg(...)] mod ... { ... }` modules."""
-    raw_lines = text.split("\n")
+    that have no non-empty `Sound:` comment within REACH lines above, skipping
+    test-only `#[cfg(test)]` modules/items."""
+    code_text, comm_text = split_code_and_comments(text)
+    comm_lines = comm_text.split("\n")
     found = []
     for lineno, raw, code in non_test_lines(text):
         if not UNSAFE.search(code):
             continue
         idx = lineno - 1
-        above = raw_lines[max(0, idx - REACH):idx + 1]
-        if not any("Sound:" in a and a.lstrip().startswith("//") for a in above[:-1]) and "// Sound:" not in raw:
+        above = comm_lines[max(0, idx - REACH):idx + 1]
+        if not any(SOUND_RE.search(c) for c in above):
+            found.append((lineno, raw.strip()))
+    return found
+
+
+def debug_assert_without_reason(text):
+    """The lines (numbers from 1, and the line) of `text`'s `debug_assert*!`
+    invocations that have no non-empty `// Debug-only:` comment directly
+    attached above (or trailing on the same line), skipping test-only
+    modules/items (QUALITY.md). Consecutive `debug_assert*!` invocations share
+    one directly attached comment; any unrelated code line breaks attachment."""
+    code_text, comm_text = split_code_and_comments(text)
+    code_lines = code_text.split("\n")
+    comm_lines = comm_text.split("\n")
+    found = []
+    for lineno, raw, code in non_test_lines(text):
+        if not DEBUG_ASSERT.search(code):
+            continue
+        idx = lineno - 1
+        has_reason = bool(DEBUG_ONLY_RE.search(comm_lines[idx]))
+        if not has_reason:
+            k = idx - 1
+            while k >= 0:
+                if DEBUG_ONLY_RE.search(comm_lines[k]):
+                    has_reason = True
+                    break
+                c_strip = code_lines[k].strip()
+                if not c_strip:
+                    k -= 1
+                    continue
+                # Consecutive debug_assert*! lines share an attached comment;
+                # any other code statement breaks attachment (no cross-branch borrowing).
+                if DEBUG_ASSERT.search(c_strip):
+                    k -= 1
+                    continue
+                break
+        if not has_reason:
             found.append((lineno, raw.strip()))
     return found
 
@@ -280,14 +375,19 @@ def without_reason(text):
 def main():
     files = shipped_files()
     bad = 0
+    bad_da = 0
     for path in files:
         with open(os.path.join(ROOT, path)) as f:
-            for number, line in without_reason(f.read()):
-                bad += 1
-                print(f"{path}:{number}: no reason (a `// Sound: ...` comment above): {line[:100]}")
-    if bad:
-        sys.exit(f"unsafe_reasons: {bad} unsafe blocks state no reason")
-    print(f"unsafe_reasons: every unsafe block across all {len(files)} shipped Rust files states its reason")
+            text = f.read()
+        for number, line in without_reason(text):
+            bad += 1
+            print(f"{path}:{number}: no reason (a `// Sound: ...` comment above): {line[:100]}")
+        for number, line in debug_assert_without_reason(text):
+            bad_da += 1
+            print(f"{path}:{number}: no reason (a `// Debug-only: ...` comment above): {line[:100]}")
+    if bad or bad_da:
+        sys.exit(f"unsafe_reasons: {bad} unsafe blocks and {bad_da} debug_asserts state no reason")
+    print(f"unsafe_reasons: every unsafe block and debug_assert across all {len(files)} shipped Rust files states its reason")
 
 
 if __name__ == "__main__":

@@ -66,12 +66,51 @@ class Reasons(unittest.TestCase):
         ):
             self.assertNotIn(must_exclude, discovered, f"test-only file unexpectedly scanned: {must_exclude}")
 
+    def test_debug_assert_requires_debug_only_comment(self):
+        ok = "fn f() {\n    // Debug-only: hot loop invariant.\n    debug_assert!(true);\n    debug_assert_eq!(1, 1);\n}\n"
+        self.assertEqual(ur.debug_assert_without_reason(ok), [])
+        bad = "fn f() {\n    // Just a comment.\n    debug_assert!(true);\n    debug_assert_eq !(1, 1);\n}\n"
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(bad)], [3, 4])
+
+    def test_debug_assert_rejects_string_spoof_empty_reason_and_sibling_borrowing(self):
+        spoof = 'fn f() {\n    debug_assert!(true, "// Debug-only: not a comment");\n}\n'
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(spoof)], [2])
+        empty = "fn f() {\n    // Debug-only:   \n    debug_assert!(true);\n}\n"
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(empty)], [3])
+        sibling = (
+            "fn f(a: bool) {\n"
+            "    if a {\n"
+            "        // Debug-only: first branch.\n"
+            "        debug_assert!(true);\n"
+            "    } else {\n"
+            "        debug_assert!(true);\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(sibling)], [6])
+
+    def test_cfg_test_fn_items_are_excluded(self):
+        src = (
+            "#[cfg(test)]\n"
+            "fn helper() {\n"
+            "    debug_assert!(true);\n"
+            "    let _ = unsafe { 1 };\n"
+            "}\n"
+            "fn shipped() {\n"
+            "    debug_assert!(true);\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(src)], [7])
+        self.assertEqual(ur.without_reason(src), [])
+
     def test_all_shipped_files_pass(self):
         files = ur.shipped_files()
         self.assertGreaterEqual(len(files), 40)
         for path in files:
             with open(os.path.join(ur.ROOT, path)) as f:
-                self.assertEqual(ur.without_reason(f.read()), [], path)
+                text = f.read()
+                self.assertEqual(ur.without_reason(text), [], path)
+                self.assertEqual(ur.debug_assert_without_reason(text), [], path)
 
 
 if __name__ == "__main__":

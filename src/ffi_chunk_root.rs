@@ -58,6 +58,8 @@ unsafe fn chunk_root_partial(avx512: bool, input: &[u8], key: &CVWords, flags: u
 #[inline(always)]
 pub(crate) unsafe fn pad_block(dst: *mut u8, src: *const u8, n: usize) {
     use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_set_epi64x, _mm_setzero_si128, _mm_storeu_si128};
+    // Debug-only: `pad_block` is called on every short message hot path; all
+    // callers enforce `n <= BLOCK_LEN` (remainder `% BLOCK_LEN` or stage cap).
     debug_assert!(n <= BLOCK_LEN);
     let mut piece = 0;
     while piece < BLOCK_LEN {
@@ -84,8 +86,10 @@ pub(crate) unsafe fn pad_block(dst: *mut u8, src: *const u8, n: usize) {
 /// took 53 ns against 40 (one Zen 4 core, November 14, 2026).
 /// Requires `platform`'s instructions.
 #[inline(always)]
-pub(crate) unsafe fn block_root(platform: crate::platform::Platform, block: &[u8; BLOCK_LEN], n: usize, key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
-    debug_assert!(n <= BLOCK_LEN && block[n..].iter().all(|&b| b == 0), "a block zero-padded past its {n} bytes");
+pub(crate) unsafe fn block_root(platform: crate::platform::Platform, block: &[u8; BLOCK_LEN], n: u8, key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
+    // Debug-only: O(64) scan verifying the caller's zero-padded block invariant
+    // on every <= 64 B finalize hot path; `n: u8` makes bit-16 carry unwriteable.
+    debug_assert!(usize::from(n) <= BLOCK_LEN && block[usize::from(n)..].iter().all(|&b| b == 0), "a block zero-padded past its {n} bytes");
     // Sound: no whole block before the last; `block` is 64 readable bytes.
     // The AVX-512 kernel where the platform is that; else the SSE4.1 one, which every x86-64 platform has.
     unsafe { call(matches!(platform, crate::platform::Platform::AVX512), &[], key, block.as_ptr(), flags as u64 | (n as u64) << 8) }

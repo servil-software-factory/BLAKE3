@@ -641,6 +641,7 @@ pub fn sha3_detected() -> bool {
 /// The kernel uses only integer instructions. Unsafe because `blocks` must
 /// hold `count * 64` readable bytes and `count` must be in 1..=16.
 pub unsafe fn compress_blocks(cv: &mut CVWords, blocks: *const u8, count: usize, counter: u64, flags: u8, flags_start: u8) {
+    // Debug-only: `Platform::compress_blocks` asserts `(1..=16).contains(&count)` in release.
     debug_assert!((1..=16).contains(&count));
     let packed = flags as u64 | (flags_start as u64) << 8 | (BLOCK_LEN as u64) << 24;
     // The kernel reads the whole key in its prologue and stores the output
@@ -666,6 +667,7 @@ pub unsafe fn compress_blocks(cv: &mut CVWords, blocks: *const u8, count: usize,
 /// core. `block_len` is at most 64; the block is 64 bytes, zero-padded
 /// past `block_len` by the caller as the portable compressor requires.
 pub fn compress_in_place(cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
+    // Debug-only: hot per-block compression; internal callers pass `<= 64` (remaining bytes or `BLOCK_LEN`).
     debug_assert!(block_len as usize <= BLOCK_LEN);
     // The one block is both first and last: the kernel ORs flags_start
     // into the first block and flags_end into the last, so the flags go
@@ -705,6 +707,7 @@ pub unsafe fn hash_chunk(
     flags_end: u8,
     out: &mut [u8; OUT_LEN],
 ) {
+    // Debug-only: hot single-chunk root wrapper; `hash_one_chunk_root` asserts `input.len() <= CHUNK_LEN` in release.
     debug_assert!((1..=16).contains(&blocks));
     debug_assert!(last_len as usize <= BLOCK_LEN);
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (last_len as u64) << 24;
@@ -1225,18 +1228,26 @@ mod test {
             return;
         }
         let has = |feature: &str| features.iter().all(|f| f.split_whitespace().any(|w| w == feature));
-        let apple = implementers.iter().all(|i| i.eq_ignore_ascii_case("0x61"));
+        let all_apple = implementers.iter().all(|i| i.eq_ignore_ascii_case("0x61"));
+        let no_apple = implementers.iter().all(|i| !i.eq_ignore_ascii_case("0x61"));
         if has("cpuid") {
-            assert_eq!(midr_implementer().map(|byte| std::format!("{byte:#04x}")), Some(implementers[0].to_ascii_lowercase()), "the register's byte");
-            assert_eq!(midr_implementer() == Some(0x61), apple, "implementers {implementers:?}");
-            assert_eq!(apple_cores(), apple, "the answer, asked");
-            assert_eq!(apple_cores(), apple, "the answer kept");
+            let got = midr_implementer().map(|byte| std::format!("{byte:#04x}")).expect("cpuid feature exposes MIDR_EL1");
+            assert!(implementers.iter().any(|i| i.eq_ignore_ascii_case(&got)), "the register's byte {got} is in {implementers:?}");
+            if all_apple || no_apple {
+                assert_eq!(midr_implementer() == Some(0x61), all_apple, "implementers {implementers:?}");
+                assert_eq!(apple_cores(), all_apple, "the answer, asked");
+                assert_eq!(apple_cores(), all_apple, "the answer kept");
+            }
         } else {
             assert_eq!((midr_implementer(), apple_cores()), (None, false), "no register to read: not Apple's");
         }
         assert_eq!(sha3_detected(), has("sha3"));
         let want: &Family = if !has("sha3") {
             &PLAIN
+        } else if all_apple {
+            &WITH_SHA3
+        } else if no_apple {
+            &OTHER
         } else if apple_cores() {
             &WITH_SHA3
         } else {

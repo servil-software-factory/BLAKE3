@@ -199,6 +199,7 @@ impl<T> Drop for RawSlots<T> {
 
 #[inline(always)]
 fn pack_arg(kind: u64, a: u32, b: u32, sme2: bool) -> u64 {
+    // Debug-only: hot job-argument packer; callers pass 2-bit `kind` and slot/piece indices `< 2^29`.
     debug_assert!(kind < 4 && a < (1 << 29));
     let raw = (kind << 61) | ((a as u64) << 32) | (b as u64);
     if sme2 { raw | ACTION_SME2 } else { raw }
@@ -364,7 +365,7 @@ impl Rooms {
 
     #[inline(always)]
     fn room_ptr(&self, index: usize) -> *mut u8 {
-        debug_assert!(index < self.count);
+        assert!(index < self.count, "room index out of bounds");
         // Sound: `index < self.count`, so `index * ROOM_LEN` lies inside the
         // `count * ROOM_LEN`-byte allocation at `self.buf`.
         unsafe { self.buf.add(index * ROOM_LEN) }
@@ -1487,6 +1488,7 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
             self.slots[s].kind = SlotKind::WaitBatch { group: NONE, epoch: 0 };
             let per_part = (TASK_LEN / work_slot).max(1).max(count.div_ceil(MAX_SLOT_PIECES));
             let pieces = count.div_ceil(per_part);
+            // Debug-only: `per_part` is chosen so `pieces <= MAX_SLOT_PIECES`.
             debug_assert!((1..=MAX_SLOT_PIECES).contains(&pieces));
             self.storage().slot_done[s].store(false, Ordering::Relaxed);
             self.storage().tasks_left[s].store(pieces, Ordering::Relaxed);
@@ -1848,6 +1850,7 @@ impl<T, B, P> Pipeline<T, B, P> {
 
         match self.slots[s].kind {
             SlotKind::OpenEmpty => {
+                // Debug-only: an `OpenEmpty` slot always starts at offset 0 and finishes a full `ROOM_LEN` fill.
                 debug_assert_eq!(written, ROOM_LEN);
                 debug_assert_eq!(start_offset, 0);
                 room.offset = u32::try_from(ROOM_LEN).unwrap();
@@ -1859,6 +1862,7 @@ impl<T, B, P> Pipeline<T, B, P> {
             }
             SlotKind::OpenRooms { ref mut sealed } => {
                 if written == ROOM_LEN {
+                    // Debug-only: writing a full `ROOM_LEN` is only possible when starting at offset 0.
                     debug_assert_eq!(start_offset, 0);
                     room.offset = u32::try_from(ROOM_LEN).unwrap();
                 } else {

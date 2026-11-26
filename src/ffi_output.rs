@@ -91,18 +91,22 @@ pub(crate) fn finish_last_blocks_order(
     let rem = chunks.remainder();
     for chunk in chunks {
         if width == 16 {
-            finish_last_blocks_simd::<16>(chunk, items, cvs, flags, flags_end, out);
+            // Sound: `width == 16` only when `platform` is `Platform::AVX512`.
+            unsafe { finish_last_blocks_simd::<16>(chunk, items, cvs, flags, flags_end, out) };
         } else {
-            finish_last_blocks_simd::<8>(chunk, items, cvs, flags, flags_end, out);
+            // Sound: `width == 8` only when `platform` is `Platform::AVX2`.
+            unsafe { finish_last_blocks_simd::<8>(chunk, items, cvs, flags, flags_end, out) };
         }
     }
     if rem.len() < 4 {
         return order.len() - rem.len();
     }
     if rem.len() <= 8 {
-        finish_last_blocks_simd::<8>(rem, items, cvs, flags, flags_end, out);
+        // Sound: both `Platform::AVX512` and `Platform::AVX2` support AVX2 `output8`.
+        unsafe { finish_last_blocks_simd::<8>(rem, items, cvs, flags, flags_end, out) };
     } else {
-        finish_last_blocks_simd::<16>(rem, items, cvs, flags, flags_end, out);
+        // Sound: `rem.len() > 8` only when `width == 16` (`Platform::AVX512`).
+        unsafe { finish_last_blocks_simd::<16>(rem, items, cvs, flags, flags_end, out) };
     }
     order.len()
 }
@@ -110,15 +114,11 @@ pub(crate) fn finish_last_blocks_order(
 /// Compress `4..=W` (`W` in `{8, 16}`) counter-zero final blocks for
 /// `each::by_blocks_at_once` in a single `output8`/`output16` call, padding
 /// spare lanes by repeating the last item in `chunk`.
+///
+/// # Safety
+/// Caller must have verified CPU support for the `W`-lane output kernel.
 #[inline(never)]
-pub(crate) fn finish_last_blocks_simd<const W: usize>(
-    chunk: &[u8],
-    items: &[&[u8]],
-    cvs: &[crate::CVWords],
-    flags: u8,
-    flags_end: u8,
-    out: &mut [[u8; OUT_LEN]],
-) {
+unsafe fn finish_last_blocks_simd<const W: usize>(chunk: &[u8], items: &[&[u8]], cvs: &[crate::CVWords], flags: u8, flags_end: u8, out: &mut [[u8; OUT_LEN]]) {
     let count = chunk.len();
     let mut blocks = [[0u8; BLOCK_LEN]; W];
     let mut lens = [0u8; W];
@@ -128,7 +128,7 @@ pub(crate) fn finish_last_blocks_simd<const W: usize>(
         let k = item.len().saturating_sub(1) / BLOCK_LEN;
         let last = item.len() - k * BLOCK_LEN;
         blocks[j][..last].copy_from_slice(&item[k * BLOCK_LEN..]);
-        lens[j] = last.to_le_bytes()[0];
+        lens[j] = u8::try_from(last).expect("last block <= 64");
         let start = if k == 0 { CHUNK_START } else { 0 };
         item_flags[j] = flags | start | flags_end;
     }
@@ -263,7 +263,7 @@ pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Plat
 #[inline(never)]
 fn held_groups_in(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
     let width = lanes(platform);
-    debug_assert!(!held.is_empty() && width != 0);
+    assert!(!held.is_empty() && width != 0, "held_groups_in requires non-empty held slice and SIMD width");
     const PER: usize = crate::STAGE_LEN / CHUNK_LEN;
     const { assert!(PER == 16) };
     let n = held.len();
@@ -310,10 +310,10 @@ fn held_groups_in(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
                 unsafe { hash_group::<8>(&inputs, &mut next[base..base + 8]) };
             }
         }
-        if width == 16 && count - full >= 8 && crate::platform::avx2_detected() {
+        if width == 16 && count - full >= 8 {
             let inputs = core::array::from_fn(|j| input(full + j));
-            // Sound: AVX2 is detected; eight real parent blocks and keys
-            // remain, and next has disjoint room for all eight outputs.
+            // Sound: `width == 16` means `Platform::AVX512`, which implies AVX2;
+            // eight real parent blocks and keys remain, and next has disjoint room.
             unsafe { hash_group::<8>(&inputs, &mut next[full..full + 8]) };
             full += 8;
         }
@@ -369,14 +369,14 @@ pub(crate) fn self_test(platform: Platform) -> usize {
     let answer = self_test_shape(|inputs, out| {
         // Sound: initialize detected this platform before testing its kernels.
         unsafe { hash_on_platform(platform, inputs, out) };
-        if lanes(platform) == 16 && crate::platform::avx2_detected() {
+        if lanes(platform) == 16 {
             #[cfg(test)]
             if PLANTED_WRONG_OUTPUT.load(core::sync::atomic::Ordering::Relaxed) == 1 {
                 out[15][OUT_LEN - 1] = !out[15][OUT_LEN - 1];
             }
             // Check the wide output before the remainder kernel reuses it.
             check_self_test(crate::self_test::fold(out.as_flattened()));
-            // Sound: `avx2_detected()` is true above; `inputs` and `out` hold 16 entries.
+            // Sound: `lanes(platform) == 16` means `Platform::AVX512`, which implies AVX2; `inputs` and `out` hold 16 entries.
             unsafe { hash_eight_groups(inputs, out) };
             checked = 2;
         }

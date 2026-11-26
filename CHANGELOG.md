@@ -5,6 +5,21 @@ figure names its machine.
 
 ## Breaking changes and migration
 
+- **Test-only `Platform::{sse41,avx2,avx512,neon,sme2}` constructors gated under
+  `#[cfg(test)]`** (`blake3-servil-core` `#[doc(hidden)] thread_support::Platform`):
+  these test-only per-ISA selectors are no longer exposed in production builds;
+  callers use `Platform::detect()` and `Platform::own_core()`.
+
+- **Removed `cargo::metadata=sme2=1` (`DEP_BLAKE3_SERVIL_CORE_SME2`) build-script
+  metadata** (`blake3-servil-core` `build.rs`): `blake3-servil-core` still
+  keeps `links = "blake3_servil_core"` so Cargo rejects duplicate unmangled
+  assembly symbols in one dependency graph, and still compiles SME2 kernels on
+  every supported AArch64 target (Linux and macOS). Downstream build scripts
+  that previously read `DEP_BLAKE3_SERVIL_CORE_SME2` should inspect
+  `CARGO_CFG_TARGET_ARCH == "aarch64"` for compile-time availability and call
+  `initialize()` before `Platform::detect()` (and rely on the library's
+  checked dispatchers for Linux per-thread SVL verification).
+
 - **`b3sum` split into its own repository (`servil-software-factory/b3sum`)
   and `#[doc(hidden)] blake3_servil::__confine_cli_to_one_node` removed**:
   the `b3sum` CLI (`b3sums` on crates.io) now lives in

@@ -884,13 +884,26 @@ pub(crate) fn hash_many_rounded<const N: usize>(
 #[cfg(all(test, target_arch = "x86_64"))]
 use ffi_partial::{lane_widths, rounded_lanes};
 
+/// Intentional low-byte extraction for self-test byte patterns (wrapping is
+/// the point, unlike length/count narrowing which uses `u8::try_from`).
+#[inline(always)]
+pub(crate) const fn low_byte(x: usize) -> u8 {
+    x.to_le_bytes()[0]
+}
+
+/// Intentional low-byte extraction from `platform::DETECTED`'s packed `u16`.
+#[inline(always)]
+pub(crate) const fn low_byte_u16(x: u16) -> u8 {
+    x.to_le_bytes()[0]
+}
+
 // Use SIMD parallelism to hash up to MAX_SIMD_DEGREE chunks at the same time
 // on a single thread. Write out the chunk chaining values and return the
 // number of chunks hashed. These chunks are never the root and never empty;
 // those cases use a different codepath.
 fn compress_chunks_parallel(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, platform: Platform, out: &mut [u8]) -> usize {
-    debug_assert!(!input.is_empty(), "empty chunks below the root");
-    debug_assert!(input.len() <= MAX_SIMD_DEGREE * CHUNK_LEN);
+    assert!(!input.is_empty(), "empty chunks below the root");
+    assert!(input.len() <= MAX_SIMD_DEGREE * CHUNK_LEN, "compress_chunks_parallel exceeds MAX_SIMD_DEGREE chunks");
 
     let mut chunks_exact = input.chunks_exact(CHUNK_LEN);
     let mut chunks_array = StackVec::<&[u8; CHUNK_LEN], MAX_SIMD_DEGREE>::new();
@@ -943,10 +956,9 @@ fn compress_chunks_parallel(input: &[u8], key: &CVWords, chunk_counter: u64, fla
 // never empty; those cases use a different codepath.
 #[doc(hidden)]
 pub(crate) fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWords, flags: u8, platform: Platform, out: &mut [u8]) -> usize {
-    debug_assert_eq!(child_chaining_values.len() % OUT_LEN, 0, "wacky hash bytes");
+    assert_eq!(child_chaining_values.len() % OUT_LEN, 0, "chaining values are 32 bytes each");
     let num_children = child_chaining_values.len() / OUT_LEN;
-    debug_assert!(num_children >= 2, "not enough children");
-    debug_assert!(num_children <= 2 * MAX_SIMD_DEGREE, "too many");
+    assert!((2..=2 * MAX_SIMD_DEGREE).contains(&num_children), "compress_parents_parallel expects 2..=2*MAX_SIMD_DEGREE children");
 
     let mut parents_exact = child_chaining_values.chunks_exact(BLOCK_LEN);
     let mut parents_array = StackVec::<&[u8; BLOCK_LEN], MAX_SIMD_DEGREE>::new();
@@ -1006,7 +1018,7 @@ pub(crate) fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWo
 #[inline]
 #[doc(hidden)]
 pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8, platform: Platform) -> [u8; BLOCK_LEN] {
-    debug_assert!(input.len() > CHUNK_LEN);
+    assert!(input.len() > CHUNK_LEN, "compress_subtree_wide requires more than one chunk");
     let kernels = tree::PlatformKernels { key, flags, platform };
     let [left, right] = tree::root_children(&kernels, input, ahead, chunk_counter);
     let mut block = [0u8; BLOCK_LEN];
@@ -1024,7 +1036,7 @@ pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &
 #[cfg(target_arch = "aarch64")]
 #[inline]
 fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
-    debug_assert!(input.len() <= CHUNK_LEN);
+    assert!(input.len() <= CHUNK_LEN, "one chunk or less");
     let blocks = cmp::max(1, input.len().div_ceil(BLOCK_LEN));
     let whole = (blocks - 1) * BLOCK_LEN;
     let tail = &input[whole..];
@@ -1045,7 +1057,18 @@ fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
     let mut out = [0u8; OUT_LEN];
     // Sound: `input` holds `(blocks - 1) * BLOCK_LEN` readable bytes before `tail`, `blocks` is in 1..=16, and `last` is 64 readable bytes.
     unsafe {
-        neon_hybrid::hash_chunk(input.as_ptr(), blocks, last, tail.len().to_le_bytes()[0], key, 0, flags, CHUNK_START, CHUNK_END | ROOT, &mut out);
+        neon_hybrid::hash_chunk(
+            input.as_ptr(),
+            blocks,
+            last,
+            u8::try_from(tail.len()).expect("tail block <= 64"),
+            key,
+            0,
+            flags,
+            CHUNK_START,
+            CHUNK_END | ROOT,
+            &mut out,
+        );
     }
     Hash(out)
 }
@@ -1448,6 +1471,8 @@ impl OutputReader {
         // nothing, which test_fill_computes_each_block_once counts.
         let full_blocks = buf.len() / BLOCK_LEN;
         let full_blocks_len = full_blocks * BLOCK_LEN;
+        // Debug-only: structural postcondition of the partial-block branch above
+        // (either we filled to boundary or `buf` became empty, so `full_blocks == 0`).
         debug_assert!(full_blocks == 0 || self.position_within_block == 0);
         self.inner.platform.xof_many(
             &self.inner.input_chaining_value,
@@ -1461,8 +1486,10 @@ impl OutputReader {
         buf = &mut buf[full_blocks_len..];
 
         if !buf.is_empty() {
+            // Debug-only: `buf` is the remainder after dividing by `BLOCK_LEN`.
             debug_assert!(buf.len() < BLOCK_LEN);
             self.fill_one_block(&mut buf);
+            // Debug-only: `fill_one_block` consumes all `< BLOCK_LEN` bytes of a fresh block.
             debug_assert!(buf.is_empty());
         }
     }

@@ -58,7 +58,6 @@ src/ffi_output.rs	replace - with / in held_groups_in	1	[cpu lacks avx512f avx512
 src/ffi_output.rs	replace == with != in held_groups_in	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
 src/ffi_output.rs	replace >= with < in held_groups_in	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
 src/ffi_output.rs	replace | with ^ in final_block	2	equivalent: domain flags (0, KEYED_HASH=16, DERIVE_KEY_MATERIAL=64) are disjoint from CHUNK_END (2) and ROOT (8), so | and ^ compute the same byte
-src/ffi_output.rs	replace | with ^ in finish_last_blocks_simd	2	equivalent: domain flags (0, KEYED_HASH=16, DERIVE_KEY_MATERIAL=64), CHUNK_START (1), and flags_end (CHUNK_END=2, ROOT=8) occupy disjoint bits
 src/ffi_output.rs	replace | with ^ in held_groups_in	1	equivalent: mode flags (0, 16, 32, 64) and PARENT (4) occupy disjoint bits
 src/ffi_output.rs	replace | with ^ in packed	3	equivalent: | and ^ agree on flag bits that never overlap: the mode's flags hold none of CHUNK_START, CHUNK_END and ROOT
 src/ffi_partial.rs	replace % with + in rotation	1	equivalent: k % 4 becomes k + 4, which adds 16 to each shuffle index; pshufb reads an index's low four bits (and bit 7, clear: the largest is 47), so the shuffle is the same
@@ -255,13 +254,8 @@ src/platform.rs	replace << with >> in sme2_reported	1	same code: every test bina
 src/platform.rs	replace <impl Drop for Sme2Turn>::drop with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/platform.rs	replace == with != in sme2_reported	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace >= with < in Platform::xof_many	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace Platform::avx512 -> Option<Self> with None	1	[cpu lacks avx512f avx512vl] equivalent: this CPU lacks AVX-512, so the forced None is its own answer (a CPU with it catches it)
 src/platform.rs	replace Platform::name -> &'static str with ""	1	a name for reports and legends, with no reader since the kernel reports went
 src/platform.rs	replace Platform::name -> &'static str with "xyzzy"	1	a name for the kernel report and legends (no test pins the names)
-src/platform.rs	replace Platform::neon -> Option<Self> with None	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace Platform::neon -> Option<Self> with Some(Default::default())	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace Platform::sme2 -> Option<Self> with None	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace Platform::sme2 -> Option<Self> with Some(Default::default())	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace avx2_detected -> bool with true	1	[cpu has avx2] equivalent: this CPU has AVX2, so the forced yes is its own answer
 src/platform.rs	replace avx512_detected -> bool with false	1	[cpu lacks avx512f avx512vl] equivalent: this CPU lacks AVX-512, so the forced no is its own answer (a CPU with it catches it: test_detected_degree_is_the_widest_kernel)
 src/platform.rs	replace avx512_detected -> bool with true	1	[cpu has avx512f avx512vl] equivalent: this CPU has AVX-512, so the forced yes is its own answer
@@ -307,6 +301,7 @@ src/self_test.rs	replace ^= with &= in run	1	as on aarch64: survives (known-aarc
 src/self_test.rs	replace chunk_values -> usize with 0	1	AArch64 only: the AArch64 CASES table is cfg(target_arch = "aarch64"), compiled out on x86
 src/self_test.rs	replace chunk_values -> usize with 1	1	AArch64 only: the AArch64 CASES table is cfg(target_arch = "aarch64"), compiled out on x86
 src/self_test.rs	replace compiled_features_present with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
+src/self_test.rs	replace incremental -> crate::Hash with Default::default()	1	AArch64 only: the AArch64 CASES table is cfg(target_arch = "aarch64"), compiled out on x86
 src/self_test.rs	replace | with & in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace < with <= in last_max	1	equivalent: `whole` is a multiple of 1024 and `room` (2^64 - 1 less a multiple of 1024) never is, so the two are never equal and either branch gives the smaller
@@ -322,10 +317,7 @@ src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<us
 src/each.rs	replace >= with < in finalize_each	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace | with ^ in hash_by_blocks	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/ffi_partial.rs	replace | with ^ in finalize_each	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
-src/platform.rs	replace && with || in sme2_allowed	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in sme2_svl_ok	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace sme2_allowed -> bool with false	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/platform.rs	replace sme2_allowed -> bool with true	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace sme2_svl_ok -> bool with false	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace sme2_svl_ok -> bool with true	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace >= with < in TreeHasher::parent_cvs	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

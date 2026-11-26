@@ -155,9 +155,11 @@ const fn with_platform(detected: u16, platform: u8) -> u16 {
 }
 
 /// Whether [`crate::initialize`] has finished recording the process platform.
+/// `Acquire` pairs with `Platform::record`'s `Release` so callers on weak-
+/// memory CPUs observe the recorded platform before proceeding.
 #[inline]
 pub(crate) fn is_initialized() -> bool {
-    DETECTED.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes()[0] != 0
+    crate::low_byte_u16(DETECTED.load(core::sync::atomic::Ordering::Acquire)) != 0
 }
 
 /// A call before `initialize`: the caller broke the contract. The crate's
@@ -191,6 +193,7 @@ const fn x86_platform(avx512: bool, avx2: bool, sse41: bool) -> Option<Platform>
 }
 
 impl Platform {
+    #[cfg(test)]
     #[inline]
     fn require_initialized() {
         if !is_initialized() {
@@ -204,7 +207,7 @@ impl Platform {
     /// which every call makes anyway.
     #[inline]
     pub fn detect() -> Self {
-        let mut code = DETECTED.load(core::sync::atomic::Ordering::Relaxed).to_le_bytes()[0];
+        let mut code = crate::low_byte_u16(DETECTED.load(core::sync::atomic::Ordering::Relaxed));
         if code == 0 {
             code = not_initialized();
         }
@@ -228,10 +231,11 @@ impl Platform {
     /// Make `self` what [`Platform::detect`] returns from now on, in every
     /// thread: `initialize` does, once its self-test has passed.
     pub(crate) fn record(self) {
-        // The other bits stay (the cores, asked by now or later).
-        use core::sync::atomic::Ordering::Relaxed;
+        // The other bits stay (the cores, asked by now or later). `Release`
+        // pairs with `is_initialized()`'s `Acquire` load.
+        use core::sync::atomic::Ordering::{Relaxed, Release};
         let mut detected = DETECTED.load(Relaxed);
-        while let Err(now) = DETECTED.compare_exchange_weak(detected, with_platform(detected, self as u8), Relaxed, Relaxed) {
+        while let Err(now) = DETECTED.compare_exchange_weak(detected, with_platform(detected, self as u8), Release, Relaxed) {
             detected = now;
         }
     }
@@ -288,31 +292,48 @@ impl Platform {
     }
 
     pub fn simd_degree(&self) -> usize {
-        let degree = match self {
+        #[cfg(target_arch = "x86_64")]
+        const SSE41_DEGREE: usize = 4;
+        #[cfg(target_arch = "x86_64")]
+        const AVX2_DEGREE: usize = 8;
+        #[cfg(target_arch = "x86_64")]
+        const AVX512_DEGREE: usize = 32;
+        #[cfg(target_arch = "aarch64")]
+        const NEON_DEGREE: usize = 16;
+        #[cfg(target_arch = "x86_64")]
+        const {
+            assert!(SSE41_DEGREE >= 2 && SSE41_DEGREE <= MAX_SIMD_DEGREE && SSE41_DEGREE.is_power_of_two());
+            assert!(AVX2_DEGREE >= 2 && AVX2_DEGREE <= MAX_SIMD_DEGREE && AVX2_DEGREE.is_power_of_two());
+            assert!(AVX512_DEGREE >= 2 && AVX512_DEGREE <= MAX_SIMD_DEGREE && AVX512_DEGREE.is_power_of_two());
+        }
+        #[cfg(target_arch = "aarch64")]
+        const {
+            assert!(NEON_DEGREE >= 2 && NEON_DEGREE <= MAX_SIMD_DEGREE && NEON_DEGREE.is_power_of_two());
+            assert!(crate::sme2::DEGREE >= 2 && crate::sme2::DEGREE <= MAX_SIMD_DEGREE && crate::sme2::DEGREE.is_power_of_two());
+        }
+        match self {
             #[cfg(target_arch = "x86_64")]
-            Platform::SSE41 => 4,
+            Platform::SSE41 => SSE41_DEGREE,
             #[cfg(target_arch = "x86_64")]
-            Platform::AVX2 => 8,
+            Platform::AVX2 => AVX2_DEGREE,
             #[cfg(target_arch = "x86_64")]
-            Platform::AVX512 => 32,
+            Platform::AVX512 => AVX512_DEGREE,
             // Sixteen chunks per call reach the k10 kernel (see
             // neon_hybrid), in both its families.
             #[cfg(target_arch = "aarch64")]
-            Platform::NEON => 16,
+            Platform::NEON => NEON_DEGREE,
             #[cfg(target_arch = "aarch64")]
             Platform::SME2 => crate::sme2::DEGREE,
-        };
-        debug_assert!((2..=MAX_SIMD_DEGREE).contains(&degree), "the walk (src/tree.rs) takes 2 to MAX_SIMD_DEGREE chunks a call");
-        degree
+        }
     }
 
     #[inline(always)]
     fn compress_in_place_raw(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
         match self {
-            // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID or compile-time target-feature verification.
+            // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID verification.
             #[cfg(target_arch = "x86_64")]
             Platform::SSE41 | Platform::AVX2 => unsafe { crate::sse41::compress_in_place(cv, block, block_len, counter, flags) },
-            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 verification.
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::compress_in_place(cv, block, block_len, counter, flags) },
             // The scalar kernel k1 keeps the state in registers; it runs on
@@ -357,10 +378,10 @@ impl Platform {
 
     pub(crate) fn compress_xof(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) -> [u8; 64] {
         match self {
-            // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID or compile-time target-feature verification.
+            // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID verification.
             #[cfg(target_arch = "x86_64")]
             Platform::SSE41 | Platform::AVX2 => unsafe { crate::sse41::compress_xof(cv, block, block_len, counter, flags) },
-            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 verification.
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::compress_xof(cv, block, block_len, counter, flags) },
             // The one-block extended-output kernel (neon_hybrid::xof_block).
@@ -407,13 +428,13 @@ impl Platform {
             crate::record_hash_many_call(N / BLOCK_LEN, inputs.len());
         }
         match self {
-            // Sound: `Platform::SSE41` is constructed only after CPUID or compile-time target-feature verification.
+            // Sound: `Platform::SSE41` is constructed only after CPUID verification.
             #[cfg(target_arch = "x86_64")]
             Platform::SSE41 => unsafe { crate::sse41::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
-            // Sound: `Platform::AVX2` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
+            // Sound: `Platform::AVX2` is constructed only after CPUID + XCR0 verification.
             #[cfg(target_arch = "x86_64")]
             Platform::AVX2 => unsafe { crate::avx2::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
-            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 verification.
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
             // Sound: `Platform::NEON` is built only on AArch64 where NEON is baseline.
@@ -432,7 +453,7 @@ impl Platform {
             return;
         }
         match self {
-            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
+            // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 verification.
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::xof_many(cv, block, block_len, counter, flags, out) },
             _ => {
@@ -472,15 +493,14 @@ impl Platform {
         }
     }
 
-    // Explicit platform constructors, for the tests (std). Each enforces
-    // `initialize()` in production builds just like `Platform::detect()`.
+    // Explicit platform constructors for in-crate unit tests. Not part of the
+    // production surface; each still enforces `initialize()` like `detect()`.
 
     /// The SSE41 platform where this build has its kernels and the CPU its
     /// instructions.
-    #[cfg(target_arch = "x86_64")]
-    pub fn sse41() -> Option<Self> {
+    #[cfg(all(test, target_arch = "x86_64"))]
+    pub(crate) fn sse41() -> Option<Self> {
         Self::require_initialized();
-        #[cfg(target_arch = "x86_64")]
         if sse41_detected() {
             return Some(Self::SSE41);
         }
@@ -489,38 +509,36 @@ impl Platform {
 
     /// The AVX2 platform where this build has its kernels and the CPU its
     /// instructions.
-    #[cfg(target_arch = "x86_64")]
-    pub fn avx2() -> Option<Self> {
+    #[cfg(all(test, target_arch = "x86_64"))]
+    pub(crate) fn avx2() -> Option<Self> {
         Self::require_initialized();
-        #[cfg(target_arch = "x86_64")]
         if avx2_detected() {
             return Some(Self::AVX2);
         }
         None
     }
 
-    #[cfg(target_arch = "x86_64")]
-    pub fn avx512() -> Option<Self> {
+    #[cfg(all(test, target_arch = "x86_64"))]
+    pub(crate) fn avx512() -> Option<Self> {
         Self::require_initialized();
         if avx512_detected() { Some(Self::AVX512) } else { None }
     }
 
-    #[cfg(target_arch = "aarch64")]
-    pub fn neon() -> Option<Self> {
+    #[cfg(all(test, target_arch = "aarch64"))]
+    pub(crate) fn neon() -> Option<Self> {
         Self::require_initialized();
-        // Assumed to be safe if the "neon" feature is on.
         Some(Self::NEON)
     }
 
-    #[cfg(target_arch = "aarch64")]
-    pub fn sme2() -> Option<Self> {
+    #[cfg(all(test, target_arch = "aarch64"))]
+    pub(crate) fn sme2() -> Option<Self> {
         // Issue Platform::SME2 only when the startup self-test actually tested
         // SME2 (recorded as the process platform) and this thread's SVL is 512 bits.
         if sme2_allowed(Self::detect(), sme2_detected()) { Some(Self::SME2) } else { None }
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(test, target_arch = "aarch64"))]
 #[inline(always)]
 const fn sme2_allowed(detected: Platform, thread_ok: bool) -> bool {
     matches!(detected, Platform::SME2) && thread_ok
@@ -537,7 +555,7 @@ const fn sme2_svl_ok(lanes: u64) -> bool {
 /// [`READ`] once the bits are read. Every check reads them from CPUID once
 /// per process: CPUID costs about 640 ns (i7-12700K), and cpufeatures read
 /// three leaves per feature checked, six on an AVX2 machine's first
-/// detection where two serve. A feature the build assumes needs none.
+/// detection where two serve.
 #[cfg(target_arch = "x86_64")]
 mod x86_bits {
     pub const SSE41: u8 = 2;
@@ -679,13 +697,6 @@ pub fn wide_avx512() -> bool {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn avx512_detected() -> bool {
-    // A build for CPUs that have it (`-C target-cpu=...` or
-    // `-C target-feature=...`) needs no check: run elsewhere, it stops
-    // at its first such instruction (SIGILL), in the startup self-test.
-    if cfg!(all(target_feature = "ssse3", target_feature = "sse4.1", target_feature = "avx2", target_feature = "avx512f", target_feature = "avx512vl")) {
-        return true;
-    }
-
     x86_features() & x86_bits::AVX512 != 0
 }
 
@@ -693,13 +704,6 @@ pub fn avx512_detected() -> bool {
 #[inline(always)]
 // Read by the x86 kernels' dispatch and the tests.
 pub fn avx2_detected() -> bool {
-    // A build for CPUs that have it (`-C target-cpu=...` or
-    // `-C target-feature=...`) needs no check: run elsewhere, it stops
-    // at its first such instruction (SIGILL), in the startup self-test.
-    if cfg!(all(target_feature = "ssse3", target_feature = "sse4.1", target_feature = "avx2")) {
-        return true;
-    }
-
     x86_features() & x86_bits::AVX2 != 0
 }
 
@@ -707,13 +711,6 @@ pub fn avx2_detected() -> bool {
 #[inline(always)]
 // Read by the x86 kernels' dispatch and the tests.
 pub fn sse41_detected() -> bool {
-    // A build for CPUs that have it (`-C target-cpu=...` or
-    // `-C target-feature=...`) needs no check: run elsewhere, it stops
-    // at its first such instruction (SIGILL), in the startup self-test.
-    if cfg!(all(target_feature = "ssse3", target_feature = "sse4.1")) {
-        return true;
-    }
-
     x86_features() & x86_bits::SSE41 != 0
 }
 
@@ -725,6 +722,8 @@ pub fn sse41_detected() -> bool {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 pub(crate) fn prefetch_code((start, end): (usize, usize)) {
+    // Debug-only: `prfm` never faults and is skipped when `start >= end`; this
+    // sanity-checks symbol-pair bounds passed by our own code-range helpers.
     debug_assert!(start < end && end - start < 64 * 1024, "a kernel's code");
     // Four lines a step (past `end` by up to three: harmless).
     let mut line = start;

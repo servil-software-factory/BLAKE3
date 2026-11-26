@@ -213,6 +213,7 @@ pub(crate) const SPIN_BEFORE_SLEEP: std::time::Duration = std::time::Duration::f
 /// `threads` is positive. Pieces therefore shrink toward the end of the input, and the slowest
 /// thread's last piece is a small one.
 fn next_piece_len(remaining: usize, threads: usize) -> usize {
+    // Debug-only: `remaining / threads` already panics on `threads == 0` in release.
     debug_assert!(threads > 0, "a cut needs at least one thread");
     let want = (remaining / threads).clamp(MIN_PIECE_LEN, MAX_PIECE_LEN);
     1 << (usize::BITS - 1 - want.leading_zeros())
@@ -280,6 +281,7 @@ pub(crate) fn hash_many_in(
 /// over the machine's threads (a shorter input is the caller's, on its
 /// own thread: the public calls' short path).
 pub(crate) fn hash_over_pool(tree: &TreeHasher, input: &[u8]) -> Hash {
+    // Debug-only: `hash_multithreaded` routes shorter inputs directly to `tree.hash`.
     debug_assert!(input.len() >= MIN_SPLIT_LEN);
     let Some((pool, _caller)) = spare_pool() else {
         return tree.hash(input);
@@ -693,7 +695,7 @@ impl Job<'_> {
                 let bytes = &input[piece.offset..][..piece.len];
                 let chunk = counter + (piece.offset / CHUNK_LEN) as u64;
                 if index + 1 == pieces.len() {
-                    // The caller's own first pieces are never the last one.
+                    // Debug-only: the caller's own first pieces are never the last one.
                     debug_assert!(!own);
                     // Sound: one thread takes the last index, and the caller reads `last` after the job.
                     unsafe { **last = Some(tree.last_cv(chunk, bytes)) };
@@ -853,6 +855,7 @@ fn merge_to_children(pieces: &[Piece], cvs: &mut [ChainingValue], mut last: Last
     let mut out = [ChainingValue::unset(); crate::MAX_SIMD_DEGREE];
     while count > 1 {
         let prefix = whole.partition_point(|p| p.len > width);
+        // Debug-only: pieces longer than `width` carried forward from earlier rounds always stay within the live `count` entries.
         debug_assert!(prefix <= count);
         let mut read = prefix;
         let mut write = prefix;
@@ -925,6 +928,7 @@ fn cut_items_vec(items: &[&[u8]], threads: usize) -> Vec<Piece> {
 /// parent of its two halves, cut at the subtree's left-subtree boundary.
 #[cfg(test)]
 fn subtree_cv(pieces: &[Piece], cvs: &[[u8; crate::OUT_LEN]], mode: crate::Mode) -> [u8; crate::OUT_LEN] {
+    // Debug-only: recursive internal helper; caller allocates one CV per piece.
     debug_assert_eq!(pieces.len(), cvs.len());
     if pieces.len() == 1 {
         return cvs[0];
@@ -3344,6 +3348,7 @@ pub(crate) mod sources {
         /// time, and every `(run, context, arg)` tuple published must be safe
         /// for a worker (or caller) to invoke once with the assigned `Platform`.
         pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64], near: bool) {
+            // Debug-only: internal pool entry; callers only publish non-empty job slices.
             debug_assert!(!args.is_empty());
             let p = self.finish.published.load(Ordering::Relaxed);
             let next = p.checked_add(args.len()).expect("Source action ticket counter exhausted");
@@ -3420,6 +3425,7 @@ pub(crate) mod sources {
         /// valid until `self.wait(target)` returns.
         pub(crate) unsafe fn publish_job(&self, job: *mut Job<'static>, pieces: usize, own: usize, near: bool) -> usize {
             let base = self.finish.published.load(Ordering::Relaxed);
+            // Debug-only: `Source` holds exclusive ownership between sequential jobs.
             debug_assert_eq!(self.finish.finished_count(), base, "the last job is finished");
             let target = base.checked_add(pieces).expect("Source job counter overflow");
             assert!(target < crate::finish::SLEEPING, "Source job counter reached Finish::SLEEPING limit");
@@ -3599,7 +3605,7 @@ pub(crate) mod sources {
     /// The slot of the first registered source for which `f` says yes, in
     /// a walk of the slots from `start` up and then of those below it.
     fn find_from(start: usize, mut f: impl FnMut(&'static Source) -> bool) -> Option<usize> {
-        let mut active = ACTIVE.load(Ordering::SeqCst).rotate_right(u32::from(start.to_le_bytes()[0]));
+        let mut active = ACTIVE.load(Ordering::SeqCst).rotate_right(u32::try_from(start).expect("start fits in u32"));
         while active != 0 {
             let slot = (active.trailing_zeros() as usize + start) % SLOTS;
             active &= active - 1;
@@ -3665,7 +3671,7 @@ pub(crate) mod sources {
         if in_turn {
             // The slot after this one (after the last, the first: the
             // walk takes its start round).
-            *turn = Turn { taken: 0, cursor: u32::from((slot + 1).to_le_bytes()[0]) };
+            *turn = Turn { taken: 0, cursor: u32::try_from(slot + 1).expect("slot + 1 fits in u32") };
         } else {
             turn.taken += 1;
         }
@@ -4480,16 +4486,10 @@ mod test {
     #[test]
     fn equal_members_match_the_reference() {
         crate::initialize();
-        #[allow(unused_mut)]
-        let mut platforms: Vec<Platform> = std::vec::Vec::new();
-        #[cfg(target_arch = "x86_64")]
-        platforms.extend([Platform::sse41(), Platform::avx2()].into_iter().flatten());
-        #[cfg(target_arch = "x86_64")]
-        platforms.extend(Platform::avx512());
         let detected = Platform::detect();
-        platforms.push(detected);
+        let mut platforms: Vec<Platform> = std::vec![detected];
         let own = Platform::own_core();
-        if own != detected && !platforms.contains(&own) {
+        if own != detected {
             platforms.push(own);
         }
         let key = [0x5Au8; crate::KEY_LEN];

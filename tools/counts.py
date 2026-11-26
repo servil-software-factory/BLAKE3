@@ -8,10 +8,14 @@
                                               (default working tree) exceeds BASE
 
 Ratcheted counts (must not rise above BASE; comments, strings, and test-only
-modules/files are excluded via `unsafe_reasons.non_test_lines`):
-  undocumented_unsafe   `unsafe` blocks / `unsafe impl` without `// Sound:`
-  truncation_allows     `#[allow(...clippy::cast_possible_truncation...)]` attributes
-  debug_asserts         `debug_assert*!` invocations in shipped code
+modules/items/files are excluded via `unsafe_reasons.non_test_lines`):
+  undocumented_unsafe        `unsafe` blocks / `unsafe impl` without `// Sound:`
+  undocumented_debug_asserts `debug_assert*!` without an attached `// Debug-only:`
+  truncation_allows          `#[allow(...clippy::cast_possible_truncation...)]`
+  silent_narrowings          token-level `.to_le_bytes()[0]` low-byte narrowings
+                             (only the two named `low_byte`/`low_byte_u16` helpers
+                             should hold this spelling)
+  debug_asserts              `debug_assert*!` invocations in shipped code
 
 Also reported alongside for visibility (not failed here):
   shipped_code_lines    non-blank non-comment code lines in shipped Rust files
@@ -28,10 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unsafe_reasons as ur
 
 TRUNC_ALLOW_RE = re.compile(r"#!?\[[^\]]*\ballow\s*\([^)]*\bclippy::cast_possible_truncation\b")
-DEBUG_ASSERT_RE = re.compile(r"\bdebug_assert(?:_eq|_ne)?!")
+DEBUG_ASSERT_RE = ur.DEBUG_ASSERT
+SILENT_NARROW_RE = re.compile(r"\.\s*to_le_bytes\s*\(\s*\)\s*\[\s*0\s*\]")
 CFG_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
 
-RATCHETED = ("undocumented_unsafe", "truncation_allows", "debug_asserts")
+RATCHETED = ("undocumented_unsafe", "undocumented_debug_asserts", "truncation_allows", "silent_narrowings", "debug_asserts")
 
 
 def read_tree(rev=None):
@@ -51,13 +56,16 @@ def read_tree(rev=None):
 def measure_files(files):
     counts = {
         "undocumented_unsafe": 0,
+        "undocumented_debug_asserts": 0,
         "truncation_allows": 0,
+        "silent_narrowings": 0,
         "debug_asserts": 0,
         "shipped_code_lines": 0,
         "cfg_conditions": 0,
     }
     for rel, text in files.items():
         counts["undocumented_unsafe"] += len(ur.without_reason(text))
+        counts["undocumented_debug_asserts"] += len(ur.debug_assert_without_reason(text))
         code_lines = []
         for _lineno, _raw, code in ur.non_test_lines(text):
             code_lines.append(code)
@@ -65,6 +73,7 @@ def measure_files(files):
                 counts["shipped_code_lines"] += 1
         body = "\n".join(code_lines)
         counts["truncation_allows"] += len(TRUNC_ALLOW_RE.findall(body))
+        counts["silent_narrowings"] += len(SILENT_NARROW_RE.findall(body))
         counts["debug_asserts"] += len(DEBUG_ASSERT_RE.findall(body))
         counts["cfg_conditions"] += len(CFG_RE.findall(body))
     return counts
@@ -78,10 +87,14 @@ def fmt(counts):
     return ", ".join(f"{k}={v}" for k, v in counts.items())
 
 
+def check_counts(base_c, rev_c):
+    return [f"{k}: {base_c[k]} -> {rev_c[k]}" for k in RATCHETED if rev_c[k] > base_c[k]]
+
+
 def check(base, rev=None):
     base_c = measure(base)
     rev_c = measure(rev)
-    rose = [f"{k}: {base_c[k]} -> {rev_c[k]}" for k in RATCHETED if rev_c[k] > base_c[k]]
+    rose = check_counts(base_c, rev_c)
     return base_c, rev_c, rose
 
 
