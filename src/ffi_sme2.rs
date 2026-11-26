@@ -319,7 +319,6 @@ pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, f
     unsafe { crate::neon_hybrid::hash_many_last_len(&lanes[..count], key, 0, IncrementCounter::No, flags, flags_start, flags_end, last_len, out) };
 }
 
-#[cfg(feature = "std")]
 /// Groups of sixteen whole chunks, each at its own first counter: group g
 /// is `chunks[16 g..16 g + 16]`, chunk i of it at `counters[g] + i`, its
 /// sixteen chaining values to `out[512 g..]`. One kernel call, so one
@@ -458,7 +457,6 @@ pub unsafe fn hash_chunked_messages(lanes: &[*const u8; GROUP], len: usize, key:
 /// parent round (`sum_{chunks > 2} (chunks / 2) >= 16`) can reach an SME2 group.
 /// Subsequent parent rounds strictly shrink pair counts, so no later round can
 /// enter SME2 without first consulting the turn.
-#[cfg(feature = "std")]
 pub(crate) fn turn_for_each_middle<I: crate::each::Item>(
     platform: crate::platform::Platform,
     items: &[I],
@@ -504,7 +502,7 @@ pub const FLAT_MIN_CHUNKS: usize = 32;
 /// (the integer lane's kernel) and 16: 256 = 8 x 18 + 7 x 16. Smaller
 /// subtrees take groups of 16 alone. The split's arithmetic (8 lane groups
 /// per 144 chunks) makes this boundary; the dispatch test checks it.
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub const LANE_MIN_CHUNKS: usize = 256;
 /// The most chunks the flat walk takes; its chaining values sit in the
 /// 64 KiB aligned scratch buffer (`SCRATCH`). Larger subtrees are split by
@@ -610,7 +608,6 @@ unsafe fn flat_walk(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u6
         unsafe { core::arch::asm!("prfm pldl2keep, [{0}]", in(reg) line, options(nostack, readonly, preserves_flags)) };
         line += 128;
     }
-    #[cfg(feature = "std")]
     if crate::platform::is_initialized() {
         if let Ok(base) = SCRATCH_BLOCK.try_with(|block| block.get() as *mut u8) {
             // Sound: this thread's block outlives the call, and the walk calls
@@ -619,7 +616,7 @@ unsafe fn flat_walk(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u6
         }
     }
     // During startup self-test (avoiding heap allocation under Once::call_once),
-    // without std, or in a thread's teardown after its block is gone.
+    // or in a thread's teardown after its block is gone.
     unsafe { walk_on_stack(input, key, chunk_counter, flags, keep, out, n) }
 }
 
@@ -633,7 +630,7 @@ const SMALL_SCRATCH_MAX_CHUNKS: usize = 64;
 #[repr(C, align(4096))]
 struct SmallScratch([core::mem::MaybeUninit<u8>; SMALL_SCRATCH]);
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 std::thread_local! {
     /// Most recent stack scratch size used by `walk_on_stack` on this thread.
     static LAST_STACK_SCRATCH_BYTES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
@@ -643,7 +640,7 @@ std::thread_local! {
 /// out of line so the 64 KiB frame stays off the small-walk path.
 #[inline(never)]
 unsafe fn walk_on_stack_small(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize) -> usize {
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     LAST_STACK_SCRATCH_BYTES.with(|b| b.set(SMALL_SCRATCH));
     let mut block = SmallScratch([core::mem::MaybeUninit::<u8>::uninit(); SMALL_SCRATCH]);
     // Sound: `walk_in` checks `scratch_layout(n, SMALL_SCRATCH)` against this frame's
@@ -655,7 +652,7 @@ unsafe fn walk_on_stack_small(input: &[u8], key: &CVWords, chunk_counter: u64, f
 /// so small subtrees and startup self-test never reserve 64 KiB on the stack.
 #[inline(never)]
 unsafe fn walk_on_stack_large(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8, keep: usize, out: &mut [u8], n: usize) -> usize {
-    #[cfg(all(test, feature = "std"))]
+    #[cfg(test)]
     LAST_STACK_SCRATCH_BYTES.with(|b| b.set(SCRATCH));
     let mut block = Scratch([core::mem::MaybeUninit::<u8>::uninit(); SCRATCH]);
     // Sound: `walk_in` checks `scratch_layout(n, SCRATCH)` against this frame's
@@ -692,7 +689,6 @@ struct Scratch([core::mem::MaybeUninit<u8>; SCRATCH]);
 // unit is about to use, put it in its slow state at some stack depths
 // (M4 Max, hash(32 KiB) 0.178-0.245 ns/B by depth with the buffers on the
 // stack, 0.177 at every depth off it; probe/stack-map, jobs 169-171).
-#[cfg(feature = "std")]
 std::thread_local! {
     static SCRATCH_BLOCK: Box<core::cell::UnsafeCell<Scratch>> = {
         #[cfg(test)]
@@ -707,7 +703,6 @@ std::thread_local! {
 /// pool's SME2 worker does this before it first parks. Uses `try_with` so
 /// a repeated `initialize_multithreaded()` from a thread-local destructor
 /// during teardown never panics.
-#[cfg(feature = "std")]
 pub fn prepare_thread_scratch() {
     let _ = SCRATCH_BLOCK.try_with(|_| ());
 }
@@ -890,7 +885,6 @@ fn scratch_layout(n: usize, limit: usize) -> (usize, usize) {
 mod scratch_layout_tests {
     use super::*;
 
-    #[cfg(feature = "std")]
     #[test]
     fn startup_allocates_the_scratch_before_any_walk() {
         // Startup self-test must use stack scratch rather than allocating TLS
@@ -935,7 +929,6 @@ mod scratch_layout_tests {
         }
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn test_walk_on_stack_selects_small_tier_up_to_64_chunks() {
         crate::initialize();
@@ -963,7 +956,6 @@ mod scratch_layout_tests {
 /// two on the integer units (c/blake3_sme2_hybrid_aarch64.S).
 pub const HYBRID_GROUP: usize = 18;
 
-#[cfg(feature = "std")]
 /// Prefetch the code of c/blake3_sme2_aarch64.S (its chunk, message, and
 /// parent kernels, 11 KB), which a call of 16 chunks to 64 KiB runs.
 pub fn prefetch_code() {
@@ -995,7 +987,7 @@ pub unsafe fn xof_many(cv: &CVWords, block: &[u8; crate::BLOCK_LEN], block_len: 
 }
 
 /// Every SME2 assembly entry point, named (for the self-test's test).
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) fn entries() -> std::vec::Vec<(&'static str, *const ())> {
     std::vec![
         ("hash16_chunks", ffi::blake3_servil_sme2_hash16_chunks_512 as *const ()),
@@ -1012,7 +1004,6 @@ pub mod ffi {
         /// Return the calling thread's streaming vector length in 32-bit lanes
         /// without entering streaming mode or touching ZA / `TPIDR2_EL0`.
         pub fn blake3_servil_sme2_svl_lanes() -> u64;
-        #[cfg(feature = "std")]
         /// `blake3_servil_sme2_hash16_chunks_512` with group g's first counter
         /// `counters[g]`: separate messages' groups of sixteen chunks.
         pub fn blake3_servil_sme2_hash16_chunks_at_512(
@@ -1026,7 +1017,6 @@ pub mod ffi {
         /// Sixteen extended-output blocks per group (see xof_many).
         pub fn blake3_servil_sme2_xof16_512(cv: *const u32, block: *const u8, counter: u64, flags_len: u64, out: *mut u8, groups: u64) -> u64;
         /// Where c/blake3_sme2_aarch64.S's code ends.
-        #[cfg(feature = "std")]
         pub static blake3_servil_sme2_text_end: u8;
         /// Eighteen whole chunks per group, sixteen on the SME2 lanes and
         /// two on the integer units beside them (generated by
@@ -1096,7 +1086,6 @@ mod test {
     /// The cold NEON fallback helpers used when a Linux thread's SVL is not
     /// 512 bits produce exact BLAKE3 chaining values and digests on every
     /// AArch64 host.
-    #[cfg(feature = "std")]
     #[test]
     fn neon_fallbacks_match_blake3_reference() {
         crate::initialize();
@@ -1145,7 +1134,6 @@ mod test {
     /// 3. Every SME2 assembly entry point commits all 64 distinct slices of
     ///    dormant caller ZA into `za_save_buffer` bit-for-bit, clears
     ///    `TPIDR2_EL0`, and computes exact BLAKE3 digests.
-    #[cfg(feature = "std")]
     #[test]
     fn dormant_caller_za_is_lazily_saved_by_every_sme2_kernel() {
         crate::initialize();

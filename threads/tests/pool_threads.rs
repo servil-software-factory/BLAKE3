@@ -2,7 +2,6 @@
 //! threads. A process of its own (the number is process-wide): 1 starts no
 //! workers, the calls still hash rightly, a later call with None keeps the
 //! number, and another number panics.
-#![cfg(feature = "std")]
 
 use core::num::NonZeroUsize;
 

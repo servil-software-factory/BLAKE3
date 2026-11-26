@@ -11,7 +11,7 @@ You are an independent reviewer. Work alone; do not look for or read other revie
 ## What is in front of you
 
 - The checkout in the current directory is BLAKE3-Servil, a Rust and assembly implementation of the BLAKE3
-  hash function: the core crate at the root (`src/`, one thread, no allocator needed), the thread library in
+  hash function: the core crate at the root (`src/`, single-threaded, `std`), the thread library in
   `threads/` (a pool, the multithreaded calls, the `Pipeline`), the command-line program in `b3sum/`, the C
   interface in `capi/`, tools and proofs in `tools/`. It is detached at the commit under review:
   `@SHA@`.
@@ -45,7 +45,7 @@ You are an independent reviewer. Work alone; do not look for or read other revie
 For each changed function, write down the facts about its inputs and about shared state that the new code
 relies on, and look for every piece of code that can make each fact false: its callers (the public API
 included), its callees, other threads, other platforms (x86-64 with SSE4.1, AVX2 and AVX-512; 64-bit Arm with
-NEON and SME2), other configurations (features, `no_std`, with and without a thread pool). Then answer:
+NEON and SME2), other configurations (optional features where present, with and without a thread pool, and stamped releases). Then answer:
 
 1. Does the change do what its message says, all of it, and nothing else? Name anything the difference
    changes that the message does not say, and anything the message claims that the difference does not do.

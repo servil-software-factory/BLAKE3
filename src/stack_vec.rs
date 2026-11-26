@@ -1,5 +1,5 @@
 //! `StackVec<T, N>`: a vector of at most `N` elements held inline. No heap,
-//! no dependency, `no_std`.
+//! no dependency.
 //!
 //! Its elements are `Copy`, so no destructor ever runs here: to shorten the
 //! vector is to change its length, and a panic midway through a fill leaves
@@ -54,11 +54,7 @@ impl<T: Copy, const N: usize> StackVec<T, N> {
         // Sound: buf[..len] is initialized (the invariant).
         unsafe { slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut T, self.len) }
     }
-}
 
-// What `each` alone calls, and `each` needs `std`.
-#[cfg(feature = "std")]
-impl<T: Copy, const N: usize> StackVec<T, N> {
     /// Whether the vector holds `N` elements.
     #[inline]
     pub(crate) fn is_full(&self) -> bool {

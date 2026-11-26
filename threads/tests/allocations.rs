@@ -3,7 +3,6 @@
 //! their preparation. A counting allocator, in a process of its own,
 //! counts what each call asks for on its calling thread, and on the
 //! library's worker threads where the call uses them.
-#![cfg(feature = "std")]
 
 #[path = "../../tools/require_nextest.rs"]
 mod require_nextest;

@@ -4,7 +4,6 @@
 //! under `cfg(test)`), this integration test links the shipped library where
 //! observing an unpublished `DETECTED == 0` panics immediately.
 
-#[cfg(feature = "std")]
 #[test]
 fn fast_path_initialize_publishes_platform_to_preexisting_worker() {
     use core::sync::atomic::{AtomicBool, Ordering};

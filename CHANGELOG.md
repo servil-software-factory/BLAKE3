@@ -1,3 +1,20 @@
+# blake3-servil 0.12.0+dev, against blake3-servil 0.11.0
+
+What changed since `0.11.0`, each item with its issue or commit. Every
+figure names its machine.
+
+## Breaking changes and migration
+
+- **Require `std`; removed `no_std` mode and the `std` Cargo feature**
+  (`blake3-servil-core` and `blake3-servil`): both crates already reject
+  non-OS targets in `build.rs` (only 64-bit little-endian x86-64 Linux
+  and AArch64 Linux/macOS compile), and `blake3-servil` always linked
+  `std`. Callers upgrading from `0.11.0` should remove `features =
+  ["std"]` / `blake3-servil-core/std` / `blake3-servil/std` from
+  `Cargo.toml`. Disabling default features (`default-features = false`)
+  no longer opts out of `std`; programs that must not link `std` should
+  use official `blake3`.
+
 # blake3-servil 0.11.0+2c43b150bd18c89b6c08a133446c51a3fe6981bc, against blake3-servil 0.10.0
 
 What changed since `0.10.0`, each item with its issue or commit. Every

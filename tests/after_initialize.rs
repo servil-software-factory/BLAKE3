@@ -19,7 +19,6 @@ fn after_initialize_each_kind_of_call_hashes() {
     }
     let key = [7u8; 32];
     assert_eq!(*convenience::hash_with(Mode::Keyed(&key), &input).as_bytes(), *blake3::keyed_hash(&key, &input).as_bytes(), "the keyed hash");
-    #[cfg(feature = "std")]
     {
         use blake3_servil_core::throughput;
         let mut batch = throughput::Batch::new(100, 5);

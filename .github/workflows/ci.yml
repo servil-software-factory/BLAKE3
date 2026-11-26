@@ -93,10 +93,8 @@ jobs:
     # via tools/ci-locked.sh.
     - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core
     - run: sh tools/ci-locked.sh test --doc -p blake3-servil-core
-    # no_std library checks (--lib leaves #[cfg(test)] off so dead-code
-    # warnings surface under -D warnings) and no_std tests.
-    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features
-    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --no-default-features
+    # --lib leaves #[cfg(test)] off so dead-code warnings surface under -D warnings.
+    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib
     - name: Make sure enabling LTO via CFLAGS doesn't break the build.
       run: sh tools/ci-locked.sh build -p blake3-servil-core --tests
       env:
@@ -141,9 +139,6 @@ jobs:
     - name: test b3sum
       run: cargo nextest run --locked
       working-directory: ./b3sum
-    - name: test b3sum --no-default-features
-      run: cargo nextest run --locked --no-default-features
-      working-directory: ./b3sum
     - name: Make sure enabling LTO via CFLAGS doesn't break the build.
       run: cargo build --locked
       env:
@@ -166,8 +161,7 @@ jobs:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - run: sh tools/ci-rust.sh stable
     - run: sh tools/ci-tools.sh nextest cargo-c
-    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features
-    - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --no-default-features
+    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib
     - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests
     - name: threads
       run: sh tools/ci-locked.sh nextest run -p blake3-servil -P ci --lib --tests --no-fail-fast
@@ -272,8 +266,8 @@ jobs:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
     - run: sh tools/ci-rust.sh stable
     - run: sh tools/ci-tools.sh nextest cargo-c
-    # no_std checks on Apple Silicon under -D warnings (without #[cfg(test)]).
-    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib --no-default-features
+    # --lib check on Apple Silicon under -D warnings (without #[cfg(test)]).
+    - run: sh tools/ci-locked.sh check -p blake3-servil-core --lib
     # The same installed-consumer test as on Linux: shared and static
     # installations, pkg-config flags, C11 and C++11 callers.
     - name: C API

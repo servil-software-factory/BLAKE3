@@ -221,8 +221,8 @@ makes, in about a minute (BLAKE3 #257). What it gives up waits for the
 next whole run: a changed test's effect on other code's mutants, and a
 listed survivor now caught.
 
-**What the suites cover.** Branch coverage runs over the default,
-one-CPU, and no-std builds. Most uncovered sides are the branches of
+**What the suites cover.** Branch coverage runs over the default and
+one-CPU builds. Most uncovered sides are the branches of
 other machines (a CPU without the SHA-3 extension or without SME2,
 which CI's AArch64 job runs), the pool's scheduling races, and
 fail-stop arms. The aim is every
@@ -243,10 +243,10 @@ the pool's cuts and merges, its thread caps, and 32 callers at once.
 calls `initialize()` (or `initialize_multithreaded`) before hashing. It
 hashes platform-specific fixed inputs and compares their folded outputs
 with constants derived from official BLAKE3 (`src/self_test.rs`). A
-mismatch aborts with std, or traps without it; a caller cannot catch the
-failure and keep hashing. Tests plant a wrong last output byte in each
-case and require that stop. The fold is FNV-1a, not a cryptographic
-integrity check.
+mismatch writes a best-effort diagnostic to fd 2 and aborts; a caller
+cannot catch the failure and keep hashing. Tests plant a wrong last output
+byte in each case and require that stop. The fold is FNV-1a, not a
+cryptographic integrity check.
 
 The cases exercise the selected kernel entries and public hashing paths.
 AArch64's `l` kernels (short messages of unequal lengths) are deliberately

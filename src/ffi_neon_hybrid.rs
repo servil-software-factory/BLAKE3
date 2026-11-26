@@ -108,7 +108,6 @@ mod asm {
     // block and the packed length (#247). The only production caller of
     // `hash_last_lanes` is the std-only `each` module; its direct lane
     // test also requires `std`.
-    #[cfg(feature = "std")]
     unsafe extern "C" {
         pub fn blake3_servil_hybrid_l2(
             inputs: *const *const u8,
@@ -302,9 +301,7 @@ const PARENT_KERNELS: [Option<Kernel>; 11] = [
 
 /// The l kernels (#247), per exact input count, beside the parent plans
 /// they share: a lone item runs c1, which takes its last block apart too.
-#[cfg(feature = "std")]
 type LastKernel = unsafe extern "C" fn(*const *const u8, u64, *const u32, u64, u64, *mut u8, *const u32, *const *const u8);
-#[cfg(feature = "std")]
 const LAST_KERNELS: [Option<LastKernel>; 10] = [
     None,
     None,
@@ -327,7 +324,6 @@ const PARENT_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[3, 3], &[7], &[8], &[9], &[10], &[9, 2], &[10, 2], &[10, 3], &[10, 4], &[10, 5], &[10, 3, 3]];
 
 /// Kernel sizes for the `l` kernels (`l2..l9`, which have no `l6` or `l10`).
-#[cfg(feature = "std")]
 const LAST_PLANS: [&[usize]; 17] =
     [&[], &[1], &[2], &[3], &[4], &[5], &[3, 3], &[7], &[8], &[9], &[7, 3], &[9, 2], &[9, 3], &[9, 4], &[9, 5], &[8, 7], &[8, 8]];
 
@@ -423,7 +419,6 @@ fn family() -> &'static Family {
     }
 }
 
-#[cfg(feature = "std")]
 /// Where each kernel's code ends (labels the generator puts after each).
 mod ends {
     unsafe extern "C" {
@@ -459,7 +454,6 @@ mod ends {
     }
 }
 
-#[cfg(feature = "std")]
 /// The code of the chunk kernel for `n` whole chunks (1 to 10), and of
 /// the q kernel for `n` whole chunks and a partial one (1 to 9): start
 /// and end addresses.
@@ -496,7 +490,6 @@ fn chunk_code(n: usize, partial: bool) -> (usize, usize) {
     }
 }
 
-#[cfg(feature = "std")]
 /// The code of the quad kernels that cores not Apple's run for four and
 /// five chunks, kn4 and kn5, where Apple's run a hybrid
 /// (OTHER_CHUNK_KERNELS; its other sizes are the kernels Apple's run).
@@ -513,7 +506,6 @@ fn other_code(n: usize) -> (usize, usize) {
     }
 }
 
-#[cfg(feature = "std")]
 /// The code of the parent kernel for `n` parents (PARENT_KERNELS).
 fn parent_code(n: usize) -> (usize, usize) {
     macro_rules! code {
@@ -535,7 +527,6 @@ fn parent_code(n: usize) -> (usize, usize) {
     }
 }
 
-#[cfg(feature = "std")]
 /// Prefetch the code a tree of `whole` chunks (up to 16) and then `partial`
 /// bytes (under a chunk) runs on the hybrids: the chunk kernels
 /// (`compress_chunks_parallel` and [`hash_chunks_with_partial`] choose
@@ -556,7 +547,6 @@ pub fn prefetch_tree_code(whole: usize, partial: usize, parent_values: usize) {
     prefetch_parent_code(parent_values.min(32));
 }
 
-#[cfg(feature = "std")]
 /// Prefetch the code that merges `values` chaining values to the root:
 /// each level's parent plan (`compress_parents_parallel`), then the scalar
 /// kernel that compresses the root. Requires 2 to 32 values.
@@ -653,14 +643,7 @@ fn midr_implementer() -> Option<u8> {
 /// pair kernels rotate with `xar`; the scalar and quad kernels need no
 /// extension.
 pub fn sha3_detected() -> bool {
-    #[cfg(feature = "std")]
-    {
-        std::arch::is_aarch64_feature_detected!("sha3")
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        cfg!(target_feature = "sha3")
-    }
+    std::arch::is_aarch64_feature_detected!("sha3")
 }
 
 /// Compress `count` whole 64-byte blocks of one chunk into `cv`, all with
@@ -754,7 +737,7 @@ type PartialKernel = unsafe extern "C" fn(*const *const u8, u64, *const u32, u64
 /// from the kernel tables, the q kernels, and the integer kernel (for the
 /// self-test's test). The l kernels are left to
 /// test_hash_last_lanes_against_hash (self_test.rs has why).
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 pub(crate) fn entries() -> std::vec::Vec<(std::string::String, *const ())> {
     let mut out = std::vec::Vec::new();
     let family = family();
@@ -1041,7 +1024,6 @@ pub unsafe fn hash_messages_raw(
 /// Unsafe because the CPU must have NEON and SHA-3 (`sha3_detected`), each
 /// input must reach `blocks - 1` whole blocks, and each last block 64 bytes.
 /// The output must be separate from every input prefix and last block.
-#[cfg(feature = "std")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn hash_last_lanes(
     inputs: &[*const u8],
@@ -1089,7 +1071,7 @@ pub unsafe fn hash_last_lanes(
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use super::*;
 
@@ -1246,7 +1228,7 @@ mod test {
     /// the register (the `cpuid` feature), we read the implementer it
     /// reports, and the answer kept is the same.
     #[test]
-    #[cfg(all(target_os = "linux", feature = "std"))]
+    #[cfg(target_os = "linux")]
     fn test_the_family_is_the_cpus_as_cpuinfo_has_it() {
         let info = std::fs::read_to_string("/proc/cpuinfo").expect("/proc/cpuinfo");
         let field =

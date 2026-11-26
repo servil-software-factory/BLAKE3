@@ -11,10 +11,6 @@
 //! are added and the others must equal them, so the constant is the same
 //! on every machine.
 
-// Named in full: the library is no_std, its tests std.
-#[allow(unused_imports)]
-use std::{println, vec::Vec};
-
 pub struct Golden {
     name: &'static str,
     ours: Vec<u8>,
