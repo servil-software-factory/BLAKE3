@@ -118,24 +118,12 @@ criteria = "agent-safe-to-run"
 version = "3.5.0"
 criteria = "agent-safe-to-run"
 
-[[exemptions.pin-project-lite]]
-version = "0.2.18"
-criteria = "agent-safe-to-run"
-
 [[exemptions.positioned-io]]
 version = "0.3.5"
 criteria = "agent-safe-to-run"
 
 [[exemptions.range-collections]]
 version = "0.4.6"
-criteria = "agent-safe-to-run"
-
-[[exemptions.ref-cast]]
-version = "1.0.27"
-criteria = "agent-safe-to-run"
-
-[[exemptions.ref-cast-impl]]
-version = "1.0.27"
 criteria = "agent-safe-to-run"
 
 [[exemptions.self_cell]]
@@ -183,10 +171,6 @@ version = "0.100.0"
 criteria = "agent-safe-to-run"
 
 [[exemptions.windows-interface]]
-version = "0.100.0"
-criteria = "agent-safe-to-run"
-
-[[exemptions.windows-link]]
 version = "0.100.0"
 criteria = "agent-safe-to-run"
 
