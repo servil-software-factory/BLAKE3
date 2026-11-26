@@ -806,3 +806,27 @@ fn failed_allocator_results_are_not_charged_as_live_memory() {
     let ok_realloc = counts(|| account_realloc(non_null, 4096, 8192));
     assert_eq!(ok_realloc, Counts { reallocations: 1, bytes: 8192, freed_bytes: 4096, ..Counts::default() });
 }
+
+#[test]
+fn first_pending_waiter_registration_allocates_nothing() {
+    use blake3_servil::throughput::{Limits, Pipeline, block_on};
+    use core::future::Future;
+    use core::task::{Context, Poll, Waker};
+
+    // Fresh Pipeline with 1 room: taking the room then polling a second room()
+    // forces the very first `WakerSlot::register` call on a newly constructed
+    // PipeSlot. On platforms with lazy std::sync::Mutex initialization (macOS
+    // OnceBox pthread mutex), WakerSlot::new must warm the mutex at creation so
+    // the first Pending poll performs zero allocations.
+    pool_ready(2);
+    let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
+    let r = block_on(p.room());
+    let pending_alloc = counts_with_workers(|| {
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut fut = core::pin::pin!(p.room());
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+    });
+    drop(r);
+    drop(p);
+    assert_eq!(pending_alloc, Counts::default(), "first Pending waiter registration must allocate nothing");
+}
