@@ -53,12 +53,12 @@ It is fast. Like 10 *times* as fast, or more, as the competitors in many cases. 
 of use cases, where you need to ensure data integrity and user security, and you have to do it
 efficiently.
 
-For example, [install the `b3sum` executable from this release](b3sum/README.md#installation) and
+For example, [install the `b3sum` executable](https://github.com/servil-software-factory/b3sum#installation) and
 run `time b3sum $FILES` on some files that you want to calculate a secure hash of. Then compare its
 performance to `md5sum` and `sha256sum`. Then post screenshots of your comparison on Twitter or
 bsky. :-)
 
-<img src="docs/images/b3sum-epyc-1000-files.svg" alt="b3sum beside sha256sum, sha1sum and md5sum on a tree of 1,000 files" width="720">
+<img src="https://raw.githubusercontent.com/servil-software-factory/b3sum/main/docs/images/b3sum-epyc-1000-files.svg" alt="b3sum beside sha256sum, sha1sum and md5sum on a tree of 1,000 files" width="720">
 
 How is it so fast? Three ways:
 

@@ -1,15 +1,13 @@
 name: release artifacts
 
 # What users download for a release is a clean build of the release's
-# version commit: the GitHub release's programs and libraries by the
-# build version they hold, crates.io's packages file by file against the
-# commit (tools/release_artifacts.py). And each b3sum program is, byte for
-# byte, what these machines build from the tag (tools/b3sum-release.sh,
-# whose build is reproducible): a program with other code in it fails
-# here whatever it says of itself. The tag itself is held to the code
-# commit its name gives and to main's history: a moved tag fails. Run when a release is published,
-# and by hand for any release's tag. 0.9.0's two b3sum programs say
-# "dirty" (BLAKE3 #435): dispatched with its tag, this fails on them.
+# version commit: crates.io's packages file by file against the commit
+# (tools/release_artifacts.py), and byte for byte what these two machines
+# package from the tag (tools/crates-release.sh, whose archives are
+# reproducible): a crate with other code or lock metadata fails here
+# whatever it says of itself. The tag itself is held to the code commit its
+# name gives and to main's history: a moved tag fails. Run when a release
+# is published, and by hand for any release's tag.
 on:
   release:
     types: [published]
@@ -24,7 +22,7 @@ permissions:
 
 jobs:
   build:
-    name: b3sum, built again from the tag
+    name: crates, packaged again from the tag
     strategy:
       fail-fast: false
       matrix:
@@ -37,10 +35,11 @@ jobs:
         ref: ${{ github.event.release.tag_name || inputs.tag }}
         # The version commit and its parent, which it names.
         fetch-depth: 2
-    - run: docker run --rm -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
+    - run: sh tools/ci-rust.sh stable
+    - run: sh tools/crates-release.sh --no-verify
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: b3sum-${{ runner.arch }}
+        name: crates-${{ runner.arch }}
         path: dist/
 
   clean:
@@ -76,13 +75,13 @@ jobs:
     # artifacts' names): each must have left its folder, with every crate.
     - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       with:
-        pattern: b3sum-*
+        pattern: crates-*
         path: rebuilt
-    - name: tools/release_artifacts.py TAG --published --rebuilt rebuilt --builders b3sum-X64=x86_64-unknown-linux-gnu,b3sum-ARM64=aarch64-unknown-linux-gnu
+    - name: tools/release_artifacts.py TAG --published --rebuilt rebuilt --builders crates-X64=x86_64-unknown-linux-gnu,crates-ARM64=aarch64-unknown-linux-gnu
       env:
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
         GITHUB_TOKEN: ${{ github.token }}
-      run: python3 tools/release_artifacts.py "$TAG" --published --rebuilt rebuilt --builders b3sum-X64=x86_64-unknown-linux-gnu,b3sum-ARM64=aarch64-unknown-linux-gnu
+      run: python3 tools/release_artifacts.py "$TAG" --published --rebuilt rebuilt --builders crates-X64=x86_64-unknown-linux-gnu,crates-ARM64=aarch64-unknown-linux-gnu
 
   close-milestone:
     name: close the release's completed milestone

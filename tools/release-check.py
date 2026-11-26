@@ -194,21 +194,28 @@ def mutation_result(path, commit):
     return next((r for r in (False, None, NO_VERDICT) if r in results), True)
 
 
-def unpack_builds(archives, into):
-    """Write into the folder `into` each b3sum program and crate of the
-    zips `archives` ((artifact name, bytes) pairs, each one job's dist/),
-    and name where the builders do not bear each other out. Both Linux
-    builders package the crates, and each crate is to be the same bytes
-    from both:
-    - a crate two builders made with different bytes (the later copy once
-      replaced the earlier unread, so a builder that disagreed went unseen
-      whenever the other's crate was the local one's);
-    - a crate one builder made and another builder of crates did not (the
-      union of their files would still hold every crate, each seen once);
+def expected_builders(release):
+    """The two CI builder artifact names and their target triples for `release`."""
+    prefix = "b3sum" if release.has_b3sum() else "crates"
+    return [f"{prefix}-X64=x86_64-unknown-linux-gnu", f"{prefix}-ARM64=aarch64-unknown-linux-gnu"]
+
+
+def unpack_builds(archives, into, expected_names=None):
+    """Write each CI builder zip's b3sum programs and crates into its own
+    subfolder under `into` (`into/<artifact>/`), and name where the builders
+    do not bear each other out. Both Linux builders package the crates, and
+    each crate is to be the same bytes from both:
+    - a required builder missing, or an unexpected builder present;
+    - a crate two builders made with different bytes;
+    - a crate one builder made and another builder of crates did not;
     - crates from one builder alone;
-    - a zip that holds a name twice (reading by name reads one of them)."""
-    made_by, crates, differ = {}, {}, []
+    - a zip that holds a name twice."""
+    made_by, made_bytes, crates, differ = {}, {}, {}, []
+    seen_builders = []
     for artifact, archive in archives:
+        seen_builders.append(artifact)
+        sub = os.path.join(into, artifact)
+        os.makedirs(sub, exist_ok=True)
         with zipfile.ZipFile(io.BytesIO(archive)) as files:
             names = files.namelist()
             for name in sorted({n for n in names if names.count(n) > 1}):
@@ -219,15 +226,22 @@ def unpack_builds(archives, into):
                     continue
                 if name.endswith(".crate"):
                     crates.setdefault(artifact, set()).add(base)
-                data, path = files.read(name), os.path.join(into, base)
+                data = files.read(name)
+                with open(os.path.join(sub, base), "wb") as f:
+                    f.write(data)
                 if base in made_by:
-                    if release_artifacts.read(path) != data:
+                    if made_bytes[base] != data:
                         differ.append(f"{base} ({made_by[base]} and {artifact})")
                     continue
                 made_by[base] = artifact
-                with open(path, "wb") as f:
-                    f.write(data)
-    every = set().union(*crates.values())
+                made_bytes[base] = data
+    if expected_names is not None:
+        want = set(expected_names)
+        for missing in sorted(want - set(seen_builders)):
+            differ.append(f"builder {missing} is absent from CI's artifacts")
+        for extra in sorted(set(seen_builders) - want):
+            differ.append(f"unexpected builder artifact {extra}")
+    every = set().union(*crates.values()) if crates else set()
     for artifact in sorted(crates):
         for base in sorted(every - crates[artifact]):
             differ.append(f"{base} ({made_by[base]} made it and {artifact} did not)")
@@ -236,23 +250,23 @@ def unpack_builds(archives, into):
     return differ
 
 
-def ci_builds(run, into):
-    """Write into the folder `into` the b3sum programs and the crates
-    that the CI run `run` made (its `b3sum release build` jobs' artifacts,
-    each a zip of that job's dist/); return what its jobs disagree on
-    (unpack_builds)."""
+def ci_builds(run, into, release=None):
+    """Write into per-builder subfolders of `into` the release artifacts
+    that the CI run `run` made; return what its jobs disagree on."""
     token = open(os.path.join(MAIN, "ghtokenclassic.txt")).read().strip()
+    prefixes = ("b3sum-",) if (release is not None and release.has_b3sum()) else ("crates-",) if release is not None else ("b3sum-", "crates-")
+    expected_names = [spec.split("=", 1)[0] for spec in expected_builders(release)] if release is not None else None
 
     def archives():
         for artifact in github(f"/repos/servil-software-factory/BLAKE3/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]:
-            if not artifact["name"].startswith("b3sum-"):
+            if not artifact["name"].startswith(prefixes):
                 continue
             # GitHub answers with a redirect to its storage, which refuses the
             # token: gh follows it without.
             yield artifact["name"], subprocess.run(["gh", "api", f"repos/servil-software-factory/BLAKE3/actions/artifacts/{artifact['id']}/zip"],
                                                    env={**os.environ, "GH_TOKEN": token}, capture_output=True, check=True, timeout=300).stdout
 
-    return unpack_builds(archives(), into)
+    return unpack_builds(archives(), into, expected_names=expected_names)
 
 
 def version_at(commit):
@@ -265,23 +279,27 @@ def artifacts_result(commit, run=None):
     build of `commit`, False where one is not (or `commit` is no version
     commit), None where some are not there yet; and what to say of it.
     `run`: the commit's dispatched CI run, where it has completed. Each
-    b3sum program and each crate must be, byte for byte, the one that run
-    made: two builders, ours and GitHub's, and neither's word alone."""
+    expected artifact must match both CI builders byte for byte."""
     try:
         release = release_artifacts.Release("v" + version_at(commit), ROOT, commit)
     except release_artifacts.NotARelease as e:
         return False, f"{e} (python3 tools/gen-ver.py X.Y.Z makes a version commit)"
     dist = os.path.join(ROOT, "dist")
+    builders = expected_builders(release) if run is not None else None
     with tempfile.TemporaryDirectory() as second:
-        differ = (ci_builds(run, second) or []) if run is not None else []
+        differ = (ci_builds(run, second, release) or []) if run is not None else []
         if differ:
             return False, "CI's own builders do not bear each other out on " + ", ".join(differ) + ": their files are no witness of the version commit's"
-        ok, lines = release_artifacts.directory(dist, release, rebuilt=None if run is None else second)
+        ok, lines = release_artifacts.directory(dist, release, rebuilt=None if run is None else second, builders=builders)
     if ok is None:
-        return None, (f"not in {dist} yet: {', '.join(lines)}. On each machine `sh tools/b3sum-release.sh` writes b3sum to its dist/, "
-                      "and `sh tools/crates-release.sh` writes the crates' archives there. Gather them here")
+        if release.has_b3sum():
+            how = "On each machine `sh tools/b3sum-release.sh` writes b3sum to its dist/, and `sh tools/crates-release.sh` writes the crates' archives there"
+        else:
+            how = "`sh tools/crates-release.sh` writes the crates' archives to dist/"
+        return None, f"not in {dist} yet: {', '.join(lines)}. {how}. Gather them here"
     if ok and run is None:
-        return None, "each is clean by its own word; CI's builds, which each b3sum program and crate must equal byte for byte, are not there yet (dispatch the tests workflow on the commit)"
+        what = "each b3sum program and crate" if release.has_b3sum() else "each crate"
+        return None, f"each is clean by its own word; CI's builds, which {what} must equal byte for byte, are not there yet (dispatch the tests workflow on the commit)"
     return ok, "; ".join(line.replace(second, "CI's run") for line in lines)
 
 
@@ -602,7 +620,7 @@ def mac_check(exchange, commit, old):
 
 
 def readme_charts_result(commit):
-    """Verify the two README benchmark SVGs at `commit` match its Cargo.toml X.Y.Z."""
+    """Verify the README benchmark SVG at `commit` matches its Cargo.toml X.Y.Z."""
     def show(rel):
         try:
             return git("show", f"{commit}:{rel}")
@@ -612,7 +630,6 @@ def readme_charts_result(commit):
     return sync_readme_charts.check_chart_texts(
         show("Cargo.toml"),
         show(sync_readme_charts.CHARTS[0][1]),
-        show(sync_readme_charts.CHARTS[1][1]),
     )
 
 

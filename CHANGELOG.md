@@ -5,6 +5,14 @@ figure names its machine.
 
 ## Breaking changes and migration
 
+- **`b3sum` split into its own repository (`servil-software-factory/b3sum`)
+  and `#[doc(hidden)] blake3_servil::__confine_cli_to_one_node` removed**:
+  the `b3sum` CLI (`b3sums` on crates.io) now lives in
+  [`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum)
+  with its full commit history and self-contained Linux NUMA confinement.
+  `blake3-servil` no longer exports the undocumented CLI-only hook
+  `__confine_cli_to_one_node`; worker-pool NUMA binding is unchanged.
+
 - **Require `std`; removed `no_std` mode and the `std` Cargo feature**
   (`blake3-servil-core` and `blake3-servil`, `0.12.0+dev`): `build.rs`
   accepts only std-capable 64-bit little-endian x86-64 Linux and AArch64

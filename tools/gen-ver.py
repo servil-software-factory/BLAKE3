@@ -109,13 +109,11 @@ PACKAGES = {
     "blake3-servil-version": "version/Cargo.toml",
     "blake3-servil-core": "Cargo.toml",
     "blake3-servil": "threads/Cargo.toml",
-    "b3sums": "b3sum/Cargo.toml",
     "blake3-servil-c": "capi/Cargo.toml",
 }
 PINS = {
     "Cargo.toml": "blake3-servil-version",
     "threads/Cargo.toml": "blake3-servil-core",
-    "b3sum/Cargo.toml": "blake3",
 }
 
 
@@ -150,32 +148,17 @@ def check_copies(full):
         header_lines = f.read().split("\n")
     if f'#define B3_VERSION "{full}"' not in header_lines:
         sys.exit(f"capi/b3.h: B3_VERSION must be {full}")
-    lock = tomllib.loads(Path("b3sum/Cargo.lock").read_text())
     release = tomllib.loads(Path(RELEASE_LOCK).read_text())
-    for name in PACKAGES.keys() - {"blake3-servil-c"}:
-        versions = [p["version"] for p in lock["package"] if p["name"] == name]
-        if versions != [full]:
-            sys.exit(f"b3sum/Cargo.lock: expected one {name} at {full}, found {versions}")
     for name in PACKAGES:
         versions = [p["version"] for p in release["package"] if p["name"] == name]
         if versions != [full]:
             sys.exit(f"{RELEASE_LOCK}: expected one {name} at {full}, found {versions}")
-    # The crates are packaged with the release lock (tools/crates-release.sh)
-    # and b3sum is built and tested with its own: one set of dependencies,
-    # so every package of b3sum's lock is in the release lock as it is there.
-    pinned = {(p["name"], p["version"]): p.get("checksum") for p in release["package"]}
-    for p in lock["package"]:
-        key = (p["name"], p["version"])
-        if key not in pinned or pinned[key] != p.get("checksum"):
-            sys.exit(f"{RELEASE_LOCK}: b3sum/Cargo.lock has {p['name']} {p['version']}, and the release lock has "
-                     f"{sorted(v for n, v in pinned if n == p['name']) or 'none'}: the crates would ship another dependency than b3sum is "
-                     f"tested with (CONTRIBUTING.md, \"The release lock\")")
 
 
 def stamp_files(notes=True):
     """The files a stamp writes, and no others: what it commits, and what
     it puts back where it stops."""
-    return [*PACKAGES.values(), *(["CHANGELOG.md"] if notes else []), "b3sum/Cargo.lock", RELEASE_LOCK, "capi/b3.h"]
+    return [*PACKAGES.values(), *(["CHANGELOG.md"] if notes else []), RELEASE_LOCK, "capi/b3.h"]
 
 
 def put_back(files, snapshot=None):
@@ -273,9 +256,6 @@ def set_version(full, notes=True):
                 sys.exit(f"{path}: no line matches {pattern}; nothing is written")
     for path, pattern, replacement in lines:
         edit(path, pattern, replacement)
-    # The CLI's tracked lock contains all four published packages.
-    subprocess.run(["cargo", "update", "-q", *[a for name in PACKAGES if name != "blake3-servil-c" for a in ("-p", name)]],
-                   cwd="b3sum", check=True)
     check_copies(full)
 
 
@@ -299,9 +279,11 @@ if sys.argv[1:] == ["--dev"]:
     stamped(full, f"Version {full}: the code after {release}", notes=False)
     print(full)
     sys.exit(0)
-if len(sys.argv) != 2 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", sys.argv[1]):
+if len(sys.argv) != 2 or not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", sys.argv[1]):
     sys.exit("usage: python3 tools/gen-ver.py X.Y.Z | --dev | --check")
 version = sys.argv[1]
+if any(int(part) > (1 << 64) - 1 for part in version.split(".")):
+    sys.exit(f"{version}: each SemVer numeric component must fit in u64 (0..={(1 << 64) - 1})")
 if git("status", "--porcelain"):
     sys.exit("the tree must be clean")
 number = lambda v: tuple(map(int, v.split("+")[0].split(".")))

@@ -12,8 +12,9 @@ You are an independent reviewer. Work alone; do not look for or read other revie
 
 - The checkout in the current directory is BLAKE3-Servil, a Rust and assembly implementation of the BLAKE3
   hash function: the core crate at the root (`src/`, single-threaded, `std`), the thread library in
-  `threads/` (a pool, the multithreaded calls, the `Pipeline`), the command-line program in `b3sum/`, the C
-  interface in `capi/`, tools and proofs in `tools/`. It is detached at the commit under review:
+  `threads/` (a pool, the multithreaded calls, the `Pipeline`), the C
+  interface in `capi/`, tools and proofs in `tools/` (the `b3sum` CLI lives in
+  `servil-software-factory/b3sum`). It is detached at the commit under review:
   `@SHA@`.
 - The change is @COMMITS@ on top of `@BASE@` (the branch `next`, where every change lands):
   `@SHOW@`. The same difference is in `audit-scratch/change.diff`, the message in

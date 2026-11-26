@@ -1,6 +1,6 @@
 #!/bin/sh
 # Run a Cargo command against the repository's audited lockfile
-# (tools/release/Cargo.lock) and six-crate workspace
+# (tools/release/Cargo.lock) and five-crate workspace
 # (tools/release/workspace.toml), without adding a second lockfile.
 #
 #     sh tools/ci-locked.sh check -p blake3-servil-core --lib

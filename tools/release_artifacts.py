@@ -217,6 +217,15 @@ class Release:
             path = os.path.join(os.path.dirname(path), data.decode())
         return None
 
+    def has_b3sum(self):
+        """Whether this release commit carries `b3sum/` in this repository
+        (historical releases through 0.11.0; from 0.12.0 b3sum lives in
+        servil-software-factory/b3sum)."""
+        return self.file("b3sum/Cargo.toml") is not None
+
+    def crate_dirs(self):
+        return CRATE_DIRS if self.has_b3sum() else tuple(d for d in CRATE_DIRS if d != "b3sum")
+
     def crate(self, folder):
         """The name of the crate in `folder`, from the commit's manifest."""
         manifest = self.file(os.path.join(folder, "Cargo.toml"))
@@ -325,10 +334,10 @@ def problems(name, data, release):
 
 
 def expected(release):
-    """The file names a release has, as tools/b3sum-release.sh and Cargo
-    name them: b3sum for each machine, and the four crates."""
-    programs = [f"b3sum-{release.tag}-{target}" for target in B3SUM_TARGETS]
-    return programs + [f"{release.crate(folder)}-{release.version}.crate" for folder in CRATE_DIRS]
+    """The file names a release has: the library crates, plus historical
+    b3sum programs and `b3sums` crate for pre-split releases."""
+    programs = [f"b3sum-{release.tag}-{target}" for target in B3SUM_TARGETS] if release.has_b3sum() else []
+    return programs + [f"{release.crate(folder)}-{release.version}.crate" for folder in release.crate_dirs()]
 
 
 def expected_program_digests(release):
@@ -398,9 +407,9 @@ def request_for(url):
 
 def published(release):
     """What users download for the release, each as (name, bytes or None
-    where it is not there): the four crates from crates.io, and every
+    where it is not there): the release's crates from crates.io, and every
     asset of the GitHub release, each program's digest file among them."""
-    for folder in CRATE_DIRS:
+    for folder in release.crate_dirs():
         crate = release.crate(folder)
         name = f"{crate}-{release.version}.crate"
         try:
@@ -496,20 +505,25 @@ def rebuilt_problems(name, data, rebuilt, named=None, release=None):
     others = sorted(sub for sub in os.listdir(rebuilt) if sub not in builder_names)
     if others:
         return [f"{rebuilt} holds entries outside the builders named ({', '.join(others)}): with builders named, every copy is one builder's"]
-    crate_names = {f"{release.crate(folder)}-{release.version}.crate" for folder in CRATE_DIRS} if release is not None else None
+    crate_names = {f"{release.crate(folder)}-{release.version}.crate" for folder in release.crate_dirs()} if release is not None else None
     for builder, target in builders:
         entries = sorted(os.listdir(builder))
         non_plain = [e for e in entries if not _plain_file(os.path.join(builder, e))]
         if non_plain:
             return [f"{builder} holds what is no plain file ({non_plain[0]}): every rebuilt file is a plain file"]
         if release is not None:
-            own_program = f"b3sum-{release.tag}-{target}"
-            allowed = {own_program, *crate_names}
+            allowed = set(crate_names)
+            if release.has_b3sum():
+                own_program = f"b3sum-{release.tag}-{target}"
+                allowed.add(own_program)
+            else:
+                own_program = None
             allowed |= {n + suffix for n in allowed for suffix in DIGEST_SUFFIXES}
             extra = [e for e in entries if e not in allowed]
             if extra:
-                return [f"{builder} holds an unexpected file ({extra[0]}): a builder holds only its own target's program, the release's crates, and their digests"]
-            if own_program not in entries:
+                what = "its own target's program, the release's crates, and their digests" if own_program else "the release's crates and their digests"
+                return [f"{builder} holds an unexpected file ({extra[0]}): a builder holds only {what}"]
+            if own_program is not None and own_program not in entries:
                 return [f"{builder} holds no {own_program}: each builder named builds its own target's program"]
     if name.endswith(".crate"):
         target_builders = [builder for builder, _ in builders]

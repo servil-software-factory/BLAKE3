@@ -148,6 +148,7 @@ from pathlib import Path
 from exchange import Exchange, utc
 
 FORK_URL = "https://github.com/servil-software-factory/BLAKE3.git"
+B3SUM_URL = "https://github.com/servil-software-factory/b3sum.git"
 BENCH_URL = "https://github.com/servil-software-factory/bench-hashes.git"
 HOME = Path.home()
 CHECKOUTS = HOME / "checkouts"
@@ -781,16 +782,29 @@ def benchmark(job, run, work, out):
 
 
 def b3sum(job, run, work, out):
+    """Benchmark b3sum contenders. Supports both standalone
+    `servil-software-factory/b3sum` jobs (`b3sum_commit`, with `fork_commit`
+    building `bench-hashes`) and historical pre-split `BLAKE3` jobs
+    (`fork_commit` alone)."""
     fork_commit = hex_commit(job, "fork_commit")
+    b3sum_commit = hex_commit(job, "b3sum_commit") if "b3sum_commit" in job else None
     old_commit = hex_commit(job, "against") if "against" in job else None
     fork, bench = run.checkouts(fork_commit, hex_commit(job, "bench_commit"))
-    commits = [old_commit, fork_commit] if old_commit is not None else [fork_commit]
+    if b3sum_commit is not None:
+        contender_repo = CHECKOUTS / "b3sum"
+        run.sync(B3SUM_URL, contender_repo, b3sum_commit)
+        run.run(["git", "clean", "-ffd", "--quiet"], cwd=contender_repo)
+        target_commit = b3sum_commit
+    else:
+        contender_repo = fork
+        target_commit = fork_commit
+    commits = [old_commit, target_commit] if old_commit is not None else [target_commit]
     # One contender a line, each one argument (a command may hold flags).
-    contenders = [line for line in run.run([sys.executable, "tools/b3sum-contenders.py", str(fork), str(HOME / "b3sum-contenders"), *commits],
+    contenders = [line for line in run.run([sys.executable, "tools/b3sum-contenders.py", str(contender_repo), str(HOME / "b3sum-contenders"), *commits],
                                            cwd=bench, capture=True).splitlines() if "=" in line]
     if old_commit is not None:
-        # Head-to-head comparison: old_commit is the base (first), followed by fork_commit and official.
-        old_tag, new_tag = f"b3sum-{old_commit[:7]}=", f"b3sum-{fork_commit[:7]}="
+        # Head-to-head comparison: old_commit is the base (first), followed by target_commit and official.
+        old_tag, new_tag = f"b3sum-{old_commit[:7]}=", f"b3sum-{target_commit[:7]}="
         contenders = (
             [c for c in contenders if c.startswith(old_tag)]
             + [c for c in contenders if c.startswith(new_tag)]
@@ -801,7 +815,6 @@ def b3sum(job, run, work, out):
     quick = ["--quick"] if job.get("quick") else []
     run.run([exe, "b3sum", "--files", str(HOME / "b3sum-bench-files"), *quick, *contenders], cwd=out)
     return "ok"
-
 
 def check(job, run, work, out):
     """bench-hashes check: BLAKE3-Servil at new_commit, with bench-hashes at

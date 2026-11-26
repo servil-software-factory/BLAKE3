@@ -869,10 +869,13 @@ class Artifacts(unittest.TestCase):
         for key, value in [("user.name", "A Test"), ("user.email", "test@example.invalid"), ("commit.gpgsign", "false"), ("core.hooksPath", str(self.repo / "no-hooks"))]:
             self.git("config", key, value)
         (self.repo / "Cargo.toml").write_text('[package]\nname = "top-crate"\nversion = "0.3.0+dev"\n')
+        (self.repo / "b3sum").mkdir()
+        (self.repo / "b3sum" / "Cargo.toml").write_text('[package]\nname = "b3sums"\nversion = "0.3.0+dev"\n')
         self.git("add", ".")
         self.git("commit", "-qm", "the code")
         self.code = self.git("rev-parse", "HEAD")
         (self.repo / "Cargo.toml").write_text(f'[package]\nname = "top-crate"\nversion = "0.3.0+{self.code}"\n')
+        (self.repo / "b3sum" / "Cargo.toml").write_text(f'[package]\nname = "b3sums"\nversion = "0.3.0+{self.code}"\n')
         self.git("commit", "-qam", "the version")
         self.commit = self.git("rev-parse", "HEAD")
 
@@ -882,12 +885,15 @@ class Artifacts(unittest.TestCase):
     def result(self, commit, ci_built=None, ci_crate=None):
         """`ci_built`: the bytes of the program the commit's CI run built,
         where that run has completed; `ci_crate`: of the crate it made."""
-        def ci_builds(run, into):
-            (Path(into) / f"b3sum-v0.3.0+{self.code}-x86_64-unknown-linux-gnu").write_bytes(ci_built)
+        def ci_builds(run, into, release=None):
+            d = Path(into) / "b3sum-X64"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"b3sum-v0.3.0+{self.code}-x86_64-unknown-linux-gnu").write_bytes(ci_built)
             if ci_crate is not None:
-                (Path(into) / f"top-crate-0.3.0+{self.code}.crate").write_bytes(ci_crate)
+                (d / f"top-crate-0.3.0+{self.code}.crate").write_bytes(ci_crate)
 
         with patch.object(check, "ROOT", str(self.repo)), patch.object(check, "git", self.git), patch.object(check, "ci_builds", ci_builds), \
+             patch.object(check, "expected_builders", lambda rel: ["b3sum-X64=x86_64-unknown-linux-gnu"]), \
              patch.object(check.release_artifacts, "CRATE_DIRS", ("",)), patch.object(check.release_artifacts, "B3SUM_TARGETS", ("x86_64-unknown-linux-gnu",)):
             return check.artifacts_result(commit, None if ci_built is None else {"id": 7})
 
@@ -913,8 +919,29 @@ class Artifacts(unittest.TestCase):
                 self.assertTrue(differ[0].startswith(crate + " (") and "b3sum-x86" in differ[0] and "b3sum-arm" in differ[0], differ)
         with tempfile.TemporaryDirectory() as into:
             self.assertEqual(check.unpack_builds([("b3sum-x86", one), ("b3sum-arm", same)], into), [])
-            self.assertEqual(sorted(os.listdir(into)), sorted(["b3sum-arm", "b3sum-x86", crate]), "programs and crates, no digest file, nothing else")
-            self.assertEqual((Path(into) / crate).read_bytes(), b"the commit's crate")
+            self.assertEqual(sorted(os.listdir(into)), ["b3sum-arm", "b3sum-x86"])
+            self.assertEqual(sorted(os.listdir(Path(into) / "b3sum-x86")), sorted(["b3sum-x86", crate]), "programs and crates, no digest file, nothing else")
+            self.assertEqual((Path(into) / "b3sum-x86" / crate).read_bytes(), b"the commit's crate")
+        # Post-split builder validation: two X64 builders without ARM64 must fail.
+        with tempfile.TemporaryDirectory() as into:
+            crate_only = zipped({f"dist/{crate}": b"the commit's crate"})
+            differ = check.unpack_builds(
+                [("crates-X64", crate_only), ("crates-X64-retry", crate_only)],
+                into,
+                expected_names=("crates-X64", "crates-ARM64"),
+            )
+            self.assertTrue(any("crates-ARM64" in d for d in differ), differ)
+            self.assertTrue(any("crates-X64-retry" in d for d in differ), differ)
+        with tempfile.TemporaryDirectory() as into:
+            crate_only = zipped({f"dist/{crate}": b"the commit's crate"})
+            self.assertEqual(
+                check.unpack_builds(
+                    [("crates-X64", crate_only), ("crates-ARM64", crate_only)],
+                    into,
+                    expected_names=("crates-X64", "crates-ARM64"),
+                ),
+                [],
+            )
 
     def test_each_ci_builder_of_crates_holds_every_crate(self):
         # The union of two builders' files held every crate even where one
@@ -948,7 +975,7 @@ class Artifacts(unittest.TestCase):
 
     def test_a_disagreement_among_ci_builders_fails_the_artifacts(self):
         with patch.object(check, "ROOT", str(self.repo)), patch.object(check, "git", self.git), \
-             patch.object(check, "ci_builds", lambda run, into: ["top-crate.crate (b3sum-x86 and b3sum-arm)"]), \
+             patch.object(check, "ci_builds", lambda run, into, release=None: ["top-crate.crate (b3sum-x86 and b3sum-arm)"]), \
              patch.object(check.release_artifacts, "CRATE_DIRS", ("",)), patch.object(check.release_artifacts, "B3SUM_TARGETS", ("x86_64-unknown-linux-gnu",)):
             ok, why = check.artifacts_result(self.commit, {"id": 7})
         self.assertIs(ok, False)

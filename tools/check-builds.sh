@@ -44,13 +44,9 @@ step python3 tools/pipeline_model_controls.py
 step python3 tools/check-waker-order.py
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --all-features --tests'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --tests --target x86_64-unknown-linux-gnu'
-RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path b3sum/Cargo.toml
-RUSTFLAGS="-D warnings" step cargo check -q --release --tests --manifest-path b3sum/Cargo.toml
 RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path version/Cargo.toml
-# Cross-check macOS b3sum compilation under -D warnings on Linux build hosts.
-CC_aarch64_apple_darwin=clang RUSTFLAGS="-D warnings" step cargo check -q --release --manifest-path b3sum/Cargo.toml --target aarch64-apple-darwin
-# Crate [lints.clippy] enforcement (no silent narrowing `as`, no b3sum stdout/stderr print macros).
-for manifest in Cargo.toml threads/Cargo.toml b3sum/Cargo.toml capi/Cargo.toml version/Cargo.toml; do
+# Crate [lints.clippy] enforcement (no silent narrowing `as`).
+for manifest in Cargo.toml threads/Cargo.toml capi/Cargo.toml version/Cargo.toml; do
     step cargo clippy -q --manifest-path "$manifest" --no-deps -- -D warnings
 done
 # The C API (capi/): its Rust tests, and b3.h compiled as C11 and run.
@@ -100,6 +96,4 @@ for manifest in Cargo.toml threads/Cargo.toml; do
 done
 step python3 tools/api.py "$CARGO_TARGET_DIR/doc/blake3_servil_core.json" --check docs/core-api.md
 step python3 tools/api.py "$CARGO_TARGET_DIR/doc/blake3_servil.json" --check
-# Each of b3sum's protections has a test that fails without it.
-step python3 tools/b3sum_controls.py
 echo "check-builds: every build passes"

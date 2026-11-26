@@ -63,12 +63,13 @@ class Repository(unittest.TestCase):
         self.write("README.md", "the readme\n")
         self.write("sub/Cargo.toml", '[package]\nname = "sub-crate"\nversion = "0.3.0+dev"\nreadme = "../README.md"\n')
         self.write("sub/src/lib.rs", "pub fn sub() {}\n")
+        self.write("b3sum/Cargo.toml", '[package]\nname = "b3sums"\nversion = "0.3.0+dev"\n')
         os.symlink("../LICENSE", os.path.join(self.repo, "sub/LICENSE"))
         self.git("add", ".")
         self.git("commit", "-qm", "the code")
         self.code = self.git("rev-parse", "HEAD")
         self.version = "0.3.0+" + self.code
-        for manifest in ("Cargo.toml", "sub/Cargo.toml"):
+        for manifest in ("Cargo.toml", "sub/Cargo.toml", "b3sum/Cargo.toml"):
             self.write(manifest, self.read(manifest).replace("0.3.0+dev", self.version))
         self.git("commit", "-qam", "Version " + self.version)
         self.commit = self.git("rev-parse", "HEAD")
@@ -830,23 +831,19 @@ class CommandLine(Repository):
 
 
 class Image(unittest.TestCase):
-    """The container a release binary is built in is named once, by its
-    digest: the image line of tools/b3sum-release.toolchain. Every command
-    that runs the build, in the pages and in the workflows, reads it from
-    there, so the command a user copies starts from the bytes CI starts
-    from."""
+    """The container image used by CI is named once, by its digest: the image
+    line of tools/release.toolchain. Every command that runs it reads it from
+    there."""
 
     def test_the_image_is_named_once_and_every_command_reads_it(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "tools", "b3sum-release.toolchain")) as file:
+        with open(os.path.join(root, "tools", "release.toolchain")) as file:
             images = [line.split(" ", 1)[1].strip() for line in file if line.startswith("image ")]
         self.assertEqual(len(images), 1)
         self.assertRegex(images[0], r"^ubuntu:[0-9.]+@sha256:[0-9a-f]{64}$")
         tag = images[0].split("@")[0]
-        reads = "\"$(sed -n 's/^image //p' tools/b3sum-release.toolchain)\" sh tools/b3sum-release-container.sh"
         tracked = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, text=True, check=True).stdout.split("\0")
-        named, commands, other = [], 0, []
-        # Where commands are written: pages, workflows, scripts.
+        named = []
         for name in tracked:
             if not name.endswith((".md", ".yml", ".sh", ".toolchain")):
                 continue
@@ -854,12 +851,91 @@ class Image(unittest.TestCase):
                 lines = file.read().splitlines()
             if any(tag in line for line in lines):
                 named.append(name)
-            runs = [line for line in lines if "docker run" in line and "b3sum-release-container.sh" in line]
-            commands += len(runs)
-            other += [f"{name}: {line.strip()}" for line in runs if reads not in line]
-        self.assertEqual(named, ["tools/b3sum-release.toolchain"])
-        self.assertEqual(other, [])
-        self.assertEqual(commands, 5, "two pages, the script's own header, two workflows")
+        self.assertEqual(named, ["tools/release.toolchain"])
+
+
+class PostSplitRelease(unittest.TestCase):
+    """End-to-end checks on a post-split library-only release (no b3sum/Cargo.toml):
+    published(), directory(), and named-builder rebuilt_problems()."""
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.repo = scratch.name
+        for cmd in (
+            ["init", "-q", "--initial-branch=main"],
+            ["config", "user.name", "A Test"],
+            ["config", "user.email", "test@example.invalid"],
+            ["config", "commit.gpgsign", "false"],
+            ["config", "core.hooksPath", os.path.join(self.repo, "no-hooks")],
+        ):
+            subprocess.run(["git", "-C", self.repo, *cmd], check=True, capture_output=True)
+        for rel, name in (("version/Cargo.toml", "blake3-servil-version"), ("Cargo.toml", "blake3-servil-core"), ("threads/Cargo.toml", "blake3-servil")):
+            full = os.path.join(self.repo, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write(f'[package]\nname = "{name}"\nversion = "0.12.0+dev"\n')
+        subprocess.run(["git", "-C", self.repo, "add", "."], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.repo, "commit", "-qm", "code"], check=True, capture_output=True)
+        self.code = subprocess.check_output(["git", "-C", self.repo, "rev-parse", "HEAD"], text=True).strip()
+        self.version = "0.12.0+" + self.code
+        for rel in ("version/Cargo.toml", "Cargo.toml", "threads/Cargo.toml"):
+            full = os.path.join(self.repo, rel)
+            with open(full) as f:
+                text = f.read().replace("0.12.0+dev", self.version)
+            with open(full, "w") as f:
+                f.write(text)
+        subprocess.run(["git", "-C", self.repo, "commit", "-qam", "Version " + self.version], check=True, capture_output=True)
+        self.commit = subprocess.check_output(["git", "-C", self.repo, "rev-parse", "HEAD"], text=True).strip()
+        self.tag = "v" + self.version
+        subprocess.run(["git", "-C", self.repo, "tag", self.tag], check=True, capture_output=True)
+        self.release = ra.Release(self.tag, self.repo)
+
+    def _crate_bytes(self, crate, folder):
+        manifest = os.path.join(folder, "Cargo.toml") if folder else "Cargo.toml"
+        data = self.release.file(manifest)
+        prefix = f"{crate}-{self.version}"
+        return tar_gz({
+            f"{prefix}/.cargo_vcs_info.json": json.dumps({"git": {"sha1": self.commit}, "path_in_vcs": folder}).encode(),
+            f"{prefix}/Cargo.toml.orig": data,
+            f"{prefix}/Cargo.toml": b"[package]\n",
+        })
+
+    def test_published_and_rebuilt_builders_work_for_library_only_release(self):
+        self.assertFalse(self.release.has_b3sum())
+        self.assertEqual(self.release.crate_dirs(), ("version", "", "threads"))
+        crates = {
+            f"blake3-servil-version-{self.version}.crate": self._crate_bytes("blake3-servil-version", "version"),
+            f"blake3-servil-core-{self.version}.crate": self._crate_bytes("blake3-servil-core", ""),
+            f"blake3-servil-{self.version}.crate": self._crate_bytes("blake3-servil", "threads"),
+        }
+        self.assertEqual(sorted(ra.expected(self.release)), sorted(crates))
+        self.assertEqual(ra.expected_program_digests(self.release), [])
+
+        # published() fetches ONLY the 3 library crates and never calls release.crate("b3sum").
+        def fake_fetch(url):
+            if "/releases/tags/" in url:
+                return json.dumps({"assets": []}).encode()
+            for name, raw in crates.items():
+                if url.endswith("/" + name) or url.endswith(name.replace("+", "%2B")):
+                    return raw
+            raise not_found(url)
+
+        builders = ["crates-X64=x86_64-unknown-linux-gnu", "crates-ARM64=aarch64-unknown-linux-gnu"]
+        with tempfile.TemporaryDirectory() as rebuilt:
+            for b in ("crates-X64", "crates-ARM64"):
+                os.makedirs(os.path.join(rebuilt, b))
+                for name, raw in crates.items():
+                    with open(os.path.join(rebuilt, b, name), "wb") as f:
+                        f.write(raw)
+            with patch.object(ra, "fetch", fake_fetch):
+                bad = ra.check(ra.published(self.release), self.release, out=io.StringIO(), rebuilt=rebuilt, builders=builders)
+            self.assertEqual(bad, 0)
+            # Unexpected b3sum binary inside a post-split builder folder must fail.
+            with open(os.path.join(rebuilt, "crates-X64", f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"), "wb") as f:
+                f.write(b"stray")
+            problems = ra.rebuilt_problems(next(iter(crates)), next(iter(crates.values())), rebuilt, named=builders, release=self.release)
+            self.assertTrue(any("unexpected file" in p for p in problems), problems)
 
 
 if __name__ == "__main__":

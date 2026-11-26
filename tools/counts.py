@@ -10,7 +10,6 @@
 Ratcheted counts (must not rise above BASE; comments, strings, and test-only
 modules/files are excluded via `unsafe_reasons.non_test_lines`):
   undocumented_unsafe   `unsafe` blocks / `unsafe impl` without `// Sound:`
-  b3sum_print_macros    `print!` / `println!` / `eprint!` / `eprintln!` in `b3sum/src/`
   truncation_allows     `#[allow(...clippy::cast_possible_truncation...)]` attributes
   debug_asserts         `debug_assert*!` invocations in shipped code
 
@@ -28,12 +27,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unsafe_reasons as ur
 
-PRINT_RE = re.compile(r"\b(?:e?println|e?print)!")
 TRUNC_ALLOW_RE = re.compile(r"#!?\[[^\]]*\ballow\s*\([^)]*\bclippy::cast_possible_truncation\b")
 DEBUG_ASSERT_RE = re.compile(r"\bdebug_assert(?:_eq|_ne)?!")
 CFG_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
 
-RATCHETED = ("undocumented_unsafe", "b3sum_print_macros", "truncation_allows", "debug_asserts")
+RATCHETED = ("undocumented_unsafe", "truncation_allows", "debug_asserts")
 
 
 def read_tree(rev=None):
@@ -53,7 +51,6 @@ def read_tree(rev=None):
 def measure_files(files):
     counts = {
         "undocumented_unsafe": 0,
-        "b3sum_print_macros": 0,
         "truncation_allows": 0,
         "debug_asserts": 0,
         "shipped_code_lines": 0,
@@ -67,8 +64,6 @@ def measure_files(files):
             if code.strip():
                 counts["shipped_code_lines"] += 1
         body = "\n".join(code_lines)
-        if rel.startswith("b3sum/src/"):
-            counts["b3sum_print_macros"] += len(PRINT_RE.findall(body))
         counts["truncation_allows"] += len(TRUNC_ALLOW_RE.findall(body))
         counts["debug_asserts"] += len(DEBUG_ASSERT_RE.findall(body))
         counts["cfg_conditions"] += len(CFG_RE.findall(body))

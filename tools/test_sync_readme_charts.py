@@ -27,15 +27,6 @@ def make_hash_svg(ver: str, measured: str = "2026-11-25 06:52:38 UTC") -> str:
     )
 
 
-def make_b3sum_svg(ver: str, measured: str = "2026-11-25 07:01:43 UTC") -> str:
-    return (
-        "<svg xmlns='http://www.w3.org/2000/svg'>\n"
-        f"<text>AMD EPYC 9255 · measured {measured}</text>\n"
-        f"<text>b3sum {ver}+abc (each build)</text>\n"
-        "</svg>\n"
-    )
-
-
 class SyncReadmeChartsTests(unittest.TestCase):
     def test_parse_cargo_ignores_dependency_versions(self):
         self.assertEqual(charts.parse_cargo_base_version(CARGO_011), "0.11.0")
@@ -47,20 +38,19 @@ class SyncReadmeChartsTests(unittest.TestCase):
         new_style = make_hash_svg("0.11.0")
         self.assertEqual(charts.parse_chart_version(old_style, "hash"), "0.8.0")
         self.assertEqual(charts.parse_chart_version(new_style, "hash"), "0.11.0")
-        self.assertEqual(charts.parse_chart_version(make_b3sum_svg("0.11.0"), "b3sum"), "0.11.0")
         self.assertIsNone(charts.parse_chart_version("not an svg BLAKE3-Servil 0.11.0", "hash"))
 
     def test_check_chart_texts_accepts_matching_and_rejects_stale_or_missing(self):
-        ok, detail = charts.check_chart_texts(CARGO_011, make_hash_svg("0.11.0"), make_b3sum_svg("0.11.0"))
+        ok, detail = charts.check_chart_texts(CARGO_011, make_hash_svg("0.11.0"))
         self.assertTrue(ok, detail)
 
-        ok, detail = charts.check_chart_texts(CARGO_011, make_hash_svg("0.8.0"), make_b3sum_svg("0.11.0"))
+        ok, detail = charts.check_chart_texts(CARGO_011, make_hash_svg("0.8.0"))
         self.assertFalse(ok)
         self.assertIn("hash-epyc-128mib.svg is 0.8.0, expected 0.11.0", detail)
 
-        ok, detail = charts.check_chart_texts(CARGO_011, make_hash_svg("0.11.0"), None)
+        ok, detail = charts.check_chart_texts(CARGO_011, None)
         self.assertFalse(ok)
-        self.assertIn("b3sum-epyc-1000-files.svg is missing", detail)
+        self.assertIn("hash-epyc-128mib.svg is missing", detail)
 
     def test_sync_picks_newest_measured_machine_and_validates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,7 +60,6 @@ class SyncReadmeChartsTests(unittest.TestCase):
             (repo / "docs/images").mkdir(parents=True)
             (repo / "Cargo.toml").write_text(CARGO_011, encoding="utf-8")
             (repo / "docs/images/hash-epyc-128mib.svg").write_text(make_hash_svg("0.8.0"), encoding="utf-8")
-            (repo / "docs/images/b3sum-epyc-1000-files.svg").write_text(make_b3sum_svg("0.8.0"), encoding="utf-8")
 
             # Older kernel dir has 0.8.0; newer kernel dir has 0.11.0.
             old_dir = bench / "benchmark-results/AMDEPYC925524CoreProcessor.linux70038generic"
@@ -78,9 +67,7 @@ class SyncReadmeChartsTests(unittest.TestCase):
             old_dir.mkdir(parents=True)
             new_dir.mkdir(parents=True)
             (old_dir / "bench-hashes.chart.svg").write_text(make_hash_svg("0.8.0", "2026-11-03 00:13:52 UTC"), encoding="utf-8")
-            (old_dir / "b3sum.chart.svg").write_text(make_b3sum_svg("0.8.0", "2026-11-03 00:19:24 UTC"), encoding="utf-8")
             (new_dir / "bench-hashes.chart.svg").write_text(make_hash_svg("0.11.0", "2026-11-25 06:52:38 UTC"), encoding="utf-8")
-            (new_dir / "b3sum.chart.svg").write_text(make_b3sum_svg("0.11.0", "2026-11-25 07:01:43 UTC"), encoding="utf-8")
 
             self.assertEqual(charts.main(["--repo", str(repo), "--check"]), 1)
             self.assertEqual(charts.main(["--repo", str(repo), "--bench", str(bench)]), 0)
@@ -104,9 +91,10 @@ class SyncReadmeChartsTests(unittest.TestCase):
             d = bench / "benchmark-results/AMDEPYC925524CoreProcessor.linux70043generic"
             d.mkdir(parents=True)
             (d / "bench-hashes.chart.svg").write_text(make_hash_svg("0.11.0"), encoding="utf-8")
-            (d / "b3sum.chart.svg").write_text(make_b3sum_svg("0.11.0"), encoding="utf-8")
             subprocess.run(["git", "-C", str(bench), "add", "."], check=True)
             subprocess.run(["git", "-C", str(bench), "commit", "-qm", "charts"], check=True)
+            # Mutate the working tree to a stale version so sync must actually read git_ref="next".
+            (d / "bench-hashes.chart.svg").write_text(make_hash_svg("0.8.0"), encoding="utf-8")
 
             repo = root / "BLAKE3"
             repo.mkdir()

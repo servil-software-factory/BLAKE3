@@ -22,9 +22,9 @@ class Gates(unittest.TestCase):
             self.assertEqual(land.required([path]), shipped_perf, path)
         for path in ("Cargo.lock", "threads/Cargo.lock"):
             self.assertEqual(land.required([path]), base + ("cells",), f"perf lockfile only: {path}")
-        for path in ("b3sum/src/main.rs", "b3sum/Cargo.toml", "capi/b3.h", "capi/src/lib.rs"):
+        for path in ("capi/b3.h", "capi/src/lib.rs", "capi/Cargo.toml"):
             self.assertEqual(land.required([path]), shipped_non_perf, f"shipped but not benchmarked lib: {path}")
-        for path in ("tools/land.py", "tools/runner/runner.py", "tools/mutants/known-arm64.txt", ".github/workflows/ci.yml", "tests/lifecycle.rs", "b3sum/tests/cli_tests.rs"):
+        for path in ("tools/land.py", "tools/runner/runner.py", "tools/mutants/known-arm64.txt", ".github/workflows/ci.yml", "tests/lifecycle.rs"):
             self.assertEqual(land.required([path]), base, f"not shipped code: {path}")
         self.assertEqual(land.required(["c/blake3_neon_hybrid_aarch64.S"]), shipped_perf + ("long proofs",))
         for path in ("tools/verify/canon.py", "tools/gen_neon_hybrid.py", "c2sp/BLAKE3/Blake3.lean"):
@@ -141,7 +141,7 @@ class Subjects(unittest.TestCase):
 class Landable(unittest.TestCase):
     def test_the_status_text_fits_github_for_every_set_of_gates(self):
         base = "0123456789abcdef"
-        for paths in (["CONTRIBUTING.md"], ["tools/land.py"], ["b3sum/src/main.rs"], ["src/lib.rs"], ["c/x.S"]):
+        for paths in (["CONTRIBUTING.md"], ["tools/land.py"], ["capi/src/lib.rs"], ["src/lib.rs"], ["c/x.S"]):
             text = land.landable(base, list(land.required(paths)))
             self.assertLessEqual(len(text), 140, paths)
             self.assertTrue(text.startswith("every gate green on top of 0123456789ab: "))

@@ -31,14 +31,13 @@ jobs:
     - name: cargo fmt --check, in each crate
       run: for d in $(git ls-files '*Cargo.toml' | xargs -n1 dirname); do (cd "$d" && cargo fmt --all -- --check) || exit 1; done
 
-  # Both locked resolutions — the release workspace
-  # (tools/release/Cargo.lock) and standalone b3sum (b3sum/Cargo.lock) —
-  # under every feature, against the policy (deny.toml: advisories, yanked
-  # versions, sources, licences) and the audits (tools/release/supply-chain/:
-  # a published audit or a recorded exemption for each version); and no
-  # package taken by path but the four. CONTRIBUTING.md, "The dependency
-  # policy". Both tools are fetched by their hashes, and the release's cargo
-  # reads the locks.
+  # The locked release workspace (tools/release/workspace.toml and
+  # tools/release/Cargo.lock) under every feature, against the policy
+  # (deny.toml: advisories, yanked versions, sources, licences) and the audits
+  # (tools/release/supply-chain/: a published audit or a recorded exemption for
+  # each version); and no package taken by path but the five workspace crates.
+  # CONTRIBUTING.md, "The dependency policy". Both tools are fetched by their
+  # hashes, and the release's cargo reads the lock.
   dependency_policy:
     name: "dependency policy (cargo-deny, cargo-vet)"
     runs-on: ubuntu-latest
@@ -116,35 +115,6 @@ jobs:
       env:
         CARGO_PROFILE_RELEASE_PANIC: abort
 
-  b3sum_tests:
-    name: b3sum ${{ matrix.target.name }} ${{ matrix.channel }}
-    runs-on: ${{ matrix.target.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # x86 alone: the AArch64 builds run on the VM and the Mac
-        # (tools/check-builds.sh and the suites), where the x86 feature
-        # flags below would build the same code each time.
-        target: [
-          { "os": "ubuntu-latest",    "toolchain": "x86_64-unknown-linux-gnu",  "name": "Linux GNU" }
-        ]
-        channel: ["stable", "nightly"]
-
-    steps:
-    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-    - run: sh tools/ci-rust.sh ${{ matrix.channel }}
-    - run: sh tools/ci-tools.sh nextest
-    # Test b3sum (locked against b3sum/Cargo.lock, gated by dependency_policy).
-    - name: test b3sum
-      run: cargo nextest run --locked
-      working-directory: ./b3sum
-    - name: Make sure enabling LTO via CFLAGS doesn't break the build.
-      run: cargo build --locked
-      env:
-        CFLAGS: -flto
-      working-directory: ./b3sum
-
   aarch64_without_sme2:
     # The AArch64 paths our machines (an M4 Max and a VM on it) never run:
     # a CPU without SME2 (this runner, a Neoverse N2), and one without the
@@ -175,8 +145,7 @@ jobs:
       run: |
         curl -sSfLO --retry 3 https://snapshot.debian.org/archive/debian/20261115T000000Z/pool/main/q/qemu/qemu-user_11.1.2+ds-3_arm64.deb
         echo "e278d393447a97b548728918af8e395a33086f5b7100138e38cf06a41766612e  qemu-user_11.1.2+ds-3_arm64.deb" | sha256sum -c
-        echo "7c3f49bb0945cf7e2148480118a34dc34ef1641cf5f83f0137996b78f2202945  qemu-user_11.1.2+ds-3_arm64.deb" > qemu.b3
-        cargo run -q --release --locked --manifest-path b3sum/Cargo.toml -- -c qemu.b3
+        test "$(python3 tools/blake3_ref.py qemu-user_11.1.2+ds-3_arm64.deb)" = "7c3f49bb0945cf7e2148480118a34dc34ef1641cf5f83f0137996b78f2202945  qemu-user_11.1.2+ds-3_arm64.deb"
         ar x qemu-user_11.1.2+ds-3_arm64.deb data.tar.xz && tar xJf data.tar.xz ./usr/bin/qemu-aarch64
         sudo install usr/bin/qemu-aarch64 /usr/local/bin/qemu-aarch64 && qemu-aarch64 --version
     - run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --lib --tests
@@ -212,8 +181,7 @@ jobs:
       run: |
         curl -sSfLO --retry 3 https://snapshot.debian.org/archive/debian/20261115T000000Z/pool/main/q/qemu/qemu-user_11.1.2+ds-3_arm64.deb
         echo "e278d393447a97b548728918af8e395a33086f5b7100138e38cf06a41766612e  qemu-user_11.1.2+ds-3_arm64.deb" | sha256sum -c
-        echo "7c3f49bb0945cf7e2148480118a34dc34ef1641cf5f83f0137996b78f2202945  qemu-user_11.1.2+ds-3_arm64.deb" > qemu.b3
-        cargo run -q --release --locked --manifest-path b3sum/Cargo.toml -- -c qemu.b3
+        test "$(python3 tools/blake3_ref.py qemu-user_11.1.2+ds-3_arm64.deb)" = "7c3f49bb0945cf7e2148480118a34dc34ef1641cf5f83f0137996b78f2202945  qemu-user_11.1.2+ds-3_arm64.deb"
         ar x qemu-user_11.1.2+ds-3_arm64.deb data.tar.xz && tar xJf data.tar.xz ./usr/bin/qemu-aarch64
         sudo install usr/bin/qemu-aarch64 /usr/local/bin/qemu-aarch64 && qemu-aarch64 --version
     - name: verify QEMU reports Linux SME2 (512-bit SVL)
@@ -293,7 +261,7 @@ jobs:
           cat /proc/cpuinfo
           curl --proto "=https" --tlsv1.2 -sSfL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init
           echo "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55  /tmp/rustup-init" | sha256sum -c
-          chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain "$(sed -n "s/^rustc //p" /work/tools/b3sum-release.toolchain)" && rm /tmp/rustup-init
+          chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain "$(sed -n "s/^rustc //p" /work/tools/release.toolchain)" && rm /tmp/rustup-init
           sh tools/ci-tools.sh nextest
           export CARGO=~/.cargo/bin/cargo
           sh tools/ci-locked.sh nextest run -p blake3-servil-core
@@ -339,10 +307,9 @@ jobs:
       run: |
         curl -sSfL -o sde.tar.xz https://downloadmirror.intel.com/859732/sde-external-9.58.0-2025-06-16-lin.tar.xz
         echo "f849acecad4c9b108259c643b2688fd65c35723cd23368abe5dd64b917cc18c0  sde.tar.xz" | sha256sum -c
-        echo "22b6383cfadc97177e0bf3e432ca339a734222b53fb8c00d4a6e51797d96f27f  sde.tar.xz" > sde.b3
-        cargo run -q --release --locked --manifest-path b3sum/Cargo.toml -- -c sde.b3
+        test "$(python3 tools/blake3_ref.py sde.tar.xz)" = "22b6383cfadc97177e0bf3e432ca339a734222b53fb8c00d4a6e51797d96f27f  sde.tar.xz"
         mkdir "$RUNNER_TEMP/sde" && tar xJf sde.tar.xz -C "$RUNNER_TEMP/sde" --strip-components=1
-        rm sde.tar.xz sde.b3
+        rm sde.tar.xz
         "$RUNNER_TEMP/sde/sde64" -version | head -n 1
     - if: matrix.cpu.suite != 'threads'
       run: sh tools/ci-locked.sh nextest run -p blake3-servil-core --release --lib --tests --no-run
@@ -371,8 +338,8 @@ jobs:
     # In the container releases are built in, with LLVM 18 from the day of
     # Ubuntu's archive the toolchain file names (GitHub's image has no
     # llvm-objdump): what the check installs is the same on every run.
-    # ca-certificates comes first, from the archive of the day, as in
-    # tools/b3sum-release-container.sh: the snapshot is served over HTTPS.
+    # ca-certificates comes first, from the archive of the day: the snapshot
+    # is served over HTTPS.
     # Cache the downloaded .deb archives and z3 wheel across runs so slow
     # snapshot.ubuntu.com fetches do not push this job near its 30-minute
     # timeout. apt still verifies every cached .deb against the signed
@@ -382,7 +349,7 @@ jobs:
         path: |
           /tmp/x86-model-apt
           /tmp/x86-model-pip
-        key: x86-model-v1-${{ hashFiles('tools/b3sum-release.toolchain') }}-z3-5.4.1.0
+        key: x86-model-v1-${{ hashFiles('tools/release.toolchain') }}-z3-5.4.1.0
     - run: |
         mkdir -p /tmp/x86-model-apt /tmp/x86-model-pip
         printf '%s\n' \
@@ -395,9 +362,9 @@ jobs:
           -v /tmp/z3.req:/tmp/z3.req:ro \
           -v /tmp/x86-model-apt:/var/cache/apt/archives \
           -v /tmp/x86-model-pip:/root/.cache/pip \
-          -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh -euc '
+          -w /src "$(sed -n 's/^image //p' tools/release.toolchain)" sh -euc '
           rm -f /etc/apt/apt.conf.d/docker-clean
-          snapshot=$(sed -n "s/^apt-snapshot //p" tools/b3sum-release.toolchain)
+          snapshot=$(sed -n "s/^apt-snapshot //p" tools/release.toolchain)
           export DEBIAN_FRONTEND=noninteractive
           apt="apt-get -q -o Acquire::Retries=5 -o Acquire::http::Timeout=30"
           retry() {
@@ -418,12 +385,12 @@ jobs:
           chmod -R a+rX /var/cache/apt/archives /root/.cache/pip
           python3 tools/verify/cross_check_x86.py'
 
-  b3sum_release_build:
-    # b3sum's release binary, built as a release builds it
-    # (tools/b3sum-release.sh): for a version commit, the second build
+  crates_release_build:
+    # The three published library crates, packaged as a release packages them
+    # (tools/crates-release.sh): for a version commit, the second build
     # that tools/release-check.py compares ours with, byte for byte; for
     # every other commit, the proof that the script still works.
-    name: b3sum release build
+    name: crates release build
     strategy:
       fail-fast: false
       matrix:
@@ -435,10 +402,11 @@ jobs:
       with:
         # The commit and its parent: a version commit names its parent.
         fetch-depth: 2
-    - run: docker run --rm -e B3SUM_RELEASE_ANY_COMMIT=1 -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
+    - run: sh tools/ci-rust.sh stable
+    - run: RELEASE_ANY_COMMIT=1 sh tools/crates-release.sh --no-verify
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: b3sum-${{ runner.arch }}
+        name: crates-${{ runner.arch }}
         path: dist/
 
   python_tools:

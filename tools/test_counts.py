@@ -18,35 +18,31 @@ class CountsControls(unittest.TestCase):
             '    let x = 1;\n'
             '}\n'
         )
-        c = counts.measure_files({"b3sum/src/x.rs": src})
+        c = counts.measure_files({"src/x.rs": src})
         self.assertEqual(c["debug_asserts"], 2)
-        self.assertEqual(c["b3sum_print_macros"], 0)
         self.assertEqual(c["truncation_allows"], 0)
         self.assertEqual(c["undocumented_unsafe"], 0)
 
-    def test_detects_allow_truncation_and_b3sum_print_and_undocumented_unsafe(self):
+    def test_detects_allow_truncation_and_undocumented_unsafe(self):
         src = (
             '#[allow(clippy::cast_possible_truncation)]\n'
             'fn bad() {\n'
-            '    println!("nope");\n'
             '    let _ = unsafe { 1 };\n'
             '}\n'
         )
-        c = counts.measure_files({"b3sum/src/x.rs": src})
+        c = counts.measure_files({"src/x.rs": src})
         self.assertEqual(c["truncation_allows"], 1)
-        self.assertEqual(c["b3sum_print_macros"], 1)
         self.assertEqual(c["undocumented_unsafe"], 1)
 
     def test_ignores_cfg_test_but_checks_cfg_not_test(self):
         src = (
             '#[cfg(test)]\n'
-            'mod t { fn x() { debug_assert!(true); println!("ok"); } }\n'
+            'mod t { fn x() { debug_assert!(true); } }\n'
             '#[cfg(not(test))]\n'
             'mod prod { fn y() { debug_assert!(true); } }\n'
         )
-        c = counts.measure_files({"b3sum/src/x.rs": src})
+        c = counts.measure_files({"src/x.rs": src})
         self.assertEqual(c["debug_asserts"], 1)
-        self.assertEqual(c["b3sum_print_macros"], 0)
 
 
 if __name__ == "__main__":

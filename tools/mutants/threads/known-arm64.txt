@@ -151,7 +151,6 @@ src/lanes.rs	replace places::allowed_from_status -> Option<Set> with None	1	comp
 src/lanes.rs	replace places::allowed_from_status -> Option<Set> with Some(Default::default())	1	compiled out off Linux: parsing Cpus_allowed_list from /proc status
 src/lanes.rs	replace places::cap_default_threads -> usize with 0	1	compiled out off Linux: capping default pool threads by node or affinity
 src/lanes.rs	replace places::cap_default_threads -> usize with 1	1	compiled out off Linux: capping default pool threads by node or affinity
-src/lanes.rs	replace places::confine_cli_thread with ()	1	compiled out off Linux: setting the CLI's node affinity
 src/lanes.rs	replace places::cpu_set -> Option<Set> with None	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace places::cpu_set -> Option<Set> with Some(Default::default())	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace places::has -> bool with false	1	compiled out off Linux: testing a member of a CPU or node set
@@ -164,7 +163,6 @@ src/lanes.rs	replace places::online_nodes -> Option<Set> with Some(Default::defa
 src/lanes.rs	replace |= with &= in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace |= with &= in places::cpu_set	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace || with && in places::number	2	compiled out off Linux: parsing Linux CPU lists
-src/lib.rs	replace __confine_cli_to_one_node with ()	1	compiled out off Linux: setting the CLI's node affinity
 src/lib.rs	replace __all_workers_parked -> bool with true	1	a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	speed: changes how many parked workers a publisher wakes or owes (BLAKE3 #119: every wake direct, the cascade alone and 8 direct measured 4-25% apart on the EPYC and the i7); no result waits on a worker waking: the publisher hashes every piece no worker takes, and finish.rs's handshake wakes a waiting caller

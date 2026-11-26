@@ -32,12 +32,12 @@ release's measure of assurance.
 | Worker reads state after its owner frees it | Worker-facing `PipeSlot` (`Source`, `WakerSlot`, and monotonic completion lines) lives for the process; per-Pipeline `PipeStorage` (`Rooms`, groups, pieces, slots) is freed after all dispatched work publishes completion, the Pipeline drops, and the last surviving `Room` drops (completed `Lent` guards observe the retained slot), with every `&PipeStorage` borrow ending before the worker's completion atomic | weak-memory execution and schedules outside Shuttle's SeqCst model |
 | A wait loses a wake or races on a waker | Shuttle checks the production finish/park/waker modules; `tools/check-waker-order.py` compiles the Apple Arm64 wait handshakes (`WakerSlot`, `Park`, `sme2_serve`) and verifies their fences against `RCpc` loads, rejecting unfenced controls | every possible schedule, or weak-memory paths outside those handshakes |
 | The Pipeline hands a result, a Room or a storage over too early, or loses a wake | Shuttle runs the whole of `pipeline.rs` against a stand-in pool; seventeen planted faults each make that model fail | schedules not tried, weak-memory execution, and the pool itself, which the model replaces |
-| An `unsafe` block rests on a reason no one wrote down | every `unsafe` block across all five shipped crates and build scripts carries a `// Sound:` comment verified by `tools/unsafe_reasons.py` (0 undocumented blocks); `tools/counts.py` blocks rising counts of undocumented `unsafe`, `debug_assert!`, and narrowing-cast allows | that each stated reason is true: they are read by people and by the audits, not proved |
-| Kernel still writes an I/O buffer after error recovery frees it | failed `io_uring_enter` aborts before recovery or unwind; a ring dropped with reads in flight aborts; a panic in `b3sum` aborts | every other lifetime or cancellation path |
-| File name replaced after the file is opened | every path hashes the file already open; direct reads reopen that descriptor through procfs | a coherent snapshot against concurrent writes to that inode: a file changed while it is hashed can give the hash of bytes it never held (`b3sum/README.md`, #443) |
+| An `unsafe` block rests on a reason no one wrote down | every `unsafe` block across all four shipped crates (`version`, `core`, `threads`, `capi`) and build scripts carries a `// Sound:` comment verified by `tools/unsafe_reasons.py` (0 undocumented blocks); `tools/counts.py` blocks rising counts of undocumented `unsafe`, `debug_assert!`, and narrowing-cast allows | that each stated reason is true: they are read by people and by the audits, not proved |
+| Kernel still writes an I/O buffer after error recovery frees it | failed `io_uring_enter` aborts before recovery or unwind; a ring dropped with reads in flight aborts; a panic in `b3sum` (`servil-software-factory/b3sum`) aborts | every other lifetime or cancellation path |
+| File name replaced after the file is opened | every path in `b3sum` (`servil-software-factory/b3sum`) hashes the file already open; direct reads reopen that descriptor through procfs | a coherent snapshot against concurrent writes to that inode: a file changed while it is hashed can give the hash of bytes it never held (`servil-software-factory/b3sum`, #443) |
 | Incomplete output, or empty verification input, reported as success | output errors propagated; each checkfile must contain a line, and each invalid line fails | complete directory verification or authentication of the expected digests |
 | A tree built from parts that are not BLAKE3's subtrees, or joined in the wrong place, gives a hash that is no BLAKE3 hash | `TreeHasher` names a whole subtree by level and index and types the message's last subtree apart (`Cv`, `LastCv`); each value carries its place, and every join and the root compare places and the message's length in every build. `tests/tree_shape.rs`: 4,032 trees equal official BLAKE3, each wrong shape refused; within 16 chunks, every pairing of values (9,889) is taken if and only if a rule written apart from the library's makes the two children of one parent; three examples must fail to compile, each for its named reason | that the bytes handed over are the message's bytes at the place named; a place a program gives a stored value itself (`Cv::at`) |
-| A `b3sum` protection lost in a later change | `tools/b3sum_controls.py` takes eleven of them out one at a time; the test for each must fail | protections it does not list; `b3sum` is outside the mutation gate |
+| A `b3sum` protection lost in a later change | `tools/b3sum_controls.py` in [`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum) takes eleven of them out one at a time in CI; the test for each must fail | protections it does not list |
 
 The rows from the Pipeline's model on are additions for 0.10.0. The I/O
 ones change production behavior; their fault controls are described below.
@@ -70,7 +70,7 @@ algorithm:
   `throughput::update_each`, `src/each.rs`);
 - the Pipeline's message/room/loan lifetimes (`threads/src/pipeline.rs`);
 - `b3sum`'s direct and asynchronous reads, checkfile parser and outboard
-  writer (`b3sum/src/`);
+  writer (moved to [`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum));
 - the startup self-test (`src/self_test.rs`);
 - the C API (`capi/b3.h` over the crate, `capi/src/lib.rs`), tested
   through every call against the official test vectors, and from a C
@@ -306,8 +306,10 @@ authenticate a binary.
 These tests exercise the actual CLI or the production syscall wrapper,
 not an independent model of them. Run on Linux, with cargo-nextest:
 
+In [`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum):
+
 ```sh
-cargo nextest run --release --manifest-path b3sum/Cargo.toml --tests \
+cargo nextest run --release --tests \
   -E 'test(test_output_error_is_failure) | test(test_empty_checkfile_is_failure) | test(direct_reads_keep_the_open_file) | test(failed_enter_stops_before_unwinding)'
 ```
 
@@ -337,7 +339,7 @@ The output, empty-checkfile and pathname tests failed on the old code.
 The enter test rejected the planted continuation. These are checks of
 specific faults, not evidence that all I/O failures are safe.
 
-`python3 tools/b3sum_controls.py` repeats such controls by program, for
+`python3 tools/b3sum_controls.py` (in `servil-software-factory/b3sum`) repeats such controls by program, for
 these four protections and seven more (the file's end on a direct read
 and on a sized read, the small file's slot, the buffer sized by what was
 read, the descriptor table, a ring dropped with reads in flight, and
@@ -450,17 +452,20 @@ Two programs check a release's artifacts against its version commit
 (`CONTRIBUTING.md`, "Every artifact is a clean build of the version
 commit"). `tools/release_artifacts.py` compares each crate with the
 commit file by file, reads each program's build version, and holds each
-`.sha256` and `.b3` files to the artifact beside them. `b3sum`'s Linux binaries and
-the four crates are also reproducible: `tools/b3sum-release.sh` and
-`tools/crates-release.sh` give the same bytes on any machine from the
-same commit, the toolchain it names and the dependency lock it holds
+`.sha256` and `.b3` files to the artifact beside them. The three published
+library crates are reproducible: `tools/crates-release.sh` gives the same
+bytes on any machine from the same commit, the toolchain it names
+(`tools/release.toolchain`) and the dependency lock it holds
+(`tools/release/Cargo.lock`). `b3sum`'s Linux binaries build reproducibly in
+[`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum).
 (`tools/release/Cargo.lock`; a dependency changes only by a commit).
 Before a release our build must equal GitHub's, byte for byte; after it
 a workflow rebuilds the tag and compares what was published. The tag's
 name holds the code commit's hash, the tag's commit must be that commit
 with the version written in and nothing else, and on GitHub a release
 tag can be neither moved nor deleted.
-You can do the same with Docker (`b3sum/README.md`). A binary that
+You can rebuild the library crates with `sh tools/crates-release.sh` (or
+`b3sum` with Docker in [`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum)). A crate or binary that
 differs from your rebuild was not built from the source, whatever its
 checksums say. 0.9.0's binaries predate this: they were built in
 checkouts that held untracked files (#435).
@@ -484,7 +489,7 @@ For `b3sum --check`, expected digests must arrive through a trusted
 channel. It checks listed files, not absence of additional files or
 presence of omitted entries. An empty checkfile now fails, but a
 partially deleted manifest may still pass. See
-[`what_does_check_do.md`](../b3sum/what_does_check_do.md).
+[`what_does_check_do.md`](https://github.com/servil-software-factory/b3sum/blob/main/what_does_check_do.md).
 
 ## Proofs
 
@@ -663,7 +668,6 @@ To run the full test and check suite (which also compiles the official
 git clone -b main https://github.com/servil-software-factory/BLAKE3 && cd BLAKE3
 cargo nextest run --release --lib --tests         # the one-thread crate
 cargo nextest run --release --manifest-path threads/Cargo.toml --lib --tests
-cargo nextest run --release --manifest-path b3sum/Cargo.toml --lib --tests
 cargo test --release --doc                        # each doc example in its own process
 cargo nextest run --release --manifest-path test_vectors/Cargo.toml
 cargo nextest run --release --manifest-path capi/Cargo.toml   # the C API

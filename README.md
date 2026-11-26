@@ -84,7 +84,8 @@ let hash = blake3_servil::convenience::hash(b"foobarbaz");
 
 The [crate documentation](https://servil-software-factory.github.io/BLAKE3/blake3_servil/) covers the
 calls for programs that hash a lot, and the C library in [`capi/`](capi/).
-[`b3sum/README.md`](b3sum/README.md) covers the command-line tool.
+The command-line tool `b3sum` lives in its own repository,
+[`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum).
 
 It runs on 64-bit Arm (Linux, macOS) and x86-64 (Linux, a CPU with SSSE3 and SSE4.1: Intel since
 2008, AMD since 2011) with the latest stable Rust; [official BLAKE3](https://github.com/BLAKE3-team/BLAKE3)

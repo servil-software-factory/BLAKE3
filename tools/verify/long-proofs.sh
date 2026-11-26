@@ -98,7 +98,7 @@ else
 	run cross_check "$LONG_PROOFS_ARM" "$commit"
 fi
 run mutants python3 tools/verify/mutants.py
-b3=$(cat "$logs"/*.txt | cargo run -q --release --manifest-path b3sum/Cargo.toml -- --no-names)
+b3=$(cat "$logs"/*.txt | python3 -c 'import sys; sys.path.insert(0, "tools"); import blake3_ref; h = blake3_ref.Hasher(); [h.update(c) for c in iter(lambda: sys.stdin.buffer.read(65536), b"")]; print(h.hexdigest())')
 sha=$(cat "$logs"/*.txt | sha256sum | cut -d' ' -f1)
 # The status's description holds 140 characters: the logs' two hashes,
 # each whole in base64url (RFC 4648, 43 characters for 256 bits), fit
