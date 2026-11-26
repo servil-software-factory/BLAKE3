@@ -248,7 +248,6 @@ src/many.rs	replace | with ^ in hash_group_across_with_cvs	2	same code: every te
 src/many.rs	replace | with ^ in hash_run	3	equivalent: mode flags use bits 4 through 6; CHUNK_START, CHUNK_END and ROOT use bits 0, 1 and 3. Each combination uses disjoint bits.
 src/many.rs	replace | with ^ in hash_run_padded	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in hash_two_chunks	1	equivalent: | and ^ agree on flag bits that never overlap
-src/many.rs	replace | with ^ in neon_plans_last_len	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in subtree_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in whole_messages	4	equivalent: mode flags use bits 4 through 6; CHUNK_START, CHUNK_END and ROOT use bits 0, 1 and 3. Each combination uses disjoint bits.
 src/many.rs	replace || with && in across_from	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

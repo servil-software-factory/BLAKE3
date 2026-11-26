@@ -925,11 +925,25 @@ pub unsafe fn hash_many_last_len<const N: usize>(
     unsafe { hash_many_in(family(), inputs, key, counter, increment_counter, flags, flags_start, flags_end, last_len, out) }
 }
 
-/// [`hash_many_last_len`] on the kernels of `family`.
+/// [`hash_many_last_len`] on the kernels of `family`, non-generic over `blocks`.
+/// Inlined into `hash_many_in::<N>` (for compile-time `N = 64` / `1024`, keeping
+/// the 1-block `IdleManyMessages|2` path free of an extra call and branch) and
+/// into out-of-line `hash_many_raw` (one copy shared across runtime `2..=16`
+/// block counts).
+///
+/// # Safety
+/// The CPU must support every ISA extension required by `family` (NEON and,
+/// where `family` selects SHA-3 plans, FEAT_SHA3); `table` must hold `total`
+/// pointers each reaching `blocks * 64` readable bytes disjoint from `out` for
+/// the duration of the call (with bytes past `last_len` in the final block
+/// zeroed for the digest).
 #[allow(clippy::too_many_arguments)]
-unsafe fn hash_many_in<const N: usize>(
+#[inline(always)]
+unsafe fn hash_many_in_raw(
     family: &Family,
-    inputs: &[&[u8; N]],
+    table: *const *const u8,
+    total: usize,
+    blocks: usize,
     key: &CVWords,
     counter: u64,
     increment_counter: IncrementCounter,
@@ -939,24 +953,21 @@ unsafe fn hash_many_in<const N: usize>(
     last_len: usize,
     out: &mut [u8],
 ) {
-    assert!(inputs.len() <= out.len() / OUT_LEN);
+    assert!(total <= out.len() / OUT_LEN);
+    assert!((1..=16).contains(&blocks), "1 to 16 whole blocks");
     assert!((1..=BLOCK_LEN).contains(&last_len), "a last block of 1 to 64 bytes");
-    const { assert!(N > 0 && N % BLOCK_LEN == 0 && N <= CHUNK_LEN, "1 to 16 whole blocks") };
     let (plans, kernels, counter_step): (&[&[usize]; 17], &[Option<Kernel>], u64) = if increment_counter.yes() {
-        assert_eq!(N, CHUNK_LEN, "incrementing counters hash whole chunks");
+        assert_eq!(blocks, CHUNK_LEN / BLOCK_LEN, "incrementing counters hash whole chunks");
         (family.chunk_plans, family.chunk_kernels, 1)
     } else {
         (family.parent_plans, family.parent_kernels, 0)
     };
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (last_len as u64) << 24;
-    let blocks = N / BLOCK_LEN;
-    // `&[&[u8; N]]` is a table of pointers, which is what the kernels take.
-    let table = inputs.as_ptr() as *const *const u8;
 
     let mut done = 0;
-    while done < inputs.len() {
-        let count = core::cmp::min(GROUP, inputs.len() - done);
-        // Sound: `done + count <= inputs.len()`, `inputs` holds valid `N`-byte references, and `out` was asserted to hold `inputs.len() * OUT_LEN` bytes.
+    while done < total {
+        let count = core::cmp::min(GROUP, total - done);
+        // Sound: `done + count <= total`, `table` holds valid `blocks * 64`-byte pointers, and `out` was asserted to hold `total * OUT_LEN` bytes.
         unsafe {
             run_plan(
                 plans[count],
@@ -972,6 +983,71 @@ unsafe fn hash_many_in<const N: usize>(
         }
         done += count;
     }
+}
+
+/// [`hash_many_last_len`] on the kernels of `family`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn hash_many_in<const N: usize>(
+    family: &Family,
+    inputs: &[&[u8; N]],
+    key: &CVWords,
+    counter: u64,
+    increment_counter: IncrementCounter,
+    flags: u8,
+    flags_start: u8,
+    flags_end: u8,
+    last_len: usize,
+    out: &mut [u8],
+) {
+    const { assert!(N > 0 && N % BLOCK_LEN == 0 && N <= CHUNK_LEN, "1 to 16 whole blocks") };
+    // Sound: `&[&[u8; N]]` is a table of valid `N`-byte pointers matching `blocks = N / BLOCK_LEN`; caller verified NEON.
+    unsafe {
+        hash_many_in_raw(
+            family,
+            inputs.as_ptr() as *const *const u8,
+            inputs.len(),
+            N / BLOCK_LEN,
+            key,
+            counter,
+            increment_counter,
+            flags,
+            flags_start,
+            flags_end,
+            last_len,
+            out,
+        )
+    }
+}
+
+/// Non-generic entry for independent messages of `blocks` whole blocks (1..=16)
+/// at counter 0, each last block `last_len` bytes (1..=64, zero-padded past
+/// `last_len` within its final 64-byte block). Kept out of line so runtime
+/// block-count dispatch (`2..=16`) compiles to one copy instead of fifteen.
+///
+/// # Safety
+/// All supported AArch64 targets supply NEON (`family()` picks only extensions
+/// detected on this CPU); every pointer in `lanes` must reach `blocks * 64`
+/// readable bytes disjoint from `out` for the duration of the call, and `out`
+/// must hold `lanes.len() * OUT_LEN` bytes.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub unsafe fn hash_many_raw(lanes: &[*const u8], blocks: usize, key: &CVWords, flags: u8, flags_start: u8, flags_end: u8, last_len: usize, out: &mut [u8]) {
+    // Sound: caller verified NEON and that every pointer in `lanes` reaches `blocks * 64` readable bytes.
+    unsafe { hash_many_in_raw(family(), lanes.as_ptr(), lanes.len(), blocks, key, 0, IncrementCounter::No, flags, flags_start, flags_end, last_len, out) }
+}
+
+/// One-block (`blocks == 1`) sibling of [`hash_many_raw`] for `many::hash_run_short`,
+/// specializing `blocks = 1` and `IncrementCounter::No` at compile time so the
+/// 1-block path pays no runtime block-count assert or counter-mode branch.
+///
+/// # Safety
+/// Same as [`hash_many_raw`] with `blocks == 1`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub unsafe fn hash_many_one_block_raw(lanes: &[*const u8], key: &CVWords, flags: u8, flags_start: u8, flags_end: u8, last_len: usize, out: &mut [u8]) {
+    // Sound: caller verified NEON and that every pointer in `lanes` reaches 64 readable bytes.
+    unsafe { hash_many_in_raw(family(), lanes.as_ptr(), lanes.len(), 1, key, 0, IncrementCounter::No, flags, flags_start, flags_end, last_len, out) }
 }
 
 /// Separate inputs of `blocks` whole blocks (1 to 16) at one `counter`, the

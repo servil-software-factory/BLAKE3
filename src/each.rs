@@ -621,38 +621,18 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         {
             let turn = crate::platform::Sme2Turn::take(platform, true);
             if matches!(turn.platform(), Platform::SME2) {
-                macro_rules! run {
-                    ($n:expr) => {{
-                        let mut lanes: crate::stack_vec::StackVec<&[u8; $n], BY_BLOCKS_AT_ONCE> =
-                            items.iter().map(|item| (*item).try_into().expect("equal whole-block lengths")).collect();
-                        while lanes.len() % GROUP != 0 {
-                            lanes.push(*lanes.last().unwrap());
-                        }
-                        crate::counted(crate::Counted::ByBlocksCall);
-                        // Sound: detection and the turn provide SME2. Every
-                        // typed lane holds its whole input; spare lanes
-                        // repeat a valid input and write no output.
-                        unsafe { crate::sme2::hash_messages(&lanes, key, flags, CHUNK_START, flags_end, crate::BLOCK_LEN, out.as_flattened_mut()) };
-                    }};
+                let mut lanes: crate::stack_vec::StackVec<*const u8, BY_BLOCKS_AT_ONCE> = items.iter().map(|item| item.as_ptr()).collect();
+                let last = *lanes.last().unwrap();
+                while lanes.len() % GROUP != 0 {
+                    lanes.push(last);
                 }
-                match len {
-                    128 => run!(128),
-                    192 => run!(192),
-                    256 => run!(256),
-                    320 => run!(320),
-                    384 => run!(384),
-                    448 => run!(448),
-                    512 => run!(512),
-                    576 => run!(576),
-                    640 => run!(640),
-                    704 => run!(704),
-                    768 => run!(768),
-                    832 => run!(832),
-                    896 => run!(896),
-                    960 => run!(960),
-                    1024 => run!(1024),
-                    _ => unreachable!("an SME2-sized table of whole blocks of up to a chunk"),
-                }
+                crate::counted(crate::Counted::ByBlocksCall);
+                // Sound: detection and the turn provide SME2. Every item has
+                // equal whole-block length `len`; spare lanes repeat a valid
+                // input pointer and write no output.
+                unsafe {
+                    crate::sme2::hash_messages_raw(&lanes, len / crate::BLOCK_LEN, key, flags, CHUNK_START, flags_end, crate::BLOCK_LEN, out.as_flattened_mut())
+                };
                 return;
             }
         }
@@ -1859,8 +1839,7 @@ mod test {
         for mode in [Mode::Plain, Mode::Keyed(&secret), Mode::DeriveKey("a table of whole blocks")] {
             let mut room = core::mem::MaybeUninit::uninit();
             let (key, flags) = mode.key(&mut room);
-            // Every whole-block length of up to a chunk: each has its own
-            // typed call of the kernel.
+            // Every whole-block length of up to a chunk (1..=16 blocks).
             for len in (64usize..=1024).step_by(64) {
                 for count in [1usize, 15, 16, 17, 31, 32, 63, 64, 127, 128] {
                     let data: Vec<Vec<u8>> = (0..count).map(|i| (0..len).map(|j| (i * 37 + j * 11) as u8).collect()).collect();

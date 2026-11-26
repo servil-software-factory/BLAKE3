@@ -277,18 +277,24 @@ pub unsafe fn hash_block_run(run: &[u8], key: &CVWords, flags: u8, out: &mut [u8
     }
 }
 
-/// Messages in slots of N bytes (1 to 16 whole blocks), every one at
+/// Messages in slots of `blocks` whole blocks (1 to 16), every one at
 /// counter zero and hashed alone (flags_start on its first block,
 /// flags_end on its last), its last block `last_len` bytes long (1 to 64;
 /// the slot's bytes past it zero): `lanes` holds whole groups of sixteen,
 /// of which the first `out.len() / OUT_LEN` are messages whose digests go
 /// to `out` and the rest (fewer than sixteen, all in the last group) spare
 /// lanes whose values the kernel computes and never stores. One kernel
-/// call, so one entry into streaming mode. Unsafe because the CPU must
-/// report SME2 (falls back to NEON if the calling thread's SVL is not 512 bits).
-pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, flags_start: u8, flags_end: u8, last_len: usize, out: &mut [u8]) {
-    let blocks = N / BLOCK_LEN;
-    assert!(N % BLOCK_LEN == 0 && (1..=16).contains(&blocks), "slots of 1 to 16 whole blocks");
+/// call, so one entry into streaming mode.
+///
+/// # Safety
+/// The CPU must report SME2 (falls back to NEON if the calling thread's SVL is
+/// not 512 bits); every pointer in `lanes` must reach `blocks * 64` readable
+/// bytes disjoint from `out` for the duration of the call (with bytes past
+/// `last_len` in the final block zeroed).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub unsafe fn hash_messages_raw(lanes: &[*const u8], blocks: usize, key: &CVWords, flags: u8, flags_start: u8, flags_end: u8, last_len: usize, out: &mut [u8]) {
+    assert!((1..=16).contains(&blocks), "slots of 1 to 16 whole blocks");
     assert!((1..=BLOCK_LEN).contains(&last_len), "a last block of 1 to 64 bytes");
     let count = out.len() / OUT_LEN;
     assert!(
@@ -299,10 +305,10 @@ pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, f
         return;
     }
     let stored = (count % GROUP) as u64;
-    // Sound: caller verified SME2 support; `lanes` holds whole groups of `N`-byte pointers and `out` holds `count * OUT_LEN` writable bytes.
+    // Sound: caller verified SME2 support; `lanes` holds whole groups of `blocks * 64`-byte pointers and `out` holds `count * OUT_LEN` writable bytes.
     let lanes_returned = unsafe {
         ffi::blake3_servil_sme2_hash16_messages_512(
-            lanes.as_ptr() as *const *const u8,
+            lanes.as_ptr(),
             key.as_ptr(),
             0,
             flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | stored << 24 | ((last_len % BLOCK_LEN) as u64) << 40,
@@ -316,7 +322,7 @@ pub unsafe fn hash_messages<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, f
         return;
     }
     // Sound: NEON is baseline on AArch64; `lanes[..count]` and `out` hold `count` valid inputs/outputs.
-    unsafe { crate::neon_hybrid::hash_many_last_len(&lanes[..count], key, 0, IncrementCounter::No, flags, flags_start, flags_end, last_len, out) };
+    unsafe { crate::neon_hybrid::hash_many_raw(&lanes[..count], blocks, key, flags, flags_start, flags_end, last_len, out) };
 }
 
 /// Groups of sixteen whole chunks, each at its own first counter: group g

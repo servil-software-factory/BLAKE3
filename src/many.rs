@@ -138,24 +138,7 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
         #[cfg(target_arch = "x86_64")]
         crate::sse41::hash_blocks_x86(messages, blocks, key, flags, digests, platform, last_len);
         #[cfg(target_arch = "aarch64")]
-        match blocks {
-            2 => hash_blocks::<{ 2 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            3 => hash_blocks::<{ 3 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            4 => hash_blocks::<{ 4 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            5 => hash_blocks::<{ 5 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            6 => hash_blocks::<{ 6 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            7 => hash_blocks::<{ 7 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            8 => hash_blocks::<{ 8 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            9 => hash_blocks::<{ 9 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            10 => hash_blocks::<{ 10 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            11 => hash_blocks::<{ 11 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            12 => hash_blocks::<{ 12 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            13 => hash_blocks::<{ 13 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            14 => hash_blocks::<{ 14 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            15 => hash_blocks::<{ 15 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            16 => hash_blocks::<{ 16 * BLOCK_LEN }>(messages, key, flags, digests, platform, last_len),
-            _ => unreachable!("messages of up to a chunk"),
-        }
+        hash_blocks(messages, blocks, key, flags, digests, platform, last_len);
     }
 }
 
@@ -813,10 +796,10 @@ pub(crate) fn try_whole_group<'a>(
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn hash_run_padded(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], last_len: usize) {
-    let mut slots: Slots<BLOCK_LEN> = [core::mem::MaybeUninit::uninit(); TABLE + 16];
-    let lanes = fill_table(&mut slots, messages, outputs.len(), outputs.len().next_multiple_of(16));
-    // Sound: the caller found SME2 (platform_is_sme2).
-    unsafe { crate::sme2::hash_messages::<BLOCK_LEN>(lanes, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut()) };
+    let mut slots: PtrSlots = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+    let lanes = fill_ptrs(&mut slots, messages, BLOCK_LEN, outputs.len(), outputs.len().next_multiple_of(16));
+    // Sound: the caller found SME2 (platform_is_sme2); `fill_ptrs` verified `messages` holds `outputs.len()` blocks.
+    unsafe { crate::sme2::hash_messages_raw(lanes, 1, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut()) };
 }
 
 /// [`hash_run`] for messages of 1 to 63 bytes (one short block): on SME2
@@ -840,9 +823,10 @@ fn hash_run_short(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8;
     }
     #[cfg(target_arch = "aarch64")]
     {
-        let mut slots: Slots<BLOCK_LEN> = [core::mem::MaybeUninit::uninit(); TABLE + 16];
-        let lanes = fill_table(&mut slots, messages, outputs.len(), outputs.len());
-        neon_plans_last_len::<BLOCK_LEN>(lanes, key, flags, last_len, outputs);
+        let mut slots: PtrSlots = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+        let lanes = fill_ptrs(&mut slots, messages, BLOCK_LEN, outputs.len(), outputs.len());
+        // Sound: all supported AArch64 targets assume NEON; `fill_ptrs` verified `messages` holds `outputs.len()` blocks.
+        unsafe { crate::neon_hybrid::hash_many_one_block_raw(lanes, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut()) };
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -880,39 +864,31 @@ pub(crate) const ONE_BLOCK_PAD_AFTER_GROUPS: usize = 5;
 /// Room for a pointer table: TABLE messages and a padded group's spare
 /// lanes, uninitialised on the caller's stack.
 #[cfg(target_arch = "aarch64")]
-type Slots<'a, const N: usize> = [core::mem::MaybeUninit<&'a [u8; N]>; TABLE + 16];
+type PtrSlots = [core::mem::MaybeUninit<*const u8>; TABLE + 16];
 
-/// Fill `slots` with pointers to the first `count` slots of N bytes in
+/// Fill `slots` with pointers to the first `count` slots of `stride` bytes in
 /// `messages`, then spare lanes repeating the last up to `lanes`; the
 /// table's filled part.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn fill_table<'a, 's, const N: usize>(slots: &'s mut Slots<'a, N>, messages: &'a [u8], count: usize, lanes: usize) -> &'s [&'a [u8; N]] {
-    assert!(0 < count && count <= lanes && lanes <= TABLE + 16 && messages.len() >= count * N, "a table of 1 to TABLE + 16 lanes over the messages");
-    let mut last: &[u8; N] = &[0; N];
-    for (slot, message) in slots[..count].iter_mut().zip(messages.chunks_exact(N)) {
-        last = message.try_into().expect("slots of N bytes");
+fn fill_ptrs<'s>(slots: &'s mut PtrSlots, messages: &[u8], stride: usize, count: usize, lanes: usize) -> &'s [*const u8] {
+    assert!(
+        stride > 0 && 0 < count && count <= lanes && lanes <= TABLE + 16 && count <= messages.chunks_exact(stride).len(),
+        "a table of 1 to TABLE + 16 lanes over the messages"
+    );
+    let mut last = messages.as_ptr();
+    for (slot, message) in slots[..count].iter_mut().zip(messages.chunks_exact(stride)) {
+        last = message.as_ptr();
         slot.write(last);
     }
     for slot in &mut slots[count..lanes] {
         slot.write(last);
     }
     // Sound: the first `lanes` slots were written just above.
-    unsafe { core::slice::from_raw_parts(slots.as_ptr() as *const &[u8; N], lanes) }
+    unsafe { core::slice::from_raw_parts(slots.as_ptr() as *const *const u8, lanes) }
 }
 
-/// The integer + NEON parent plans over `lanes`, each message's last block
-/// `last_len` bytes.
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-fn neon_plans_last_len<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags: u8, last_len: usize, outputs: &mut [[u8; OUT_LEN]]) {
-    // Sound: every AArch64 CPU has NEON.
-    unsafe {
-        crate::neon_hybrid::hash_many_last_len(lanes, key, 0, IncrementCounter::No, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut())
-    };
-}
-
-/// [`hash_run`] for messages of 2 to 16 blocks (N), the last block
+/// [`hash_run`] for messages of 2 to 16 whole blocks (`blocks`), the last block
 /// `last_len` bytes, on one of three plans:
 ///
 /// - SME2, SME2_TAIL_MIN or more messages in all (below sixteen) or
@@ -927,8 +903,9 @@ fn neon_plans_last_len<const N: usize>(lanes: &[&[u8; N]], key: &CVWords, flags:
 /// - The integer + NEON plans (no SME2, or fewer messages): all at once.
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
-fn hash_blocks<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, last_len: usize) {
+fn hash_blocks(messages: &[u8], blocks: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, last_len: usize) {
     const GROUP: usize = 16;
+    assert!((2..=16).contains(&blocks), "2 to 16 whole blocks");
     let count = outputs.len();
     if count == 0 {
         return;
@@ -945,18 +922,19 @@ fn hash_blocks<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, output
         0
     };
     let lanes = if padded { count.next_multiple_of(GROUP) } else { count };
-    let mut slots: Slots<N> = [core::mem::MaybeUninit::uninit(); TABLE + 16];
-    let table = fill_table(&mut slots, messages, count, lanes);
+    let mut slots: PtrSlots = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+    let table = fill_ptrs(&mut slots, messages, blocks * BLOCK_LEN, count, lanes);
     let (groups, rest) = outputs.split_at_mut(on_sme2);
     if !rest.is_empty() {
         let rest_lanes = &table[on_sme2..count];
-        neon_plans_last_len::<N>(rest_lanes, key, flags, last_len, rest);
+        // Sound: every AArch64 CPU has NEON; `fill_ptrs` verified `messages` holds `count` slots of `blocks * BLOCK_LEN` bytes.
+        unsafe { crate::neon_hybrid::hash_many_raw(rest_lanes, blocks, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, rest.as_flattened_mut()) };
     }
     if on_sme2 > 0 {
         // Sound: platform_is_sme2 means detect() found SME2 with 512-bit
-        // streaming vectors.
+        // streaming vectors; `fill_ptrs` verified every pointer reaches `blocks * BLOCK_LEN` bytes.
         let sme2_lanes = &table[..if padded { lanes } else { on_sme2 }];
-        unsafe { crate::sme2::hash_messages::<N>(sme2_lanes, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, groups.as_flattened_mut()) };
+        unsafe { crate::sme2::hash_messages_raw(sme2_lanes, blocks, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, groups.as_flattened_mut()) };
     }
 }
 
@@ -1662,7 +1640,7 @@ mod test {
                 #[cfg(target_arch = "x86_64")]
                 crate::sse41::hash_blocks_x86(&input, 4, crate::IV, 0, &mut out[..count], platform, BLOCK_LEN);
                 #[cfg(target_arch = "aarch64")]
-                hash_blocks::<{ 4 * BLOCK_LEN }>(&input, crate::IV, 0, &mut out[..count], platform, BLOCK_LEN);
+                hash_blocks(&input, 4, crate::IV, 0, &mut out[..count], platform, BLOCK_LEN);
                 assert!(out[count..].iter().all(|d| *d == [0xAA; OUT_LEN]), "{platform:?}, {count}: a store past the last output");
                 for (i, digest) in out[..count].iter().enumerate() {
                     assert_eq!(*digest, *crate::convenience::hash(message(&input, 256, i)).as_bytes(), "{platform:?}, message {i} of {count}");
