@@ -513,64 +513,151 @@ fn hash_two_chunks(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: 
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn hash_long_or_single(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
-    if across_from(len, platform).is_some_and(|least| outputs.len() >= least) {
-        crate::ran(crate::Ran::Across);
-        return hash_across(input, len, key, flags, outputs, platform);
-    }
-    crate::ran(crate::Ran::MessageAlone);
-    let slot = slot_len(len);
-    for (i, output) in outputs.iter_mut().enumerate() {
-        *output = *crate::hash_serial_on(&input[i * slot..][..len], key, flags, platform).as_bytes();
+    hash_long_or_single_for(input, len, key, flags, outputs, platform, crate::platform::wide_avx512());
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn hash_long_or_single_for(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, wide_avx512: bool) {
+    let done = if let Some(least) = across_from(len, platform)
+        && outputs.len() >= least
+    {
+        hash_across_tiles(input, len, key, flags, outputs, platform, least, wide_avx512)
+    } else {
+        0
+    };
+    if done < outputs.len() {
+        crate::ran(crate::Ran::MessageAlone);
+        let slot = slot_len(len);
+        for (i, output) in outputs[done..].iter_mut().enumerate() {
+            *output = *crate::hash_serial_on(&input[(done + i) * slot..][..len], key, flags, platform).as_bytes();
+        }
     }
 }
 
-/// The chunks a message has below which [`hash_across`] takes it: from 16,
-/// a message's own chunks fill the widest lanes alone (as each.rs's
-/// ALONE_CHUNKS).
+/// Out of line so `StackVec` and `hash_group_across`'s 8 KiB CV table stay out
+/// of `hash_long_or_single`'s frame on the one-message path.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn hash_across_tiles(
+    mut input: &[u8],
+    len: usize,
+    key: &CVWords,
+    flags: u8,
+    mut outputs: &mut [[u8; OUT_LEN]],
+    platform: Platform,
+    least: usize,
+    wide_avx512: bool,
+) -> usize {
+    let total = outputs.len();
+    let slot = slot_len(len);
+    let lanes = across_lanes(platform);
+    let chunks = len.div_ceil(CHUNK_LEN);
+    while outputs.len() >= least {
+        crate::ran(crate::Ran::Across);
+        let take = across_take(outputs.len(), chunks, lanes, least, wide_avx512);
+        let (head, rest) = outputs.split_at_mut(take);
+        let (in_head, in_rest) = input.split_at(take * slot);
+        let messages: crate::stack_vec::StackVec<&[u8], ACROSS_GROUP> = (0..take).map(|m| &in_head[m * slot..][..len]).collect();
+        hash_group_across(&messages, len, key, flags, head, platform);
+        input = in_rest;
+        outputs = rest;
+    }
+    total - outputs.len()
+}
+
+/// The across-group lane width for `platform`: 8 on AVX2, 16 (`ACROSS_GROUP`)
+/// on AVX-512 (never AVX-512's 32-lane single-tree degree).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn across_lanes(platform: Platform) -> usize {
+    platform.simd_degree().min(ACROSS_GROUP)
+}
+
+/// The number of messages to take into one [`hash_group_across`] tile out of
+/// `rem` remaining messages of `chunks` chunks on an across width of `lanes`
+/// (8 on AVX2, 16 on AVX-512) with admission floor `least`:
+/// - `ACROSS_GROUP` (16) whenever `rem >= ACROSS_GROUP`;
+/// - `lanes` (8 on AVX2) when `lanes <= rem < ACROSS_GROUP` and the leftover
+///   `rem - lanes < least` should run serially rather than in an underfilled
+///   sub-group (when `rem - lanes >= least`, keeping all `rem` in one call
+///   avoids re-initializing the 8 KiB CV table);
+/// - on non-wide AVX-512 (`!wide_avx512`), 8 for `rem` in `9..=10` when
+///   `chunks >= 4`, so 1–2 trailing messages run serially instead of padding a
+///   16-lane pass (at 2–3 chunks, 9–10 messages padded to 16 beat 8 + serial);
+/// - otherwise all `rem` messages together.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn across_take(rem: usize, chunks: usize, lanes: usize, least: usize, wide_avx512: bool) -> usize {
+    if rem >= ACROSS_GROUP {
+        ACROSS_GROUP
+    } else if rem >= lanes && rem - lanes < least {
+        lanes
+    } else if chunks >= 4 && !wide_avx512 && matches!(rem, 9 | 10) {
+        ACROSS_GROUP / 2
+    } else {
+        rem
+    }
+}
+
+/// The chunks a message has below which [`hash_long_or_single`] hashes across
+/// messages: from 16, a message's own chunks fill the widest lanes alone (as
+/// each.rs's ALONE_CHUNKS).
 #[cfg(target_arch = "x86_64")]
 const ACROSS_CHUNKS: usize = 16;
 
-/// The fewest messages of `len` bytes that [`hash_across`] takes on
-/// `platform` (AVX2 and AVX-512, messages of 2 to ACROSS_CHUNKS - 1
-/// chunks): as many as the lanes, or 4 where each message's chunks leave
-/// the lanes short and its own tree is a long chain (a partial chunk after
-/// its whole ones, or two chunks). i7-12700K, six messages: 1500-6000 B
-/// x0.58-0.84 across; 4 KiB x1.13, 8 KiB x1.55, 12-15 KiB x1.15-1.23
-/// (their own lanes and parents ahead).
+/// The fewest messages of `len` bytes that one [`hash_group_across`] tile
+/// beats serial hashing on `platform` (AVX2 and AVX-512, 2 to ACROSS_CHUNKS - 1
+/// chunks):
+/// - 2 for 2-chunk messages (1025..=2048 B) and partial 3-chunk messages
+///   (2049..=3071 B), where even 2 messages fill more work across than one
+///   message's short chain alone;
+/// - 4 for longer partial-chunk messages with `chunks < lanes` (4..=7 chunks
+///   on AVX2, 4..=15 on AVX-512);
+/// - `lanes / 2` (4 on AVX2 at 3 KiB, 8 on AVX-512 at 3..=7 KiB) for whole-
+///   chunk messages under half the across lanes;
+/// - on AVX-512 (`lanes == ACROSS_GROUP`), for 8..=15 whole KiB: 14 at 8 KiB
+///   (8 chunks fill an exact 8-lane AVX2 pass alone) and `chunks` at 9..=15
+///   KiB (which already pad to 16 alone, so `chunks` messages across match or
+///   beat serial);
+/// - on AVX2 (`lanes == 8`), for 4..=15 whole KiB: 7 at 9..=14 KiB (where
+///   serial needs two AVX2 passes so 7/8 padded across wins) and 8 otherwise.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn across_from(len: usize, platform: Platform) -> Option<usize> {
     let chunks = len.div_ceil(CHUNK_LEN);
     if !(2..ACROSS_CHUNKS).contains(&chunks) || !crate::pair::takes_platform(platform) {
         return None;
     }
-    let chain = chunks < platform.simd_degree() && (len % CHUNK_LEN != 0 || chunks == 2);
-    Some(if chain { 4 } else { platform.simd_degree() })
-}
-
-/// Messages of one length, over a chunk and under ACROSS_CHUNKS chunks,
-/// hashed across up to sixteen messages at every step of their tree (all
-/// share one shape): each whole chunk index on the platform's hash_many;
-/// the partial chunk's blocks but its last likewise, its last block for
-/// each message alone (its chaining value so far is that message's own);
-/// then each parent node, from the leaves up, across the messages, ROOT on
-/// the top one. Every value on the stack: the batch allocates nothing.
-#[cfg(target_arch = "x86_64")]
-#[inline(never)]
-fn hash_across(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
-    let slot = slot_len(len);
-    for (group, digests) in outputs.chunks_mut(ACROSS_GROUP).enumerate() {
-        let messages: crate::stack_vec::StackVec<&[u8], ACROSS_GROUP> =
-            (0..digests.len()).map(|m| &input[(group * ACROSS_GROUP + m) * slot..][..len]).collect();
-        hash_group_across(&messages, len, key, flags, digests, platform);
-    }
+    let lanes = across_lanes(platform);
+    let half = lanes / 2;
+    let partial = len % CHUNK_LEN != 0;
+    Some(if chunks == 2 || (chunks == 3 && partial) {
+        2
+    } else if chunks < lanes && partial {
+        4
+    } else if chunks < half {
+        half
+    } else if lanes == ACROSS_GROUP {
+        if chunks == half { 14 } else { chunks }
+    } else if (9..=14).contains(&chunks) {
+        7
+    } else {
+        lanes
+    })
 }
 
 /// The most messages [`hash_group_across`] takes at once: the widest lanes.
 #[cfg(target_arch = "x86_64")]
 pub(crate) const ACROSS_GROUP: usize = 16;
 
-/// [`hash_across`] for up to ACROSS_GROUP messages of `len` bytes each,
-/// wherever each lies (a batch's slots, or a queue's members).
+/// Messages of one length, over a chunk and under ACROSS_CHUNKS chunks,
+/// hashed across up to ACROSS_GROUP messages at every step of their tree (all
+/// share one shape): each whole chunk index on the platform's hash_many;
+/// the partial chunk's blocks but its last likewise, its last block for
+/// each message alone (its chaining value so far is that message's own);
+/// then each parent node, from the leaves up, across the messages, ROOT on
+/// the top one. Every value on the stack: the batch allocates nothing.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn hash_group_across(messages: &[&[u8]], len: usize, key: &CVWords, flags: u8, digests: &mut [[u8; OUT_LEN]], platform: Platform) {
     const GROUP: usize = ACROSS_GROUP;
@@ -1287,51 +1374,168 @@ mod test {
         let two = messages(CHUNK_LEN + 1, 2);
         let r = ran(&mut || hash_many_on(&two, CHUNK_LEN + 1, slot_len(CHUNK_LEN + 1), IV, 0, &mut out[..2], avx2));
         assert!(!has(r, Ran::ShortRun), "two of a chunk and a byte: past the short runs");
-        // Three whole chunks: across from eight messages on AVX2.
-        let len = 3 * CHUNK_LEN;
-        assert_eq!(across_from(len, avx2), Some(8));
-        let eight = messages(len, 8);
-        let r = ran(&mut || hash_many_on(&eight[..7 * slot_len(len)], len, slot_len(len), IV, 0, &mut out[..7], avx2));
+        let check_digests = |buf: &[u8], len: usize, out: &[[u8; OUT_LEN]]| {
+            for (i, o) in out.iter().enumerate() {
+                assert_eq!(*o, *crate::convenience::hash(message(buf, len, i)).as_bytes());
+            }
+        };
+        // Three whole chunks: across from four messages on AVX2 (under half lanes).
+        let len3 = 3 * CHUNK_LEN;
+        assert_eq!(across_from(len3, avx2), Some(4));
+        let four = messages(len3, 4);
+        out.fill([0xAA; OUT_LEN]);
+        let r = ran(&mut || hash_many_on(&four[..3 * slot_len(len3)], len3, slot_len(len3), IV, 0, &mut out[..3], avx2));
+        assert!(has(r, Ran::MessageAlone) && !has(r, Ran::Across), "three of 3 KiB: one at a time");
+        check_digests(&four, len3, &out[..3]);
+        out.fill([0xAA; OUT_LEN]);
+        let r = ran(&mut || hash_many_on(&four, len3, slot_len(len3), IV, 0, &mut out[..4], avx2));
+        assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "four of 3 KiB: across");
+        check_digests(&four, len3, &out[..4]);
+        // Four whole chunks: across from eight messages on AVX2, and a 9th
+        // message in the tail falls back to one-at-a-time instead of a 1-lane
+        // across group.
+        let len4 = 4 * CHUNK_LEN;
+        assert_eq!(across_from(len4, avx2), Some(8));
+        let nine = messages(len4, 9);
+        out.fill([0xAA; OUT_LEN]);
+        let r = ran(&mut || hash_many_on(&nine[..7 * slot_len(len4)], len4, slot_len(len4), IV, 0, &mut out[..7], avx2));
         assert!(has(r, Ran::MessageAlone) && !has(r, Ran::Across), "seven: one at a time");
-        let r = ran(&mut || hash_many_on(&eight, len, slot_len(len), IV, 0, &mut out[..8], avx2));
+        check_digests(&nine, len4, &out[..7]);
+        out.fill([0xAA; OUT_LEN]);
+        let r = ran(&mut || hash_many_on(&nine[..8 * slot_len(len4)], len4, slot_len(len4), IV, 0, &mut out[..8], avx2));
         assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "eight: across");
-        for (i, o) in out[..8].iter().enumerate() {
-            assert_eq!(*o, *crate::convenience::hash(message(&eight, len, i)).as_bytes());
+        check_digests(&nine, len4, &out[..8]);
+        out.fill([0xAA; OUT_LEN]);
+        let r = ran(&mut || hash_many_on(&nine, len4, slot_len(len4), IV, 0, &mut out[..9], avx2));
+        assert!(has(r, Ran::Across) && has(r, Ran::MessageAlone), "nine on AVX2: 8 across + 1 serial tail");
+        check_digests(&nine, len4, &out[..9]);
+        #[cfg(blake3_avx512_ffi)]
+        if let Some(avx512) = Platform::avx512() {
+            let mut out26 = vec![[0u8; OUT_LEN]; 26];
+            // 4 KiB on AVX-512: 7 serial, 8 across, 9 & 26 test both wide and
+            // non-wide peeling directly, and 26 exercises peeling after a full 16 tile.
+            let m26 = messages(len4, 26);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_many_on(&m26[..7 * slot_len(len4)], len4, slot_len(len4), IV, 0, &mut out26[..7], avx512));
+            assert!(has(r, Ran::MessageAlone) && !has(r, Ran::Across), "AVX-512 4 KiB x 7: serial");
+            check_digests(&m26, len4, &out26[..7]);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_many_on(&m26[..8 * slot_len(len4)], len4, slot_len(len4), IV, 0, &mut out26[..8], avx512));
+            assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "AVX-512 4 KiB x 8: across");
+            check_digests(&m26, len4, &out26[..8]);
+            for wide in [false, true] {
+                for count in [9usize, 26] {
+                    out26.fill([0xAA; OUT_LEN]);
+                    let r = ran(&mut || hash_long_or_single_for(&m26[..count * slot_len(len4)], len4, IV, 0, &mut out26[..count], avx512, wide));
+                    assert!(has(r, Ran::Across) && has(r, Ran::MessageAlone) == !wide, "AVX-512 4 KiB x {count} wide={wide}");
+                    check_digests(&m26, len4, &out26[..count]);
+                }
+            }
+            // 3 KiB x 10 never peels (chunks < 4); 2 KiB x 10/19 run all across.
+            let m10_3 = messages(len3, 10);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_long_or_single_for(&m10_3, len3, IV, 0, &mut out26[..10], avx512, false));
+            assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "AVX-512 3 KiB x 10: all across");
+            check_digests(&m10_3, len3, &out26[..10]);
+            let len2 = 2 * CHUNK_LEN;
+            let m19 = messages(len2, 19);
+            for count in [10usize, 19] {
+                out26.fill([0xAA; OUT_LEN]);
+                let r = ran(&mut || hash_long_or_single_for(&m19[..count * slot_len(len2)], len2, IV, 0, &mut out26[..count], avx512, false));
+                assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "AVX-512 2 KiB x {count}: all across");
+                check_digests(&m19, len2, &out26[..count]);
+            }
+            // 8 KiB on AVX-512: 13 serial, 14 across, 17 = 16 across + 1 serial.
+            let len8 = 8 * CHUNK_LEN;
+            let m17 = messages(len8, 17);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_many_on(&m17[..13 * slot_len(len8)], len8, slot_len(len8), IV, 0, &mut out26[..13], avx512));
+            assert!(has(r, Ran::MessageAlone) && !has(r, Ran::Across), "AVX-512 8 KiB x 13: serial");
+            check_digests(&m17, len8, &out26[..13]);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_many_on(&m17[..14 * slot_len(len8)], len8, slot_len(len8), IV, 0, &mut out26[..14], avx512));
+            assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "AVX-512 8 KiB x 14: across");
+            check_digests(&m17, len8, &out26[..14]);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_many_on(&m17, len8, slot_len(len8), IV, 0, &mut out26[..17], avx512));
+            assert!(has(r, Ran::Across) && has(r, Ran::MessageAlone), "AVX-512 8 KiB x 17: 16 across + 1 serial");
+            check_digests(&m17, len8, &out26[..17]);
+            // 10 KiB on AVX-512: 9 serial, 10 across (peels 8+2 on !wide), 15 across.
+            let len10 = 10 * CHUNK_LEN;
+            let m15 = messages(len10, 15);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_many_on(&m15[..9 * slot_len(len10)], len10, slot_len(len10), IV, 0, &mut out26[..9], avx512));
+            assert!(has(r, Ran::MessageAlone) && !has(r, Ran::Across), "AVX-512 10 KiB x 9: serial");
+            check_digests(&m15, len10, &out26[..9]);
+            out26.fill([0xAA; OUT_LEN]);
+            let r = ran(&mut || hash_many_on(&m15, len10, slot_len(len10), IV, 0, &mut out26[..15], avx512));
+            assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "AVX-512 10 KiB x 15: across");
+            check_digests(&m15, len10, &out26[..15]);
         }
     }
 
-    /// across_from(len, platform), exactly (BLAKE3 #219): the fewest
-    /// messages hash_across takes, for 2 to 15 chunks on AVX2 or AVX-512:
-    /// the platform's lanes, or 4 where the chunks leave the lanes short
-    /// and a message's own tree is a long chain (a partial chunk after its
-    /// whole ones, or two chunks); none for one chunk, 16 or more, or SSE4.1.
+    /// across_from(len, platform) and across_take(rem, chunks, lanes, wide)
+    /// (BLAKE3 #219): exact admission floors and tile sizing on AVX2, AVX-512,
+    /// and SSE4.1.
     #[test]
     #[cfg(all(target_arch = "x86_64", blake3_avx2_ffi))]
     fn test_across_from_exactly() {
         let avx2 = Platform::AVX2;
         assert_eq!(across_from(CHUNK_LEN, avx2), None, "one chunk");
-        assert_eq!(across_from(CHUNK_LEN + 1, avx2), Some(4), "two chunks, one partial");
-        assert_eq!(across_from(2 * CHUNK_LEN, avx2), Some(4), "two whole chunks");
-        assert_eq!(across_from(3 * CHUNK_LEN, avx2), Some(8), "three whole chunks: the lanes");
+        assert_eq!(across_from(CHUNK_LEN + 1, avx2), Some(2), "two chunks, one partial");
+        assert_eq!(across_from(2 * CHUNK_LEN, avx2), Some(2), "two whole chunks");
+        assert_eq!(across_from(2 * CHUNK_LEN + 1, avx2), Some(2), "three chunks, one partial");
+        assert_eq!(across_from(3 * CHUNK_LEN, avx2), Some(4), "three whole chunks: under half AVX2 lanes");
         assert_eq!(across_from(3 * CHUNK_LEN + 1, avx2), Some(4), "four chunks, one partial");
+        assert_eq!(across_from(4 * CHUNK_LEN, avx2), Some(8), "four whole chunks: half AVX2 lanes");
         assert_eq!(across_from(6 * CHUNK_LEN + 500, avx2), Some(4), "seven chunks, one partial, short of the lanes");
         assert_eq!(across_from(7 * CHUNK_LEN + 500, avx2), Some(8), "eight chunks fill the lanes, partial or not");
         assert_eq!(across_from(8 * CHUNK_LEN, avx2), Some(8), "eight whole chunks");
-        assert_eq!(across_from(8 * CHUNK_LEN + 1, avx2), Some(8), "nine chunks: the lanes are full");
+        assert_eq!(across_from(8 * CHUNK_LEN + 1, avx2), Some(7), "nine chunks: serial needs two AVX2 passes");
+        assert_eq!(across_from(14 * CHUNK_LEN, avx2), Some(7), "fourteen chunks: 7/8 padded beats two AVX2 passes");
         assert_eq!(across_from(15 * CHUNK_LEN, avx2), Some(8), "fifteen chunks");
         assert_eq!(across_from(15 * CHUNK_LEN + 1, avx2), None, "sixteen chunks");
         assert_eq!(across_from(16 * CHUNK_LEN, avx2), None);
         assert_eq!(across_from(3 * CHUNK_LEN, Platform::SSE41), None, "SSE4.1 hashes message by message");
+        // Tile sizing: ACROSS_GROUP when rem >= 16; peel `lanes` on AVX2 when
+        // the leftover < least (keep `rem` together when leftover >= least);
+        // peel 8 for 9..=10 on non-wide AVX-512 when chunks >= 4.
+        assert_eq!(across_take(4, 4, 8, 4, false), 4);
+        assert_eq!(across_take(5, 4, 8, 4, false), 5);
+        assert_eq!(across_take(7, 4, 8, 4, false), 7);
+        assert_eq!(across_take(8, 4, 8, 8, false), 8);
+        assert_eq!(across_take(9, 3, 8, 4, false), 8);
+        assert_eq!(across_take(11, 4, 8, 4, false), 8);
+        assert_eq!(across_take(11, 4, 8, 8, false), 8);
+        assert_eq!(across_take(12, 4, 8, 4, false), 12);
+        assert_eq!(across_take(10, 2, 8, 2, false), 10);
+        assert_eq!(across_take(15, 10, 8, 7, false), 15);
+        assert_eq!(across_take(16, 4, 8, 8, false), 16);
+        assert_eq!(across_take(17, 4, 8, 8, false), 16);
+        assert_eq!(across_take(9, 3, 16, 8, false), 9);
+        assert_eq!(across_take(10, 3, 16, 8, false), 10);
+        assert_eq!(across_take(8, 4, 16, 8, false), 8);
+        assert_eq!(across_take(9, 4, 16, 8, false), 8);
+        assert_eq!(across_take(10, 4, 16, 8, false), 8);
+        assert_eq!(across_take(11, 4, 16, 8, false), 11);
+        assert_eq!(across_take(9, 4, 16, 8, true), 9);
+        assert_eq!(across_take(10, 4, 16, 8, true), 10);
+        assert_eq!(across_take(16, 4, 16, 15, false), 16);
+        assert_eq!(across_take(17, 4, 16, 15, false), 16);
         #[cfg(blake3_avx512_ffi)]
         {
-            // AVX-512's lanes: 32 on Linux (the wide kernel), 16 elsewhere;
-            // every count under 16 chunks is short of them.
-            let lanes = Platform::AVX512.simd_degree();
-            assert!(lanes >= 16);
-            assert_eq!(across_from(8 * CHUNK_LEN, Platform::AVX512), Some(lanes), "eight whole chunks: the lanes");
-            assert_eq!(across_from(8 * CHUNK_LEN + 1, Platform::AVX512), Some(4), "nine chunks, one partial, short of the lanes");
-            assert_eq!(across_from(2 * CHUNK_LEN, Platform::AVX512), Some(4), "two whole chunks: a long chain");
-            assert_eq!(across_from(15 * CHUNK_LEN, Platform::AVX512), Some(lanes));
+            // AVX-512 across lanes are capped at ACROSS_GROUP = 16 (never
+            // simd_degree()'s 32 for single-tree dispatch). Pin literals so a
+            // future simd_degree() change cannot silently drift the threshold.
+            assert_eq!(across_from(2 * CHUNK_LEN, Platform::AVX512), Some(2), "two whole chunks");
+            assert_eq!(across_from(2 * CHUNK_LEN + 1, Platform::AVX512), Some(2), "three chunks, one partial");
+            assert_eq!(across_from(3 * CHUNK_LEN, Platform::AVX512), Some(8), "three whole chunks: under half of 16");
+            assert_eq!(across_from(7 * CHUNK_LEN, Platform::AVX512), Some(8), "seven whole chunks: under half of 16");
+            assert_eq!(across_from(8 * CHUNK_LEN, Platform::AVX512), Some(14), "eight whole chunks: fills 8-lane AVX2 alone");
+            assert_eq!(across_from(8 * CHUNK_LEN + 1, Platform::AVX512), Some(4), "nine chunks, one partial, short of 16");
+            assert_eq!(across_from(9 * CHUNK_LEN, Platform::AVX512), Some(9), "nine whole chunks: pads to 16 alone");
+            assert_eq!(across_from(12 * CHUNK_LEN, Platform::AVX512), Some(12), "twelve whole chunks");
+            assert_eq!(across_from(15 * CHUNK_LEN, Platform::AVX512), Some(15), "fifteen whole chunks");
         }
     }
 
@@ -1465,7 +1669,14 @@ mod test {
                     let expected: [u8; OUT_LEN] = crate::Hash::from_hex(anchor).unwrap().into();
                     for platform in crate::test::every_platform() {
                         let mut out = vec![[0u8; OUT_LEN]; *count];
-                        hash_across(&input, len, words, *flags, &mut out, platform);
+                        if crate::pair::takes_platform(platform) {
+                            hash_many_on(&input, len, slot, words, *flags, &mut out, platform);
+                        } else {
+                            let msgs: Vec<&[u8]> = (0..*count).map(|m| &input[m * slot..][..len]).collect();
+                            for (g, digests) in out.chunks_mut(ACROSS_GROUP).enumerate() {
+                                hash_group_across(&msgs[g * ACROSS_GROUP..][..digests.len()], len, words, *flags, digests, platform);
+                            }
+                        }
                         assert!(out.iter().all(|digest| *digest == expected), "{platform:?}: {count} x {len} B");
                     }
                 }
@@ -1498,7 +1709,14 @@ mod test {
                 let expected: [u8; OUT_LEN] = crate::Hash::from_hex(anchor).unwrap().into();
                 for platform in crate::test::every_platform() {
                     let mut out = vec![[0u8; OUT_LEN]; count];
-                    hash_across(&input, 2 * CHUNK_LEN, words, *flags, &mut out, platform);
+                    if crate::pair::takes_platform(platform) {
+                        hash_many_on(&input, 2 * CHUNK_LEN, 2 * CHUNK_LEN, words, *flags, &mut out, platform);
+                    } else {
+                        let msgs: Vec<&[u8]> = (0..count).map(|m| &input[m * 2 * CHUNK_LEN..][..2 * CHUNK_LEN]).collect();
+                        for (g, digests) in out.chunks_mut(ACROSS_GROUP).enumerate() {
+                            hash_group_across(&msgs[g * ACROSS_GROUP..][..digests.len()], 2 * CHUNK_LEN, words, *flags, digests, platform);
+                        }
+                    }
                     assert!(out.iter().all(|digest| *digest == expected), "{platform:?}");
                 }
             }
@@ -1529,7 +1747,14 @@ mod test {
                 let expected: [u8; OUT_LEN] = crate::Hash::from_hex(anchor).unwrap().into();
                 for platform in crate::test::every_platform() {
                     let mut out = vec![[0u8; OUT_LEN]; count];
-                    hash_across(&input, 4 * CHUNK_LEN, words, *flags, &mut out, platform);
+                    if crate::pair::takes_platform(platform) {
+                        hash_many_on(&input, 4 * CHUNK_LEN, 4 * CHUNK_LEN, words, *flags, &mut out, platform);
+                    } else {
+                        let msgs: Vec<&[u8]> = (0..count).map(|m| &input[m * 4 * CHUNK_LEN..][..4 * CHUNK_LEN]).collect();
+                        for (g, digests) in out.chunks_mut(ACROSS_GROUP).enumerate() {
+                            hash_group_across(&msgs[g * ACROSS_GROUP..][..digests.len()], 4 * CHUNK_LEN, words, *flags, digests, platform);
+                        }
+                    }
                     assert!(out.iter().all(|digest| *digest == expected), "{platform:?}");
                 }
             }
