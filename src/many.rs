@@ -52,6 +52,9 @@ pub fn assert_slots(input: &[u8], len: usize, slot: usize, count: usize) {
     // Every caller's slots come from a Batch (throughput's calls, the
     // stream's batches) or from the crate's own buffers, which keep them
     // zero past each message (BLAKE3 #205): checked in debug builds.
+    // Debug-only: O(count * padding) scan over every batch slot's padding
+    // bytes; too expensive per batch call in release, where Batch/Part types
+    // guarantee zero padding for safe callers.
     debug_assert!(
         len % BLOCK_LEN == 0 || slot == len || input.chunks_exact(slot).all(|s| s[len..].iter().all(|&b| b == 0)),
         "every slot's bytes past its message are zero"
@@ -201,7 +204,7 @@ fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key
     // Check the descriptor length once, before narrowing it or filling
     // any lanes. Both short batches and expanded Packed remainders come here.
     assert!(len <= BLOCK_LEN, "an independent short message fits in one block");
-    let len = len.to_le_bytes()[0];
+    let len = u8::try_from(len).expect("len <= BLOCK_LEN");
     let lanes = crate::ffi_output::lanes(platform);
     if lanes == 0 {
         return 0;
@@ -210,12 +213,13 @@ fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key
     for g in 0..groups {
         let (at, out) = (g * lanes, &mut digests[g * lanes..][..lanes]);
         let group = &bytes[at * BLOCK_LEN..];
-        // Sound: lanes() names the platform's kernel width, which the CPU
-        // runs (Platform::detect chose it).
+        // Sound: `lanes()` matches the platform's verified AVX2/AVX-512 width.
         unsafe {
             if lanes == 16 {
+                assert!(matches!(platform, Platform::AVX512), "16-lane output requires AVX-512");
                 packed_group::<16>(group, out, len, key, flags);
             } else {
+                assert_eq!(lanes, 8, "unexpected output width {lanes}");
                 packed_group::<8>(group, out, len, key, flags);
             }
         }
@@ -356,7 +360,7 @@ fn multi_block_short_last(
 ) {
     assert!(last_len > 0 && last_len < BLOCK_LEN, "short final block");
     let prefix_len = slot - BLOCK_LEN;
-    let last_len_u8 = last_len.to_le_bytes()[0];
+    let last_len_u8 = u8::try_from(last_len).expect("last block <= 64");
     for (messages, digests) in input.chunks(slot * width).zip(outputs.chunks_mut(width)) {
         let count = digests.len();
         if count < X86_PAD8_MIN {
@@ -509,6 +513,18 @@ fn hash_two_chunks(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: 
     }
 }
 
+/// Number of messages to hash across when `count >= least`: whole-chunk
+/// AVX-512 batches of 16..=31 (`least == ACROSS_GROUP`) hash their full
+/// 16-message prefix across and leave the 0..=15 remainder serial, avoiding
+/// the +14% slowdown of running a short tail through `hash_group_across`
+/// (e.g. 15 KiB x 17). Larger batches (>= 32) and all other shapes stay
+/// all-across.
+#[cfg(any(target_arch = "x86_64", test))]
+#[inline]
+const fn across_prefix(least: usize, count: usize) -> usize {
+    if least == ACROSS_GROUP && count < 2 * ACROSS_GROUP { ACROSS_GROUP } else { count }
+}
+
 /// Keep long-message tree work outside the short-message dispatcher's frame.
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
@@ -517,12 +533,7 @@ fn hash_long_or_single(input: &[u8], len: usize, key: &CVWords, flags: u8, outpu
     if let Some(least) = across_from(len, platform) {
         if outputs.len() >= least {
             crate::ran(crate::Ran::Across);
-            // Whole-chunk AVX-512 batches of 16..=31 messages (`least == ACROSS_GROUP`)
-            // hash their full 16-message group across and leave the short remainder
-            // serial, avoiding the +14% slowdown of running a 1..15 tail through
-            // `hash_group_across` (e.g. 15 KiB x 17). Larger batches (>= 32) and
-            // all other shapes keep their existing all-across route unchanged.
-            let across_len = if least == ACROSS_GROUP && outputs.len() < 2 * ACROSS_GROUP { ACROSS_GROUP } else { outputs.len() };
+            let across_len = across_prefix(least, outputs.len());
             hash_across(input, len, key, flags, &mut outputs[..across_len], platform);
             done = across_len;
         }
@@ -579,7 +590,7 @@ fn hash_across(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut
 }
 
 /// The most messages [`hash_group_across`] takes at once: the widest lanes.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const ACROSS_GROUP: usize = 16;
 
 /// [`hash_across`] for up to ACROSS_GROUP messages of `len` bytes each,
@@ -660,7 +671,7 @@ fn hash_group_across_with_cvs(
                 let mut block = [0u8; BLOCK_LEN];
                 block[..last.len()].copy_from_slice(last);
                 let start = if before_last == 0 { CHUNK_START } else { 0 };
-                platform.compress_in_place(&mut cv, &block, last.len().to_le_bytes()[0], full as u64, flags | start | CHUNK_END);
+                platform.compress_in_place(&mut cv, &block, u8::try_from(last.len()).expect("last block <= 64"), full as u64, flags | start | CHUNK_END);
                 cvs[full][m] = crate::hasher::le_bytes(&cv);
             }
         }
@@ -1364,6 +1375,16 @@ mod test {
             assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "AVX-512 partial x 17: all across");
             check_digests(&batch_p, len_p, &out32[..17]);
         }
+    }
+
+    #[test]
+    fn test_across_prefix() {
+        assert_eq!(across_prefix(16, 16), 16);
+        assert_eq!(across_prefix(16, 17), 16);
+        assert_eq!(across_prefix(16, 31), 16);
+        assert_eq!(across_prefix(16, 32), 32);
+        assert_eq!(across_prefix(8, 17), 17);
+        assert_eq!(across_prefix(4, 17), 17);
     }
 
     /// Stack-backed 16 x 3 KiB batch on a 64 KiB worker stack completes without

@@ -738,7 +738,7 @@ unsafe fn walk_in(
     let chunk_flags = flags as u32 | (crate::CHUNK_START as u32) << 8 | (crate::CHUNK_END as u32) << 16;
     let lane_groups = 8 * (n / 144);
     let plain_groups = (n - HYBRID_GROUP * lane_groups) / GROUP;
-    debug_assert_eq!(HYBRID_GROUP * lane_groups + GROUP * plain_groups, n);
+    assert_eq!(HYBRID_GROUP * lane_groups + GROUP * plain_groups, n, "SME2 flat walk chunk partition");
     // Sound: caller verified SME2 support; `table`, `src`, `dst`, and `out` all satisfy `scratch_layout` bounds and non-overlap.
     unsafe {
         if lane_groups > 0 {

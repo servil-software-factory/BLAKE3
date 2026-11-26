@@ -412,22 +412,15 @@ fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]
     out.len()
 }
 
-/// Run every case and stop on the first that differs from the reference;
-/// records the tested platform once on first initialization and returns how
-/// many cases ran (CASES and the selected platform's extra entries).
+/// Run every case for the detected platform and stop on the first that differs
+/// from the reference; records the tested platform once on first initialization
+/// and returns how many cases ran (`CASES` and `platform`'s extra entries).
 fn run() -> usize {
     // A kernel's panic, as a test plants it: the guard in ensure_slow
     // stops the process for it.
     #[cfg(test)]
     if PLANTED_FAILURE.load(core::sync::atomic::Ordering::Relaxed) {
         panic!("a kernel's panic, planted by a test");
-    }
-    #[cfg(test)]
-    if HOLD_RUN.load(core::sync::atomic::Ordering::Relaxed) {
-        IN_RUN.store(true, core::sync::atomic::Ordering::Release);
-        while HOLD_RUN.load(core::sync::atomic::Ordering::Acquire) {
-            std::thread::yield_now();
-        }
     }
     compiled_features_present();
     let platform = Platform::detect_unchecked();
@@ -462,14 +455,12 @@ fn run() -> usize {
     );
     #[cfg(target_arch = "x86_64")]
     if crate::platform::wide_avx512() {
-        // Sound: the detected platform has the wide kernels' ISA, and
-        // hash_many dispatches to them (only then does startup check them). Their
-        // wrapper checks its bounds, and builds all arguments on the stack.
+        // Sound: `wide_avx512()` requires AVX-512, so `platform` is AVX-512
+        // and hash_many dispatches to these kernels. Their wrapper checks
+        // bounds on stack.
         checked += unsafe { crate::avx512_32::self_test(&previous) };
     }
-    {
-        checked += crate::ffi_output::self_test(platform);
-    }
+    checked += crate::ffi_output::self_test(platform);
     #[cfg(target_arch = "x86_64")]
     {
         checked += crate::ffi_partial::self_test(platform);
@@ -477,6 +468,13 @@ fn run() -> usize {
     checked += crate::ffi_packed::self_test(platform);
     checked += crate::ffi_counter::self_test(platform);
     let _ = previous;
+    #[cfg(test)]
+    if HOLD_RUN.load(core::sync::atomic::Ordering::Relaxed) {
+        IN_RUN.store(true, core::sync::atomic::Ordering::Release);
+        while HOLD_RUN.load(core::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
     platform.record();
     checked
 }
@@ -491,7 +489,6 @@ fn run() -> usize {
 fn compiled_features_present() {
     #[cfg(target_arch = "x86_64")]
     {
-        #[cfg(target_arch = "x86_64")]
         use core::arch::x86_64::__cpuid_count;
         let cpuid = |leaf, sub| __cpuid_count(leaf, sub);
         let lacks = |feature: &str| -> ! {
@@ -586,11 +583,6 @@ fn stop(why: core::fmt::Arguments) -> ! {
     std::process::abort()
 }
 
-/// The self-test's progress in this process. A failed one stops the
-/// process (stop), so no state says so.
-const PASSED: u8 = 2;
-static STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-
 static INIT: std::sync::Once = std::sync::Once::new();
 
 /// Test-only rendezvous hooks so a subprocess test can hold the real winner
@@ -611,12 +603,12 @@ static PLANTED_FAILURE: core::sync::atomic::AtomicBool = core::sync::atomic::Ato
 static PLANTED_WRONG_CASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
 
 /// Run the self-test unless it has passed: once per process, the first
-/// caller running it and any other waiting. The `Acquire` load pairs with
-/// the `Release` store in `ensure_slow()` so fast-path callers observe the
-/// `DETECTED` platform published during `run()` on weak-memory CPUs.
+/// caller running it and any other waiting. `platform::is_initialized()`
+/// loads `DETECTED` with `Acquire`, pairing with `Platform::record`'s
+/// `Release` store at the end of `run()`.
 #[inline]
 pub(crate) fn ensure() {
-    if STATE.load(core::sync::atomic::Ordering::Acquire) != PASSED {
+    if !crate::platform::is_initialized() {
         ensure_slow();
     }
 }
@@ -642,7 +634,6 @@ fn ensure_slow() {
         let failed = Failed;
         run();
         core::mem::forget(failed);
-        STATE.store(PASSED, core::sync::atomic::Ordering::Release);
     });
 }
 
@@ -725,16 +716,7 @@ mod test {
             expected
         };
         #[cfg(target_arch = "x86_64")]
-        if matches!(Platform::detect_unchecked(), Platform::AVX2 { .. }) || {
-            #[cfg(target_arch = "x86_64")]
-            {
-                matches!(Platform::detect_unchecked(), Platform::AVX512 { .. })
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                false
-            }
-        } {
+        if matches!(Platform::detect_unchecked(), Platform::AVX2 | Platform::AVX512) {
             for (name, entry) in crate::ffi_packed::entries_avx2() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
@@ -762,13 +744,19 @@ mod test {
         assert_eq!(checked, expected);
     }
 
-    /// Contending threads calling `initialize()` while the winner is inside
-    /// `run()` park in `std::sync::Once` until the real winner finishes, then
-    /// all wake and observe `PASSED`. Run in a fresh subprocess so `INIT` is
-    /// uninitialized.
+    /// Contending threads calling `initialize()` while the winner has finished
+    /// kernel checks and is held just before `platform.record()` park in
+    /// `std::sync::Once` until publication completes, then all wake and observe
+    /// `is_initialized() == true`. Also proves `platform.record()` cannot move
+    /// ahead of kernel verification and that nonzero high family/width bits in
+    /// `DETECTED` never masquerade as initialized when the low byte is zero.
     #[test]
     fn test_a_waiting_thread_takes_the_verdict() {
-        use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+        use core::sync::atomic::Ordering::{Acquire, Release};
+        assert!(!crate::platform::is_initialized_word(0x0000));
+        assert!(!crate::platform::is_initialized_word(0xff00));
+        assert!(crate::platform::is_initialized_word(0x0001));
+        assert!(crate::platform::is_initialized_word(0xff01));
         const CHILD: &str = "BLAKE3_SERVIL_TEST_WAITERS";
         if std::env::var_os(CHILD).is_some() {
             HOLD_RUN.store(true, Release);
@@ -776,6 +764,10 @@ mod test {
             while !IN_RUN.load(Acquire) {
                 std::thread::yield_now();
             }
+            // Winner has completed every kernel self-test and is held just
+            // before `platform.record()`: publication must NOT have happened
+            // yet, even though high bits of `DETECTED` may already be set.
+            assert!(!crate::platform::is_initialized(), "platform must not be published before kernel self-tests finish");
             let started = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
             let done = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
             let waiters: std::vec::Vec<_> = (0..3)
@@ -800,7 +792,7 @@ mod test {
                 waiter.join().expect("waiter woke after verdict");
             }
             assert_eq!(done.load(Acquire), 3);
-            assert_eq!(STATE.load(Relaxed), PASSED);
+            assert!(crate::platform::is_initialized());
             std::process::exit(0);
         }
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1032,7 +1024,7 @@ mod stops {
         use core::sync::atomic::Ordering::Relaxed;
         const CHILD: &str = "BLAKE3_SERVIL_TEST_PLANTED_FAILURE";
         if std::env::var_os(CHILD).is_some() {
-            STATE.store(0, Relaxed);
+            crate::platform::DETECTED.store(0, Relaxed);
             PLANTED_FAILURE.store(true, Relaxed);
             let _ = std::panic::catch_unwind(ensure_slow);
             std::process::exit(0);

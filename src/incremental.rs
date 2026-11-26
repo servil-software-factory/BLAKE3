@@ -507,7 +507,7 @@ impl Hasher {
     /// (ChunkState), stored as it is loaded.
     #[inline(always)]
     fn fresh_key(&self) -> &CVWords {
-        debug_assert_eq!(self.core.count(), 0, "a fresh core's chaining value is its key");
+        assert_eq!(self.core.count(), 0, "a fresh core's chaining value is its key");
         self.core.chunk_state.cv()
     }
 
@@ -674,12 +674,13 @@ impl Hasher {
             // cache line as `fresh_key`, initialized from `domain`).
             #[cfg(target_arch = "x86_64")]
             if self.stage.len() <= BLOCK_LEN {
+                let n = u8::try_from(self.stage.len()).expect("stage length <= BLOCK_LEN");
                 // Sound: the platform's instructions were detected.
                 return Hash(unsafe {
                     crate::chunk_root::block_root(
                         self.core.chunk_state.platform(),
                         self.stage.first_block(),
-                        self.stage.len(),
+                        n,
                         self.fresh_key(),
                         self.core.chunk_state.flags(),
                     )

@@ -34,15 +34,44 @@ class CountsControls(unittest.TestCase):
         self.assertEqual(c["truncation_allows"], 1)
         self.assertEqual(c["undocumented_unsafe"], 1)
 
-    def test_ignores_cfg_test_but_checks_cfg_not_test(self):
+    def test_detects_undocumented_debug_assert_and_silent_narrowings(self):
         src = (
-            '#[cfg(test)]\n'
-            'mod t { fn x() { debug_assert!(true); } }\n'
-            '#[cfg(not(test))]\n'
-            'mod prod { fn y() { debug_assert!(true); } }\n'
+            'fn f(x: usize) -> u8 {\n'
+            '    debug_assert_eq !(x, 0);\n'
+            '    x.to_le_bytes( )[0]\n'
+            '}\n'
         )
         c = counts.measure_files({"src/x.rs": src})
         self.assertEqual(c["debug_asserts"], 1)
+        self.assertEqual(c["undocumented_debug_asserts"], 1)
+        self.assertEqual(c["silent_narrowings"], 1)
+        clean = counts.measure_files({"src/x.rs": "fn f() {}\n"})
+        rose = counts.check_counts(clean, c)
+        self.assertTrue(any(r.startswith("undocumented_debug_asserts:") for r in rose), rose)
+        self.assertTrue(any(r.startswith("silent_narrowings:") for r in rose), rose)
+        self.assertTrue(any(r.startswith("debug_asserts:") for r in rose), rose)
+
+    def test_ignores_cfg_test_items_and_mods_but_checks_cfg_not_test(self):
+        src = (
+            '#[cfg(test)]\n'
+            'mod t { fn x() { debug_assert!(true); } }\n'
+            '#[cfg(test)]\n'
+            'fn test_helper() { debug_assert!(true); }\n'
+            '#[cfg(test)] const ONE_LINE: u8 = 1;\n'
+            '#[cfg(not(test))]\n'
+            'mod prod { fn y() { debug_assert!(true); } }\n'
+            'fn after_closure(x: usize) -> u8 {\n'
+            '    #[cfg(test)]\n'
+            '    NOTED.with(|n| { n.set(1); });\n'
+            '    debug_assert\n'
+            '        !(x == 0);\n'
+            '    x.to_le_bytes()[0]\n'
+            '}\n'
+        )
+        c = counts.measure_files({"src/x.rs": src})
+        self.assertEqual(c["debug_asserts"], 2)
+        self.assertEqual(c["undocumented_debug_asserts"], 2)
+        self.assertEqual(c["silent_narrowings"], 1)
 
 
 if __name__ == "__main__":

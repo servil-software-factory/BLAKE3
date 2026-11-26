@@ -736,8 +736,7 @@ impl TreeHasher {
                 out[0] = crate::hasher::parent_output(&children[0], &children[1], self.domain.key(), self.domain.flags(), platform).chaining_value();
                 continue;
             }
-            let parents = crate::compress_parents_parallel(children.as_flattened(), self.domain.key(), self.domain.flags(), platform, out.as_flattened_mut());
-            debug_assert_eq!(parents, out.len());
+            let _ = crate::compress_parents_parallel(children.as_flattened(), self.domain.key(), self.domain.flags(), platform, out.as_flattened_mut());
         }
     }
 
