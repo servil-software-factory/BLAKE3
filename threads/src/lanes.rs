@@ -1786,40 +1786,52 @@ pub(crate) mod places {
 
         /// Set up a deterministic two-place topology (using `PRETENDED` when at
         /// least 4 CPUs are allowed and affinity binding is permitted), wait
-        /// bounded for `settled()`, and pin the calling thread to a staffed
-        /// place so `near_workers()` remains `Some(_)` without migrating to an
-        /// unstaffed LLC/NUMA node. Distinguishes genuine prerequisite skips
-        /// (non-Linux, `< 4` allowed CPUs, refused affinity, or no pool
-        /// workers) from setup failures once the two-place topology is
-        /// requested, asserting on the latter.
+        /// for `settled()` under nextest's outer timeout, and pin the calling
+        /// thread to a staffed place so `near_workers()` remains `Some(_)`
+        /// without migrating to an unstaffed LLC/NUMA node. Distinguishes
+        /// genuine prerequisite skips (non-Linux, `< 4` allowed CPUs,
+        /// `EPERM`/`EACCES` on affinity, or no pool workers) from setup
+        /// failures once the two-place topology is requested, asserting on the
+        /// latter.
         pub(crate) fn init_two_places_and_pin() -> bool {
             #[cfg(target_os = "linux")]
             let requested_two_places = {
-                if let Ok(cur) = affinity()
-                    // Sound: `cur` is a live `Set` of `size_of::<Set>()` readable bytes.
-                    && unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &cur) } == 0
-                    && let Some(cpus) = allowed()
-                    && cpus.len() >= 4
-                {
-                    let pretended: Vec<Cpu> = cpus.iter().enumerate().map(|(i, &cpu)| Cpu { cpu, cache: i % 2, socket: 0 }).collect();
-                    let _ = PRETENDED.set(pretended);
-                    true
-                } else {
-                    false
+                match affinity() {
+                    Ok(cur) => {
+                        // Sound: `cur` is a live `Set` of `size_of::<Set>()` readable bytes.
+                        let rc = unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &cur) };
+                        if rc == 0 {
+                            if let Some(cpus) = allowed()
+                                && cpus.len() >= 4
+                            {
+                                let pretended: Vec<Cpu> = cpus.iter().enumerate().map(|(i, &cpu)| Cpu { cpu, cache: i % 2, socket: 0 }).collect();
+                                assert!(PRETENDED.set(pretended).is_ok(), "PRETENDED must be unset in a fresh test process before init_two_places_and_pin");
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            let err = std::io::Error::last_os_error();
+                            assert!(
+                                matches!(err.kind(), std::io::ErrorKind::PermissionDenied),
+                                "unexpected sched_setaffinity error probing affinity support: {err}"
+                            );
+                            false
+                        }
+                    }
+                    Err(_) => false,
                 }
             };
             crate::initialize();
             let has_workers = crate::lanes::pool_has_workers();
             if has_workers {
-                let deadline = now() + std::time::Duration::from_secs(2);
-                while !settled() && now() < deadline {
+                while !settled() {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
             #[cfg(target_os = "linux")]
             {
                 if requested_two_places && has_workers {
-                    assert!(settled(), "two-place topology failed to settle within 2s on a >=4-CPU Linux host");
                     let places = PLACES.get().expect("PLACES must be initialized after installing two-place PRETENDED topology");
                     let &place = places.of_worker.first().expect("two-place topology must have at least one staffed worker place");
                     let set = &places.cpus[place as usize];

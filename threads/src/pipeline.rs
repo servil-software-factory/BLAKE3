@@ -5597,7 +5597,9 @@ mod test {
             }
             block_on(pipe.ready());
         };
-        let is_registered = pipe.source_slot.is_some();
+        let expect_registered = crate::lanes::pool_has_workers();
+        assert_eq!(pipe.source_slot.is_some(), expect_registered, "single Pipeline in a fresh process must register a source slot iff pool has workers");
+        let is_registered = expect_registered;
 
         // Split batch (>= TASK_LEN = 64 KiB) records a BatchPlan when
         // registered, tracks real depths (1, 2) across interleaved short/empty
@@ -5654,8 +5656,9 @@ mod test {
         // time via try_reap_one() (without reap_all batching) to verify the
         // exact [1, 1, 1, 0] batches_in_flight progression and per-slot plan retirement.
         pipe.publish_open();
-        let expected_after_reap: &[(u32, u32, bool)] = &[(10, 1, true), (11, 1, true), (12, 1, true), (13, 0, false)];
-        for &(expected_tag, want_in_flight, s2_plan_live) in expected_after_reap {
+        let expected_after_reap: &[(u32, usize, u8, u32, bool)] =
+            &[(10, one_ticket_count, 0, 1, true), (11, 4, 3, 1, true), (12, 0, 0, 1, true), (13, multi_ticket_count, 7, 0, false)];
+        for &(expected_tag, expected_count, seed, want_in_flight, s2_plan_live) in expected_after_reap {
             let ev = loop {
                 if let Some(ev) = pipe.try_reap_one() {
                     break ev;
@@ -5666,8 +5669,12 @@ mod test {
             };
             let Event::Batch { tag, batch, digests } = ev else { panic!("expected Batch event") };
             assert_eq!(tag, expected_tag);
+            assert_eq!(batch.len(), expected_count, "returned batch count for tag {tag}");
+            assert_eq!(digests.len(), expected_count, "returned digest count for tag {tag}");
+            let want_batch = make_batch(expected_count, seed);
+            assert_eq!(batch.bytes(), want_batch.bytes(), "returned batch input bytes must match seed for tag {tag}");
             for (idx, digest) in digests.iter().enumerate() {
-                assert_eq!(*digest, *crate::convenience::hash(&batch.bytes()[idx * 64..(idx + 1) * 64]).as_bytes());
+                assert_eq!(*digest, *blake3::hash(&want_batch.bytes()[idx * 64..(idx + 1) * 64]).as_bytes());
             }
             if is_registered {
                 assert_eq!(pipe.batches_in_flight, want_in_flight, "batches_in_flight after reaping tag {tag}");
