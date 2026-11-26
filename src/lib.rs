@@ -282,7 +282,8 @@ pub(crate) enum Ran {
     /// time (many::hash_many_on's first path).
     BlockRun = 16,
     /// A batch's messages of 2 to 15 chunks ran across messages
-    /// (many::hash_across).
+    /// (`many::hash_across`). A batch with a serial tail records both `Across`
+    /// and `MessageAlone`.
     Across = 32,
     /// A batch's messages ran one at a time (many::hash_long_or_single).
     MessageAlone = 64,
