@@ -925,11 +925,15 @@ pub unsafe fn hash_many_last_len<const N: usize>(
     unsafe { hash_many_in(family(), inputs, key, counter, increment_counter, flags, flags_start, flags_end, last_len, out) }
 }
 
-/// [`hash_many_last_len`] on the kernels of `family`.
+/// [`hash_many_last_len`] on the kernels of `family`, non-generic over `blocks`.
+/// Unsafe because `table` must hold `total` pointers each reaching `blocks * 64`
+/// readable bytes and the CPU must have NEON.
 #[allow(clippy::too_many_arguments)]
-unsafe fn hash_many_in<const N: usize>(
+unsafe fn hash_many_in_raw(
     family: &Family,
-    inputs: &[&[u8; N]],
+    table: *const *const u8,
+    total: usize,
+    blocks: usize,
     key: &CVWords,
     counter: u64,
     increment_counter: IncrementCounter,
@@ -939,24 +943,21 @@ unsafe fn hash_many_in<const N: usize>(
     last_len: usize,
     out: &mut [u8],
 ) {
-    assert!(inputs.len() <= out.len() / OUT_LEN);
+    assert!(total <= out.len() / OUT_LEN);
+    assert!((1..=16).contains(&blocks), "1 to 16 whole blocks");
     assert!((1..=BLOCK_LEN).contains(&last_len), "a last block of 1 to 64 bytes");
-    const { assert!(N > 0 && N % BLOCK_LEN == 0 && N <= CHUNK_LEN, "1 to 16 whole blocks") };
     let (plans, kernels, counter_step): (&[&[usize]; 17], &[Option<Kernel>], u64) = if increment_counter.yes() {
-        assert_eq!(N, CHUNK_LEN, "incrementing counters hash whole chunks");
+        assert_eq!(blocks, CHUNK_LEN / BLOCK_LEN, "incrementing counters hash whole chunks");
         (family.chunk_plans, family.chunk_kernels, 1)
     } else {
         (family.parent_plans, family.parent_kernels, 0)
     };
     let packed = flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16 | (last_len as u64) << 24;
-    let blocks = N / BLOCK_LEN;
-    // `&[&[u8; N]]` is a table of pointers, which is what the kernels take.
-    let table = inputs.as_ptr() as *const *const u8;
 
     let mut done = 0;
-    while done < inputs.len() {
-        let count = core::cmp::min(GROUP, inputs.len() - done);
-        // Sound: `done + count <= inputs.len()`, `inputs` holds valid `N`-byte references, and `out` was asserted to hold `inputs.len() * OUT_LEN` bytes.
+    while done < total {
+        let count = core::cmp::min(GROUP, total - done);
+        // Sound: `done + count <= total`, `table` holds valid `blocks * 64`-byte pointers, and `out` was asserted to hold `total * OUT_LEN` bytes.
         unsafe {
             run_plan(
                 plans[count],
@@ -972,6 +973,51 @@ unsafe fn hash_many_in<const N: usize>(
         }
         done += count;
     }
+}
+
+/// [`hash_many_last_len`] on the kernels of `family`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn hash_many_in<const N: usize>(
+    family: &Family,
+    inputs: &[&[u8; N]],
+    key: &CVWords,
+    counter: u64,
+    increment_counter: IncrementCounter,
+    flags: u8,
+    flags_start: u8,
+    flags_end: u8,
+    last_len: usize,
+    out: &mut [u8],
+) {
+    const { assert!(N > 0 && N % BLOCK_LEN == 0 && N <= CHUNK_LEN, "1 to 16 whole blocks") };
+    // Sound: `&[&[u8; N]]` is a table of valid `N`-byte pointers matching `blocks = N / BLOCK_LEN`; caller verified NEON.
+    unsafe {
+        hash_many_in_raw(
+            family,
+            inputs.as_ptr() as *const *const u8,
+            inputs.len(),
+            N / BLOCK_LEN,
+            key,
+            counter,
+            increment_counter,
+            flags,
+            flags_start,
+            flags_end,
+            last_len,
+            out,
+        )
+    }
+}
+
+/// Non-generic entry for independent messages of `blocks` whole blocks (1..=16)
+/// at counter 0, each last block `last_len` bytes (1..=64). Unsafe because the
+/// CPU must have NEON and every pointer in `lanes` must reach `blocks * 64`
+/// readable bytes.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn hash_many_raw(lanes: &[*const u8], blocks: usize, key: &CVWords, flags: u8, flags_start: u8, flags_end: u8, last_len: usize, out: &mut [u8]) {
+    // Sound: caller verified NEON and that every pointer in `lanes` reaches `blocks * 64` readable bytes.
+    unsafe { hash_many_in_raw(family(), lanes.as_ptr(), lanes.len(), blocks, key, 0, IncrementCounter::No, flags, flags_start, flags_end, last_len, out) }
 }
 
 /// Separate inputs of `blocks` whole blocks (1 to 16) at one `counter`, the
