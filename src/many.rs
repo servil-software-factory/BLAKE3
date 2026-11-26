@@ -532,19 +532,39 @@ const ACROSS_CHUNKS: usize = 16;
 
 /// The fewest messages of `len` bytes that [`hash_across`] takes on
 /// `platform` (AVX2 and AVX-512, messages of 2 to ACROSS_CHUNKS - 1
-/// chunks): as many as the lanes, or 4 where each message's chunks leave
-/// the lanes short and its own tree is a long chain (a partial chunk after
-/// its whole ones, or two chunks). i7-12700K, six messages: 1500-6000 B
-/// x0.58-0.84 across; 4 KiB x1.13, 8 KiB x1.55, 12-15 KiB x1.15-1.23
-/// (their own lanes and parents ahead).
+/// chunks):
+/// - 4 where each message's chunks leave the across lanes short and its own
+///   tree is a long chain (a partial chunk after its whole ones, or two
+///   chunks);
+/// - `lanes / 2` (4 on AVX2, 8 on AVX-512) for whole-chunk messages using
+///   fewer than half the across lanes (3 chunks on AVX2, 3..=7 chunks on
+///   AVX-512);
+/// - `lanes` (`platform.simd_degree().min(ACROSS_GROUP)`: 8 on AVX2, 16 on
+///   AVX-512 — tied to [`ACROSS_GROUP`], never to AVX-512's 32-chunk wide
+///   single-message kernel) otherwise.
+///
+/// Measured natively (Nov 26, 2026):
+/// - EPYC 9255 (Zen 5 AVX-512): 3 KiB × 16 1460 → 285 ns (5.1×), 4 KiB × 16
+///   1448 → 390 ns (3.7×), 3–6 KiB × 8 1.5–2.7× faster, 8–15 KiB × 16 1.27–2.12×;
+/// - Xeon Gold 6330 (Ice Lake AVX-512): 3–6 KiB × 8 1.25–1.70×, 3–15 KiB × 16
+///   1.18–2.41×;
+/// - EPYC 7443 (Zen 3 AVX2): 3 KiB × 4..7 1.31–1.78× faster, 4 KiB unchanged.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn across_from(len: usize, platform: Platform) -> Option<usize> {
     let chunks = len.div_ceil(CHUNK_LEN);
     if !(2..ACROSS_CHUNKS).contains(&chunks) || !crate::pair::takes_platform(platform) {
         return None;
     }
-    let chain = chunks < platform.simd_degree() && (len % CHUNK_LEN != 0 || chunks == 2);
-    Some(if chain { 4 } else { platform.simd_degree() })
+    let lanes = platform.simd_degree().min(ACROSS_GROUP);
+    let half = lanes / 2;
+    let chain = chunks < lanes && (len % CHUNK_LEN != 0 || chunks == 2);
+    Some(if chain {
+        4
+    } else if chunks < half {
+        half
+    } else {
+        lanes
+    })
 }
 
 /// Messages of one length, over a chunk and under ACROSS_CHUNKS chunks,
@@ -1287,8 +1307,19 @@ mod test {
         let two = messages(CHUNK_LEN + 1, 2);
         let r = ran(&mut || hash_many_on(&two, CHUNK_LEN + 1, slot_len(CHUNK_LEN + 1), IV, 0, &mut out[..2], avx2));
         assert!(!has(r, Ran::ShortRun), "two of a chunk and a byte: past the short runs");
-        // Three whole chunks: across from eight messages on AVX2.
-        let len = 3 * CHUNK_LEN;
+        // Three whole chunks: across from four messages on AVX2 (under half lanes).
+        let len3 = 3 * CHUNK_LEN;
+        assert_eq!(across_from(len3, avx2), Some(4));
+        let four = messages(len3, 4);
+        let r = ran(&mut || hash_many_on(&four[..3 * slot_len(len3)], len3, slot_len(len3), IV, 0, &mut out[..3], avx2));
+        assert!(has(r, Ran::MessageAlone) && !has(r, Ran::Across), "three of 3 KiB: one at a time");
+        let r = ran(&mut || hash_many_on(&four, len3, slot_len(len3), IV, 0, &mut out[..4], avx2));
+        assert!(has(r, Ran::Across) && !has(r, Ran::MessageAlone), "four of 3 KiB: across");
+        for (i, o) in out[..4].iter().enumerate() {
+            assert_eq!(*o, *crate::convenience::hash(message(&four, len3, i)).as_bytes());
+        }
+        // Four whole chunks: across from eight messages on AVX2.
+        let len = 4 * CHUNK_LEN;
         assert_eq!(across_from(len, avx2), Some(8));
         let eight = messages(len, 8);
         let r = ran(&mut || hash_many_on(&eight[..7 * slot_len(len)], len, slot_len(len), IV, 0, &mut out[..7], avx2));
@@ -1312,8 +1343,9 @@ mod test {
         assert_eq!(across_from(CHUNK_LEN, avx2), None, "one chunk");
         assert_eq!(across_from(CHUNK_LEN + 1, avx2), Some(4), "two chunks, one partial");
         assert_eq!(across_from(2 * CHUNK_LEN, avx2), Some(4), "two whole chunks");
-        assert_eq!(across_from(3 * CHUNK_LEN, avx2), Some(8), "three whole chunks: the lanes");
+        assert_eq!(across_from(3 * CHUNK_LEN, avx2), Some(4), "three whole chunks: under half AVX2 lanes");
         assert_eq!(across_from(3 * CHUNK_LEN + 1, avx2), Some(4), "four chunks, one partial");
+        assert_eq!(across_from(4 * CHUNK_LEN, avx2), Some(8), "four whole chunks: half AVX2 lanes");
         assert_eq!(across_from(6 * CHUNK_LEN + 500, avx2), Some(4), "seven chunks, one partial, short of the lanes");
         assert_eq!(across_from(7 * CHUNK_LEN + 500, avx2), Some(8), "eight chunks fill the lanes, partial or not");
         assert_eq!(across_from(8 * CHUNK_LEN, avx2), Some(8), "eight whole chunks");
@@ -1324,14 +1356,15 @@ mod test {
         assert_eq!(across_from(3 * CHUNK_LEN, Platform::SSE41), None, "SSE4.1 hashes message by message");
         #[cfg(blake3_avx512_ffi)]
         {
-            // AVX-512's lanes: 32 on Linux (the wide kernel), 16 elsewhere;
-            // every count under 16 chunks is short of them.
-            let lanes = Platform::AVX512.simd_degree();
-            assert!(lanes >= 16);
-            assert_eq!(across_from(8 * CHUNK_LEN, Platform::AVX512), Some(lanes), "eight whole chunks: the lanes");
-            assert_eq!(across_from(8 * CHUNK_LEN + 1, Platform::AVX512), Some(4), "nine chunks, one partial, short of the lanes");
+            // AVX-512 across lanes are capped at ACROSS_GROUP = 16 (never
+            // simd_degree()'s 32 for wide single-message kernels). Pin literals
+            // so a future simd_degree() change cannot silently drift the threshold.
             assert_eq!(across_from(2 * CHUNK_LEN, Platform::AVX512), Some(4), "two whole chunks: a long chain");
-            assert_eq!(across_from(15 * CHUNK_LEN, Platform::AVX512), Some(lanes));
+            assert_eq!(across_from(3 * CHUNK_LEN, Platform::AVX512), Some(8), "three whole chunks: under half of 16");
+            assert_eq!(across_from(7 * CHUNK_LEN, Platform::AVX512), Some(8), "seven whole chunks: under half of 16");
+            assert_eq!(across_from(8 * CHUNK_LEN, Platform::AVX512), Some(16), "eight whole chunks: ACROSS_GROUP");
+            assert_eq!(across_from(8 * CHUNK_LEN + 1, Platform::AVX512), Some(4), "nine chunks, one partial, short of 16");
+            assert_eq!(across_from(15 * CHUNK_LEN, Platform::AVX512), Some(16), "fifteen whole chunks: ACROSS_GROUP");
         }
     }
 
