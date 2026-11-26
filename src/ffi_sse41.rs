@@ -49,10 +49,10 @@ pub unsafe fn hash_many<const N: usize>(
     }
 }
 
-/// Single non-generic x86-64 dispatcher for `2..=15`-block slot widths
-/// (`128..=960 B`), eliminating 14 monomorphized copies of `hash_blocks` +
-/// `hash_four_at_a_time` while preserving the 4-lane fast path for `count == 3`
-/// and SSE4.1 / AVX2 / AVX-512 assembly dispatch via `pair::hash_many_blocks`.
+/// Single non-generic x86-64 dispatcher for `2..=16`-block slot widths
+/// (`128..=1024 B`), eliminating all 15 monomorphized x86 copies of
+/// `hash_blocks` while delegating whole-chunk (`16`-block) runs to
+/// `hash_many_rounded` and `2..=15`-block runs through `pair::hash_many_blocks`.
 #[inline(never)]
 pub(crate) fn hash_blocks_x86(
     messages: &[u8],
@@ -64,7 +64,7 @@ pub(crate) fn hash_blocks_x86(
     last_len: usize,
 ) {
     let count = outputs.len();
-    assert!((2..=15).contains(&blocks) && (1..=BLOCK_LEN).contains(&last_len), "x86 multi-block shape out of range");
+    assert!((2..=16).contains(&blocks) && (1..=BLOCK_LEN).contains(&last_len), "x86 multi-block shape out of range");
     let slot = blocks * BLOCK_LEN;
     assert_eq!(messages.len(), count.checked_mul(slot).expect("slot byte count fits"), "exact slot bytes for count outputs");
     if count == 0 {
@@ -75,6 +75,24 @@ pub(crate) fn hash_blocks_x86(
         for (output, message) in outputs.iter_mut().zip(messages.chunks_exact(slot)) {
             *output = *crate::hash_serial_on(&message[..len], key, flags, platform).as_bytes();
         }
+        return;
+    }
+    if blocks == 16 {
+        // Whole-chunk batches delegate to `hash_many_rounded` (preserving
+        // Zen 5 `hash32` for 17..=31).
+        let mut lanes = crate::stack_vec::StackVec::<&[u8; crate::CHUNK_LEN], { crate::many::TABLE }>::new();
+        lanes.extend(messages.chunks_exact(crate::CHUNK_LEN).map(|m| m.try_into().expect("CHUNK_LEN chunk")));
+        crate::hash_many_rounded(
+            platform,
+            &lanes,
+            key,
+            0,
+            crate::IncrementCounter::No,
+            flags,
+            crate::CHUNK_START,
+            crate::CHUNK_END | crate::ROOT,
+            outputs.as_flattened_mut(),
+        );
         return;
     }
     if count == 3 {
@@ -102,8 +120,27 @@ pub(crate) fn hash_blocks_x86(
     let mut ptrs = crate::stack_vec::StackVec::<*const u8, { crate::many::TABLE }>::new();
     ptrs.extend(messages.chunks_exact(slot).map(|m| m.as_ptr()));
     assert_eq!(ptrs.len(), count, "one message per output");
+    let (full, target) = round_x86_blocks(platform, blocks, count);
+    if target == 0 {
+        // Sound: every pointer in `ptrs` reaches `blocks` whole blocks inside `messages`, and `platform` is a detected x86-64 ISA.
+        unsafe {
+            crate::pair::hash_many_blocks(
+                platform,
+                &ptrs,
+                blocks,
+                key,
+                0,
+                false,
+                flags,
+                crate::CHUNK_START,
+                crate::CHUNK_END | crate::ROOT,
+                outputs.as_flattened_mut(),
+            );
+        }
+        return;
+    }
     // Sound: every pointer in `ptrs` reaches `blocks` whole blocks inside `messages`, and `platform` is a detected x86-64 ISA.
-    unsafe { hash_blocks_rounded_x86(&ptrs, blocks, key, flags, outputs, platform) };
+    unsafe { hash_blocks_rounded_x86(&ptrs, blocks, full, target, key, flags, outputs, platform) };
 }
 
 /// Compute `(full_prefix_lanes, rounded_tail_width)` once for x86-64 multi-block
@@ -130,38 +167,22 @@ pub(crate) fn round_x86_blocks(platform: crate::platform::Platform, blocks: usiz
     if target == 0 { (0, 0) } else { (count - rem, target) }
 }
 
-/// Non-generic x86-64 rounded multi-block batch helper (`2..=15` blocks) built
-/// over `pair::hash_many_blocks` with width-sized stack scratch (`4/8/16`),
-/// avoiding per-length monomorphization bloat in `hash_blocks`.
+/// Out-of-line x86-64 rounded-tail batch helper (`2..=15` blocks, `target > 0`)
+/// built over `pair::hash_many_blocks` with width-sized stack scratch (`4/8/16`),
+/// entered only when rounding a tail so unrounded calls stay inline in
+/// `hash_blocks_x86`.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 unsafe fn hash_blocks_rounded_x86(
     ptrs: &[*const u8],
     blocks: usize,
+    full: usize,
+    target: usize,
     key: &CVWords,
     flags: u8,
     outputs: &mut [[u8; OUT_LEN]],
     platform: crate::platform::Platform,
 ) {
-    let count = outputs.len();
-    let (full, target) = round_x86_blocks(platform, blocks, count);
-    if target == 0 {
-        // Sound: caller verified a detected x86-64 platform and every pointer reaches `blocks` blocks.
-        unsafe {
-            crate::pair::hash_many_blocks(
-                platform,
-                ptrs,
-                blocks,
-                key,
-                0,
-                false,
-                flags,
-                crate::CHUNK_START,
-                crate::CHUNK_END | crate::ROOT,
-                outputs.as_flattened_mut(),
-            );
-        }
-        return;
-    }
     if full != 0 {
         // Sound: same pointer/platform guarantees on the leading `full` lanes.
         unsafe {
