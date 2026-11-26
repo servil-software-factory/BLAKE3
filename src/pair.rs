@@ -101,47 +101,41 @@ pub(crate) unsafe fn hash_many_blocks(
     #[cfg(test)]
     let _ = BLOCKS_CALLS.try_with(|c| c.borrow_mut().push((blocks, inputs.len())));
     let (n, input, key_ptr, out_ptr) = (inputs.len(), inputs.as_ptr(), key.as_ptr(), out.as_mut_ptr());
-    match platform {
-        #[cfg(blake3_avx512_ffi)]
-        // Sound: `Platform::AVX512` proves AVX-512F+VL support; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
-        Platform::AVX512 => {
-            #[cfg(test)]
-            crate::record_hash_many_call(blocks, n);
-            crate::ran_kernel(crate::avx512::ffi::blake3_servil_hash_many_avx512 as *const ());
-            unsafe { crate::avx512::ffi::blake3_servil_hash_many_avx512(input, n, blocks, key_ptr, counter, increment, flags, flags_start, flags_end, out_ptr) }
-        }
-        #[cfg(blake3_avx2_ffi)]
-        // Sound: `Platform::AVX2` proves AVX2 support; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
-        Platform::AVX2 => {
-            #[cfg(test)]
-            crate::record_hash_many_call(blocks, n);
-            crate::ran_kernel(crate::avx2::ffi::blake3_servil_hash_many_avx2 as *const ());
-            unsafe { crate::avx2::ffi::blake3_servil_hash_many_avx2(input, n, blocks, key_ptr, counter, increment, flags, flags_start, flags_end, out_ptr) }
-        }
-        #[cfg(blake3_sse41_ffi)]
-        // Sound: `Platform::SSE41` proves SSSE3+SSE4.1 support; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
-        Platform::SSE41 => {
-            #[cfg(test)]
-            crate::record_hash_many_call(blocks, n);
-            crate::ran_kernel(crate::sse41::ffi::blake3_servil_hash_many_sse41 as *const ());
-            unsafe { crate::sse41::ffi::blake3_servil_hash_many_sse41(input, n, blocks, key_ptr, counter, increment, flags, flags_start, flags_end, out_ptr) }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        _ => {
-            // Elsewhere one input after another on the platform's compression
-            // (for tests of hash_many's batches on non-x86 platforms). Does not
-            // record into `KERNEL_HASH_MANY_CALLS` so SIMD dispatch tests catch
-            // accidental scalar fallbacks.
-            for (i, &p) in inputs.iter().enumerate() {
-                let mut cv = *key;
-                for b in 0..blocks {
-                    // Sound: `p` reaches `blocks` blocks.
-                    let block: &[u8; BLOCK_LEN] = unsafe { &*(p.add(b * BLOCK_LEN) as *const [u8; BLOCK_LEN]) };
-                    let f = flags | if b == 0 { flags_start } else { 0 } | if b + 1 == blocks { flags_end } else { 0 };
-                    platform.compress_in_place(&mut cv, block, u8::try_from(BLOCK_LEN).unwrap(), counter + if increment { i as u64 } else { 0 }, f);
-                }
-                out[i * OUT_LEN..][..OUT_LEN].copy_from_slice(&crate::hasher::le_bytes(&cv));
+    #[cfg(target_arch = "x86_64")]
+    {
+        type HashManyFn = unsafe extern "C" fn(*const *const u8, usize, usize, *const u32, u64, bool, u8, u8, u8, *mut u8);
+        // Select the assembly entry point once so the test kernel-identity
+        // record and the actual FFI call cannot diverge (#570).
+        let entry: HashManyFn = match platform {
+            #[cfg(blake3_avx512_ffi)]
+            Platform::AVX512 => crate::avx512::ffi::blake3_servil_hash_many_avx512,
+            #[cfg(blake3_avx2_ffi)]
+            Platform::AVX2 => crate::avx2::ffi::blake3_servil_hash_many_avx2,
+            #[cfg(blake3_sse41_ffi)]
+            Platform::SSE41 => crate::sse41::ffi::blake3_servil_hash_many_sse41,
+        };
+        #[cfg(test)]
+        crate::record_hash_many_call(blocks, n);
+        crate::ran_kernel(entry as *const ());
+        // Sound: `platform` proves ISA support for `entry`; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
+        unsafe { entry(input, n, blocks, key_ptr, counter, increment, flags, flags_start, flags_end, out_ptr) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (n, input, key_ptr, out_ptr);
+        // Elsewhere one input after another on the platform's compression
+        // (for tests of hash_many's batches on non-x86 platforms). Does not
+        // record into `KERNEL_HASH_MANY_CALLS` so SIMD dispatch tests catch
+        // accidental scalar fallbacks.
+        for (i, &p) in inputs.iter().enumerate() {
+            let mut cv = *key;
+            for b in 0..blocks {
+                // Sound: `p` reaches `blocks` blocks.
+                let block: &[u8; BLOCK_LEN] = unsafe { &*(p.add(b * BLOCK_LEN) as *const [u8; BLOCK_LEN]) };
+                let f = flags | if b == 0 { flags_start } else { 0 } | if b + 1 == blocks { flags_end } else { 0 };
+                platform.compress_in_place(&mut cv, block, u8::try_from(BLOCK_LEN).unwrap(), counter + if increment { i as u64 } else { 0 }, f);
             }
+            out[i * OUT_LEN..][..OUT_LEN].copy_from_slice(&crate::hasher::le_bytes(&cv));
         }
     }
 }

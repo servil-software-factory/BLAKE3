@@ -136,21 +136,21 @@ src/lib.rs	replace | with ^ in OutputReader::fill	1	equivalent: | and ^ agree on
 src/lib.rs	replace | with ^ in compress_parents_parallel	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace || with && in compress_chunks_parallel	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	delete match arm 3 in hash_four_at_a_time	1	non-x86 only: cfg(not(target_arch="x86_64")) excludes this fallback on x86-64; caught on AArch64
-src/many.rs	delete match arm 2 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 3 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 4 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 5 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 6 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 7 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 8 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 9 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 10 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 11 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 12 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 13 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 14 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
-src/many.rs	delete match arm 15 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 2 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 3 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 4 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 5 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 6 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 7 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 8 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 9 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 10 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 11 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 12 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 13 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 14 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 15 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
+src/many.rs	delete match arm 16 in hash_many_on	1	non-x86 only: cfg(blake3_neon) excludes per-length arms 2..=16 on x86-64; caught on AArch64
 src/many.rs	replace % with + in hash_blocks	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace % with + in hash_chunked	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace % with + in hash_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -203,7 +203,6 @@ src/many.rs	replace chunked -> bool with false	1	same code: every test binary ha
 src/many.rs	replace hash_chunked with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace hash_run_padded with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace hash_two_chunks with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/many.rs	replace neon_plans -> bool with false	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace neon_plans_last_len with ()	1	NEON only: its body is cfg(blake3_neon); on x86 neon_plans() is false and it is not called
 src/many.rs	replace platform_is_sme2 -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace sme2_chunked_min -> usize with 0	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -326,7 +325,6 @@ src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<us
 src/each.rs	replace >= with < in finalize_each	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace | with ^ in hash_by_blocks	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/ffi_partial.rs	replace | with ^ in finalize_each	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
-src/many.rs	replace | with ^ in hash_four_at_a_time	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/platform.rs	replace && with || in sme2_allowed	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in sme2_svl_ok	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace sme2_allowed -> bool with false	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

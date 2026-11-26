@@ -252,8 +252,8 @@ const HELD_TILE: usize = 16;
 /// and flags in the existing independent-compression descriptors. The
 /// caller supplies 1..=TABLE stages and a detected AVX2/AVX512 platform.
 /// All turns tile in `HELD_TILE` (16-stage) chunks (`held_groups_in`),
-/// avoiding a 128-stage stack frame (~85.9 KiB smaller frame on x86-64
-/// release CGU=1 builds).
+/// avoiding a 128-stage stack frame (~84 KiB / 85,952 B smaller frame on
+/// x86-64 release CGU=1 builds).
 pub(crate) fn held_groups(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
     for tile in held.chunks(HELD_TILE) {
         held_groups_in(hashers, tile, platform);

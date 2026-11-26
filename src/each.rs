@@ -2380,12 +2380,14 @@ mod test {
         }
     }
 
-    /// Feeding plain (including 17 and 33 hashers fed sixteen 1 KiB pieces) or
-    /// mixed keyed+plain (3, 16, 17, and 33 hashers fed four 4 KiB pieces so
-    /// index 0 holds a full stage and enters `held_groups`) cohorts of boxed
-    /// hashers through a 16 KiB stage in `update_each` uses bounded 1/16-stage
-    /// workspaces (~1.5–15 KiB) rather than a ~99 KiB 128-stage frame, so all
-    /// succeed on a 64 KiB worker thread stack.
+    /// Feeding plain (including 17 and 33 hashers fed sixteen 1 KiB pieces plus
+    /// a 97 B tail) or mixed keyed+plain (3, 16, 17, and 33 hashers fed four
+    /// 4 KiB pieces plus a 97 B tail so index 0 holds a full stage and enters
+    /// `held_groups` on AVX2/AVX-512; macOS uses a 4-stage tier for 3 mixed
+    /// hashers and tiles larger turns by 16) cohorts of `Vec<Hasher>` through
+    /// a 16 KiB stage in `update_each` uses bounded workspaces (~1.5–15 KiB)
+    /// rather than a ~99 KiB 128-stage frame, so all succeed on a 64 KiB
+    /// worker thread stack.
     #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
     #[test]
     fn small_held_cohorts_fit_in_64kib_stack() {
