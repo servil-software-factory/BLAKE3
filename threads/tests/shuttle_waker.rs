@@ -1,31 +1,12 @@
-//! Shuttle model check of `src/waker.rs` (`WakerSlot`): causal race-freedom
-//! on `UnsafeCell<Option<Waker>>` and lost-wake freedom under concurrent
-//! finishers and re-registrations.
+//! Shuttle model check of `src/waker.rs` (`WakerSlot`): lost-wake freedom
+//! under concurrent finishers and re-registrations.
 //!
 //!     RUSTFLAGS="--cfg shuttle" cargo test --release --test shuttle_waker
 #![cfg(shuttle)]
 
 mod waker_sync {
-    pub use shuttle::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
-    pub struct UnsafeCell<T> {
-        busy: AtomicBool,
-        inner: core::cell::UnsafeCell<T>,
-    }
-    impl<T> UnsafeCell<T> {
-        pub fn new(v: T) -> Self {
-            Self { busy: AtomicBool::new(false), inner: core::cell::UnsafeCell::new(v) }
-        }
-    }
-    pub fn spin() {
-        shuttle::thread::yield_now();
-    }
-    pub unsafe fn with_mut<T, R>(cell: &UnsafeCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        assert!(!cell.busy.swap(true, Ordering::SeqCst), "concurrent mutable access to WakerSlot::waker");
-        shuttle::thread::yield_now();
-        let out = f(unsafe { &mut *cell.inner.get() });
-        assert!(cell.busy.swap(false, Ordering::SeqCst));
-        out
-    }
+    pub use shuttle::sync::Mutex;
+    pub use shuttle::sync::atomic::{AtomicBool, Ordering, fence};
 }
 
 #[path = "../src/waker.rs"]
@@ -140,5 +121,52 @@ fn overwrite_and_clear_drop_wakers_and_prevent_spurious_wakes() {
         },
         2000,
         3,
+    );
+}
+
+#[test]
+fn superseded_waker_delivers_wake_to_newest_waiter() {
+    use core::sync::atomic::AtomicUsize;
+    use core::task::{RawWaker, RawWakerVTable};
+    use std::sync::Arc;
+
+    unsafe fn clone_cnt(p: *const ()) -> RawWaker {
+        let a = unsafe { Arc::from_raw(p as *const AtomicUsize) };
+        let c = Arc::clone(&a);
+        let _ = Arc::into_raw(a);
+        RawWaker::new(Arc::into_raw(c) as *const (), &CNT_VTABLE)
+    }
+    unsafe fn wake_cnt(p: *const ()) {
+        let a = unsafe { Arc::from_raw(p as *const AtomicUsize) };
+        a.fetch_add(1, Ordering::SeqCst);
+    }
+    unsafe fn wake_by_ref_cnt(p: *const ()) {
+        let a = unsafe { &*(p as *const AtomicUsize) };
+        a.fetch_add(1, Ordering::SeqCst);
+    }
+    unsafe fn drop_cnt(p: *const ()) {
+        drop(unsafe { Arc::from_raw(p as *const AtomicUsize) });
+    }
+    static CNT_VTABLE: RawWakerVTable = RawWakerVTable::new(clone_cnt, wake_cnt, wake_by_ref_cnt, drop_cnt);
+
+    shuttle::check_pct(
+        || {
+            let slot = Arc::new(WakerSlot::new());
+            let c1 = Arc::new(AtomicUsize::new(0));
+            let c2 = Arc::new(AtomicUsize::new(0));
+            let w1 = unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(Arc::clone(&c1)) as *const (), &CNT_VTABLE)) };
+            let w2 = unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(Arc::clone(&c2)) as *const (), &CNT_VTABLE)) };
+            slot.register(&Context::from_waker(&w1));
+            slot.register(&Context::from_waker(&w2));
+            let s_worker = Arc::clone(&slot);
+            let worker = thread::spawn(move || s_worker.notify_after_seqcst());
+            worker.join().unwrap();
+            assert_eq!([c1.load(Ordering::SeqCst), c2.load(Ordering::SeqCst)], [0, 1], "notify must wake the newest registered waiter, not a superseded one");
+            drop((w1, w2));
+            assert_eq!(Arc::strong_count(&c1), 1, "superseded waker dropped");
+            assert_eq!(Arc::strong_count(&c2), 1, "notified waker dropped");
+        },
+        100,
+        2,
     );
 }

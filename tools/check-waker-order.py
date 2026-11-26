@@ -15,14 +15,10 @@ import tempfile
 PROBE = """
 #![allow(dead_code, unused_imports)]
 mod waker_sync {
-    pub use core::cell::UnsafeCell;
-    pub use core::sync::atomic::{AtomicUsize, Ordering, fence};
-    #[inline(always)]
-    pub fn spin() { core::hint::spin_loop(); }
-    #[inline(always)]
-    pub unsafe fn with_mut<T, R>(cell: &UnsafeCell<T>, f: impl FnOnce(&mut T) -> R) -> R {
-        f(unsafe { &mut *cell.get() })
-    }
+    pub use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering, fence},
+    };
 }
 mod waker;
 mod park_sync {
@@ -37,8 +33,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub(crate) fn register_then_recheck(
     slot: &waker::WakerSlot,
     cx: &core::task::Context<'_>,
-    completed: &core::sync::atomic::AtomicUsize,
-) -> usize {
+    completed: &core::sync::atomic::AtomicBool,
+) -> bool {
     slot.register(cx);
     completed.load(Ordering::Acquire)
 }
@@ -85,9 +81,9 @@ def ordered(asm, function, announce):
     return re.match(r"[ \t]+dmb[ \t]+ish[ \t]*\n", between) is not None
 
 
-def ordered_cfg(asm, function, announce):
-    """Verify every CFG path from entry to every `ldapr` passes through
-    `announce` followed later by `dmb ish` before reaching `ldapr`."""
+def ordered_cfg(asm, function, announce, load_op="ldapr"):
+    """Verify every CFG path from entry to every `load_op` passes through
+    `announce` followed later by `dmb ish` before reaching `load_op`."""
     body = function_body(asm, function)
     blocks = []
     cur_label = "__entry__"
@@ -107,7 +103,7 @@ def ordered_cfg(asm, function, announce):
     idx_of = {lbl: i for i, (lbl, _) in enumerate(blocks)}
 
     # States: 0 = no announce yet, 1 = announced (no dmb ish since), 2 = announced + dmb ish.
-    seen_ldapr = 0
+    seen_load = 0
     seen_fenced = 0
     visited = set()
     work = [(0, 0)]
@@ -127,8 +123,8 @@ def ordered_cfg(asm, function, announce):
                 if s == 1:
                     s = 2
                     seen_fenced += 1
-            elif op == "ldapr":
-                seen_ldapr += 1
+            elif op == load_op:
+                seen_load += 1
                 if s != 2:
                     return False
             elif op == "ret":
@@ -141,12 +137,12 @@ def ordered_cfg(asm, function, announce):
                 fallthrough = False
                 break
             elif op.startswith("b.") or op in ("cbz", "cbnz", "tbz", "tbnz"):
-                target = insn.split(",")[-1].strip()
+                target = insn.split(",")[-1].split()[-1].strip()
                 if target in idx_of:
                     work.append((idx_of[target], s))
         if fallthrough and bi + 1 < len(blocks):
             work.append((bi + 1, s))
-    return seen_ldapr > 0 and seen_fenced > 0
+    return seen_load > 0 and seen_fenced > 0
 
 
 def main():
@@ -163,9 +159,9 @@ def main():
         raise SystemExit("sleep ordering: SME2 must order its announcement before the work re-check")
     probe = PROBE.replace("// SME2_ADVERTISEMENT", advertisement[1].replace("SME2_PARKED", "flag"))
     paths = {
-        "waker.rs": [("register_then_recheck", "stlr", ordered_cfg)],
-        "park.rs": [("park_then_recheck", "ldsetal", ordered)],
-        "probe.rs": [("sme2_then_recheck", "stlrb", ordered)],
+        "waker.rs": [("register_then_recheck", "stlrb", "ldaprb", lambda a, f, n: ordered_cfg(a, f, n, "ldaprb"))],
+        "park.rs": [("park_then_recheck", "ldsetal", "ldapr", ordered)],
+        "probe.rs": [("sme2_then_recheck", "stlrb", "ldapr", ordered)],
     }
     with tempfile.TemporaryDirectory(prefix="sleep-order-") as tmp:
         directory = Path(tmp)
@@ -177,12 +173,12 @@ def main():
             if sources[name].count(fence) != 1:
                 raise SystemExit(f"sleep ordering: expected one SeqCst fence in {name}")
             unfenced = compile_probe({**sources, name: sources[name].replace(fence, "")}, directory)
-            for function, announce, check in checks:
+            for function, announce, load_op, check in checks:
                 if not check(asm, function, announce):
                     raise SystemExit(f"sleep ordering: missing dmb ish in {function}")
                 if check(unfenced, function, announce):
                     raise SystemExit(f"sleep ordering: negative control retained a barrier in {function}")
-                print(f"sleep ordering: {function} has {announce}/dmb ish/ldapr; unfenced control rejected")
+                print(f"sleep ordering: {function} has {announce}/dmb ish/{load_op}; unfenced control rejected")
 
 
 if __name__ == "__main__":
