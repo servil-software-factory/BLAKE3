@@ -599,6 +599,13 @@ fn hash_chunks_by_blocks(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8
 
 fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, flags_end: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
     const GROUP: usize = 16;
+    const BINS: usize = 16;
+    const { assert!(BINS * crate::BLOCK_LEN == crate::CHUNK_LEN) };
+    const { assert!(BY_BLOCKS_AT_ONCE <= u8::MAX as usize) };
+    let n = items.len();
+    if n == 0 {
+        return;
+    }
     // On SME2, a table of messages of one length, whole blocks, at counter 0,
     // with at least the work that pays for the SME2 turn: one call of the message
     // kernel for all of them (a turn's 1 KiB messages finishing together:
@@ -653,8 +660,29 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         }
     }
     let whole = |item: &[u8]| item.len().saturating_sub(1) / crate::BLOCK_LEN;
-    let mut order: crate::stack_vec::StackVec<usize, BY_BLOCKS_AT_ONCE> = (0..items.len()).collect();
-    order.sort_unstable_by_key(|&i| whole(items[i]));
+    let mut order = [0u8; BY_BLOCKS_AT_ONCE];
+    if items.is_sorted_by_key(|item| whole(item)) {
+        for (slot, i) in order[..n].iter_mut().zip(0u8..) {
+            *slot = i;
+        }
+    } else {
+        let mut ends = [0u8; BINS];
+        for item in items {
+            ends[whole(item)] += 1;
+        }
+        let mut sum = 0u8;
+        for end in &mut ends {
+            sum += *end;
+            *end = sum;
+        }
+        let n_u8 = u8::try_from(n).expect("chunk <= BY_BLOCKS_AT_ONCE");
+        for i in (0..n_u8).rev() {
+            let bin = whole(items[usize::from(i)]);
+            ends[bin] -= 1;
+            order[usize::from(ends[bin])] = i;
+        }
+    }
+    let order = &order[..n];
     // With SHA-3 the last block stays in the lanes too; other AArch64
     // CPUs keep the prefix kernels followed by scalar last blocks.
     #[cfg(blake3_neon)]
@@ -664,16 +692,16 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     let mut cvs = [*key; BY_BLOCKS_AT_ONCE];
     // chunk_by always advances and returns nonempty groups, even if a
     // changed predicate groups the wrong items; no mutable loop bound.
-    for same_blocks in order.chunk_by(|&a, &b| whole(items[a]) == whole(items[b])) {
-        let k = whole(items[same_blocks[0]]);
+    for same_blocks in order.chunk_by(|&a, &b| whole(items[usize::from(a)]) == whole(items[usize::from(b)])) {
+        let k = whole(items[usize::from(same_blocks[0])]);
         #[cfg(blake3_neon)]
         if last_lanes {
             for group in same_blocks.chunks(GROUP) {
-                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                let inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[usize::from(i)].as_ptr()).collect();
                 let mut last_blocks = [[0u8; crate::BLOCK_LEN]; GROUP];
                 let mut lengths = [0u32; GROUP];
                 for ((&i, block), len) in group.iter().zip(&mut last_blocks).zip(&mut lengths) {
-                    let tail = &items[i][k * crate::BLOCK_LEN..];
+                    let tail = &items[usize::from(i)][k * crate::BLOCK_LEN..];
                     block[..tail.len()].copy_from_slice(tail);
                     *len = u32::from(tail.len().to_le_bytes()[0]);
                 }
@@ -697,7 +725,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                     );
                 }
                 for (&i, digest) in group.iter().zip(digests.chunks_exact(OUT_LEN)) {
-                    out[i].copy_from_slice(digest);
+                    out[usize::from(i)].copy_from_slice(digest);
                 }
             }
             continue;
@@ -705,7 +733,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         if k > 0 {
             for group in same_blocks.chunks(GROUP) {
                 #[cfg_attr(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")), allow(unused_mut))]
-                let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[i].as_ptr()).collect();
+                let mut inputs: crate::stack_vec::StackVec<*const u8, GROUP> = group.iter().map(|&i| items[usize::from(i)].as_ptr()).collect();
                 #[cfg(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux"))]
                 let padded = crate::ffi_output::pad_by_blocks_inputs(&mut inputs, platform);
                 #[cfg(all(target_arch = "x86_64", not(all(blake3_avx512_ffi, target_os = "linux"))))]
@@ -734,7 +762,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                     )
                 };
                 for (n, &i) in group.iter().enumerate() {
-                    cvs[i] = crate::platform::words_from_le_bytes_32(lanes[n * OUT_LEN..][..OUT_LEN].try_into().unwrap());
+                    cvs[usize::from(i)] = crate::platform::words_from_le_bytes_32(lanes[n * OUT_LEN..][..OUT_LEN].try_into().unwrap());
                 }
             }
         }
@@ -747,6 +775,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
     #[cfg(not(all(target_arch = "x86_64", blake3_avx512_ffi, target_os = "linux")))]
     let serial_start = 0usize;
     for &i in &order[serial_start..] {
+        let i = usize::from(i);
         let item = items[i];
         let k = whole(item);
         let mut cv = cvs[i];
@@ -2352,10 +2381,11 @@ mod test {
     }
 
     /// Feeding plain (including 17 and 33 hashers fed sixteen 1 KiB pieces) or
-    /// mixed keyed+plain (3..=16) cohorts of boxed hashers through a 16 KiB
-    /// stage in `update_each` uses bounded 1/16-stage workspaces (~1.5–15 KiB)
-    /// rather than a 116 KiB 128-stage frame, so all succeed on a 64 KiB worker
-    /// thread stack.
+    /// mixed keyed+plain (3, 16, 17, and 33 hashers fed four 4 KiB pieces so
+    /// index 0 holds a full stage and enters `held_groups`) cohorts of boxed
+    /// hashers through a 16 KiB stage in `update_each` uses bounded 1/16-stage
+    /// workspaces (~1.5–15 KiB) rather than a ~99 KiB 128-stage frame, so all
+    /// succeed on a 64 KiB worker thread stack.
     #[cfg(any(target_arch = "x86_64", target_os = "macos"))]
     #[test]
     fn small_held_cohorts_fit_in_64kib_stack() {
@@ -2364,26 +2394,40 @@ mod test {
         let expected_plain = *blake3::hash(&data).as_bytes();
         let key = [0x5Au8; 32];
         let expected_keyed = *blake3::keyed_hash(&key, &data).as_bytes();
-        for (count, keyed_first, piece_len) in
-            [(1usize, false, 4096usize), (2, false, 4096), (3, true, 4096), (16, true, 4096), (17, false, 1024), (33, false, 1024)]
-        {
+        for (count, keyed_first, piece_len) in [
+            (1usize, false, 4096usize),
+            (2, false, 4096),
+            (3, true, 4096),
+            (16, true, 4096),
+            (17, false, 1024),
+            (17, true, 4096),
+            (33, false, 1024),
+            (33, true, 4096),
+        ] {
             let data_c = data.clone();
             let mut hashers: std::vec::Vec<Hasher> =
                 (0..count).map(|i| if keyed_first && i == 0 { Hasher::new(Mode::Keyed(&key), None) } else { Hasher::new(Mode::Plain, None) }).collect();
-            let (first, last) = std::thread::Builder::new()
+            let (first, last, saw_independent) = std::thread::Builder::new()
                 .stack_size(64 * 1024)
                 .spawn(move || {
+                    HELD_GROUPS.with(|g| g.borrow_mut().clear());
                     for piece in data_c.chunks(piece_len) {
                         let pieces: std::vec::Vec<(usize, &[u8])> = (0..count).map(|i| (i, piece)).collect();
                         update_each(&mut hashers[..], &pieces);
                     }
-                    (*hashers[0].finalize().as_bytes(), *hashers[count - 1].finalize().as_bytes())
+                    let saw = HELD_GROUPS.with(|g| g.borrow().iter().any(|h| h.len() == count));
+                    (*hashers[0].finalize().as_bytes(), *hashers[count - 1].finalize().as_bytes(), saw)
                 })
                 .expect("spawn 64 KiB thread")
                 .join()
                 .expect("held cohort must fit in 64 KiB stack");
             assert_eq!(first, if keyed_first { expected_keyed } else { expected_plain }, "cohort of {count} (keyed={keyed_first}) first");
             assert_eq!(last, expected_plain, "cohort of {count} (keyed={keyed_first}) last");
+            #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+            if keyed_first && count >= INDEPENDENT_MIN && matches!(Platform::detect(), Platform::AVX2 | Platform::AVX512) {
+                assert!(saw_independent, "mixed cohort of {count} must actually run held_groups (>16 tiled on 64 KiB stack)");
+            }
+            let _ = saw_independent;
         }
     }
 

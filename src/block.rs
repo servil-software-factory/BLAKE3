@@ -237,14 +237,7 @@ impl<const N: usize> Packed<N> {
     /// Its bytes: the messages end to end.
     #[inline]
     pub(crate) fn bytes(&self) -> &[u8] {
-        // Sound: the lines hold at least `count * N` initialized bytes, and `u8` needs no alignment.
-        unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count * N) }
-    }
-
-    #[inline]
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        // Sound: as in `bytes`, with exclusive access to `self.lines`.
-        unsafe { core::slice::from_raw_parts_mut(self.lines.as_mut_ptr().cast(), self.count * N) }
+        self[..].as_flattened()
     }
 }
 
@@ -264,14 +257,18 @@ impl<const N: usize> core::ops::Deref for Packed<N> {
     type Target = [[u8; N]];
     #[inline]
     fn deref(&self) -> &[[u8; N]] {
-        self.bytes().as_chunks::<N>().0
+        // Sound: `lines` holds at least `count * N` initialized bytes, and
+        // `[u8; N]` has alignment 1; using `self.count` directly keeps
+        // `Packed::len()` a single load without multiplying/dividing by N (#565).
+        unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count) }
     }
 }
 
 impl<const N: usize> core::ops::DerefMut for Packed<N> {
     #[inline]
     fn deref_mut(&mut self) -> &mut [[u8; N]] {
-        self.bytes_mut().as_chunks_mut::<N>().0
+        // Sound: as in `deref`, with exclusive access to `self.lines`.
+        unsafe { core::slice::from_raw_parts_mut(self.lines.as_mut_ptr().cast(), self.count) }
     }
 }
 

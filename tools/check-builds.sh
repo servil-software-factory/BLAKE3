@@ -68,9 +68,11 @@ done
 # Assembly is built directly by rustc via core::arch::global_asm! (#487),
 # so building both shipped library crates standalone (core and threads, on
 # both Linux x86-64 and macOS AArch64 Mach-O codegen) requires no external C
-# compiler. Set CC_FORCE_DISABLE=1 (cc-rs's own disable switch, which beats
-# Cargo `[env]` overrides) in addition to CC=/nonexistent/cc (#561).
-step sh -c 'no_cc="$CARGO_TARGET_DIR/no-cc"; rm -rf "$no_cc"; for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do CC_FORCE_DISABLE=1 CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --lib --target "$target" && CC_FORCE_DISABLE=1 CC=/nonexistent/cc CARGO_TARGET_DIR="$no_cc" cargo build -q --release --manifest-path threads/Cargo.toml --lib --target "$target" || exit 1; done; rm -rf "$no_cc"'
+# compiler. Explicitly poison standard compiler-discovery env vars (CC,
+# TARGET_CC, HOST_CC, and both underscore and hyphen target-triple CC_*
+# spellings) to /nonexistent/cc alongside CC_FORCE_DISABLE=1 for cc-rs
+# (#561, #565).
+step sh -c 'no_cc="$CARGO_TARGET_DIR/no-cc"; rm -rf "$no_cc"; run_no_cc() { env CC_FORCE_DISABLE=1 CC=/nonexistent/cc TARGET_CC=/nonexistent/cc HOST_CC=/nonexistent/cc CC_x86_64_unknown_linux_gnu=/nonexistent/cc CC_aarch64_apple_darwin=/nonexistent/cc "CC_x86_64-unknown-linux-gnu=/nonexistent/cc" "CC_aarch64-apple-darwin=/nonexistent/cc" CARGO_TARGET_DIR="$no_cc" "$@"; }; for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do run_no_cc cargo build -q --release --lib --target "$target" && run_no_cc cargo build -q --release --manifest-path threads/Cargo.toml --lib --target "$target" || exit 1; done; rm -rf "$no_cc"'
 # Every generated kernel file is its generator's output.
 step sh -c 'python3 tools/gen_neon_hybrid.py | cmp - c/blake3_neon_hybrid_aarch64.S && python3 tools/gen_sme2_hybrid.py | cmp - c/blake3_sme2_hybrid_aarch64.S'
 step sh -c 'python3 tools/gen_x86.py | cmp - c/blake3_partial_x86-64_unix.S'

@@ -30,6 +30,7 @@ src/each.rs	replace >= with < in by_blocks_at_once	1	same code: every test binar
 src/each.rs	replace | with ^ in by_blocks_at_once	2	as on aarch64: survives (known-aarch64.txt): equivalent: the mode flags have none of CHUNK_START, CHUNK_END or ROOT, so OR and XOR join disjoint bits; on arm64: survives (known-arm64.txt): equivalent: the mode flags have none of CHUNK_START, CHUNK_END or ROOT, so OR and XOR join disjoint bits
 src/each.rs	replace | with ^ in hash_cohort_on	1	equivalent: | and ^ agree on flag bits that never overlap
 src/each.rs	replace | with ^ in hash_each_middle	3	equivalent: | and ^ agree on disjoint mode and PARENT/ROOT flag bits
+src/ffi_sse41.rs	replace | with ^ in hash_blocks_x86	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/ffi_counter.rs	replace * with + in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
 src/ffi_counter.rs	replace * with / in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
 src/ffi_counter.rs	replace += with *= in hash_counter_groups	2	AArch64 only: SME2 and NEON arms are compiled out on x86-64
@@ -135,6 +136,21 @@ src/lib.rs	replace | with ^ in OutputReader::fill	1	equivalent: | and ^ agree on
 src/lib.rs	replace | with ^ in compress_parents_parallel	1	equivalent: | and ^ agree on flag bits that never overlap
 src/lib.rs	replace | with ^ in hash_one_chunk_root	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lib.rs	replace || with && in compress_chunks_parallel	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	delete match arm 3 in hash_four_at_a_time	1	non-x86 only: cfg(not(target_arch="x86_64")) excludes this fallback on x86-64; caught on AArch64
+src/many.rs	delete match arm 2 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 3 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 4 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 5 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 6 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 7 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 8 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 9 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 10 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 11 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 12 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 13 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 14 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
+src/many.rs	delete match arm 15 in hash_many_on	1	non-x86 only: cfg(not(blake3_sse41_ffi)) excludes per-length arms 2..=15 on x86-64; caught on AArch64
 src/many.rs	replace % with + in hash_blocks	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace % with + in hash_chunked	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace % with + in hash_run	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -310,7 +326,6 @@ src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<us
 src/each.rs	replace >= with < in finalize_each	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace | with ^ in hash_by_blocks	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/ffi_partial.rs	replace | with ^ in finalize_each	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
-src/many.rs	replace noted_lanes with ()	1	test-only hook: #[cfg(test)] instrumentation recording FOUR_AT_A_TIME_LANES
 src/many.rs	replace | with ^ in hash_four_at_a_time	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/platform.rs	replace && with || in sme2_allowed	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in sme2_svl_ok	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
