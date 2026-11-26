@@ -1689,13 +1689,6 @@ pub(crate) mod places {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn confine_cli_thread() {
-        if let Some(node) = Node::current() {
-            node.bind();
-        }
-    }
-
     /// The calling thread's place, or an out-of-range index when it has none.
     fn here() -> usize {
         #[cfg(target_os = "linux")]
@@ -2365,50 +2358,6 @@ pub(crate) mod places {
             assert!(seen > 0, "expected at least one bound worker");
         }
 
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn the_cli_mask_binds_to_a_pretended_node() {
-            std::thread::spawn(|| {
-                let before = affinity().unwrap();
-                let cpus = bits(&before);
-                if cpus.len() < 4 {
-                    return;
-                }
-                // Sound: `before` is `len` readable bytes.
-                if unsafe { sched_setaffinity(0, core::mem::size_of::<Set>(), &before) } != 0 {
-                    let err = std::io::Error::last_os_error();
-                    if matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES)) {
-                        return;
-                    }
-                    panic!("sched_setaffinity failed unexpectedly: {err}");
-                }
-                let half_cpus: Vec<usize> = cpus.iter().copied().step_by(2).collect();
-                let half_list = half_cpus.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
-                let half_mask = cpu_set(&half_list).unwrap();
-                assert!(PRETENDED_NODE.set(Node(half_mask)).is_ok());
-                crate::__confine_cli_to_one_node();
-                assert_eq!(affinity().unwrap(), half_mask, "CLI confinement binds caller to the chosen node");
-            })
-            .join()
-            .unwrap();
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn the_cli_mask_needs_no_further_node_restriction() {
-            let before = affinity().unwrap();
-            let nodes = node_masks();
-            crate::__confine_cli_to_one_node();
-            let after = affinity().unwrap();
-            assert!(after.iter().zip(before).all(|(new, old)| new & !old == 0));
-            if allowed_nodes(&nodes, &before) > 1 {
-                assert_eq!(allowed_nodes(&nodes, &after), 1);
-                assert_ne!(before, after);
-            } else {
-                assert_eq!(before, after);
-            }
-        }
-
         /// The machine as the system describes it, read by `read` and read
         /// again here another way: the CPUs are the ones this process may
         /// run on, each once, and two share a cache exactly when the
@@ -2466,7 +2415,9 @@ pub(crate) mod places {
                 }
                 panic!("sched_setaffinity failed unexpectedly: {err}");
             }
-            confine_cli_thread();
+            if let Some(node) = Node::current() {
+                node.bind();
+            }
             let cpus = allowed().unwrap();
             if cpus.len() < 4 {
                 return;

@@ -522,16 +522,6 @@ pub fn initialize_multithreaded(threads: Option<core::num::NonZeroUsize>) {
     }
 }
 
-/// Keep the command-line tool's main thread on one memory node before
-/// it starts its file readers and hash workers, where the system tells
-/// the node and allows the binding (as [`initialize_multithreaded`]
-/// does for its workers).
-#[cfg(target_os = "linux")]
-#[doc(hidden)]
-pub fn __confine_cli_to_one_node() {
-    lanes::places::confine_cli_thread();
-}
-
 /// Whether every worker of the multithreaded calls' pool is parked (false
 /// before [`initialize_multithreaded`]). Undocumented and unstable, for
 /// tests only: a test that needs the pool idle waits for this, not for a

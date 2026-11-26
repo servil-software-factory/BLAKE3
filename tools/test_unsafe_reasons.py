@@ -49,7 +49,6 @@ class Reasons(unittest.TestCase):
             "src/self_test.rs",
             "src/lib.rs",
             "threads/src/pipeline.rs",
-            "b3sum/src/file_end.rs",
             "capi/src/lib.rs",
             "version/src/lib.rs",
             "build.rs",
@@ -64,8 +63,6 @@ class Reasons(unittest.TestCase):
             "src/lifecycle_counts.rs",
             "src/ffi_avx512_32_guard_tests.rs",
             "threads/src/forms_test.rs",
-            "b3sum/src/unit_tests.rs",
-            "b3sum/src/test_temp.rs",
         ):
             self.assertNotIn(must_exclude, discovered, f"test-only file unexpectedly scanned: {must_exclude}")
 

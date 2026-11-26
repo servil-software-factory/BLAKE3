@@ -46,11 +46,6 @@ url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/
 safe-to-deploy = ["safe-to-deploy", "agent-safe-to-deploy"]
 safe-to-run = ["safe-to-run", "agent-safe-to-run"]
 
-[policy.b3sums]
-audit-as-crates-io = false
-criteria = "agent-safe-to-deploy"
-dev-criteria = "agent-safe-to-run"
-
 [policy.blake3-servil]
 audit-as-crates-io = false
 criteria = "agent-safe-to-deploy"

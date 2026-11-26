@@ -16,7 +16,6 @@ MANIFESTS = {
     "version/Cargo.toml": ("blake3-servil-version", ""),
     "Cargo.toml": ("blake3-servil-core", 'blake3-servil-version = { version = "=0.8.0+dev", path = "version" }'),
     "threads/Cargo.toml": ("blake3-servil", 'blake3-servil-core = { version = "=0.8.0+dev", path = ".." }'),
-    "b3sum/Cargo.toml": ("b3sums", 'blake3 = { version = "=0.8.0+dev", path = "../threads", package = "blake3-servil" }'),
     "capi/Cargo.toml": ("blake3-servil-c", 'blake3-servil = { path = "..", package = "blake3-servil-core" }'),
 }
 
@@ -42,11 +41,13 @@ class Versions(unittest.TestCase):
         shutil.copyfile(SCRIPT.with_name("blake3_ref.py"), self.root / "tools/blake3_ref.py")
         (self.root / "CHANGELOG.md").write_text("# blake3-servil 0.8.0+" + "a" * 40 + ", against official BLAKE3\n")
         (self.root / "capi/b3.h").write_text(f'#define B3_VERSION "{DEV}"\n')
-        self.run_command("cargo", "generate-lockfile", "--offline", "--manifest-path", "b3sum/Cargo.toml")
         (self.root / "tools/release").mkdir()
         (self.root / "tools/release/Cargo.lock").write_text(
-            (self.root / "b3sum/Cargo.lock").read_text()
-            + f'\n[[package]]\nname = "blake3-servil-c"\nversion = "{DEV}"\ndependencies = [\n "blake3-servil-core",\n]\n'
+            f'version = 4\n'
+            f'\n[[package]]\nname = "blake3-servil-version"\nversion = "{DEV}"\n'
+            f'\n[[package]]\nname = "blake3-servil-core"\nversion = "{DEV}"\ndependencies = [\n "blake3-servil-version",\n]\n'
+            f'\n[[package]]\nname = "blake3-servil"\nversion = "{DEV}"\ndependencies = [\n "blake3-servil-core",\n]\n'
+            f'\n[[package]]\nname = "blake3-servil-c"\nversion = "{DEV}"\ndependencies = [\n "blake3-servil-core",\n]\n'
         )
         self.git("init", "-q")
         self.git("config", "user.name", "Version test")
@@ -89,8 +90,7 @@ class Versions(unittest.TestCase):
         self.assertNotIn("a-clone", output)
         for path in MANIFESTS:
             self.assertIn(f'version = "{full}"', (self.root / path).read_text())
-        self.assertEqual((self.root / "b3sum/Cargo.lock").read_text().count(f'version = "{full}"'), 4)
-        self.assertEqual((self.root / "tools/release/Cargo.lock").read_text().count(f'version = "{full}"'), 5)
+        self.assertEqual((self.root / "tools/release/Cargo.lock").read_text().count(f'version = "{full}"'), 4)
         notes = (self.root / "CHANGELOG.md").read_text()
         self.assertTrue(notes.startswith(f"# blake3-servil {full},"))
         self.assertEqual(self.git("status", "--porcelain"), "")
@@ -197,42 +197,6 @@ class Versions(unittest.TestCase):
     def files(self):
         return {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts and "__pycache__" not in p.parts}
 
-    def test_a_stamp_the_release_check_would_refuse_is_undone(self):
-        # Cargo writes b3sum's lock anew and drops a comment in it: a line
-        # removed, which the release check allows no version commit. The
-        # check before the stamp passes; the stamp made its commit and its
-        # tag, and the release check then refused them.
-        lock = self.root / "b3sum/Cargo.lock"
-        lock.write_text(lock.read_text() + "# a note someone left\n")
-        self.git("commit", "-qam", "a comment in b3sum's lock")
-        self.stamp("--check")
-        head, before = self.git("rev-parse", "HEAD"), self.files()
-        said = self.stamp("0.9.0", succeeds=False)
-        self.assertIn("the stamp is undone", said)
-        self.assertIn("b3sum/Cargo.lock has lines added or removed", said)
-        self.assertEqual(self.git("rev-parse", "HEAD"), head)
-        self.assertEqual(self.git("tag", "-l"), "")
-        self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
-        self.assertEqual(self.files(), before)
-
-    def test_a_stamp_that_stops_after_writing_puts_the_files_back(self):
-        # Cargo's update of b3sum's lock comes after the manifests are
-        # written, and can fail (no network, a registry that is away): the
-        # tree was left stamped in part, with no commit.
-        with tempfile.TemporaryDirectory() as bin:
-            cargo = Path(bin) / "cargo"
-            cargo.write_text("#!/bin/sh\necho 'cargo: it does not work today' >&2\nexit 101\n")
-            cargo.chmod(0o755)
-            for arg in ("0.9.0", "--dev"):
-                with self.subTest(arg=arg):
-                    if arg == "--dev":
-                        self.stamp("0.9.0")
-                    head, before = self.git("rev-parse", "HEAD"), self.files()
-                    self.stamp(arg, succeeds=False, path=bin)
-                    self.assertEqual(self.files(), before)
-                    self.assertEqual(self.git("rev-parse", "HEAD"), head)
-                    self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "")
-
     def stand_in(self, bin, program, script):
         """A program of that name in `bin` (a folder to search first):
         `script` is its shell, in which $real is the program it stands for."""
@@ -242,32 +206,21 @@ class Versions(unittest.TestCase):
 
     def test_a_stamp_that_stops_touches_nothing_but_its_own_files(self):
         # Someone saves a file of theirs while the stamp runs, and the
-        # stamp then stops. It put the whole tree back as Git had it, and
-        # undid a refused stamp with a hard reset: their work was gone.
+        # stamp then stops. It must put only its own stamped files back,
+        # leaving their work intact.
         theirs = self.root / "threads/src/lib.rs"
-        saves = "echo '// their work' >> ../threads/src/lib.rs"
-        lock = self.root / "b3sum/Cargo.lock"
-        lock.write_text(lock.read_text() + "# a note someone left\n")
-        self.git("commit", "-qam", "a comment in b3sum's lock")
-        cases = {
-            # Cargo fails after the manifests are written.
-            "cargo fails": ("cargo", f"{saves}\nexit 101", "", "cargo"),
-            # Cargo drops the lock's comment: the release check refuses the commit.
-            "the release check refuses": ("cargo", f'{saves}\nexec $real "$@"', "the stamp is undone", "b3sum/Cargo.lock has lines added or removed"),
-        }
-        for case, (program, script, *said) in cases.items():
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as bin:
-                self.stand_in(bin, program, script)
-                head, before = self.git("rev-parse", "HEAD"), self.files()
-                out = self.stamp("0.9.0", succeeds=False, path=bin)
-                for words in said:
-                    self.assertIn(words, out)
-                self.assertEqual(self.git("rev-parse", "HEAD"), head)
-                self.assertEqual(self.git("tag", "-l"), "")
-                self.assertEqual(theirs.read_text(), "// their work\n", "their work is as they saved it")
-                self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "M threads/src/lib.rs")
-                theirs.write_text("")
-                self.assertEqual(self.files(), before)
+        saves = "echo '// their work' >> threads/src/lib.rs"
+        with tempfile.TemporaryDirectory() as bin:
+            self.stand_in(bin, "git", f'[ "$1" = commit ] && {{ {saves}; echo "git: no commit today" >&2; exit 1; }}\nexec $real "$@"')
+            head, before = self.git("rev-parse", "HEAD"), self.files()
+            out = self.stamp("0.9.0", succeeds=False, path=bin)
+            self.assertIn("no commit today", out)
+            self.assertEqual(self.git("rev-parse", "HEAD"), head)
+            self.assertEqual(self.git("tag", "-l"), "")
+            self.assertEqual(theirs.read_text(), "// their work\n", "their work is as they saved it")
+            self.assertEqual(self.git("status", "--porcelain", "--untracked-files=no"), "M threads/src/lib.rs")
+            theirs.write_text("")
+            self.assertEqual(self.files(), before)
 
     def test_a_stamp_whose_commit_or_tag_git_refuses_is_undone(self):
         # The commit can be refused (no identity, a lock on the index) and
@@ -332,7 +285,7 @@ class Versions(unittest.TestCase):
         # checkout in put_back to fail too; byte-snapshot fallback still
         # restores every stamped file on disk (#465).
         with tempfile.TemporaryDirectory() as bin:
-            self.stand_in(bin, "cargo", f': > "{lock}"\nexec $real "$@"')
+            self.stand_in(bin, "git", f'[ "$1" = commit ] && : > "{lock}"\nexec $real "$@"')
             try:
                 self.stamp("0.9.0", succeeds=False, path=bin)
             finally:
@@ -387,8 +340,8 @@ class Versions(unittest.TestCase):
 
     def test_check_rejects_each_stale_copy(self):
         cases = [(path, f'version = "{DEV}"') for path in MANIFESTS if path != "Cargo.toml"]
-        cases += [(path, f'version = "={DEV}"') for path in ("Cargo.toml", "threads/Cargo.toml", "b3sum/Cargo.toml")]
-        cases += [("capi/b3.h", DEV), ("b3sum/Cargo.lock", DEV), ("tools/release/Cargo.lock", DEV)]
+        cases += [(path, f'version = "={DEV}"') for path in ("Cargo.toml", "threads/Cargo.toml")]
+        cases += [("capi/b3.h", DEV), ("tools/release/Cargo.lock", DEV)]
         for path, old in cases:
             with self.subTest(path=path, old=old):
                 file = self.root / path
@@ -396,23 +349,6 @@ class Versions(unittest.TestCase):
                 file.write_text(original.replace(old, old.replace(DEV, "0.7.0+dev"), 1))
                 self.assertIn(path, self.stamp("--check", succeeds=False))
                 file.write_text(original)
-        self.stamp("--check")
-
-    def test_check_holds_the_release_lock_to_b3sums(self):
-        # The crates ship the release lock's dependencies, and b3sum is
-        # tested with its own lock's: a package of b3sum's lock is in the
-        # release lock, the same version and the same archive.
-        b3sum, release = self.root / "b3sum/Cargo.lock", self.root / "tools/release/Cargo.lock"
-        package = '\n[[package]]\nname = "dependency"\nversion = "{}"\nsource = "registry+https://example.invalid"\nchecksum = "{}"\n'
-        ours, theirs = b3sum.read_text(), release.read_text()
-        b3sum.write_text(ours + package.format("1.2.3", "aa"))
-        self.assertIn("b3sum/Cargo.lock has dependency 1.2.3, and the release lock has none", self.stamp("--check", succeeds=False))
-        release.write_text(theirs + package.format("1.2.4", "aa"))
-        self.assertIn("the release lock has ['1.2.4']", self.stamp("--check", succeeds=False))
-        release.write_text(theirs + package.format("1.2.3", "bb"))
-        self.stamp("--check", succeeds=False)
-        # The same, beside a package of the libraries' tests alone.
-        release.write_text(theirs + package.format("1.2.3", "aa") + package.format("9.9.9", "cc").replace("dependency", "for-tests"))
         self.stamp("--check")
 
     def test_dirty_tree_is_unchanged(self):

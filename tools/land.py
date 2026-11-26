@@ -26,7 +26,7 @@ The gates of a commit, from what it changes against next:
                             version/src/, version/Cargo.toml)
                                    cells as well
   shipped code (src/, c/, build.rs, threads/src/, threads/build.rs,
-                b3sum/src/, capi/src/, capi/b3.h, version/src/,
+                capi/src/, capi/b3.h, version/src/,
                 the crates' Cargo.toml)
                                    review as well
   proof inputs (c/, c2sp/, tools/verify/, the generators)
@@ -78,7 +78,6 @@ PERF_CODE = (
 SHIPPED_CODE = (
     "src/", "c/", "build.rs", "Cargo.toml",
     "threads/src/", "threads/build.rs", "threads/Cargo.toml",
-    "b3sum/src/", "b3sum/Cargo.toml",
     "capi/src/", "capi/b3.h", "capi/Cargo.toml",
     "version/src/", "version/Cargo.toml",
 )

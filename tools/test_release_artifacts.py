@@ -830,23 +830,19 @@ class CommandLine(Repository):
 
 
 class Image(unittest.TestCase):
-    """The container a release binary is built in is named once, by its
-    digest: the image line of tools/b3sum-release.toolchain. Every command
-    that runs the build, in the pages and in the workflows, reads it from
-    there, so the command a user copies starts from the bytes CI starts
-    from."""
+    """The container image used by CI is named once, by its digest: the image
+    line of tools/release.toolchain. Every command that runs it reads it from
+    there."""
 
     def test_the_image_is_named_once_and_every_command_reads_it(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "tools", "b3sum-release.toolchain")) as file:
+        with open(os.path.join(root, "tools", "release.toolchain")) as file:
             images = [line.split(" ", 1)[1].strip() for line in file if line.startswith("image ")]
         self.assertEqual(len(images), 1)
         self.assertRegex(images[0], r"^ubuntu:[0-9.]+@sha256:[0-9a-f]{64}$")
         tag = images[0].split("@")[0]
-        reads = "\"$(sed -n 's/^image //p' tools/b3sum-release.toolchain)\" sh tools/b3sum-release-container.sh"
         tracked = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, text=True, check=True).stdout.split("\0")
-        named, commands, other = [], 0, []
-        # Where commands are written: pages, workflows, scripts.
+        named = []
         for name in tracked:
             if not name.endswith((".md", ".yml", ".sh", ".toolchain")):
                 continue
@@ -854,12 +850,7 @@ class Image(unittest.TestCase):
                 lines = file.read().splitlines()
             if any(tag in line for line in lines):
                 named.append(name)
-            runs = [line for line in lines if "docker run" in line and "b3sum-release-container.sh" in line]
-            commands += len(runs)
-            other += [f"{name}: {line.strip()}" for line in runs if reads not in line]
-        self.assertEqual(named, ["tools/b3sum-release.toolchain"])
-        self.assertEqual(other, [])
-        self.assertEqual(commands, 5, "two pages, the script's own header, two workflows")
+        self.assertEqual(named, ["tools/release.toolchain"])
 
 
 if __name__ == "__main__":

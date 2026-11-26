@@ -6,18 +6,16 @@
     python3 tools/dependency_policy.py vet ARGS...  cargo vet ARGS on the release workspace and the tree's
                                                     audits (diff, certify, add-exemption, prune ...)
 
-What is checked is both locked resolutions the repository builds and ships from, under every feature:
-- `release`: all six crates in the repository workspace (tools/release/workspace.toml and
-  tools/release/Cargo.lock), covering the four published crates (tools/crates-release.sh) plus `capi/`
-  and `test_vectors/` (tools/ci-locked.sh).
-- `cli`: the standalone CLI (b3sum/Cargo.toml and b3sum/Cargo.lock), as tools/b3sum-release.sh builds it.
+What is checked is the locked release workspace (tools/release/workspace.toml
+and tools/release/Cargo.lock), under every feature, covering all five crates
+in the repository (`blake3-servil-version`, `blake3-servil-core`,
+`blake3-servil`, `blake3-servil-c`, and `test_vectors`).
 
 Each invocation stages its own private temporary directory under target/ (cleaned up on exit), holding a
 copy of the tracked files as the working tree has them, so concurrent runs never collide and a planted
-fault never touches the tree. On each of the two graphs:
-- `by path`: every package without a source must match one of the graph's repository crates (`OURS` for
-  `release`, `CLI_OURS` for `cli`) by both name and manifest path, and Cargo's workspace_members must be
-  exactly the expected roots (`strangers`).
+fault never touches the tree:
+- `by path`: every package without a source must match one of the repository crates (`OURS`) by both name
+  and manifest path, and Cargo's workspace_members must be exactly the expected roots (`strangers`).
 - cargo-deny against deny.toml (`--color never`, `-D index-failure`): `advisories`, `bans`, `licenses`,
   `sources`.
 - `audits`: cargo-vet against tools/release/supply-chain/ (`--locked`).
@@ -35,16 +33,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 AUDITS = Path("tools") / "release" / "supply-chain"
-# The four crates reachable from standalone b3sum/Cargo.toml, by package name and folder.
-CLI_OURS = {
+# All five crates in the repository workspace (tools/release/workspace.toml).
+OURS = {
     "blake3-servil-version": "version",
     "blake3-servil-core": ".",
     "blake3-servil": "threads",
-    "b3sums": "b3sum",
-}
-# All six crates in the repository workspace (tools/release/workspace.toml).
-OURS = {
-    **CLI_OURS,
     "blake3-servil-c": "capi",
     "test_vectors": "test_vectors",
 }
@@ -61,9 +54,8 @@ def _copy_tracked(dest, tracked_files):
 
 @contextmanager
 def staged():
-    """A private staging directory under target/ with two separate checkouts (`release/checkout` under
-    the virtual release workspace, and standalone `cli/` with no parent workspace above it), plus copies
-    of deny.toml and the audit store."""
+    """A private staging directory under target/ with `release/checkout` under
+    the virtual release workspace, plus copies of deny.toml and the audit store."""
     target_dir = ROOT / "target"
     target_dir.mkdir(exist_ok=True)
     tracked = [n for n in subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True,
@@ -73,7 +65,6 @@ def staged():
         _copy_tracked(stage / "release" / "checkout", tracked)
         shutil.copy(stage / "release" / "checkout" / "tools" / "release" / "workspace.toml", stage / "release" / "Cargo.toml")
         shutil.copy(stage / "release" / "checkout" / "tools" / "release" / "Cargo.lock", stage / "release" / "Cargo.lock")
-        _copy_tracked(stage / "cli", tracked)
         shutil.copy(ROOT / "deny.toml", stage / "deny.toml")
         shutil.copytree(ROOT / AUDITS, stage / "supply-chain")
         yield stage
@@ -155,16 +146,14 @@ def check_graph(manifest, checkout, expected_members, deny_config, audit_store, 
 
 
 def failed(stage, say=print, environment=None):
-    """Check both locked resolutions (`release` workspace and standalone `cli`), returning `{graph: [failed]}`."""
+    """Check the locked release workspace, returning `{"release": [failed]}`."""
     release_manifest = stage / "release" / "Cargo.toml"
-    cli_manifest = stage / "cli" / "b3sum" / "Cargo.toml"
     members_list = tomllib.loads(release_manifest.read_text())["workspace"]["members"]
     deny_config = stage / "deny.toml"
     audit_store = stage / "supply-chain"
     return {
         "release": check_graph(release_manifest, stage / "release" / "checkout", set(OURS), deny_config, audit_store,
                                workspace_members_list=members_list, ours=OURS, say=say, environment=environment),
-        "cli": check_graph(cli_manifest, stage / "cli", {"b3sums"}, deny_config, audit_store, ours=CLI_OURS, say=say, environment=environment),
     }
 
 
@@ -262,19 +251,18 @@ def _write_path_crate(crate_dir, name, licence):
 
 def a_vulnerable_version(stage):
     # RUSTSEC-2026-0007 (vulnerability advisory on bytes 1.11.0, zero transitive deps).
-    # Plant it as a dev-dependency of b3sums in both locks and exempt it at safe-to-run
-    # so the vulnerability advisory is the sole failure on both graphs.
+    # Plant it as a dev-dependency of blake3-servil in the release lock and exempt it at
+    # safe-to-run so the vulnerability advisory is the sole failure.
     pkg_block = (
         '\n[[package]]\nname = "bytes"\nversion = "1.11.0"\n'
         'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
         'checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"\n'
     )
-    for checkout, lock in ((stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
-                           (stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
-        add_section_dep(checkout / "b3sum" / "Cargo.toml", "dev-dependencies", 'bytes = "=1.11.0"')
-        edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "bytes",\n')
-        with open(lock, "a") as f:
-            f.write(pkg_block)
+    checkout, lock = stage / "release" / "checkout", stage / "release" / "Cargo.lock"
+    add_section_dep(checkout / "threads" / "Cargo.toml", "dev-dependencies", 'bytes = "=1.11.0"')
+    edit(lock, r'(name = "blake3-servil"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "bytes",\n')
+    with open(lock, "a") as f:
+        f.write(pkg_block)
     strip_audit_evidence(stage, "bytes", replace_with=[("1.11.0", "agent-safe-to-run")])
 
 
@@ -283,27 +271,25 @@ def no_licence_exception(stage):
 
 
 def a_crate_by_path_inside(stage):
-    """A fifth MIT crate copied inside each checkout and taken by path as a CLI test dependency."""
-    for checkout, lock in ((stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
-                           (stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
-        _write_path_crate(checkout / "copied", "copied", "MIT")
-        add_section_dep(checkout / "b3sum" / "Cargo.toml", "dev-dependencies", 'copied = { path = "../copied" }')
-        edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "copied",\n')
-        with open(lock, "a") as f:
-            f.write('\n[[package]]\nname = "copied"\nversion = "0.1.0"\n')
+    """An extra MIT crate copied inside the checkout and taken by path as a dev-dependency."""
+    checkout, lock = stage / "release" / "checkout", stage / "release" / "Cargo.lock"
+    _write_path_crate(checkout / "copied", "copied", "MIT")
+    add_section_dep(checkout / "threads" / "Cargo.toml", "dev-dependencies", 'copied = { path = "../copied" }')
+    edit(lock, r'(name = "blake3-servil"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "copied",\n')
+    with open(lock, "a") as f:
+        f.write('\n[[package]]\nname = "copied"\nversion = "0.1.0"\n')
 
 
 def a_dev_only_gpl_crate_outside(stage):
-    """A GPL-3.0-only crate staged OUTSIDE both workspace roots and referenced solely from [dev-dependencies]:
-    Cargo keeps workspace_members at 4 (release) and 1 (cli), so only include-dev = true rejects its licence."""
+    """A GPL-3.0-only crate staged OUTSIDE the workspace root and referenced solely from [dev-dependencies]:
+    Cargo keeps workspace_members at 5, so only include-dev = true rejects its licence."""
     outside = stage / "outside" / "dev_gpl"
     _write_path_crate(outside, "dev_gpl", "GPL-3.0-only")
-    for manifest, lock, rel in ((stage / "release" / "checkout" / "b3sum" / "Cargo.toml", stage / "release" / "Cargo.lock", "../../../outside/dev_gpl"),
-                                (stage / "cli" / "b3sum" / "Cargo.toml", stage / "cli" / "b3sum" / "Cargo.lock", "../../outside/dev_gpl")):
-        add_section_dep(manifest, "dev-dependencies", f'dev_gpl = {{ path = "{rel}" }}')
-        edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "dev_gpl",\n')
-        with open(lock, "a") as f:
-            f.write('\n[[package]]\nname = "dev_gpl"\nversion = "0.1.0"\n')
+    manifest, lock = stage / "release" / "checkout" / "threads" / "Cargo.toml", stage / "release" / "Cargo.lock"
+    add_section_dep(manifest, "dev-dependencies", 'dev_gpl = { path = "../../../outside/dev_gpl" }')
+    edit(lock, r'(name = "blake3-servil"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "dev_gpl",\n')
+    with open(lock, "a") as f:
+        f.write('\n[[package]]\nname = "dev_gpl"\nversion = "0.1.0"\n')
 
 
 def an_optional_feature_gpl_crate(stage):
@@ -336,49 +322,22 @@ def optional_feature_only_safe_to_run(stage):
 
 
 def arrayvec_in_what_ships(stage):
-    """arrayvec is safe-to-run only (tests); adding it to b3sum's normal dependencies must fail audits."""
+    """arrayvec is safe-to-run only (tests); adding it to blake3-servil's normal dependencies must fail audits."""
     pkg = locked_package(stage / "release" / "Cargo.lock", "arrayvec")
     ver = pkg["version"]
     strip_audit_evidence(stage, "arrayvec", replace_with=[(ver, "agent-safe-to-run")])
-    for is_cli, checkout, lock in ((False, stage / "release" / "checkout", stage / "release" / "Cargo.lock"),
-                                   (True, stage / "cli", stage / "cli" / "b3sum" / "Cargo.lock")):
-        add_section_dep(checkout / "b3sum" / "Cargo.toml", "dependencies", f'arrayvec = "{ver}"')
-        edit(lock, r'(name = "b3sums"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "arrayvec",\n')
-        if is_cli:
-            with open(lock, "a") as f:
-                f.write(f'\n[[package]]\nname = "arrayvec"\nversion = "{ver}"\n'
-                        f'source = "{pkg["source"]}"\nchecksum = "{pkg["checksum"]}"\n')
-
-
-def cli_selects_unapproved_version(stage):
-    """Two valid locks whose package sets agree with gen-ver.py --check: release selects windows-link
-    0.100.x (safe-to-deploy) for a core build-dependency, while standalone cli selects windows-link
-    0.2.x (safe-to-run only). Release must pass and standalone cli must fail audits."""
-    release_lock = stage / "release" / "Cargo.lock"
-    wl_versions = [p["version"] for p in tomllib.loads(release_lock.read_text())["package"] if p["name"] == "windows-link"]
-    wl_old = next((v for v in wl_versions if v.startswith("0.2.")), None)
-    wl_new = next((v for v in wl_versions if v.startswith("0.100.")), None)
-    assert wl_old and wl_new, f"release lock needs both windows-link 0.2.x and 0.100.x, found {wl_versions}"
-    # Resolve each lock canonically with Cargo (offline, from the already-cached crates), then broaden
-    # both manifests to the same requirement (>=0.2, <1) so both locks remain valid under --locked.
-    for manifest, workdir, pinned in (
-        (stage / "release" / "checkout" / "Cargo.toml", stage / "release", wl_new),
-        (stage / "cli" / "Cargo.toml", stage / "cli" / "b3sum", wl_old),
-    ):
-        add_section_dep(manifest, "build-dependencies", f'windows-link = "={pinned}"')
-        subprocess.run(["cargo", "metadata", "--offline", "--format-version", "1"], cwd=workdir,
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        edit(manifest, rf'^windows-link = "={re.escape(pinned)}"\n', 'windows-link = ">=0.2, <1"\n')
-    strip_audit_evidence(stage, "windows-link", replace_with=[(wl_new, "agent-safe-to-deploy"), (wl_old, "agent-safe-to-run")])
+    checkout, lock = stage / "release" / "checkout", stage / "release" / "Cargo.lock"
+    add_section_dep(checkout / "threads" / "Cargo.toml", "dependencies", f'arrayvec = "{ver}"')
+    edit(lock, r'(name = "blake3-servil"\nversion = "[^"]*"\ndependencies = \[\n)', r'\g<1> "arrayvec",\n')
 
 
 def an_unread_index(stage):
-    """Both resolutions vendored beside their manifests and a Cargo home with no crates.io index: no
+    """Vendored beside the workspace manifest and a Cargo home with no crates.io index: no
     version's yank status can be read. Copy any cached advisory DB so cargo-deny need not re-clone it."""
-    for folder in (stage / "release", stage / "cli" / "b3sum"):
-        vendored = subprocess.run(["cargo", "vendor", "--locked", "vendor"], cwd=folder, check=True, capture_output=True, text=True)
-        (folder / ".cargo").mkdir()
-        (folder / ".cargo" / "config.toml").write_text(vendored.stdout)
+    folder = stage / "release"
+    vendored = subprocess.run(["cargo", "vendor", "--locked", "vendor"], cwd=folder, check=True, capture_output=True, text=True)
+    (folder / ".cargo").mkdir()
+    (folder / ".cargo" / "config.toml").write_text(vendored.stdout)
     cargo_home = stage / "cargo-home"
     cargo_home.mkdir()
     home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
@@ -390,25 +349,23 @@ def an_unread_index(stage):
 
 CONTROLS = [
     ("a version with a vulnerability advisory, reached through a test dependency alone",
-     a_vulnerable_version, {"release": ["advisories"], "cli": ["advisories"]}),
+     a_vulnerable_version, {"release": ["advisories"]}),
     ("a licence outside the list, with no exception recorded",
-     no_licence_exception, {"release": ["licenses"], "cli": []}),
+     no_licence_exception, {"release": ["licenses"]}),
     ("a crate copied into the checkout and taken by path",
-     a_crate_by_path_inside, {"release": ["by path"], "cli": ["by path"]}),
+     a_crate_by_path_inside, {"release": ["by path"]}),
     ("a dev-only GPL crate outside the workspace (tests include-dev without implicit membership)",
-     a_dev_only_gpl_crate_outside, {"release": ["by path", "licenses"], "cli": ["by path", "licenses"]}),
+     a_dev_only_gpl_crate_outside, {"release": ["by path", "licenses"]}),
     ("a GPL crate behind a non-default feature (tests all-features in metadata and deny)",
-     an_optional_feature_gpl_crate, {"release": ["by path", "licenses"], "cli": []}),
+     an_optional_feature_gpl_crate, {"release": ["by path", "licenses"]}),
     ("a shipped crate with all audit evidence stripped",
-     no_audit_record_libc, {"release": ["audits"], "cli": ["audits"]}),
+     no_audit_record_libc, {"release": ["audits"]}),
     ("optional feature depending on safe-to-run-only arrayvec (tests deploy check under all-features)",
-     optional_feature_only_safe_to_run, {"release": ["audits"], "cli": []}),
+     optional_feature_only_safe_to_run, {"release": ["audits"]}),
     ("arrayvec (safe-to-run only) reintroduced into what ships",
-     arrayvec_in_what_ships, {"release": ["audits"], "cli": ["audits"]}),
-    ("two valid locks where standalone cli selects an unapproved build-dep version",
-     cli_selects_unapproved_version, {"release": [], "cli": ["audits"]}),
+     arrayvec_in_what_ships, {"release": ["audits"]}),
     ("versions whose yank status cannot be read",
-     an_unread_index, {"release": ["advisories"], "cli": ["advisories"]}),
+     an_unread_index, {"release": ["advisories"]}),
 ]
 
 
@@ -418,9 +375,9 @@ def _summary(outcomes):
 
 
 def controls():
-    """Each planted fault must fail the exact checks named beside it on each graph; untouched must pass."""
+    """Each planted fault must fail the exact checks named beside it; untouched must pass."""
     holes = 0
-    for what, plant, expected in [*CONTROLS, ("nothing planted", lambda stage: None, {"release": [], "cli": []})]:
+    for what, plant, expected in [*CONTROLS, ("nothing planted", lambda stage: None, {"release": []})]:
         with staged() as stage:
             buf = []
             env = plant(stage)

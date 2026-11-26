@@ -48,11 +48,10 @@ class StackBudgetTests(unittest.TestCase):
         self.assertEqual(len(entries), 4)
         max_by_bucket, violations, budgeted = stack_budget.check_entries(entries)
         self.assertEqual(violations, [])
-        self.assertEqual(budgeted, 4)
+        self.assertEqual(budgeted, 3)
         self.assertEqual(max_by_bucket["core"][0], 0x2000)
         self.assertEqual(max_by_bucket["core::Hasher"][0], 0x1000)
         self.assertEqual(max_by_bucket["threads"][0], 0x800)
-        self.assertEqual(max_by_bucket["b3sum"][0], 0x400)
 
     def test_fails_when_threads_exceeds_16k(self) -> None:
         entries = stack_budget.parse_llvm_readobj_stack_sizes(SAMPLE_SIZE_FIRST)
@@ -286,32 +285,20 @@ StackSizes [
                 sym,
             )
 
-    def test_b3sum_closure_vtable_and_fn_classified_as_b3sum(self) -> None:
-        for sym in (
-            "_RNSNvYNCNvCs9C2ZzjvkBXS_5b3sum11hash_inputss0_0INtNtNtCskADBYZwJmSU_4core3ops8function6FnOnceTjINtNtBQ_6result6ResultNtCsdKSb5PDnG5P_18blake3_servil_core4HashNtNtB8_3err5ErrorEEE9call_once6vtableB8_",
-            "<b3sum::hash_inputs::{closure#2} as core::ops::function::FnOnce<(usize, core::result::Result<blake3_servil_core::Hash, b3sum::err::Error>)>>::call_once::{shim:vtable#0}",
-        ):
-            self.assertEqual(
-                stack_budget.classify_symbol(sym),
-                ("b3sum", stack_budget.CAP_CORE_B3SUM),
-                sym,
-            )
-
-    def test_evaluate_exit_codes_across_all_four_buckets_and_fail_closed_parsing(self) -> None:
+    def test_evaluate_exit_codes_across_all_three_buckets_and_fail_closed_parsing(self) -> None:
         base_items = [
             (0x20, "main"),
-            (0x100, "_RNvCs9C2ZzjvkBXS_5b3sum4main"),
             (0x200, "_RNvMsq_CsdKSb5PDnG5P_18blake3_servil_coreNtB5_12OutputReader4fill"),
             (0x300, "_RNvMs1_NtCsdKSb5PDnG5P_18blake3_servil_core11incrementalNtB5_6Hasher8finalize"),
             (0x400, "_RNvNtCs760tuxHRkot_13blake3_servil5lanes8run_work"),
         ]
         code, headline, details = stack_budget.evaluate_stack_sizes(_make_entries(base_items))
         self.assertEqual(code, 0, headline)
-        self.assertIn("4/5 symbols budgeted", headline)
+        self.assertIn("3/4 symbols budgeted", headline)
         self.assertEqual(details, [])
 
         # Missing any single expected bucket must fail with exit code 1.
-        bucket_idx = {"b3sum": 1, "core": 2, "core::Hasher": 3, "threads": 4}
+        bucket_idx = {"core": 1, "core::Hasher": 2, "threads": 3}
         for bucket, idx in bucket_idx.items():
             dropped = list(base_items)
             dropped[idx] = (0x20, "unrelated_fn")
@@ -321,10 +308,9 @@ StackSizes [
 
         # Exceeding cap in any single bucket must return exit code 1 with detail.
         over_caps = {
-            "b3sum": (1, stack_budget.CAP_CORE_B3SUM + 8),
-            "core": (2, stack_budget.CAP_CORE_B3SUM + 8),
-            "core::Hasher": (3, stack_budget.CAP_HASHER + 8),
-            "threads": (4, stack_budget.CAP_THREADS + 8),
+            "core": (1, stack_budget.CAP_CORE_B3SUM + 8),
+            "core::Hasher": (2, stack_budget.CAP_HASHER + 8),
+            "threads": (3, stack_budget.CAP_THREADS + 8),
         }
         for bucket, (idx, oversize) in over_caps.items():
             inflated = list(base_items)

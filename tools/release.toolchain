@@ -1,0 +1,11 @@
+# Pinned toolchain and container image for CI and reproducible library crate
+# packaging (`tools/crates-release.sh`, CONTRIBUTING.md). The `b3sum` CLI
+# lives in servil-software-factory/b3sum with its own pinned toolchain.
+# apt-snapshot is the day of Ubuntu's archive (snapshot.ubuntu.com) used by
+# CI's x86_model job.
+rustc 1.99.1
+libc6-dev 2.43-2ubuntu2.7
+apt-snapshot 20261116T000000Z
+# image is the container CI jobs run in, by its digest (the one for
+# both architectures).
+image ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db

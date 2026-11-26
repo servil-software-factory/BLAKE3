@@ -5,8 +5,8 @@
 
 A reason is a comment with "Sound:" in the eight lines above the block
 (blocks that stand together share one). Exit status 1 names each block
-without one. Covers every shipped `.rs` file across all five crates (`src/`,
-`threads/src/`, `b3sum/src/`, `capi/src/`, `version/src/`, plus all build
+without one. Covers every shipped `.rs` file across all four crates (`src/`,
+`threads/src/`, `capi/src/`, `version/src/`, plus all build
 scripts and helpers: `build.rs`, `threads/build.rs`, `version/build.rs`,
 `version/build_version.rs`), excluding only the explicit list of test-only
 source files (`TEST_ONLY_FILES`) and inline `mod ... { ... }` blocks whose
@@ -27,7 +27,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHIPPED_GLOBS = (
     "src/**/*.rs",
     "threads/src/**/*.rs",
-    "b3sum/src/**/*.rs",
     "capi/src/**/*.rs",
     "version/src/**/*.rs",
 )
@@ -46,9 +45,6 @@ TEST_ONLY_FILES = frozenset({
     "src/lifecycle_counts.rs",
     "src/ffi_avx512_32_guard_tests.rs",
     "threads/src/forms_test.rs",
-    "b3sum/src/unit_tests.rs",
-    "b3sum/src/test_temp.rs",
-    "b3sum/src/test_bao_ref.rs",
 })
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
@@ -64,7 +60,7 @@ def is_shipped_path(rel):
         return True
     if not rel.endswith(".rs"):
         return False
-    if not any(rel.startswith(p) for p in ("src/", "threads/src/", "b3sum/src/", "capi/src/", "version/src/")):
+    if not any(rel.startswith(p) for p in ("src/", "threads/src/", "capi/src/", "version/src/")):
         return False
     return not is_test_file(rel)
 

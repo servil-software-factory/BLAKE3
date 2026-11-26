@@ -1,6 +1,0 @@
-# cargo-nextest profile for b3sum (BLAKE3 #465).
-# Matches the repository root's 60 s per-test hang timeout so a wedged CLI or
-# I/O test is stopped and named rather than hanging indefinitely.
-
-[profile.default]
-slow-timeout = { period = "60s", terminate-after = 1 }

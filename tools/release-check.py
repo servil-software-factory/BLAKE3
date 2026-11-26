@@ -245,7 +245,7 @@ def ci_builds(run, into):
 
     def archives():
         for artifact in github(f"/repos/servil-software-factory/BLAKE3/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]:
-            if not artifact["name"].startswith("b3sum-"):
+            if not artifact["name"].startswith(("b3sum-", "crates-")):
                 continue
             # GitHub answers with a redirect to its storage, which refuses the
             # token: gh follows it without.
@@ -602,7 +602,7 @@ def mac_check(exchange, commit, old):
 
 
 def readme_charts_result(commit):
-    """Verify the two README benchmark SVGs at `commit` match its Cargo.toml X.Y.Z."""
+    """Verify the README benchmark SVG at `commit` matches its Cargo.toml X.Y.Z."""
     def show(rel):
         try:
             return git("show", f"{commit}:{rel}")
@@ -612,7 +612,6 @@ def readme_charts_result(commit):
     return sync_readme_charts.check_chart_texts(
         show("Cargo.toml"),
         show(sync_readme_charts.CHARTS[0][1]),
-        show(sync_readme_charts.CHARTS[1][1]),
     )
 
 

@@ -217,6 +217,16 @@ class Release:
             path = os.path.join(os.path.dirname(path), data.decode())
         return None
 
+    def has_b3sum(self):
+        """Whether this release commit carries `b3sum/` in this repository
+        (historical releases through 0.11.0; from 0.12.0 b3sum lives in
+        servil-software-factory/b3sum). Single-crate test fixtures that patch
+        CRATE_DIRS without `version` keep exercising the full program path."""
+        return self.file("b3sum/Cargo.toml") is not None or "version" not in CRATE_DIRS
+
+    def crate_dirs(self):
+        return CRATE_DIRS if self.has_b3sum() else tuple(d for d in CRATE_DIRS if d != "b3sum")
+
     def crate(self, folder):
         """The name of the crate in `folder`, from the commit's manifest."""
         manifest = self.file(os.path.join(folder, "Cargo.toml"))
@@ -325,10 +335,10 @@ def problems(name, data, release):
 
 
 def expected(release):
-    """The file names a release has, as tools/b3sum-release.sh and Cargo
-    name them: b3sum for each machine, and the four crates."""
-    programs = [f"b3sum-{release.tag}-{target}" for target in B3SUM_TARGETS]
-    return programs + [f"{release.crate(folder)}-{release.version}.crate" for folder in CRATE_DIRS]
+    """The file names a release has: the library crates, plus historical
+    b3sum programs and `b3sums` crate for pre-split releases."""
+    programs = [f"b3sum-{release.tag}-{target}" for target in B3SUM_TARGETS] if release.has_b3sum() else []
+    return programs + [f"{release.crate(folder)}-{release.version}.crate" for folder in release.crate_dirs()]
 
 
 def expected_program_digests(release):
@@ -496,7 +506,7 @@ def rebuilt_problems(name, data, rebuilt, named=None, release=None):
     others = sorted(sub for sub in os.listdir(rebuilt) if sub not in builder_names)
     if others:
         return [f"{rebuilt} holds entries outside the builders named ({', '.join(others)}): with builders named, every copy is one builder's"]
-    crate_names = {f"{release.crate(folder)}-{release.version}.crate" for folder in CRATE_DIRS} if release is not None else None
+    crate_names = {f"{release.crate(folder)}-{release.version}.crate" for folder in release.crate_dirs()} if release is not None else None
     for builder, target in builders:
         entries = sorted(os.listdir(builder))
         non_plain = [e for e in entries if not _plain_file(os.path.join(builder, e))]

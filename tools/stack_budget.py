@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Enforce single-frame release stack budgets via ELF `.stack_sizes`.
 
-Builds `b3sum` (which links `blake3_servil_core`, `blake3_servil`, and `b3sums`)
-with `RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Z emit-stack-sizes"` into a dedicated target
+Builds `blake3-servil-core` and `blake3-servil` (`threads/`) with
+`RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Z emit-stack-sizes"` into a dedicated target
 subdirectory so it never invalidates the main Cargo cache, parses
-`llvm-readobj --stack-sizes`, resolves Rust v0 (RFC 2603) and legacy (`_ZN...E`)
-symbol ownership directly (including std/core/alloc generics and blanket impls
-over shipped types, closures, and function items, while excluding pure stdlib
-frames carrying only a trailing instantiating crate), and enforces the caps
-approved for #499:
+`llvm-readobj --stack-sizes` over both `.rlib` archives, resolves Rust v0
+(RFC 2603) and legacy (`_ZN...E`) symbol ownership directly (including
+std/core/alloc generics and blanket impls over shipped types, closures, and
+function items, while excluding pure stdlib frames carrying only a trailing
+instantiating crate), and enforces the caps approved for #499:
 
-- `blake3_servil_core` / `b3sums`: <= 128 KiB (131,072 bytes)
+- `blake3_servil_core`: <= 128 KiB (131,072 bytes)
 - `blake3_servil_core` `Hasher` non-update methods: <= 32 KiB (32,768 bytes)
 - `blake3_servil` (`threads/`): <= 16 KiB (16,384 bytes)
 """
@@ -29,8 +29,8 @@ CAP_CORE_B3SUM = 128 * 1024  # 131,072 B
 CAP_HASHER = 32 * 1024       #  32,768 B
 CAP_THREADS = 16 * 1024      #  16,384 B
 
-SHIPPED_CRATES = frozenset({"blake3_servil_core", "blake3_servil", "b3sum", "b3sums"})
-EXPECTED_BUCKETS = frozenset({"b3sum", "core", "core::Hasher", "threads"})
+SHIPPED_CRATES = frozenset({"blake3_servil_core", "blake3_servil"})
+EXPECTED_BUCKETS = frozenset({"core", "core::Hasher", "threads"})
 
 # Match Entry blocks and anchored Size/Functions lines inside `llvm-readobj --stack-sizes`
 # so headers like `AddressSize: 64bit` outside `Entry { ... }` are never parsed as stack sizes.
@@ -61,9 +61,9 @@ _LEGACY_ESCAPES = {
 }
 _LEGACY_U_ESC_RE = re.compile(r"\$u([0-9a-fA-F]+)\$")
 _LEGACY_HASH_SEG_RE = re.compile(r"^h[0-9a-f]{16}$")
-_SHIPPED_TOKEN_RE = re.compile(r"(?:blake3_servil_core|blake3_servil|b3sums|b3sum)")
+_SHIPPED_TOKEN_RE = re.compile(r"(?:blake3_servil_core|blake3_servil)")
 _DEMANGLED_SHIPPED_CRATE_RE = re.compile(
-    r"\b(blake3_servil_core|blake3_servil|b3sums|b3sum)(?:\[[0-9a-f]+\])?::"
+    r"\b(blake3_servil_core|blake3_servil)(?:\[[0-9a-f]+\])?::"
 )
 
 
@@ -523,8 +523,6 @@ def _bucket_for(owner_crate: str | None, receiver: str, method: str) -> tuple[st
         return ("core", CAP_CORE_B3SUM)
     if owner_crate == "blake3_servil":
         return ("threads", CAP_THREADS)
-    if owner_crate in ("b3sum", "b3sums"):
-        return ("b3sum", CAP_CORE_B3SUM)
     return None
 
 
@@ -748,20 +746,25 @@ def main() -> int:
             "build",
             "--quiet",
             "--release",
-            "--locked",
             "--manifest-path",
-            str(repo / "b3sum" / "Cargo.toml"),
-            "--bin",
-            "b3sum",
+            str(repo / "threads" / "Cargo.toml"),
+            "--lib",
         ],
         cwd=repo,
         env=env,
         check=True,
     )
 
-    binary = stack_target / "release" / "b3sum"
+    deps = stack_target / "release" / "deps"
+    rlibs = sorted(
+        p for p in deps.glob("libblake3_servil*.rlib")
+        if p.name.startswith(("libblake3_servil_core-", "libblake3_servil-"))
+    )
+    if len(rlibs) < 2:
+        print(f"stack_budget: expected core and threads rlibs in {deps}, found {rlibs}", file=sys.stderr)
+        return 1
     proc = subprocess.run(
-        [readobj, "--stack-sizes", str(binary)],
+        [readobj, "--stack-sizes", *(str(p) for p in rlibs)],
         capture_output=True,
         text=True,
         check=True,
