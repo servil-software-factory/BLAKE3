@@ -34,6 +34,17 @@ class CountsControls(unittest.TestCase):
         self.assertEqual(c["truncation_allows"], 1)
         self.assertEqual(c["undocumented_unsafe"], 1)
 
+    def test_detects_undocumented_debug_assert_and_silent_narrowings(self):
+        src = (
+            'fn f(x: usize) -> u8 {\n'
+            '    debug_assert!(x < 64);\n'
+            '    x.to_le_bytes()[0]\n'
+            '}\n'
+        )
+        c = counts.measure_files({"src/x.rs": src})
+        self.assertEqual(c["undocumented_debug_asserts"], 1)
+        self.assertEqual(c["silent_narrowings"], 1)
+
     def test_ignores_cfg_test_but_checks_cfg_not_test(self):
         src = (
             '#[cfg(test)]\n'

@@ -43,7 +43,7 @@ pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
     (staged <= BLOCK_LEN && c.count() == 0).then(|| Input {
         block: hasher.stage_first_block(),
         cv: c.cv(),
-        len: staged.to_le_bytes()[0],
+        len: u8::try_from(staged).expect("staged length <= 64"),
         flags: hasher.domain().flags() + WHOLE_ROOT_FLAGS,
     })
 }
@@ -67,7 +67,7 @@ pub(crate) fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; 
         })
     });
     let blocks: [[u8; 64]; 16] =
-        core::array::from_fn(|i| core::array::from_fn(|j| if j < lens[i] as usize { ((i * 37 + j * 17) ^ 0x5a).to_le_bytes()[0] } else { 0 }));
+        core::array::from_fn(|i| core::array::from_fn(|j| if j < lens[i] as usize { crate::low_byte((i * 37 + j * 17) ^ 0x5a) } else { 0 }));
     let inputs = core::array::from_fn(|i| Input { block: &blocks[i], cv: &cvs[i], len: lens[i], flags: flags[i] + if (i / 4) % 2 == 0 { ROOT } else { 0 } });
     let mut out = [[0u8; OUT_LEN]; 16];
     hash(&inputs, &mut out);

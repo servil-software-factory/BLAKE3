@@ -104,6 +104,7 @@ impl CvStack {
 
     /// Entry `i`'s row (it is one).
     fn row(&self, i: usize) -> &[Cv] {
+        // Debug-only: `row` is internal to `CvStack`; every caller checks `is_row` or pops a pushed row.
         debug_assert!(self.is_row(i));
         let n = self.widths[i % ROWS] as usize;
         // Sound: a row's first `width` values were written when it was pushed or merged.
@@ -116,7 +117,7 @@ impl CvStack {
         // byte here to be unwritten. clone_from may write a fresh slot.
         let rows = unsafe { &mut *self.rows.as_mut_ptr().cast::<[[core::mem::MaybeUninit<Cv>; ROW]; ROWS]>() };
         rows[slot][..row.len()].write_copy_of_slice(row);
-        self.widths[slot] = row.len().to_le_bytes()[0];
+        self.widths[slot] = u8::try_from(row.len()).expect("row width <= TILE");
         self.wide |= 1 << i;
     }
 
@@ -306,7 +307,7 @@ impl CvStack {
         // Sound: the slot's storage, every byte of it written (now or before).
         let width = fill(unsafe { &mut *place });
         assert!((4..=ROW).contains(&width) && width.is_power_of_two(), "a row of 4 to ROW values, a power of two");
-        self.widths[slot] = width.to_le_bytes()[0];
+        self.widths[slot] = u8::try_from(width).expect("row width <= TILE");
         self.wide |= 1 << self.len;
         self.len += 1;
     }
@@ -670,7 +671,7 @@ impl ChunkState {
         let take = want.min(input.len());
         let start = self.buf_len as usize;
         self.buf[start..start + take].copy_from_slice(&input[..take]);
-        self.buf_len += take.to_le_bytes()[0];
+        self.buf_len += u8::try_from(take).expect("take <= BLOCK_LEN");
         take
     }
 
@@ -697,11 +698,11 @@ impl ChunkState {
             let count = (input.len() - 1) / BLOCK_LEN;
             let start_flag = self.start_flag();
             self.platform.compress_blocks(&mut self.cv, input, count, self.chunk_counter, self.flags, start_flag);
-            self.blocks_compressed += count.to_le_bytes()[0];
+            self.blocks_compressed += u8::try_from(count).expect("blocks within one chunk <= 16");
             input = &input[count * BLOCK_LEN..];
         }
         self.fill_buf(input);
-        debug_assert!(self.count() <= CHUNK_LEN);
+        assert!(self.count() <= CHUNK_LEN, "ChunkState::update exceeded one chunk");
         self
     }
 
@@ -762,6 +763,7 @@ impl Output {
     }
 
     pub fn root_hash(&self) -> crate::Hash {
+        // Debug-only: `root_hash` runs only on the root node (counter 0).
         debug_assert_eq!(self.counter, 0);
         crate::Hash(self.root_bytes())
     }
@@ -1399,5 +1401,14 @@ mod test {
             whole.update(&input[..at]);
             assert_eq!((state.cv, state.buf, state.buf_len, state.blocks_compressed), (whole.cv, whole.buf, whole.buf_len, whole.blocks_compressed));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "ChunkState::update exceeded one chunk")]
+    fn chunk_state_update_panics_past_one_chunk() {
+        crate::initialize();
+        let mut state = ChunkState::new(crate::IV, 0, 0, Platform::detect());
+        state.update(&[0u8; crate::CHUNK_LEN]);
+        state.update(&[1u8; 100]);
     }
 }

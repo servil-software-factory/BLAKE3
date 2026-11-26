@@ -10,9 +10,6 @@ use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, platf
 
 unsafe extern "C" {
     fn blake3_servil_neon_output8(inputs: *const Input<'_>, out: *mut u8, groups: u64);
-}
-#[cfg(target_arch = "aarch64")]
-unsafe extern "C" {
     fn blake3_servil_sme2_chunks_keyed(
         chunks: *const *const u8,
         counters: *const u64,
@@ -26,7 +23,6 @@ unsafe extern "C" {
 #[cfg(test)]
 pub(crate) fn lanes(platform: Platform) -> usize {
     match platform {
-        #[cfg(target_arch = "aarch64")]
         Platform::SME2 => 16,
         Platform::NEON => 8,
     }
@@ -79,7 +75,6 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
     //    keyed/mixed stages together with zero key comparisons; on NEON (or if
     //    SME2 is busy / declined on nonzero TPIDR2_EL0 reserved bytes), each
     //    stage runs at full 16-chunk NEON width.
-    #[cfg(target_arch = "aarch64")]
     let leaves_done = {
         let turn = crate::platform::Sme2Turn::take(platform, true);
         if matches!(turn.platform(), Platform::SME2) {
@@ -194,7 +189,7 @@ fn chunks_keyed_self_test_shape(mut hash: impl FnMut(&[[u8; CHUNK_LEN]; 32], &[u
     let mut chunks = [[0u8; CHUNK_LEN]; 32];
     for (c, chunk) in chunks.iter_mut().enumerate() {
         for (b, byte) in chunk.iter_mut().enumerate() {
-            *byte = ((c * 37 + b * 17 + (b >> 6)) ^ 0x5a).to_le_bytes()[0];
+            *byte = crate::low_byte((c * 37 + b * 17 + (b >> 6)) ^ 0x5a);
         }
     }
     let counters = [u64::from(u32::MAX) - 5, 0x0000_0003_0000_0007];

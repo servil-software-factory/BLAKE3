@@ -61,7 +61,7 @@ pub(crate) fn parent(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8,
         let last = &partial[paired * BLOCK_LEN..];
         let mut block = [0u8; BLOCK_LEN];
         block[..last.len()].copy_from_slice(last);
-        platform.compress_in_place(&mut cv, &block, last.len().to_le_bytes()[0], chunk_counter + 1, flags | CHUNK_END);
+        platform.compress_in_place(&mut cv, &block, u8::try_from(last.len()).expect("last block <= 64"), chunk_counter + 1, flags | CHUNK_END);
         out[OUT_LEN..].copy_from_slice(&crate::hasher::le_bytes(&cv));
     }
     out

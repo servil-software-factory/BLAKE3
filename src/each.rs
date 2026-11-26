@@ -158,7 +158,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
             let mut keyed = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
             let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
             for (k, &i) in w_chunk.iter().enumerate() {
-                let k = k.to_le_bytes()[0];
+                let k = u8::try_from(k).expect("window index < TABLE (128)");
                 if hashers[i].is_plain_single_chunk_staged() {
                     plain.push(k);
                 } else if crate::ffi_output::input(&hashers[i]).is_some() {
@@ -267,6 +267,7 @@ fn gather<'a>(
     held: &mut crate::stack_vec::StackVec<usize, TABLE>,
     waiting: &mut crate::stack_vec::StackVec<(usize, &'a [u8]), TABLE>,
 ) {
+    // Debug-only: `gather` is called only for unheld hashers (checked by callers in `each`).
     debug_assert!(hashers[i].held_group().is_none(), "a held hasher's bytes wait");
     let rest = hashers[i].gather_part(bytes, None, true);
     assert!(rest.len() < bytes.len() || bytes.is_empty(), "a turn's pass gathered nothing");
@@ -700,7 +701,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                 for ((&i, block), len) in group.iter().zip(&mut last_blocks).zip(&mut lengths) {
                     let tail = &items[usize::from(i)][k * crate::BLOCK_LEN..];
                     block[..tail.len()].copy_from_slice(tail);
-                    *len = u32::from(tail.len().to_le_bytes()[0]);
+                    *len = u32::from(u8::try_from(tail.len()).expect("tail block <= 64"));
                 }
                 let lasts: crate::stack_vec::StackVec<*const u8, GROUP> = last_blocks[..group.len()].iter().map(|b| b.as_ptr()).collect();
                 let mut digests = [0u8; GROUP * OUT_LEN];
@@ -778,7 +779,7 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
         let last = item.len() - k * crate::BLOCK_LEN;
         block[..last].copy_from_slice(&item[k * crate::BLOCK_LEN..]);
         let start = if k == 0 { CHUNK_START } else { 0 };
-        platform.compress_in_place(&mut cv, &block, last.to_le_bytes()[0], counter, flags | start | flags_end);
+        platform.compress_in_place(&mut cv, &block, u8::try_from(last).expect("last block <= 64"), counter, flags | start | flags_end);
         out[i] = crate::hasher::le_bytes(&cv);
     }
 }
@@ -1145,7 +1146,7 @@ fn subtree(cvs: &[CVBytes], key: &CVWords, flags: u8, platform: Platform) -> CVB
 
 /// The largest power of two below `n` (n of 2 or more).
 fn left_len(n: usize) -> usize {
-    debug_assert!(n >= 2);
+    assert!(n >= 2, "left_len requires at least 2 leaves");
     1 << (usize::BITS - 1 - (n - 1).leading_zeros())
 }
 

@@ -5,6 +5,15 @@ figure names its machine.
 
 ## Breaking changes and migration
 
+- **Removed `cargo::metadata=sme2=1` (`DEP_BLAKE3_SERVIL_CORE_SME2`) build-script
+  metadata** (`blake3-servil-core` `build.rs`): `blake3-servil-core` still
+  keeps `links = "blake3_servil_core"` so Cargo rejects duplicate unmangled
+  assembly symbols in one dependency graph, and still compiles SME2 kernels on
+  every supported AArch64 target (Linux and macOS). Downstream build scripts
+  that previously read `DEP_BLAKE3_SERVIL_CORE_SME2` should gate compile-time
+  availability on `target_arch = "aarch64"` and rely on runtime detection
+  (`Platform::detect()`) for execution.
+
 - **`b3sum` split into its own repository (`servil-software-factory/b3sum`)
   and `#[doc(hidden)] blake3_servil::__confine_cli_to_one_node` removed**:
   the `b3sum` CLI (`b3sums` on crates.io) now lives in

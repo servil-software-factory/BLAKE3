@@ -48,6 +48,7 @@ TEST_ONLY_FILES = frozenset({
 })
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
+DEBUG_ASSERT = re.compile(r"\bdebug_assert(?:_eq|_ne)?!")
 
 
 def is_test_file(rel):
@@ -277,17 +278,38 @@ def without_reason(text):
     return found
 
 
+def debug_assert_without_reason(text):
+    """The lines (numbers from 1, and the line) of `text`'s `debug_assert*!`
+    invocations that have no `// Debug-only:` comment within REACH lines above,
+    skipping test-only modules (QUALITY.md)."""
+    raw_lines = text.split("\n")
+    found = []
+    for lineno, raw, code in non_test_lines(text):
+        if not DEBUG_ASSERT.search(code):
+            continue
+        idx = lineno - 1
+        above = raw_lines[max(0, idx - REACH):idx + 1]
+        if not any("Debug-only:" in a and a.lstrip().startswith("//") for a in above[:-1]) and "// Debug-only:" not in raw:
+            found.append((lineno, raw.strip()))
+    return found
+
+
 def main():
     files = shipped_files()
     bad = 0
+    bad_da = 0
     for path in files:
         with open(os.path.join(ROOT, path)) as f:
-            for number, line in without_reason(f.read()):
-                bad += 1
-                print(f"{path}:{number}: no reason (a `// Sound: ...` comment above): {line[:100]}")
-    if bad:
-        sys.exit(f"unsafe_reasons: {bad} unsafe blocks state no reason")
-    print(f"unsafe_reasons: every unsafe block across all {len(files)} shipped Rust files states its reason")
+            text = f.read()
+        for number, line in without_reason(text):
+            bad += 1
+            print(f"{path}:{number}: no reason (a `// Sound: ...` comment above): {line[:100]}")
+        for number, line in debug_assert_without_reason(text):
+            bad_da += 1
+            print(f"{path}:{number}: no reason (a `// Debug-only: ...` comment above): {line[:100]}")
+    if bad or bad_da:
+        sys.exit(f"unsafe_reasons: {bad} unsafe blocks and {bad_da} debug_asserts state no reason")
+    print(f"unsafe_reasons: every unsafe block and debug_assert across all {len(files)} shipped Rust files states its reason")
 
 
 if __name__ == "__main__":

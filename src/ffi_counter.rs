@@ -182,7 +182,7 @@ const SELF_TEST_KEY: [u8; 32] = [
 fn self_test_template() -> [u8; SELF_TEST_LEN] {
     let mut tmpl = [0u8; SELF_TEST_LEN];
     for (j, b) in tmpl.iter_mut().enumerate() {
-        *b = (j.wrapping_mul(37) ^ 0x9a).to_le_bytes()[0];
+        *b = crate::low_byte(j.wrapping_mul(37) ^ 0x9a);
     }
     tmpl
 }

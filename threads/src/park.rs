@@ -89,7 +89,7 @@ impl Park {
 
     /// Worker `me`'s word and its bit in it.
     fn place(&self, me: usize) -> (&AtomicU64, u64) {
-        (&self.parked[me / 64], 1u64.wrapping_shl(u32::from(me.to_le_bytes()[0])))
+        (&self.parked[me / 64], 1u64 << (me % 64))
     }
 
     /// How many workers are parked.

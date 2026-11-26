@@ -29,9 +29,10 @@ import unsafe_reasons as ur
 
 TRUNC_ALLOW_RE = re.compile(r"#!?\[[^\]]*\ballow\s*\([^)]*\bclippy::cast_possible_truncation\b")
 DEBUG_ASSERT_RE = re.compile(r"\bdebug_assert(?:_eq|_ne)?!")
+SILENT_NARROW_RE = re.compile(r"\.to_le_bytes\(\)\s*\[\s*0\s*\]")
 CFG_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
 
-RATCHETED = ("undocumented_unsafe", "truncation_allows", "debug_asserts")
+RATCHETED = ("undocumented_unsafe", "undocumented_debug_asserts", "truncation_allows", "silent_narrowings", "debug_asserts")
 
 
 def read_tree(rev=None):
@@ -51,13 +52,16 @@ def read_tree(rev=None):
 def measure_files(files):
     counts = {
         "undocumented_unsafe": 0,
+        "undocumented_debug_asserts": 0,
         "truncation_allows": 0,
+        "silent_narrowings": 0,
         "debug_asserts": 0,
         "shipped_code_lines": 0,
         "cfg_conditions": 0,
     }
     for rel, text in files.items():
         counts["undocumented_unsafe"] += len(ur.without_reason(text))
+        counts["undocumented_debug_asserts"] += len(ur.debug_assert_without_reason(text))
         code_lines = []
         for _lineno, _raw, code in ur.non_test_lines(text):
             code_lines.append(code)
@@ -65,6 +69,7 @@ def measure_files(files):
                 counts["shipped_code_lines"] += 1
         body = "\n".join(code_lines)
         counts["truncation_allows"] += len(TRUNC_ALLOW_RE.findall(body))
+        counts["silent_narrowings"] += len(SILENT_NARROW_RE.findall(body))
         counts["debug_asserts"] += len(DEBUG_ASSERT_RE.findall(body))
         counts["cfg_conditions"] += len(CFG_RE.findall(body))
     return counts

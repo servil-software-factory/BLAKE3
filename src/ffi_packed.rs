@@ -16,6 +16,8 @@ use crate::{CHUNK_END, CHUNK_START, CVWords, OUT_LEN, ROOT, platform::Platform};
 ///
 /// Requires `input.len() == len * outputs.len()`.
 pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) -> usize {
+    assert!(matches!(len, 16 | 32 | 48), "packed messages are 16, 32, or 48 bytes, not {len}");
+    assert_eq!(input.len(), len.checked_mul(outputs.len()).expect("packed input size overflow"), "packed input length must equal len * outputs.len()");
     let root_flags = u32::from(flags | CHUNK_START | CHUNK_END | ROOT);
     let mut done = 0usize;
 
@@ -26,7 +28,8 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
             let kernel: unsafe extern "C" fn(*const u8, *const u32, u32, *mut u8, u64) -> u64 = match len {
                 16 => ffi_sme2::blake3_servil_sme2_packed16,
                 32 => ffi_sme2::blake3_servil_sme2_packed32,
-                _ => ffi_sme2::blake3_servil_sme2_packed48,
+                48 => ffi_sme2::blake3_servil_sme2_packed48,
+                _ => unreachable!("asserted len in {{16, 32, 48}}"),
             };
             crate::ran_kernel(kernel as *const ());
             // Sound: `Platform::SME2` verified SME2 support; `input` holds at
@@ -51,7 +54,8 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
             let kernel: unsafe extern "C" fn(*const u8, u64, *const u32, u32, *mut u8) = match len {
                 16 => ffi_neon::blake3_servil_neon_p11_packed16,
                 32 => ffi_neon::blake3_servil_neon_p11_packed32,
-                _ => ffi_neon::blake3_servil_neon_p11_packed48,
+                48 => ffi_neon::blake3_servil_neon_p11_packed48,
+                _ => unreachable!("asserted len in {{16, 32, 48}}"),
             };
             crate::ran_kernel(kernel as *const ());
             // Sound: AArch64 NEON is mandatory on `Platform::NEON`/`SME2`;
@@ -73,7 +77,8 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
             let kernel: unsafe extern "C" fn(*const u8, u64, *const u32, u32, *mut u8) = match len {
                 16 => ffi_x86::blake3_servil_avx512_packed16,
                 32 => ffi_x86::blake3_servil_avx512_packed32,
-                _ => ffi_x86::blake3_servil_avx512_packed48,
+                48 => ffi_x86::blake3_servil_avx512_packed48,
+                _ => unreachable!("asserted len in {{16, 32, 48}}"),
             };
             crate::ran_kernel(kernel as *const ());
             // Sound: `Platform::AVX512` verified AVX-512F+VL; `input` holds at
@@ -101,7 +106,8 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
             let kernel: unsafe extern "C" fn(*const u8, u64, *const u32, u32, *mut u8) = match len {
                 16 => ffi_x86::blake3_servil_avx2_packed16,
                 32 => ffi_x86::blake3_servil_avx2_packed32,
-                _ => ffi_x86::blake3_servil_avx2_packed48,
+                48 => ffi_x86::blake3_servil_avx2_packed48,
+                _ => unreachable!("asserted len in {{16, 32, 48}}"),
             };
             crate::ran_kernel(kernel as *const ());
             // Sound: `Platform::AVX2` and `Platform::AVX512` guarantee AVX2;
@@ -127,7 +133,7 @@ const SELF_TEST_KEY: [u8; 32] = [
 fn fill_self_test_input(buf: &mut [u8], len: usize) {
     for (i, slot) in buf.chunks_exact_mut(len).enumerate() {
         for (j, b) in slot.iter_mut().enumerate() {
-            *b = ((i.wrapping_mul(53).wrapping_add(j.wrapping_mul(19))) ^ 0xa5).to_le_bytes()[0];
+            *b = crate::low_byte((i.wrapping_mul(53).wrapping_add(j.wrapping_mul(19))) ^ 0xa5);
         }
     }
 }
@@ -213,11 +219,8 @@ pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 3] {
 #[cfg(target_arch = "x86_64")]
 mod ffi_x86 {
     unsafe extern "C" {
-        #[cfg(target_arch = "x86_64")]
         pub fn blake3_servil_avx512_packed16(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
-        #[cfg(target_arch = "x86_64")]
         pub fn blake3_servil_avx512_packed32(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
-        #[cfg(target_arch = "x86_64")]
         pub fn blake3_servil_avx512_packed48(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
         pub fn blake3_servil_avx2_packed16(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
         pub fn blake3_servil_avx2_packed32(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
@@ -394,5 +397,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "packed messages are 16, 32, or 48 bytes")]
+    fn hash_packed_groups_rejects_invalid_len() {
+        crate::initialize();
+        let input = [0u8; 24 * 16];
+        let mut out = [[0u8; OUT_LEN]; 16];
+        let _ = hash_packed_groups(&input, 24, &crate::IV, 0, &mut out, Platform::detect());
+    }
+
+    #[test]
+    #[should_panic(expected = "packed input length must equal len * outputs.len()")]
+    fn hash_packed_groups_rejects_short_input() {
+        crate::initialize();
+        let input = [0u8; 16 * 16 - 1];
+        let mut out = [[0u8; OUT_LEN]; 16];
+        let _ = hash_packed_groups(&input, 16, &crate::IV, 0, &mut out, Platform::detect());
     }
 }
