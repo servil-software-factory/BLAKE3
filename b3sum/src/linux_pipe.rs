@@ -987,9 +987,9 @@ fn run_hybrid_worker(
             while sink.open && (c.free_slot_ids.is_empty() || c.ring.sq_space_left() == 0) {
                 c.step_ring(true, args, &mut warm_batch, &mut sink);
             }
-            if !sink.open {
-                break;
-            }
+        }
+        if !sink.open {
+            break;
         }
 
         let i = next.fetch_add(1, Ordering::Relaxed);
@@ -1991,5 +1991,73 @@ mod test {
         drop(held);
         assert_eq!(got2.into_iter().map(Option::unwrap).collect::<Vec<_>>(), want);
         assert_eq!(super::DIRECT_MULTI_SUCCEEDED.load(Ordering::Relaxed), 0, "exhausted DirectPermits must prevent O_DIRECT oversubscription");
+    }
+
+    #[test]
+    fn warm_large_pipe_stops_claiming_new_operands_after_sink_closes() {
+        blake3::initialize();
+        let dir = crate::tempfile::tempdir().unwrap();
+        let warm_path = dir.path().join("warm-4m.bin");
+        let data = vec![0x3Au8; 4 * 1024 * 1024];
+        std::fs::write(&warm_path, &data).unwrap();
+
+        // Submit enough warm 4 MiB files so `WarmLargePipe::drain` at the top
+        // of `run_hybrid_worker`'s loop fires while more operands remain. Once
+        // `done` returns `false`, the worker must break before calling
+        // `next.fetch_add` again (so `next` never advances past its value when
+        // the sink closed, preventing opening another operand such as a
+        // blocking FIFO; #564).
+        let paths = vec![warm_path; 64];
+        let args = crate::Args::for_test_plain_threads(paths.clone(), 2);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let closed_at = std::sync::atomic::AtomicUsize::new(usize::MAX);
+        super::run_hybrid_worker(&args, &paths, None, 16, 2, 1, true, &next, &mut |_, res| {
+            assert!(res.is_ok());
+            let _ = closed_at.compare_exchange(usize::MAX, next.load(Ordering::Relaxed), Ordering::Relaxed, Ordering::Relaxed);
+            false
+        });
+        let at_close = closed_at.load(Ordering::Relaxed);
+        assert_ne!(at_close, usize::MAX, "warm completion must invoke done and close sink");
+        assert_eq!(next.load(Ordering::Relaxed), at_close, "worker must not claim another operand after WarmLargePipe::drain closes sink (#564)");
+    }
+
+    #[test]
+    fn warm_large_pipe_retains_returned_maps_up_to_hold_budget() {
+        blake3::initialize_multithreaded(None);
+        let dir = crate::tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        let mut expected = Vec::new();
+        for n in 0..3u8 {
+            let p = dir.path().join(format!("warm-hold-{n}.bin"));
+            let mut buf = vec![n.wrapping_add(0x41); 4 * 1024 * 1024 + usize::from(n) * 13];
+            buf[0] = n;
+            std::fs::write(&p, &buf).unwrap();
+            expected.push(blake3::convenience::hash(&buf));
+            paths.push(p);
+        }
+
+        // Sound: query system page size (no memory argument).
+        let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).expect("positive page size");
+        let want_pages: u64 = paths.iter().map(|p| std::fs::metadata(p).unwrap().len().div_ceil(page)).sum();
+        let held_before = crate::held_pages();
+
+        let args = crate::Args::for_test_plain_threads(paths.clone(), 1);
+        let mut wp = super::WarmLargePipe::new(blake3::Mode::Plain);
+        let mut got = vec![None; paths.len()];
+        let mut done = |idx: usize, res: crate::err::Result<blake3::Hash>| {
+            got[idx] = Some(res.unwrap());
+            true
+        };
+        let mut sink = super::Sink { done: &mut done, open: true };
+        for (idx, p) in paths.iter().enumerate() {
+            let file = std::fs::File::open(p).unwrap();
+            let map = args.map(&file).expect("mmap warm 4 MiB file");
+            drop(file);
+            wp.submit_owned(idx, map.len() as u64, map, &mut sink);
+        }
+        wp.finish(&mut sink);
+
+        assert_eq!(got.into_iter().map(Option::unwrap).collect::<Vec<_>>(), expected);
+        assert_eq!(crate::held_pages() - held_before, want_pages, "WarmLargePipe must retain returned Mmaps via hold() up to HOLD_PAGES (#564)");
     }
 }

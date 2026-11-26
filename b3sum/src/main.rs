@@ -8,7 +8,9 @@
 //!   `io_uring` into recycled buffers (promoting to streaming hashing if a
 //!   small-hinted file grows past 4 MiB).
 //! - Cached large files (`>= 512 KiB`, first page resident via `mincore`) are
-//!   mapped and loaned zero-copy to `Pipeline::lent`, then held mapped up to
+//!   mapped without copying into rooms: `512 KiB..4 MiB` hash directly via
+//!   `hash_slice_32`, while `>= 4 MiB` transfer `Mmap` ownership through
+//!   `WarmLargePipe` (`Pipeline::owned`); completed maps are held up to
 //!   `HOLD_PAGES` until exit to avoid `munmap` TLB shootdowns.
 //! - Cold large files (`>= 4 MiB`, not resident in page cache) stream
 //!   directly from storage into 64 KiB `Pipeline::room()`s via batched
@@ -692,17 +694,22 @@ fn hash_path(args: &Args, path: &Path, stdin_ctx: &StdinContext) -> err::Result<
 }
 
 const HOLD_PAGES: u64 = 1 << 18;
+static HELD_PAGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn held_pages() -> u64 {
+    HELD_PAGES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub(crate) fn hold(map: mmap::Mmap) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static HELD: AtomicU64 = AtomicU64::new(0);
+    use std::sync::atomic::Ordering;
     // Sound: a query with no memory argument.
     let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).expect("the page size is positive");
     let pages = (map.len() as u64).div_ceil(page);
-    if HELD.fetch_add(pages, Ordering::Relaxed) + pages <= HOLD_PAGES {
+    if HELD_PAGES.fetch_add(pages, Ordering::Relaxed) + pages <= HOLD_PAGES {
         std::mem::forget(map);
     } else {
-        HELD.fetch_sub(pages, Ordering::Relaxed);
+        HELD_PAGES.fetch_sub(pages, Ordering::Relaxed);
     }
 }
 
