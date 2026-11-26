@@ -244,19 +244,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "blake3-servil runs on std-capable x86-64 Linux and on 64-bit Arm Linux and macOS; for {target}, use official BLAKE3 (https://github.com/BLAKE3-team/BLAKE3)",
     );
 
-    // As of Rust 1.80, unrecognized config names are warnings. Give Cargo all of our config names.
-    let all_cfgs = ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2"];
-    for cfg_name in all_cfgs {
-        println!("cargo::rustc-check-cfg=cfg({cfg_name}, values(none()))");
-    }
-
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let is_apple = os == "macos";
 
     if arch == "x86_64" {
-        println!("cargo::rustc-cfg=blake3_sse41_ffi");
-        println!("cargo::rustc-cfg=blake3_avx2_ffi");
-        println!("cargo::rustc-cfg=blake3_avx512_ffi");
         stage_asm(&out_dir, "c/blake3_sse41_x86-64_unix.S", "blake3_sse41.s", false, "sse41");
         stage_asm(&out_dir, "c/blake3_avx2_x86-64_unix.S", "blake3_avx2.s", false, "avx2");
         stage_asm(&out_dir, "c/blake3_partial_x86-64_unix.S", "blake3_partial.s", false, "partial");
@@ -270,9 +261,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if arch == "aarch64" {
-        println!("cargo::rustc-cfg=blake3_neon");
-        println!("cargo::rustc-cfg=blake3_sme2");
-        println!("cargo::metadata=sme2=1");
         stage_asm(&out_dir, "c/blake3_neon_hybrid_aarch64.S", "blake3_neon_hybrid.s", is_apple, "neon");
         stage_asm(&out_dir, "c/blake3_packed_neon_aarch64.S", "blake3_packed_neon.s", is_apple, "packed_neon");
         stage_asm(&out_dir, "c/blake3_counter_neon_aarch64.S", "blake3_counter_neon.s", is_apple, "counter_neon");

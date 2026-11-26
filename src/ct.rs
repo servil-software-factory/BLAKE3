@@ -11,7 +11,7 @@
 /// Constant-time equality over two 32-byte digests.
 #[inline]
 pub(crate) fn eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    #[cfg(target_arch = "x86_64")]
     {
         let out: u8;
         // Sound: `a` and `b` are valid references to 32 readable bytes each;
@@ -45,7 +45,7 @@ pub(crate) fn eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
         out != 0
     }
 
-    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    #[cfg(target_arch = "aarch64")]
     {
         let out: u64;
         // Sound: `a` and `b` are valid references to 32 readable bytes each;
@@ -80,11 +80,6 @@ pub(crate) fn eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
         }
         out != 0
     }
-
-    #[cfg(any(miri, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
-    {
-        eq_32_portable(a, b)
-    }
 }
 
 /// Constant-time equality when `b.len() == 32`; returns `false` immediately
@@ -97,7 +92,7 @@ pub(crate) fn eq_slice_32(a: &[u8; 32], b: &[u8]) -> bool {
     eq_32(a, b)
 }
 
-#[cfg(any(test, miri, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(test)]
 #[inline]
 fn eq_32_portable(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut diff = 0u64;

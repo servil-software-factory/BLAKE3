@@ -153,7 +153,7 @@ mod test {
         if Platform::sse41().is_some() {
             v.push(false);
         }
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         if Platform::avx512().is_some() {
             v.push(true);
         }
@@ -172,7 +172,7 @@ mod test {
         // And AVX-512 wherever the CPU has it: a list of SSE4.1 alone passed
         // every test here on AVX-512 machines (the whole mutation run of
         // November 10, 2026, on an EPYC 9255 and an Ice Lake Xeon).
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(variants.contains(&true), Platform::avx512().is_some(), "the AVX-512 kernel is checked wherever the CPU has it");
         let mut buf = vec![0u8; CHUNK_LEN + 3];
         crate::test::paint_test_input(&mut buf);

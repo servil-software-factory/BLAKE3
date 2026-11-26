@@ -12,9 +12,6 @@
 //! after the other, and the NEON and SME2 platforms have their own kernels
 //! for a partial chunk (q1), so [`takes`] admits AVX2 and AVX-512 alone.
 
-// Without the AVX2 and AVX-512 assembly, takes() is false and the rest unused.
-#![cfg_attr(not(any(blake3_avx2_ffi, blake3_avx512_ffi)), allow(unused_variables, dead_code, unreachable_code))]
-
 use crate::platform::{Platform, words_from_le_bytes_32};
 use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, CVWords, OUT_LEN};
 
@@ -33,9 +30,9 @@ pub(crate) fn takes(platform: Platform, len: usize) -> bool {
 #[inline]
 pub(crate) fn takes_platform(platform: Platform) -> bool {
     match platform {
-        #[cfg(blake3_avx2_ffi)]
+        #[cfg(target_arch = "x86_64")]
         Platform::AVX2 => true,
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         Platform::AVX512 => true,
         _ => false,
     }
@@ -107,11 +104,11 @@ pub(crate) unsafe fn hash_many_blocks(
         // Select the assembly entry point once so the test kernel-identity
         // record and the actual FFI call cannot diverge (#570).
         let entry: HashManyFn = match platform {
-            #[cfg(blake3_avx512_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => crate::avx512::ffi::blake3_servil_hash_many_avx512,
-            #[cfg(blake3_avx2_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX2 => crate::avx2::ffi::blake3_servil_hash_many_avx2,
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 => crate::sse41::ffi::blake3_servil_hash_many_sse41,
         };
         #[cfg(test)]

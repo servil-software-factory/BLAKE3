@@ -58,7 +58,7 @@ pub(crate) enum Case {
     /// integer lanes beside the matrix unit (18 chunks a group), which
     /// hash() reaches only from 256 KiB; elsewhere the platform's chunk
     /// kernels, with the same values. Only the AArch64 list has one.
-    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    #[cfg(target_arch = "aarch64")]
     ChunkValues { chunks: usize },
     /// keyed_hash() of `len` bytes, keyed by the previous case's output.
     Keyed { len: usize },
@@ -67,7 +67,7 @@ pub(crate) enum Case {
     /// A Hasher fed `len` bytes in pieces of `piece` bytes.
     // AArch64's cases alone feed a Hasher in pieces; elsewhere the
     // extended-output case runs the Hasher.
-    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    #[cfg(target_arch = "aarch64")]
     Incremental { len: usize, piece: usize },
     /// `out` bytes of extended output from hashing `len` bytes, read
     /// from output position `skip`.
@@ -221,8 +221,11 @@ pub(crate) fn chain(mut outputs: impl FnMut(Case, &[u8], &[u8; 32], &mut [u8]) -
         let (start, len, count) = match case {
             Hash { offset, len } => (offset, len, 1),
             Many { len, count, .. } => (0, len, count),
+            #[cfg(target_arch = "aarch64")]
             ChunkValues { chunks } => (0, chunks * crate::CHUNK_LEN, 1),
-            Keyed { len } | Derive { len } | Incremental { len, .. } | Xof { len, .. } => (0, len, 1),
+            #[cfg(target_arch = "aarch64")]
+            Incremental { len, .. } => (0, len, 1),
+            Keyed { len } | Derive { len } | Xof { len, .. } => (0, len, 1),
         };
         let n = len.min(32);
         for message in 0..count {
@@ -310,12 +313,14 @@ pub(crate) fn outputs(platform: Platform, case: Case, input: &[u8], previous: &[
     match case {
         Hash { offset, len } => digest(crate::hash_serial_from(platform, &input[offset..][..len], crate::IV, 0, false)),
         Many { offset, len, count } => many(platform, &input[..len * count], offset, len, &mut out[..count * crate::OUT_LEN]),
+        #[cfg(target_arch = "aarch64")]
         ChunkValues { chunks } => chunk_values(platform, &input[..chunks * crate::CHUNK_LEN], previous, out),
         Keyed { len } => digest(crate::hash_serial_from(platform, &input[..len], &words(previous), crate::KEYED_HASH, false)),
         Derive { len } => {
             let context = crate::hash_serial_from(platform, CONTEXT.as_bytes(), crate::IV, crate::DERIVE_KEY_CONTEXT, false);
             digest(crate::hash_serial_from(platform, &input[..len], &words(context.as_bytes()), crate::DERIVE_KEY_MATERIAL, false))
         }
+        #[cfg(target_arch = "aarch64")]
         Incremental { len, piece } => digest(incremental(platform, &input[..len], piece)),
         Xof { len, skip, out: n } => xof(platform, &input[..len], skip, &mut out[..n]),
     }
@@ -323,6 +328,7 @@ pub(crate) fn outputs(platform: Platform, case: Case, input: &[u8], previous: &[
 
 /// A Hasher on `platform` fed `input` in pieces of `piece` bytes (out of
 /// line, as `xof` and `many`: their buffers take the stack only in turn).
+#[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn incremental(platform: Platform, input: &[u8], piece: usize) -> crate::Hash {
     let mut hasher = crate::Hasher::from_core(crate::HasherCore::new_from(crate::Domain::plain(), platform));
@@ -364,12 +370,13 @@ fn many(platform: Platform, messages: &[u8], offset: usize, len: usize, out: &mu
 
 /// The chaining values of the whole chunks in `input`, at counter 1 on,
 /// keyed by `key` (see Case::ChunkValues), into `out`.
+#[cfg(target_arch = "aarch64")]
 fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]) -> usize {
     let key = crate::platform::words_from_le_bytes_32(key);
     let mut chunks = crate::stack_vec::StackVec::<&[u8; crate::CHUNK_LEN], 18>::new();
     chunks.extend(input.chunks_exact(crate::CHUNK_LEN).map(|c| c.try_into().expect("whole chunks")));
     let out = &mut out[..chunks.len() * crate::OUT_LEN];
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     if chunks.len() % crate::sme2::HYBRID_GROUP == 0 {
         let turn = crate::platform::Sme2Turn::take(platform, true);
         if matches!(turn.platform(), Platform::SME2) {
@@ -392,7 +399,7 @@ fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]
     }
     // A group of sixteen: on SME2 the kernel with a counter per group (as
     // Hasher::update_each hashes held groups).
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     if chunks.len() == crate::sme2::GROUP {
         let turn = crate::platform::Sme2Turn::take(platform, true);
         if matches!(turn.platform(), Platform::SME2) {
@@ -453,18 +460,17 @@ fn run() -> usize {
             }
         },
     );
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     if crate::platform::wide_avx512() {
         // Sound: the detected platform has the wide kernels' ISA, and
         // hash_many dispatches to them (only then does startup check them). Their
         // wrapper checks its bounds, and builds all arguments on the stack.
         checked += unsafe { crate::avx512_32::self_test(&previous) };
     }
-    #[cfg(any(all(blake3_avx512_ffi, target_os = "linux"), blake3_neon))]
     {
         checked += crate::ffi_output::self_test(platform);
     }
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     {
         checked += crate::ffi_partial::self_test(platform);
     }
@@ -677,7 +683,7 @@ mod test {
         crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
         let checked = run();
         let expected = CASES.len();
-        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+        #[cfg(target_arch = "x86_64")]
         let expected = if crate::platform::wide_avx512() {
             for (name, entry) in crate::avx512_32::entries() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
@@ -686,7 +692,7 @@ mod test {
         } else {
             expected
         };
-        #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+        #[cfg(target_arch = "x86_64")]
         let expected = {
             let width = crate::ffi_output::lanes(Platform::detect_unchecked());
             let mut expected = expected;
@@ -702,7 +708,7 @@ mod test {
             }
             expected
         };
-        #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+        #[cfg(target_arch = "x86_64")]
         let expected = if matches!(Platform::detect_unchecked(), Platform::AVX512 { .. }) {
             for (name, entry) in crate::ffi_partial::entries_avx512() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
@@ -718,13 +724,13 @@ mod test {
         } else {
             expected
         };
-        #[cfg(blake3_avx2_ffi)]
+        #[cfg(target_arch = "x86_64")]
         if matches!(Platform::detect_unchecked(), Platform::AVX2 { .. }) || {
-            #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             {
                 matches!(Platform::detect_unchecked(), Platform::AVX512 { .. })
             }
-            #[cfg(not(all(blake3_avx512_ffi, target_arch = "x86_64")))]
+            #[cfg(not(target_arch = "x86_64"))]
             {
                 false
             }
@@ -736,14 +742,14 @@ mod test {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
         }
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         let expected = {
             let mut expected = expected;
             for (name, entry) in crate::ffi_output::entries_neon() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
                 expected += 1;
             }
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             if matches!(Platform::detect_unchecked(), Platform::SME2) {
                 for (name, entry) in crate::ffi_output::entries_sme2() {
                     assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
@@ -820,7 +826,7 @@ mod test {
     /// The self-test runs every assembly entry point this machine has but
     /// the l kernels: the hybrids' (with SHA-3 or without), and SME2's with SME2. It runs again when another test held the SME2 turn.
     #[test]
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     fn test_self_test_runs_every_kernel() {
         use crate::{RAN, RAN_ENTRIES, Ran};
         let mut want: std::vec::Vec<(std::string::String, *const ())> = std::vec::Vec::new();
@@ -829,7 +835,7 @@ mod test {
         want.extend(crate::ffi_packed::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_counter::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_output::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if crate::platform::sme2_detected() {
             assert!(!crate::sme2::entries().is_empty(), "SME2's entries");
             want.extend(crate::sme2::entries().into_iter().map(|(n, e)| (n.into(), e)));
@@ -866,6 +872,7 @@ mod test {
         match case {
             Hash { offset, len } => official::hash(Mode::Plain, &input[offset..][..len]).to_vec(),
             Many { len, count, .. } => (0..count).flat_map(|i| official::hash(Mode::Plain, &input[i * len..][..len])).collect(),
+            #[cfg(target_arch = "aarch64")]
             ChunkValues { chunks } => {
                 let key = crate::platform::words_from_le_bytes_32(previous);
                 let table: std::vec::Vec<&[u8; crate::CHUNK_LEN]> =
@@ -876,12 +883,13 @@ mod test {
             }
             Keyed { len } => official::hash(Mode::Keyed(previous), &input[..len]).to_vec(),
             Derive { len } => official::hash(Mode::DeriveKey(CONTEXT), &input[..len]).to_vec(),
+            #[cfg(target_arch = "aarch64")]
             Incremental { len, .. } => official::hash(Mode::Plain, &input[..len]).to_vec(),
             Xof { len, skip, out } => official::xof(Mode::Plain, &input[..len], skip as u64, out),
         }
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     /// The chain's outputs from this crate's own kernels (the production
     /// self-test's), for the tests that need a correct chain to start from:
     /// every process checks those kernels against EXPECTED at startup.
@@ -889,7 +897,7 @@ mod test {
         outputs(Platform::detect_unchecked(), case, input, previous, out)
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     fn wide_reference(inputs: &[&[u8; 192]], key: &crate::CVWords, counter: u64, increment: crate::IncrementCounter, out: &mut [u8]) {
         for (i, &input) in inputs.iter().enumerate() {
             // hash_many's increment is not wrapping; exercise the
@@ -914,7 +922,7 @@ mod test {
     /// kernel, not the new assembly. A changed table is printed for review,
     /// never accepted automatically.
     #[test]
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     fn wide_self_test_matches_reference() {
         let previous = chain(ours, |i, folded| assert_eq!(folded, EXPECTED[i], "shared chain changed"));
         let mut folds = std::vec::Vec::new();
@@ -927,7 +935,7 @@ mod test {
     /// merely the first CV used as the next seed, and stops before any
     /// later case. Use the production checker with SSE4.1's callback.
     #[test]
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     fn wide_self_test_rejects_corruption() {
         let previous = chain(ours, |i, folded| assert_eq!(folded, EXPECTED[i]));
         for bad in 0..crate::avx512_32::SELF_TEST_EXPECTED.len() {
@@ -1146,7 +1154,7 @@ mod stops {
     /// independent-output self-test pass (16-lane before 8-lane overwrite, and
     /// the final pass) go directly to the non-unwinding fatal stop, even inside
     /// `catch_unwind`.
-    #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_wide_and_output_self_test_mismatch_stops_the_process() {
         use std::os::unix::process::ExitStatusExt as _;

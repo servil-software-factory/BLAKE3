@@ -121,7 +121,6 @@ pub fn paint_test_input(buf: &mut [u8]) {
 
 /// Buffers between inaccessible pages, for the tests that place inputs
 /// and outputs flush against one (each crate's guard-page tests).
-#[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), any(target_vendor = "apple", target_os = "linux")))]
 #[allow(dead_code)]
 pub(crate) mod guard {
     /// `len` bytes with an inaccessible page before and after them, the
@@ -154,7 +153,6 @@ pub(crate) mod guard {
         }
 
         /// Build shared views first; after this call the body is read-only.
-        #[cfg(any(all(target_os = "linux", blake3_avx512_ffi), blake3_neon))]
         pub(crate) fn read_only(&mut self) {
             let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
             assert_eq!(unsafe { libc::mprotect(self.base.add(page).cast(), self.total - 2 * page, libc::PROT_READ) }, 0);

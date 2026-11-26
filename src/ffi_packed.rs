@@ -19,7 +19,7 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
     let root_flags = u32::from(flags | CHUNK_START | CHUNK_END | ROOT);
     let mut done = 0usize;
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     if matches!(platform, Platform::SME2 { .. }) {
         let groups = outputs.len() / 16;
         if groups > 0 {
@@ -43,17 +43,8 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
         // or the 11..15 tail after full SME2 groups) fall through to NEON 8+3.
     }
 
-    #[cfg(blake3_neon)]
-    if matches!(platform, Platform::NEON { .. }) || {
-        #[cfg(blake3_sme2)]
-        {
-            matches!(platform, Platform::SME2 { .. })
-        }
-        #[cfg(not(blake3_sme2))]
-        {
-            false
-        }
-    } {
+    #[cfg(target_arch = "aarch64")]
+    if matches!(platform, Platform::NEON { .. } | Platform::SME2 { .. }) {
         let rem = outputs.len() - done;
         let groups = rem / 11;
         if groups > 0 {
@@ -75,7 +66,7 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
         return done;
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     if matches!(platform, Platform::AVX512 { .. }) {
         let groups = outputs.len() / 16;
         if groups > 0 {
@@ -95,21 +86,14 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
         }
     }
 
-    #[cfg(blake3_avx2_ffi)]
+    #[cfg(target_arch = "x86_64")]
     if matches!(platform, Platform::AVX2 { .. }) || {
-        #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
-        {
-            // On Linux std AVX-512, a 10..=15 remainder is faster as a single
-            // padded 16-lane `output16` call than `avx2_packed` (8) + a second
-            // kernel call for the remaining 2..=7 messages; keep AVX2 for `8..=9`.
-            let rem = outputs.len() - done;
-            let prefer_output16 = cfg!(target_os = "linux") && (10..16).contains(&rem);
-            matches!(platform, Platform::AVX512 { .. }) && !prefer_output16
-        }
-        #[cfg(not(all(blake3_avx512_ffi, target_arch = "x86_64")))]
-        {
-            false
-        }
+        // On AVX-512, a 10..=15 remainder is faster as a single padded 16-lane
+        // `output16` call than `avx2_packed` (8) + a second kernel call for
+        // the remaining 2..=7 messages; keep AVX2 for `8..=9`.
+        let rem = outputs.len() - done;
+        let prefer_output16 = (10..16).contains(&rem);
+        matches!(platform, Platform::AVX512 { .. }) && !prefer_output16
     } {
         let rem = outputs.len() - done;
         let groups = rem / 8;
@@ -131,7 +115,6 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
         }
     }
 
-    let _ = (input, len, key, root_flags, outputs, platform);
     done
 }
 
@@ -177,7 +160,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
         // On AVX-512 Linux std, 43 = 2*16 + 11 dispatches the 11-message tail
         // through padded `output16` instead of `avx2_packed`; also exercise an
         // 8-message packed batch so `avx2_packed{16,32,48}` is verified at startup.
-        #[cfg(all(blake3_avx512_ffi, blake3_avx2_ffi, target_arch = "x86_64", target_os = "linux"))]
+        #[cfg(target_arch = "x86_64")]
         if matches!(platform, Platform::AVX512) {
             let mut out8 = [[0u8; OUT_LEN]; 8];
             crate::many::hash_many_on(&slice[..8 * len], len, len, &key, crate::KEYED_HASH, &mut out8, platform);
@@ -191,7 +174,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
 
 /// Exported entry points of the packed kernels compiled for this target, for
 /// `self_test::test_self_test_runs_every_kernel`.
-#[cfg(all(test, blake3_neon))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn entries_neon() -> [(&'static str, *const ()); 3] {
     [
         ("neon_p11_packed16", ffi_neon::blake3_servil_neon_p11_packed16 as *const ()),
@@ -200,7 +183,7 @@ pub(crate) fn entries_neon() -> [(&'static str, *const ()); 3] {
     ]
 }
 
-#[cfg(all(test, blake3_sme2))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn entries_sme2() -> [(&'static str, *const ()); 3] {
     [
         ("sme2_packed16", ffi_sme2::blake3_servil_sme2_packed16 as *const ()),
@@ -209,7 +192,7 @@ pub(crate) fn entries_sme2() -> [(&'static str, *const ()); 3] {
     ]
 }
 
-#[cfg(all(test, blake3_avx2_ffi))]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) fn entries_avx2() -> [(&'static str, *const ()); 3] {
     [
         ("avx2_packed16", ffi_x86::blake3_servil_avx2_packed16 as *const ()),
@@ -218,7 +201,7 @@ pub(crate) fn entries_avx2() -> [(&'static str, *const ()); 3] {
     ]
 }
 
-#[cfg(all(test, blake3_avx512_ffi, target_arch = "x86_64"))]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 3] {
     [
         ("avx512_packed16", ffi_x86::blake3_servil_avx512_packed16 as *const ()),
@@ -227,14 +210,14 @@ pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 3] {
     ]
 }
 
-#[cfg(blake3_avx2_ffi)]
+#[cfg(target_arch = "x86_64")]
 mod ffi_x86 {
     unsafe extern "C" {
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         pub fn blake3_servil_avx512_packed16(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         pub fn blake3_servil_avx512_packed32(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         pub fn blake3_servil_avx512_packed48(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
         pub fn blake3_servil_avx2_packed16(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
         pub fn blake3_servil_avx2_packed32(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
@@ -242,7 +225,7 @@ mod ffi_x86 {
     }
 }
 
-#[cfg(all(test, blake3_sme2))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) unsafe fn call_sme2_packed(len: usize, input: *const u8, key: *const u32, flags: u32, out: *mut u8, groups: u64) -> u64 {
     // Sound: caller verified SME2 support and provided buffers covering `16 * groups` packed messages and outputs.
     unsafe {
@@ -255,7 +238,7 @@ pub(crate) unsafe fn call_sme2_packed(len: usize, input: *const u8, key: *const 
     }
 }
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 mod ffi_sme2 {
     unsafe extern "C" {
         pub fn blake3_servil_sme2_packed16(input: *const u8, key: *const u32, flags: u32, out: *mut u8, groups: u64) -> u64;
@@ -264,7 +247,7 @@ mod ffi_sme2 {
     }
 }
 
-#[cfg(blake3_neon)]
+#[cfg(target_arch = "aarch64")]
 mod ffi_neon {
     unsafe extern "C" {
         pub fn blake3_servil_neon_p11_packed16(input: *const u8, groups: u64, key: *const u32, flags: u32, out: *mut u8);
@@ -332,7 +315,7 @@ mod tests {
         crate::initialize();
         let platform = Platform::detect();
         let (group_len, entries): (usize, [usize; 3]) = match platform {
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 { .. } => (
                 16,
                 [
@@ -341,7 +324,7 @@ mod tests {
                     ffi_sme2::blake3_servil_sme2_packed48 as *const () as usize,
                 ],
             ),
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON { .. } => (
                 11,
                 [
@@ -350,7 +333,7 @@ mod tests {
                     ffi_neon::blake3_servil_neon_p11_packed48 as *const () as usize,
                 ],
             ),
-            #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX512 { .. } => (
                 16,
                 [
@@ -359,7 +342,7 @@ mod tests {
                     ffi_x86::blake3_servil_avx512_packed48 as *const () as usize,
                 ],
             ),
-            #[cfg(blake3_avx2_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX2 { .. } => (
                 8,
                 [
@@ -368,7 +351,7 @@ mod tests {
                     ffi_x86::blake3_servil_avx2_packed48 as *const () as usize,
                 ],
             ),
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 { .. } => return,
         };
 

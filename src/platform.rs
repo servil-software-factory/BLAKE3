@@ -1,16 +1,13 @@
 use crate::{BLOCK_LEN, CHUNK_LEN, CVWords, IncrementCounter};
 
-// The most chunks one call hashes: AVX-512's 32 on x86-64 (build.rs allows
-// x86-64 only on Linux), SME2's, NEON's 16. Every platform hashes at least
-// four, so the walk's arrays (src/tree.rs) hold two values or more.
+// The most chunks one call hashes: AVX-512's 32 on x86-64, SME2's 128 on
+// AArch64. Every platform hashes at least four, so the walk's arrays
+// (src/tree.rs) hold two values or more.
 #[cfg(target_arch = "x86_64")]
 pub const MAX_SIMD_DEGREE: usize = 32;
-#[cfg(all(not(target_arch = "x86_64"), blake3_sme2))]
+#[cfg(target_arch = "aarch64")]
 // See sme2::DEGREE.
 pub const MAX_SIMD_DEGREE: usize = crate::sme2::DEGREE;
-#[cfg(all(not(target_arch = "x86_64"), not(blake3_sme2)))]
-// See neon_hybrid::GROUP.
-pub const MAX_SIMD_DEGREE: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -46,20 +43,19 @@ pub const MAX_SIMD_DEGREE: usize = 16;
 /// let _ = Platform::NEON;
 /// ```
 pub enum Platform {
-    #[cfg(blake3_sse41_ffi)]
+    #[cfg(target_arch = "x86_64")]
     #[non_exhaustive]
     SSE41 = 3,
-    #[cfg(blake3_avx2_ffi)]
+    #[cfg(target_arch = "x86_64")]
     #[non_exhaustive]
     AVX2 = 4,
-    #[cfg(blake3_avx512_ffi)]
     #[cfg(target_arch = "x86_64")]
     #[non_exhaustive]
     AVX512 = 5,
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     #[non_exhaustive]
     NEON = 6,
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     #[non_exhaustive]
     SME2 = 7,
 }
@@ -83,23 +79,23 @@ pub enum Platform {
 /// 6-16%.
 pub struct Sme2Turn {
     platform: Platform,
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     held: bool,
 }
 
 /// The turn's flag, on a 128-byte line of its own (Apple's cache line), so
 /// no other state's writes invalidate it.
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 #[repr(align(128))]
 struct Busy(core::sync::atomic::AtomicBool);
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 static SME2_BUSY: Busy = Busy(core::sync::atomic::AtomicBool::new(false));
 
 impl Sme2Turn {
     #[inline]
     pub fn take(platform: Platform, sme2_sized: bool) -> Self {
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if sme2_sized && matches!(platform, Platform::SME2) {
             use core::sync::atomic::Ordering;
             // A load, and a store when the turn is free: two calls that
@@ -121,7 +117,7 @@ impl Sme2Turn {
         let _ = sme2_sized;
         Sme2Turn {
             platform,
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             held: false,
         }
     }
@@ -135,7 +131,7 @@ impl Sme2Turn {
 impl Drop for Sme2Turn {
     #[inline]
     fn drop(&mut self) {
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if self.held {
             SME2_BUSY.0.store(false, core::sync::atomic::Ordering::Relaxed);
         }
@@ -181,7 +177,7 @@ fn not_initialized() -> u8 {
 /// x86-64's kernels for a CPU with the given features: the widest whose full
 /// prerequisite chain is present (`SSSE3+SSE4.1` <= `AVX2` <= `AVX-512`), or
 /// None for a CPU without SSSE3 + SSE4.1, which is not supported.
-#[cfg(all(target_arch = "x86_64", blake3_sse41_ffi, blake3_avx2_ffi, blake3_avx512_ffi))]
+#[cfg(target_arch = "x86_64")]
 const fn x86_platform(avx512: bool, avx2: bool, sse41: bool) -> Option<Platform> {
     if sse41 && avx2 && avx512 {
         Some(Platform::AVX512)
@@ -222,7 +218,7 @@ impl Platform {
     /// platform (throughput::TreeHasher::on_this_core, and the pool's pieces).
     #[inline]
     pub fn own_core() -> Self {
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if matches!(Self::detect(), Platform::SME2) {
             return Platform::NEON;
         }
@@ -248,7 +244,7 @@ impl Platform {
         // runs the widest it has; one without SSE4.1 is not supported, and
         // the process stops here, in the startup self-test, as a build for
         // an unsupported target stops (official BLAKE3 runs there).
-        #[cfg(all(target_arch = "x86_64", blake3_sse41_ffi, blake3_avx2_ffi, blake3_avx512_ffi))]
+        #[cfg(target_arch = "x86_64")]
         match x86_platform(avx512_detected(), avx2_detected(), sse41_detected()) {
             Some(platform) => return platform,
             None => crate::self_test::unsupported(format_args!(
@@ -260,7 +256,7 @@ impl Platform {
         // SME2 the NEON backend (integer + vector hybrid kernels) is the
         // selection, and it is a real result in its own right; a benchmark
         // that cares which one ran reads it back from detect().
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         {
             if sme2_detected() {
                 return Platform::SME2;
@@ -268,7 +264,7 @@ impl Platform {
         }
         // We don't use dynamic feature detection for NEON. If the "neon"
         // feature is on, NEON is assumed to be supported.
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         {
             return Platform::NEON;
         }
@@ -278,34 +274,32 @@ impl Platform {
     /// The selection's name, for reports.
     pub fn name(&self) -> &'static str {
         match self {
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 => "SSE4.1",
-            #[cfg(blake3_avx2_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX2 => "AVX2",
-            #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => "AVX-512",
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON => "NEON",
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 => "SME2",
         }
     }
 
     pub fn simd_degree(&self) -> usize {
         let degree = match self {
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 => 4,
-            #[cfg(blake3_avx2_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX2 => 8,
-            #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => 32,
             // Sixteen chunks per call reach the k10 kernel (see
             // neon_hybrid), in both its families.
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON => 16,
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 => crate::sme2::DEGREE,
         };
         debug_assert!((2..=MAX_SIMD_DEGREE).contains(&degree), "the walk (src/tree.rs) takes 2 to MAX_SIMD_DEGREE chunks a call");
@@ -316,17 +310,16 @@ impl Platform {
     fn compress_in_place_raw(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
         match self {
             // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID or compile-time target-feature verification.
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 | Platform::AVX2 => unsafe { crate::sse41::compress_in_place(cv, block, block_len, counter, flags) },
             // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
-            #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::compress_in_place(cv, block, block_len, counter, flags) },
             // The scalar kernel k1 keeps the state in registers; it runs on
             // every AArch64 core, so the NEON and SME2 platforms share it.
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON => crate::neon_hybrid::compress_in_place(cv, block, block_len, counter, flags),
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 => crate::neon_hybrid::compress_in_place(cv, block, block_len, counter, flags),
         }
     }
@@ -344,7 +337,7 @@ impl Platform {
         assert!((1..=16).contains(&count));
         assert!(blocks.len() >= count * BLOCK_LEN);
         // The integer-only kernel runs on every AArch64 core.
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         {
             // Sound: `count` is asserted in `1..=16` and `blocks` holds at least `count * BLOCK_LEN` readable bytes.
             unsafe {
@@ -365,16 +358,15 @@ impl Platform {
     pub(crate) fn compress_xof(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) -> [u8; 64] {
         match self {
             // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID or compile-time target-feature verification.
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 | Platform::AVX2 => unsafe { crate::sse41::compress_xof(cv, block, block_len, counter, flags) },
             // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
-            #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::compress_xof(cv, block, block_len, counter, flags) },
             // The one-block extended-output kernel (neon_hybrid::xof_block).
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON => crate::neon_hybrid::xof_block(cv, block, block_len, counter, flags),
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 => crate::neon_hybrid::xof_block(cv, block, block_len, counter, flags),
         }
     }
@@ -416,25 +408,23 @@ impl Platform {
         }
         match self {
             // Sound: `Platform::SSE41` is constructed only after CPUID or compile-time target-feature verification.
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 => unsafe { crate::sse41::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
             // Sound: `Platform::AVX2` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
-            #[cfg(blake3_avx2_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX2 => unsafe { crate::avx2::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
             // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
-            #[cfg(blake3_avx512_ffi)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
             // Sound: `Platform::NEON` is built only on AArch64 where NEON is baseline.
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON => unsafe { crate::neon_hybrid::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
             // Sound: startup verified FEAT_SME2; SME2 assembly checks the calling thread's SVL at entry and falls back to NEON if != 512 bits.
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 => unsafe { crate::sme2::hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out) },
         }
     }
 
-    #[allow(unused_mut)]
     pub(crate) fn xof_many(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, mut counter: u64, flags: u8, out: &mut [u8]) {
         assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
         if out.is_empty() {
@@ -443,14 +433,12 @@ impl Platform {
         }
         match self {
             // Sound: `Platform::AVX512` is constructed only after CPUID + XCR0 or compile-time target-feature verification.
-            #[cfg(blake3_avx512_ffi)]
-            #[cfg(unix)]
             #[cfg(target_arch = "x86_64")]
             Platform::AVX512 => unsafe { crate::avx512::xof_many(cv, block, block_len, counter, flags, out) },
             _ => {
                 // On SME2, whole groups of sixteen blocks on the extended-
                 // output kernel, under the process's turn; the rest below.
-                #[cfg(blake3_sme2)]
+                #[cfg(target_arch = "aarch64")]
                 let out = {
                     let turn = Sme2Turn::take(*self, out.len() >= 16 * BLOCK_LEN);
                     let done = if matches!(turn.platform(), Platform::SME2) {
@@ -465,7 +453,7 @@ impl Platform {
                 // Then four or eight at a time on NEON (AArch64): CPUs
                 // without SME2, and SME2's leftovers; the last one to three
                 // blocks after them (neon_hybrid::xof_tail).
-                #[cfg(blake3_neon)]
+                #[cfg(target_arch = "aarch64")]
                 {
                     let done = crate::neon_hybrid::xof_many(cv, block, block_len, counter, flags, out);
                     if done < out.len() {
@@ -492,7 +480,7 @@ impl Platform {
     #[cfg(target_arch = "x86_64")]
     pub fn sse41() -> Option<Self> {
         Self::require_initialized();
-        #[cfg(blake3_sse41_ffi)]
+        #[cfg(target_arch = "x86_64")]
         if sse41_detected() {
             return Some(Self::SSE41);
         }
@@ -504,28 +492,27 @@ impl Platform {
     #[cfg(target_arch = "x86_64")]
     pub fn avx2() -> Option<Self> {
         Self::require_initialized();
-        #[cfg(blake3_avx2_ffi)]
+        #[cfg(target_arch = "x86_64")]
         if avx2_detected() {
             return Some(Self::AVX2);
         }
         None
     }
 
-    #[cfg(blake3_avx512_ffi)]
     #[cfg(target_arch = "x86_64")]
     pub fn avx512() -> Option<Self> {
         Self::require_initialized();
         if avx512_detected() { Some(Self::AVX512) } else { None }
     }
 
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     pub fn neon() -> Option<Self> {
         Self::require_initialized();
         // Assumed to be safe if the "neon" feature is on.
         Some(Self::NEON)
     }
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     pub fn sme2() -> Option<Self> {
         // Issue Platform::SME2 only when the startup self-test actually tested
         // SME2 (recorded as the process platform) and this thread's SVL is 512 bits.
@@ -533,13 +520,13 @@ impl Platform {
     }
 }
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 const fn sme2_allowed(detected: Platform, thread_ok: bool) -> bool {
     matches!(detected, Platform::SME2) && thread_ok
 }
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 const fn sme2_svl_ok(lanes: u64) -> bool {
     lanes == crate::sme2::GROUP as u64
@@ -564,7 +551,6 @@ mod x86_bits {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 // Read by the x86 kernels' dispatch and the tests.
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 fn x86_features() -> u8 {
     use core::sync::atomic::{AtomicU8, Ordering};
     static FEATURES: AtomicU8 = AtomicU8::new(0);
@@ -600,7 +586,6 @@ struct CpuWords {
 /// Leaf 1's ECX says the CPU has XSAVE and AVX and the OS enabled XGETBV
 /// (OSXSAVE): bits 26, 27 and 28.
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 const fn os_saves_avx(leaf1_ecx: u32) -> bool {
     let avx = (1 << 26) | (1 << 27) | (1 << 28);
     leaf1_ecx & avx == avx
@@ -608,22 +593,14 @@ const fn os_saves_avx(leaf1_ecx: u32) -> bool {
 
 #[cfg(target_arch = "x86_64")]
 #[cold]
-// Read by the x86 kernels' dispatch and the tests.
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 fn read_cpu_words() -> CpuWords {
     use core::arch::x86_64 as arch;
-    // Sound: every x86-64 CPU has CPUID. (Safe since Rust 1.94; unsafe
-    // before.)
-    #[allow(unused_unsafe)]
-    let leaf1 = unsafe { arch::__cpuid(1) };
+    let leaf1 = arch::__cpuid(1);
     let mut words = CpuWords { leaf1_eax: leaf1.eax, leaf1_ecx: leaf1.ecx, ..CpuWords::default() };
     if os_saves_avx(leaf1.ecx) {
         // Sound: OSXSAVE (bit 27) says the OS enabled XGETBV.
         words.xcr0 = u32::from_le_bytes(unsafe { arch::_xgetbv(0) }.to_le_bytes()[..4].try_into().unwrap());
-        // Sound: as leaf 1; leaf 7 exists where AVX does, and leaf 0 names
-        // the vendor.
-        #[allow(unused_unsafe)]
-        let (leaf7, leaf0) = unsafe { (arch::__cpuid_count(7, 0), arch::__cpuid(0)) };
+        let (leaf7, leaf0) = (arch::__cpuid_count(7, 0), arch::__cpuid(0));
         words.leaf7_ebx = leaf7.ebx;
         words.amd = (leaf0.ebx, leaf0.edx, leaf0.ecx) == (0x6874_7541, 0x6974_6e65, 0x444d_4163); // "AuthenticAMD"
     }
@@ -638,7 +615,6 @@ fn read_cpu_words() -> CpuWords {
 /// [`wide_cpu`] names. No reading, no state: its test runs it on every
 /// combination of the bits it looks at.
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 const fn features_of(words: CpuWords) -> u8 {
     use x86_bits::*;
     let mut features = READ;
@@ -668,7 +644,6 @@ const fn features_of(words: CpuWords) -> u8 {
 #[cfg(target_arch = "x86_64")]
 #[cold]
 // Read by the x86 kernels' dispatch and the tests.
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 fn read_x86_features() -> u8 {
     features_of(read_cpu_words())
 }
@@ -676,7 +651,6 @@ fn read_x86_features() -> u8 {
 /// The display family of CPUID leaf 1's EAX: the base family, plus the
 /// extended family where the base is 0xF.
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 const fn family(eax: u32) -> u32 {
     let base = (eax >> 8) & 0xF;
     if base == 0xF { base + ((eax >> 20) & 0xFF) } else { base }
@@ -689,14 +663,12 @@ const fn family(eax: u32) -> u32 {
 /// memory, and on Intel Ice Lake (Xeon Gold 6330) 3-4.5% more. Other
 /// CPUs join the list when measured.
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 const fn wide_cpu(amd: bool, family: u32) -> bool {
     amd && family >= 0x1A
 }
 
 /// Whether `hash_many` dispatches to the 32-input AVX-512 kernels
 /// (Linux): AVX-512 on a CPU where they pay ([`wide_cpu`]).
-#[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn wide_avx512() -> bool {
@@ -704,7 +676,6 @@ pub fn wide_avx512() -> bool {
     x86_features() & x86_bits::WIDE != 0
 }
 
-#[cfg(blake3_avx512_ffi)]
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn avx512_detected() -> bool {
@@ -721,7 +692,6 @@ pub fn avx512_detected() -> bool {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 // Read by the x86 kernels' dispatch and the tests.
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 pub fn avx2_detected() -> bool {
     // A build for CPUs that have it (`-C target-cpu=...` or
     // `-C target-feature=...`) needs no check: run elsewhere, it stops
@@ -736,7 +706,6 @@ pub fn avx2_detected() -> bool {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 // Read by the x86 kernels' dispatch and the tests.
-#[cfg_attr(not(blake3_sse41_ffi), allow(dead_code))]
 pub fn sse41_detected() -> bool {
     // A build for CPUs that have it (`-C target-cpu=...` or
     // `-C target-feature=...`) needs no check: run elsewhere, it stops
@@ -753,7 +722,7 @@ pub fn sse41_detected() -> bool {
 /// fetches its kernel's lines from DRAM one miss after another: hash() of
 /// 8 KiB took 4.8 us so on an M4 Max, and 2.8 with this prefetch (job 971),
 /// where code already near costs it a few cycles a line.
-#[cfg(blake3_neon)]
+#[cfg(target_arch = "aarch64")]
 #[inline]
 pub(crate) fn prefetch_code((start, end): (usize, usize)) {
     debug_assert!(start < end && end - start < 64 * 1024, "a kernel's code");
@@ -793,7 +762,7 @@ pub(crate) fn prefetch_code((start, end): (usize, usize)) {
     });
 }
 
-#[cfg(all(test, blake3_neon))]
+#[cfg(all(test, target_arch = "aarch64"))]
 std::thread_local! {
     /// The tests' record of prefetch_code on this thread since they last
     /// took it, while one asks (Some): each range, and the steps of four
@@ -823,7 +792,7 @@ pub fn words_from_le_bytes_32(bytes: &[u8; 32]) -> [u32; 8] {
 /// Linux SVL is per-thread (`prctl(PR_SME_SET_VL)`), so the calling thread's
 /// SVL is queried via side-effect-free `rdsvl` (without entering streaming
 /// mode or touching ZA).
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
 pub fn sme2_detected() -> bool {
     use core::sync::atomic::{AtomicU8, Ordering};
@@ -847,7 +816,7 @@ pub fn sme2_detected() -> bool {
     cached
 }
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 fn sme2_detect_uncached() -> bool {
     if !sme2_reported() {
         return false;
@@ -862,7 +831,7 @@ fn sme2_detect_uncached() -> bool {
     }
 }
 
-#[cfg(all(blake3_sme2, target_vendor = "apple"))]
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
 fn sme2_reported() -> bool {
     use core::ffi::{c_char, c_int, c_void};
     #[link(name = "c")]
@@ -878,7 +847,7 @@ fn sme2_reported() -> bool {
     rc == 0 && value != 0
 }
 
-#[cfg(all(blake3_sme2, target_os = "linux"))]
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
 fn sme2_reported() -> bool {
     use core::ffi::c_ulong;
     #[cfg_attr(all(target_env = "musl", target_feature = "crt-static"), link(name = "c", kind = "static", modifiers = "-bundle"))]
@@ -922,7 +891,7 @@ mod detected_test {
         platform.xof_many(crate::IV, &[0u8; 64], 0, 0, crate::ROOT, &mut out);
     }
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_sme2_policy_helpers() {
         assert!(super::sme2_svl_ok(crate::sme2::GROUP as u64));
@@ -938,7 +907,7 @@ mod detected_test {
         }
     }
 
-    #[cfg(all(blake3_avx512_ffi, unix, target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_avx512_xof_many_rejects_partial_block_output() {
         if !super::avx512_detected() {
@@ -1112,7 +1081,7 @@ mod x86_features_test {
         }
         assert_eq!(super::family(words.leaf1_eax), family, "leaf 1's family");
         // What the dispatch reads, against the same independent reading.
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(super::wide_avx512(), want, "wide_avx512 on vendor {amd}, family {family:#x}");
     }
 
@@ -1128,7 +1097,7 @@ mod x86_features_test {
         let has_avx512 = has_avx2 && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl");
         assert_eq!(super::sse41_detected(), has_sse41, "sse41_detected");
         assert_eq!(super::avx2_detected(), has_avx2, "avx2_detected");
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(super::avx512_detected(), has_avx512, "avx512_detected");
     }
     /// Each CPU runs the widest kernel whose full prerequisite chain it has;

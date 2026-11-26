@@ -35,7 +35,7 @@ fn test_every_assembly_symbol_carries_the_crate_prefix() {
 /// official linked into this binary (a dev-dependency): each of servil's
 /// bindings reaches an entry of its own, and both crates hash alike.
 #[test]
-#[cfg(all(target_arch = "x86_64", blake3_sse41_ffi))]
+#[cfg(target_arch = "x86_64")]
 fn test_official_kernels_and_ours_stay_apart() {
     // Official's names, as its own assembly exports them.
     unsafe extern "C" {
@@ -44,7 +44,7 @@ fn test_official_kernels_and_ours_stay_apart() {
         fn blake3_hash_many_sse41();
         fn blake3_hash_many_avx2();
     }
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     unsafe extern "C" {
         fn blake3_compress_in_place_avx512();
         fn blake3_compress_xof_avx512();
@@ -60,7 +60,7 @@ fn test_official_kernels_and_ours_stay_apart() {
         ("hash_many_sse41", crate::sse41::ffi::blake3_servil_hash_many_sse41 as *const (), blake3_hash_many_sse41 as *const ()),
         ("hash_many_avx2", crate::avx2::ffi::blake3_servil_hash_many_avx2 as *const (), blake3_hash_many_avx2 as *const ()),
     ];
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     pairs.extend([
         ("compress_in_place_avx512", crate::avx512::ffi::blake3_servil_compress_in_place_avx512 as *const (), blake3_compress_in_place_avx512 as *const ()),
         ("compress_xof_avx512", crate::avx512::ffi::blake3_servil_compress_xof_avx512 as *const (), blake3_compress_xof_avx512 as *const ()),
@@ -133,11 +133,11 @@ pub(crate) fn every_platform() -> Vec<crate::platform::Platform> {
     let mut all = std::vec::Vec::new();
     #[cfg(target_arch = "x86_64")]
     all.extend([Platform::sse41(), Platform::avx2()].into_iter().flatten());
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     all.extend(Platform::avx512());
-    #[cfg(blake3_neon)]
+    #[cfg(target_arch = "aarch64")]
     all.extend(Platform::neon());
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     all.extend(Platform::sme2());
     all
 }
@@ -147,7 +147,7 @@ pub(crate) fn every_platform() -> Vec<crate::platform::Platform> {
 /// 2, 4 and 8 chunks take the kernel at their own width. The digests are the test vectors' either
 /// way, so the decision alone can catch a mutant that drops the rounding.
 #[test]
-#[cfg(all(target_arch = "x86_64", blake3_sse41_ffi))]
+#[cfg(target_arch = "x86_64")]
 fn test_whole_chunks_round_up_to_the_lanes() {
     use crate::{CHUNK_LEN, Ran};
     // The startup self-test first: it runs inside a process's first call,
@@ -178,7 +178,7 @@ fn test_whole_chunks_round_up_to_the_lanes() {
     assert_eq!(ran(3 * CHUNK_LEN + 500), (false, 0), "3 whole and a partial: the spare lane's pass, never rounding");
     // AVX-512: 9 to 15 on 16 lanes; past 16, the whole group of 16 and the
     // rest rounded (19 = 16 + 3 on 4), or 32 lanes where that kernel runs.
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     if crate::platform::Platform::avx512().is_some() {
         let input = std::vec![0x5au8; 19 * CHUNK_LEN];
         let ran = |len: usize| {
@@ -209,7 +209,7 @@ fn test_whole_chunks_round_up_to_the_lanes() {
 /// is tested on a machine whose chunks never reach it (an i7's AVX2 gets
 /// at most 8 chunks a call; AVX-512's 16 and 32 reach it in real calls).
 #[test]
-#[cfg(all(target_arch = "x86_64", blake3_avx2_ffi))]
+#[cfg(target_arch = "x86_64")]
 fn test_counts_past_the_widest_kernel_split_into_groups_and_a_rounded_rest() {
     use crate::platform::Platform;
     use crate::{BLOCK_LEN, CHUNK_LEN, IV, IncrementCounter, OUT_LEN, PARENT, Ran};
@@ -269,7 +269,7 @@ fn test_hash_std_hash_distinguishes_values() {
 /// digest is the same, so only the decision itself can catch it). The
 /// Platform values are decisions' inputs here, whatever this CPU runs.
 #[test]
-#[cfg(all(target_arch = "x86_64", blake3_sse41_ffi, blake3_avx2_ffi))]
+#[cfg(target_arch = "x86_64")]
 fn test_the_paths_chosen_exactly() {
     use crate::platform::Platform;
     // spare_lane(platform, whole chunks, partial bytes): the lane for the
@@ -290,7 +290,7 @@ fn test_the_paths_chosen_exactly() {
     for whole in [0, 2, 4, 8] {
         assert_eq!(crate::ffi_partial::spare_lane(Platform::AVX2, whole, 1000), None, "{whole} whole chunks");
     }
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     {
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, false, 1, BLOCK_LEN + 1), None);
         assert_eq!(crate::ffi_partial::spare_lane_for(Platform::AVX512, true, 1, BLOCK_LEN + 1), None);
@@ -337,7 +337,7 @@ fn test_the_paths_chosen_exactly() {
         let sse41_entry = crate::ffi_partial::entry_sse41() as usize;
         assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&sse41_entry)), "SSE4.1 3+partial must run partial_sse41");
     }
-    #[cfg(blake3_avx2_ffi)]
+    #[cfg(target_arch = "x86_64")]
     if crate::platform::avx2_detected() {
         let input = [0x5au8; 5 * crate::CHUNK_LEN + 500];
         let mut out = [0u8; 6 * crate::OUT_LEN];
@@ -347,7 +347,7 @@ fn test_the_paths_chosen_exactly() {
         let avx2_entry = crate::ffi_partial::entry_avx2() as usize;
         assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&avx2_entry)), "AVX2 5+partial must run partial_avx2");
     }
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     if crate::platform::avx512_detected() {
         let [(_, p4), (_, p8), (_, p16)] = crate::ffi_partial::entries_avx512();
         let all_partial = [crate::ffi_partial::entry_sse41() as usize, crate::ffi_partial::entry_avx2() as usize, p4 as usize, p8 as usize, p16 as usize];
@@ -385,7 +385,7 @@ fn test_the_paths_chosen_exactly() {
     ] {
         assert_eq!(crate::rounded_lanes(platform, count), lanes, "{platform:?}, {count} inputs");
     }
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     {
         assert_eq!(crate::rounded_lanes(Platform::AVX512, 3), Some(4));
         assert_eq!(crate::rounded_lanes(Platform::AVX512, 7), Some(8));
@@ -411,7 +411,7 @@ fn test_the_paths_chosen_exactly() {
     }
     assert!(crate::pair::takes_platform(Platform::AVX2));
     assert!(!crate::pair::takes_platform(Platform::SSE41));
-    #[cfg(blake3_avx512_ffi)]
+    #[cfg(target_arch = "x86_64")]
     assert!(crate::pair::takes_platform(Platform::AVX512) && crate::pair::takes(Platform::AVX512, 1500));
 }
 
@@ -527,11 +527,11 @@ fn test_xof_groups_sweep_on_this_cpu() {
     });
 }
 
-#[cfg(blake3_avx512_ffi)]
+#[cfg(target_arch = "x86_64")]
 type XofManyFunction = unsafe fn(cv: &crate::CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8, out: &mut [u8]);
 
 /// An extended-output kernel (AVX-512's) against SSE4.1's.
-#[cfg(blake3_avx512_ffi)]
+#[cfg(target_arch = "x86_64")]
 pub fn test_xof_many_fn(xof_many_function: XofManyFunction) {
     let mut block = [0; BLOCK_LEN];
     let block_len = 42;
@@ -1087,7 +1087,6 @@ mod unsafe_paths {
 // after one), outputs likewise, so a kernel that reads or writes one byte
 // outside its buffers stops the test with a fault. The assembly kernels'
 // accesses are invisible to the sanitizers; these are not.
-#[cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), any(target_vendor = "apple", target_os = "linux")))]
 pub(crate) mod guard_pages {
     use crate::*;
 
@@ -1097,13 +1096,13 @@ pub(crate) mod guard_pages {
     /// inaccessible page, after it and before it: whole blocks are read in
     /// place, so a kernel that read a byte outside them would fault here.
     #[test]
-    #[cfg(all(target_arch = "x86_64", blake3_sse41_ffi))]
+    #[cfg(target_arch = "x86_64")]
     fn test_chunk_root_against_a_guard_page() {
         let mut variants = Vec::new();
         if platform::Platform::sse41().is_some() {
             variants.push(false);
         }
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         if platform::Platform::avx512().is_some() {
             variants.push(true);
         }
@@ -1128,7 +1127,7 @@ pub(crate) mod guard_pages {
     /// overlap inside the input's bytes (chunk_root::pad_block), and one
     /// that reached a byte outside them would fault here.
     #[test]
-    #[cfg(all(target_arch = "x86_64", blake3_sse41_ffi))]
+    #[cfg(target_arch = "x86_64")]
     fn test_a_padded_block_is_read_inside_its_bytes() {
         crate::initialize();
         let key = [0x33; 32];
@@ -1168,7 +1167,7 @@ pub(crate) mod guard_pages {
     /// over after a group, and no NEON kernel from 13 left over (no
     /// mutant is made in an unsafe function, so this holds the threshold).
     #[test]
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     fn test_a_run_of_blocks_against_a_guard_page() {
         if platform::Platform::sme2().is_none() {
             return;
@@ -1219,7 +1218,7 @@ pub(crate) mod guard_pages {
     /// each case's kernels and its copy read from the tests' record as
     /// above.
     #[test]
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     fn test_a_table_of_blocks_of_any_count_is_copied_for_the_parent_kernel() {
         let Some(sme2) = platform::Platform::sme2() else { return };
         const GROUP: usize = crate::sme2::GROUP;
@@ -1286,20 +1285,20 @@ pub(crate) mod guard_pages {
         let mut platforms: Vec<platform::Platform> = Vec::new();
         #[cfg(target_arch = "x86_64")]
         platforms.extend([platform::Platform::sse41(), platform::Platform::avx2()].into_iter().flatten());
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         platforms.extend(platform::Platform::avx512());
-        #[cfg(blake3_neon)]
+        #[cfg(target_arch = "aarch64")]
         platforms.extend(platform::Platform::neon());
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         platforms.extend(platform::Platform::sme2());
         // The kernels this CPU has are the ones checked: none left out.
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         assert_eq!(
             platforms.iter().any(|p| matches!(p, platform::Platform::SME2)),
             platform::sme2_detected(),
             "SME2 checked where the build and the CPU have it: {platforms:?}"
         );
-        #[cfg(blake3_avx2_ffi)]
+        #[cfg(target_arch = "x86_64")]
         {
             assert_eq!(
                 platforms.iter().any(|p| matches!(p, platform::Platform::AVX2)),
@@ -1309,7 +1308,7 @@ pub(crate) mod guard_pages {
                 std::is_x86_feature_detected!("avx2"),
                 "AVX2 checked where the build and the CPU have it: {platforms:?}"
             );
-            #[cfg(blake3_avx512_ffi)]
+            #[cfg(target_arch = "x86_64")]
             assert_eq!(
                 platforms.iter().any(|p| matches!(p, platform::Platform::AVX512)),
                 std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl"),
@@ -1713,7 +1712,7 @@ fn test_hasher_io_write() {
 /// see, so this is the test that holds them where measurement put them.
 /// On a CPU with SME2 (every kernel present); the recorded entry points
 /// are the tests' (`ran_kernel`).
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 mod dispatch {
     use crate::{CHUNK_LEN, RAN, RAN_ENTRIES, Ran};
     use std::collections::BTreeSet;
@@ -2009,7 +2008,7 @@ fn test_grouped_hash() {
 /// prefetch limit, on every platform: they look up the kernels' plans by
 /// length, and a lookup out of range would end the program.
 #[test]
-#[cfg(blake3_neon)]
+#[cfg(target_arch = "aarch64")]
 fn test_cold_prefetches_every_length() {
     for platform in every_platform() {
         for len in (0..crate::PREFETCH_BELOW).step_by(17) {
@@ -2027,7 +2026,7 @@ fn test_cold_prefetches_every_length() {
 /// update prefetch, the warm one-shot path never. The NEON hybrids' paths:
 /// SME2's own prefetch is the SME2 rows' (the hybrids run on every AArch64
 /// core with the SHA-3 extension).
-#[cfg(blake3_neon)]
+#[cfg(target_arch = "aarch64")]
 mod prefetch_counts {
     use crate::platform::{PREFETCHED, Platform};
     use crate::{CHUNK_LEN, IV, RAN_ENTRIES};
@@ -2117,7 +2116,7 @@ mod prefetch_counts {
     #[test]
     fn test_convenience_prefetches_and_performance_does_not() {
         let on_neon = matches!(Platform::detect(), Platform::NEON);
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         let on_neon = on_neon || matches!(Platform::detect(), Platform::SME2);
         if !on_neon || !crate::neon_hybrid::sha3_detected() {
             return;

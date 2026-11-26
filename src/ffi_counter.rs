@@ -40,7 +40,6 @@ fn wrapping_add_usize(start: u32, delta: usize) -> u32 {
 }
 
 #[inline]
-#[cfg(any(blake3_sme2, blake3_neon, blake3_avx2_ffi, all(blake3_avx512_ffi, target_arch = "x86_64")))]
 fn base_and_word(base: u32, counter_word: usize) -> u64 {
     u64::from(base) + ((counter_word as u64) << 32)
 }
@@ -57,11 +56,10 @@ fn hash_counter_groups(
     out: &mut [[u8; OUT_LEN]],
     platform: Platform,
 ) -> usize {
-    #[cfg(any(blake3_sme2, blake3_neon, blake3_avx2_ffi, all(blake3_avx512_ffi, target_arch = "x86_64")))]
     let flags_and_len = u64::from(root_flags) + (u64::from(blen_u8) << 8);
     let mut done = 0usize;
 
-    #[cfg(blake3_sme2)]
+    #[cfg(target_arch = "aarch64")]
     if matches!(platform, Platform::SME2 { .. }) {
         let groups = out.len() / 16;
         if groups > 0 {
@@ -83,17 +81,8 @@ fn hash_counter_groups(
         // falls through to NEON 8+3 below.
     }
 
-    #[cfg(blake3_neon)]
-    if matches!(platform, Platform::NEON { .. }) || {
-        #[cfg(blake3_sme2)]
-        {
-            matches!(platform, Platform::SME2 { .. })
-        }
-        #[cfg(not(blake3_sme2))]
-        {
-            false
-        }
-    } {
+    #[cfg(target_arch = "aarch64")]
+    if matches!(platform, Platform::NEON { .. } | Platform::SME2 { .. }) {
         let rem = out.len() - done;
         let groups = rem / 11;
         if groups > 0 {
@@ -112,7 +101,7 @@ fn hash_counter_groups(
         return done;
     }
 
-    #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86_64")]
     if matches!(platform, Platform::AVX512 { .. }) {
         let groups = out.len() / 16;
         if groups > 0 {
@@ -129,17 +118,8 @@ fn hash_counter_groups(
         }
     }
 
-    #[cfg(blake3_avx2_ffi)]
-    if matches!(platform, Platform::AVX2 { .. }) || {
-        #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
-        {
-            matches!(platform, Platform::AVX512 { .. })
-        }
-        #[cfg(not(all(blake3_avx512_ffi, target_arch = "x86_64")))]
-        {
-            false
-        }
-    } {
+    #[cfg(target_arch = "x86_64")]
+    if matches!(platform, Platform::AVX2 { .. } | Platform::AVX512 { .. }) {
         let rem = out.len() - done;
         let groups = rem / 8;
         if groups > 0 {
@@ -157,7 +137,6 @@ fn hash_counter_groups(
         }
     }
 
-    let _ = (tmpl_words, blen_u8, counter_word, start, key, root_flags, out, platform);
     done
 }
 
@@ -235,50 +214,50 @@ pub(crate) fn self_test(platform: Platform) -> usize {
 
 /// Exported entry points of the counter-range kernels compiled for this target,
 /// for `self_test::test_self_test_runs_every_kernel`.
-#[cfg(all(test, blake3_neon))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn entries_neon() -> [(&'static str, *const ()); 1] {
     [("neon_p11_counter", ffi_neon::blake3_servil_neon_p11_counter as *const ())]
 }
 
-#[cfg(all(test, blake3_sme2))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) fn entries_sme2() -> [(&'static str, *const ()); 1] {
     [("sme2_counter", ffi_sme2::blake3_servil_sme2_counter as *const ())]
 }
 
-#[cfg(all(test, blake3_avx2_ffi))]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) fn entries_avx2() -> [(&'static str, *const ()); 1] {
     [("avx2_counter", ffi_x86::blake3_servil_avx2_counter as *const ())]
 }
 
-#[cfg(all(test, blake3_avx512_ffi, target_arch = "x86_64"))]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 1] {
     [("avx512_counter", ffi_x86::blake3_servil_avx512_counter as *const ())]
 }
 
-#[cfg(all(test, blake3_sme2))]
+#[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) unsafe fn call_sme2_counter(template: *const u32, key: *const u32, base_and_word: u64, flags_and_len: u64, out: *mut u8, groups: u64) -> u64 {
     // Sound: caller verified SME2 support and provided valid buffers covering
     // 16 `u32` template words, 8 `u32` key words, and `16 * groups` outputs.
     unsafe { ffi_sme2::blake3_servil_sme2_counter(template, key, base_and_word, flags_and_len, out, groups) }
 }
 
-#[cfg(blake3_avx2_ffi)]
+#[cfg(target_arch = "x86_64")]
 mod ffi_x86 {
     unsafe extern "C" {
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         pub fn blake3_servil_avx512_counter(template: *const u32, groups: u64, key: *const u32, base_and_word: u64, flags_and_len: u64, out: *mut u8);
         pub fn blake3_servil_avx2_counter(template: *const u32, groups: u64, key: *const u32, base_and_word: u64, flags_and_len: u64, out: *mut u8);
     }
 }
 
-#[cfg(blake3_sme2)]
+#[cfg(target_arch = "aarch64")]
 mod ffi_sme2 {
     unsafe extern "C" {
         pub fn blake3_servil_sme2_counter(template: *const u32, key: *const u32, base_and_word: u64, flags_and_len: u64, out: *mut u8, groups: u64) -> u64;
     }
 }
 
-#[cfg(blake3_neon)]
+#[cfg(target_arch = "aarch64")]
 mod ffi_neon {
     unsafe extern "C" {
         pub fn blake3_servil_neon_p11_counter(template: *const u32, key: *const u32, base_and_word: u64, flags_and_len: u64, out: *mut u8, groups: u64);
@@ -377,15 +356,15 @@ mod tests {
         crate::initialize();
         let platform = Platform::detect();
         let (group_len, entry): (usize, usize) = match platform {
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 { .. } => (16, ffi_sme2::blake3_servil_sme2_counter as *const () as usize),
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON { .. } => (11, ffi_neon::blake3_servil_neon_p11_counter as *const () as usize),
-            #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX512 { .. } => (16, ffi_x86::blake3_servil_avx512_counter as *const () as usize),
-            #[cfg(blake3_avx2_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX2 { .. } => (8, ffi_x86::blake3_servil_avx2_counter as *const () as usize),
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 { .. } => return,
         };
 
@@ -417,7 +396,7 @@ mod tests {
             TreeHasher::new(Mode::Plain).hash_counter_range(&tmpl, 12, 100, &mut out);
             assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&entry)), "TreeHasher count={count}");
         }
-        #[cfg(blake3_sme2)]
+        #[cfg(target_arch = "aarch64")]
         if matches!(platform, Platform::SME2 { .. }) {
             let neon_entry = ffi_neon::blake3_servil_neon_p11_counter as *const () as usize;
             let mut out = std::vec![[0u8; OUT_LEN]; 33];
@@ -428,15 +407,15 @@ mod tests {
             assert!(!ran.contains(&entry), "on_this_core must not enter SME2");
         }
         let (mixed, want_done) = match platform {
-            #[cfg(blake3_sme2)]
+            #[cfg(target_arch = "aarch64")]
             Platform::SME2 { .. } => (43usize, 43usize),
-            #[cfg(blake3_neon)]
+            #[cfg(target_arch = "aarch64")]
             Platform::NEON { .. } => (30usize, 22usize),
-            #[cfg(all(blake3_avx512_ffi, target_arch = "x86_64"))]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX512 { .. } => (27usize, 24usize),
-            #[cfg(blake3_avx2_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::AVX2 { .. } => (23usize, 16usize),
-            #[cfg(blake3_sse41_ffi)]
+            #[cfg(target_arch = "x86_64")]
             Platform::SSE41 { .. } => (23usize, 0usize),
         };
         let mut out = std::vec![[0u8; OUT_LEN]; mixed];

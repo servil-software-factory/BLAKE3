@@ -17,16 +17,14 @@ const ROWS: usize = 8;
 /// half of `ROWS * ROW` (4 KiB).
 const HALF_RUN: usize = ROWS * ROW / 2;
 /// The most children `CvStack::condense` passes to `Hooks::parents` in one
-/// call: capped at both `2 * ROW` (64 children, 2 KiB of scratch) and
-/// `2 * MAX_SIMD_DEGREE` (64 on x86-64 Linux, 32 on AArch64 without SME2; on
-/// SME2 builds `2 * MAX_SIMD_DEGREE` is 256 so `2 * ROW` binds at 64).
-const TILE: usize = if MAX_SIMD_DEGREE == 16 { 32 } else { 64 };
+/// call: `2 * ROW` (64 children, 2 KiB of scratch; every supported target has
+/// `2 * MAX_SIMD_DEGREE >= 64`).
+const TILE: usize = 2 * ROW;
 // Exact compile-time bounds for HALF_RUN and TILE (also stops equivalent
 // mutants on their arithmetic).
 const _: () = assert!(ROW / 8 == 4);
 const _: () = assert!(2 * HALF_RUN == ROWS * ROW);
-const _: () = assert!(TILE == 2 * ROW || (MAX_SIMD_DEGREE < ROW && TILE == 2 * MAX_SIMD_DEGREE));
-const _: () = assert!(TILE <= 2 * ROW && TILE <= 2 * MAX_SIMD_DEGREE);
+const _: () = assert!(TILE == 2 * ROW && TILE <= 2 * MAX_SIMD_DEGREE);
 
 /// The values of the subtrees finished so far, bottom first, each one
 /// value or a row.
@@ -635,7 +633,7 @@ impl ChunkState {
 
     /// Read-only access to the mode flags stored alongside `cv` in the
     /// 64-byte-aligned chunk state (initialized from `Domain` at construction).
-    #[cfg(blake3_sse41_ffi)]
+    #[cfg(target_arch = "x86_64")]
     #[inline(always)]
     pub(crate) fn flags(&self) -> u8 {
         self.flags

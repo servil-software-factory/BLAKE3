@@ -119,9 +119,9 @@ pub(crate) fn hash_blocks_x86(
 /// wide-kernel setup overhead).
 pub(crate) fn round_x86_blocks(platform: crate::platform::Platform, blocks: usize, count: usize) -> (usize, usize) {
     let widest = match platform {
-        #[cfg(blake3_avx512_ffi)]
+        #[cfg(target_arch = "x86_64")]
         crate::platform::Platform::AVX512 => 16,
-        #[cfg(blake3_avx2_ffi)]
+        #[cfg(target_arch = "x86_64")]
         crate::platform::Platform::AVX2 => 8,
         crate::platform::Platform::SSE41 => 4,
     };

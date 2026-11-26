@@ -34,7 +34,6 @@ src/ffi_counter.rs	replace entries_avx2 -> [(&'static str, *const()); 1] with [(
 src/ffi_counter.rs	replace entries_avx2 -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	x86-64 only: compiled out on AArch64
 src/ffi_counter.rs	replace entries_avx512 -> [(&'static str, *const()); 1] with [("", Default::default()); 1]	1	x86-64 only: compiled out on AArch64
 src/ffi_counter.rs	replace entries_avx512 -> [(&'static str, *const()); 1] with [("xyzzy", Default::default()); 1]	1	x86-64 only: compiled out on AArch64
-src/ffi_counter.rs	replace || with && in hash_counter_groups	1	x86-64 only: AVX2 arm is compiled out on AArch64
 src/ffi_neon_hybrid.rs	replace != with == in apple_cores	1	[cpu lacks sme2] a core that is not Apple's (the VM on an AmpereOne): detection whose every answer but "Apple's" is this machine's, asked once or each time (the Mac's list judges the other answer)
 src/ffi_neon_hybrid.rs	replace & with ^ in apple_cores	2	[cpu lacks sme2] a core that is not Apple's (the VM on an AmpereOne): detection whose every answer but "Apple's" is this machine's, asked once or each time (the Mac's list judges the other answer)
 src/ffi_neon_hybrid.rs	replace & with ^ in midr_implementer	1	detection, on a system that offers the register: any bit but its own set also reads as offered
@@ -51,7 +50,6 @@ src/ffi_neon_hybrid.rs	replace > with >= in prefetch_parent_code	1	speed: whethe
 src/ffi_neon_hybrid.rs	replace > with >= in prefetch_tree_code	1	speed: whether and what to prefetch after a pause (no effect on results)
 src/ffi_neon_hybrid.rs	replace apple_cores -> bool with false	1	[cpu lacks sme2] a core that is not Apple's (the VM on an AmpereOne): detection, on a machine whose cores are not Apple's: the answer is this machine's (the Mac's list judges the other)
 src/ffi_neon_hybrid.rs	replace ask_cores -> bool with false	1	[cpu lacks sme2] a core that is not Apple's (the VM on an AmpereOne): detection whose every answer but "Apple's" is this machine's, asked once or each time (the Mac's list judges the other answer)
-src/ffi_neon_hybrid.rs	replace read_apple_cores -> bool with false	1	[cpu lacks sme2] a core that is not Apple's (the VM on an AmpereOne): detection whose every answer but "Apple's" is this machine's, asked once or each time (the Mac's list judges the other answer)
 src/ffi_neon_hybrid.rs	replace sha3_detected -> bool with true	1	detection, on a machine with SHA-3: a wrong no runs the NEON kernels (equally correct), a wrong yes is this machine's answer
 src/ffi_neon_hybrid.rs	replace | with & in ask_cores	1	[cpu lacks sme2] a core that is not Apple's (the VM on an AmpereOne): detection whose every answer but "Apple's" is this machine's, asked once or each time (the Mac's list judges the other answer)
 src/ffi_neon_hybrid.rs	replace | with ^ in ask_cores	1	[cpu lacks sme2] a core that is not Apple's (the VM on an AmpereOne): detection whose every answer but "Apple's" is this machine's, asked once or each time (the Mac's list judges the other answer)
