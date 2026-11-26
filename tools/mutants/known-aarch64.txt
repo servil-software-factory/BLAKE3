@@ -132,28 +132,24 @@ src/many.rs	replace && with || in hash_many_on	2	x86-64 only: cfg(all(feature="s
 src/many.rs	replace && with || in hash_run_short	1	speed here: on this SME2 machine every short run goes to the padded group, whose digests are the plans'; a CPU without SME2 would run SME2 instructions, and no mutation machine of ours lacks SME2
 src/many.rs	replace && with || in one_block_groups	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace && with || in prefix_padded_count	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
-src/many.rs	replace * with + in hash_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with + in hash_group_across	5	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace * with + in hash_long_or_single	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace * with + in hash_long_or_single	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with + in multi_block_short_last	2	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace * with + in multi_block_short_last_tile	4	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace * with + in one_block_groups	6	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with + in subtree_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace * with / in hash_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with / in hash_group_across	5	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace * with / in hash_long_or_single	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace * with / in hash_long_or_single	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with / in hash_run_short	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with / in multi_block_short_last	2	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace * with / in multi_block_short_last_tile	4	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace * with / in one_block_groups	6	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with / in subtree_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace + with * in hash_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with * in hash_group_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with * in multi_block_short_last	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace + with * in multi_block_short_last_tile	2	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace + with * in one_block_groups	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace + with * in subtree_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace + with - in hash_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with - in hash_group_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with - in multi_block_short_last	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace + with - in multi_block_short_last_tile	2	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
@@ -177,21 +173,23 @@ src/many.rs	replace - with / in one_block_groups	1	x86-64 only: cfg(all(feature=
 src/many.rs	replace - with / in subtree_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace / with % in hash_group_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace / with % in multi_block_short_last_tile	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
+src/many.rs	replace / with % in across_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace / with % in one_block_groups	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace / with % in subtree_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace / with * in across_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace / with * in hash_group_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace / with * in multi_block_short_last_tile	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace / with * in one_block_groups	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace / with * in subtree_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace < with <= in across_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace < with <= in across_from	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace < with <= in hash_group_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace < with <= in hash_many_on	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace < with <= in multi_block_short_last	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
-src/many.rs	replace < with == in across_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace < with == in across_from	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace < with == in hash_group_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace < with == in hash_many_on	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace < with == in multi_block_short_last	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
-src/many.rs	replace < with > in across_from	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace < with > in across_from	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace < with > in hash_group_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace < with > in hash_many_on	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
 src/many.rs	replace < with > in multi_block_short_last	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
@@ -222,7 +220,6 @@ src/many.rs	replace >= with < in prefix_padded_count	2	x86-64 only: cfg(all(feat
 src/many.rs	replace across_from -> Option<usize> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace across_from -> Option<usize> with Some(0)	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace across_from -> Option<usize> with Some(1)	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/many.rs	replace hash_across with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace hash_group_across with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace hash_long_or_single with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/many.rs	replace multi_block_short_last with ()	1	x86-64 only: cfg(all(feature="std", blake3_avx512_ffi, target_os="linux")) excludes this code on AArch64; caught on x86-64
@@ -245,6 +242,14 @@ src/many.rs	replace | with ^ in neon_plans_last_len	1	same code: every test bina
 src/many.rs	replace | with ^ in subtree_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace | with ^ in whole_messages	4	equivalent: mode flags use bits 4 through 6; CHUNK_START, CHUNK_END and ROOT use bits 0, 1 and 3. Each combination uses disjoint bits.
 src/many.rs	replace || with && in across_from	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	delete ! in across_take	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	delete ! in hash_long_or_single	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace && with || in across_take	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace / with % in across_take	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace / with * in across_take	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace >= with < in across_take	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace across_take -> usize with 0	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/many.rs	replace across_take -> usize with 1	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/pair.rs	delete match arm Platform::AVX2 in takes_platform	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/pair.rs	delete match arm Platform::AVX512 in takes_platform	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/pair.rs	replace * with + in parent	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
