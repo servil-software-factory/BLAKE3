@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -7,33 +7,28 @@ fn is_label_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'$'
 }
 
-/// Replace whole-label occurrences of `from` with `to` in `line`, preserving
-/// arbitrary UTF-8 substrings outside the match.
-fn replace_label(line: &str, from: &str, to: &str) -> String {
-    if !line.contains(from) {
-        return line.to_owned();
-    }
+/// Append `line` to `out`, rewriting maximal label-byte identifiers present in
+/// `rewrites` in a single pass while preserving arbitrary UTF-8 outside them.
+fn push_rewritten_line(out: &mut String, line: &str, rewrites: &HashMap<String, String>) {
     let bytes = line.as_bytes();
-    let fbytes = from.as_bytes();
-    let mut out = String::with_capacity(line.len() + 32);
-    let mut last = 0;
     let mut i = 0;
-    while i + fbytes.len() <= bytes.len() {
-        if &bytes[i..i + fbytes.len()] == fbytes {
-            let before_ok = i == 0 || !is_label_byte(bytes[i - 1]);
-            let after_ok = i + fbytes.len() == bytes.len() || !is_label_byte(bytes[i + fbytes.len()]);
-            if before_ok && after_ok {
-                out.push_str(&line[last..i]);
-                out.push_str(to);
-                i += fbytes.len();
-                last = i;
-                continue;
+    let mut last = 0;
+    while i < bytes.len() {
+        if is_label_byte(bytes[i]) {
+            let start = i;
+            while i < bytes.len() && is_label_byte(bytes[i]) {
+                i += 1;
             }
+            if let Some(to) = rewrites.get(&line[start..i]) {
+                out.push_str(&line[last..start]);
+                out.push_str(to);
+                last = i;
+            }
+        } else {
+            i += 1;
         }
-        i += 1;
     }
     out.push_str(&line[last..]);
-    out
 }
 
 /// Parse a private label definition at the start of a trimmed line, if any.
@@ -152,32 +147,21 @@ fn preprocess_asm(src_rel: &str, src: &str, is_apple: bool, tag: &str) -> String
     // Collect every non-exported label defined in this file so Mach-O local
     // branch targets (`L...`) and ELF fat-LTO private symbols (`.L...`) are
     // both unique across the crate and any downstream consumer.
-    let mut private_labels: Vec<String> = Vec::new();
-    let mut seen_priv: HashSet<String> = HashSet::new();
+    let local_prefix = if is_apple { "L_b3s_" } else { ".L_b3s_" };
+    let mut rewrites: HashMap<String, String> = HashMap::new();
     for line in &filtered {
         if let Some(lbl) = defined_label(line.trim())
             && !globals.contains(lbl)
-            && seen_priv.insert(lbl.to_owned())
+            && !rewrites.contains_key(lbl)
         {
-            private_labels.push(lbl.to_owned());
+            let clean = lbl.trim_start_matches('.').replace(['.', '$'], "_");
+            rewrites.insert(lbl.to_owned(), format!("{local_prefix}{tag}_{clean}"));
         }
     }
-    // Longest first so e.g. `BLAKE3_IV_0` is rewritten before `BLAKE3_IV`.
-    private_labels.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-
-    let local_prefix = if is_apple { "L_b3s_" } else { ".L_b3s_" };
-    let rewrites: Vec<(String, String)> = private_labels
-        .into_iter()
-        .map(|lbl| {
-            let clean = lbl.trim_start_matches('.').replace(['.', '$'], "_");
-            let new_lbl = format!("{local_prefix}{tag}_{clean}");
-            (lbl, new_lbl)
-        })
-        .collect();
 
     let mut out = String::with_capacity(src.len() + 256);
     let mut emitted_first_global = false;
-    for mut line in filtered {
+    for line in filtered {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(".global ").or_else(|| trimmed.strip_prefix(".globl "))
             && let Some(sym) = rest.split_whitespace().next()
@@ -201,14 +185,11 @@ fn preprocess_asm(src_rel: &str, src: &str, is_apple: bool, tag: &str) -> String
                 }
             }
         }
-        if !rewrites.is_empty() {
-            for (from, to) in &rewrites {
-                if line.contains(from.as_str()) {
-                    line = replace_label(&line, from, to);
-                }
-            }
+        if rewrites.is_empty() {
+            out.push_str(&line);
+        } else {
+            push_rewritten_line(&mut out, &line, &rewrites);
         }
-        out.push_str(&line);
         out.push('\n');
     }
 
@@ -263,9 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // As of Rust 1.80, unrecognized config names are warnings. Give Cargo all of our config names.
-    // `shuttle` gates tests/shuttle_*.rs (RUSTFLAGS="--cfg shuttle"); the
-    // library compiles the same either way.
-    let all_cfgs = ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2", "shuttle"];
+    let all_cfgs = ["blake3_sse41_ffi", "blake3_avx2_ffi", "blake3_avx512_ffi", "blake3_neon", "blake3_sme2"];
     for cfg_name in all_cfgs {
         println!("cargo::rustc-check-cfg=cfg({cfg_name}, values(none()))");
     }

@@ -81,7 +81,7 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
         crate::ran(crate::Ran::BlockRun);
         assert_slots(input, len, slot, outputs.len());
         for (messages, digests) in input.chunks(BLOCK_LEN * TABLE).zip(outputs.chunks_mut(TABLE)) {
-            hash_run::<{ BLOCK_LEN }>(messages, key, flags, digests, platform);
+            hash_run(messages, key, flags, digests, platform);
         }
         return;
     }
@@ -129,7 +129,7 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
     }
     for (messages, digests) in input.chunks(slot * TABLE).zip(outputs.chunks_mut(TABLE)) {
         match slot / BLOCK_LEN {
-            1 => hash_run_short::<{ BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
+            1 => hash_run_short(messages, key, flags, digests, platform, plans, last_len),
             2 => hash_blocks::<{ 2 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
             3 => hash_blocks::<{ 3 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
             4 => hash_blocks::<{ 4 * BLOCK_LEN }>(messages, key, flags, digests, platform, plans, last_len),
@@ -171,7 +171,7 @@ fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut
         for (i, message) in messages.chunks_exact(len).enumerate() {
             bytes[i * BLOCK_LEN..][..len].copy_from_slice(message);
         }
-        hash_run_short::<{ BLOCK_LEN }>(&bytes[..digests.len() * BLOCK_LEN], key, flags, digests, platform, plans, len);
+        hash_run_short(&bytes[..digests.len() * BLOCK_LEN], key, flags, digests, platform, plans, len);
     }
 }
 
@@ -676,24 +676,22 @@ pub(crate) fn sme2_sized(len: usize, count: usize) -> bool {
 /// 64-byte messages took 30% longer (VM, bench-hashes); out of line they
 /// cost what they did before.
 #[inline(never)]
-fn hash_run<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
+fn hash_run(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     #[cfg(blake3_sme2)]
     if platform_is_sme2(platform) && outputs.len() % 16 >= if outputs.len() > 16 { ONE_BLOCK_PAD_AFTER_GROUPS } else { ONE_BLOCK_PAD_MIN } {
-        return hash_run_padded::<N>(messages, key, flags, outputs, BLOCK_LEN);
+        return hash_run_padded(messages, key, flags, outputs, BLOCK_LEN);
     }
     #[cfg(blake3_sme2)]
     if platform_is_sme2(platform) {
-        // The messages are one block each (this function's only N) and
-        // lie one after another: a run of blocks. SME2's parent kernel
-        // reads a group of sixteen through one pointer, so they go to it
-        // as that run, not as a table of sixteen borrows.
-        const { assert!(N == BLOCK_LEN, "one-block messages") };
+        // The messages are one block each and lie one after another: a run of
+        // blocks. SME2's parent kernel reads a group of sixteen through one
+        // pointer, so they go to it as that run, not as a table of sixteen borrows.
         let run = messages.as_chunks::<BLOCK_LEN>().0[..outputs.len()].as_flattened();
         // Sound: the caller found SME2 (platform_is_sme2).
         return unsafe { crate::sme2::hash_block_run(run, key, flags | CHUNK_START | CHUNK_END | ROOT, outputs.as_flattened_mut()) };
     }
-    let mut table = crate::stack_vec::StackVec::<&[u8; N], TABLE>::new();
-    table.extend(messages.chunks_exact(N).map(|message| message.try_into().expect("messages of N bytes")));
+    let mut table = crate::stack_vec::StackVec::<&[u8; BLOCK_LEN], TABLE>::new();
+    table.extend(messages.chunks_exact(BLOCK_LEN).map(|message| message.try_into().expect("one-block messages")));
     assert_eq!(table.len(), outputs.len(), "one message per output");
     whole_messages(&table, key, flags, outputs, platform);
 }
@@ -764,11 +762,11 @@ pub(crate) fn try_whole_group<'a>(
 /// last one padded, their last block `last_len` bytes.
 #[cfg(blake3_sme2)]
 #[inline(never)]
-fn hash_run_padded<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], last_len: usize) {
-    let mut slots: Slots<N> = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+fn hash_run_padded(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], last_len: usize) {
+    let mut slots: Slots<BLOCK_LEN> = [core::mem::MaybeUninit::uninit(); TABLE + 16];
     let lanes = fill_table(&mut slots, messages, outputs.len(), outputs.len().next_multiple_of(16));
     // Sound: the caller found SME2 (platform_is_sme2).
-    unsafe { crate::sme2::hash_messages::<N>(lanes, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut()) };
+    unsafe { crate::sme2::hash_messages::<BLOCK_LEN>(lanes, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut()) };
 }
 
 /// [`hash_run`] for messages of 1 to 63 bytes (one short block): on SME2
@@ -776,26 +774,26 @@ fn hash_run_padded<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, ou
 /// records 64 for every block), else the NEON plans, or one call each
 /// without them.
 #[inline(never)]
-fn hash_run_short<const N: usize>(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, plans: bool, last_len: usize) {
+fn hash_run_short(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, plans: bool, last_len: usize) {
     // One-block messages on x86-64 with the independent-compression kernels
     // (AVX2's eight lanes, AVX-512's sixteen): whole groups and padded tails
     // (4..=7 on output8, 9..=15 on output16), a batch's and a `Packed`'s alike;
     // trailing 1..=3 messages, and every other platform, run as before.
     #[cfg(all(blake3_avx512_ffi, target_os = "linux"))]
-    let done = if N == BLOCK_LEN { one_block_groups(messages, outputs, last_len, key, flags, platform) } else { 0 };
+    let done = one_block_groups(messages, outputs, last_len, key, flags, platform);
     #[cfg(not(all(blake3_avx512_ffi, target_os = "linux")))]
     let done = 0;
-    let (messages, outputs) = (&messages[done * N..], &mut outputs[done..]);
+    let (messages, outputs) = (&messages[done * BLOCK_LEN..], &mut outputs[done..]);
     #[cfg(blake3_sme2)]
     if platform_is_sme2(platform) && outputs.len() >= ONE_BLOCK_PAD_MIN {
-        return hash_run_padded::<N>(messages, key, flags, outputs, last_len);
+        return hash_run_padded(messages, key, flags, outputs, last_len);
     }
     if plans {
-        let mut slots: Slots<N> = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+        let mut slots: Slots<BLOCK_LEN> = [core::mem::MaybeUninit::uninit(); TABLE + 16];
         let lanes = fill_table(&mut slots, messages, outputs.len(), outputs.len());
-        neon_plans_last_len::<N>(lanes, key, flags, last_len, outputs);
+        neon_plans_last_len::<BLOCK_LEN>(lanes, key, flags, last_len, outputs);
     } else {
-        for (output, message) in outputs.iter_mut().zip(messages.chunks_exact(N)) {
+        for (output, message) in outputs.iter_mut().zip(messages.chunks_exact(BLOCK_LEN)) {
             *output = *crate::hash_serial_on(&message[..last_len], key, flags, platform).as_bytes();
         }
     }

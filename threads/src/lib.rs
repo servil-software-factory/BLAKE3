@@ -84,7 +84,7 @@
 //! | One message in memory, repeated call after call | [`throughput::hash_multithreaded`] (on aligned [`Block`](throughput::Block)s), or on one thread [`throughput::TreeHasher::hash`] directly on caller-owned `&[u8]` slices without copying into aligned blocks (use [`throughput::update_multithreaded`] for large unaligned slices across cores) |
 //! | One message arriving in pieces | [`convenience::Hasher`], or for speed [`throughput::update_multithreaded`] |
 //! | Many messages of one length, in one buffer | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] |
-//! | Many 16-, 32-, or 48-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over a [`throughput::Batch`] (for data already in 64-byte padded slots) or [`throughput::Packed`] / `&[[u8; N]]` (compact storage; avoids refill copies in chains, loaded directly on AVX-512/NEON and expanded on SSE4.1) |
+//! | Many 16-, 32-, or 48-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many_multithreaded`] over [`throughput::Packed`] / `&[[u8; N]]` (compact storage; avoids refill copies in chains; full groups loaded directly on AVX2, AVX-512, NEON, and SME2; short tails and SSE4.1 expand on the stack) or an owned [`throughput::Batch::new`] (note [`Batch::from_blocks`](throughput::Batch::from_blocks) requires whole-block lengths) |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each_multithreaded`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::Pipeline`] (`owned` for zero-copy caller-owned buffers such as `Vec<u8>` or `bytes::Bytes`, `room`/`commit` for streaming); on one thread, or holding each message's running state, [`throughput::update_each`] |
 //! | Continuous stream of messages or batches (single or mixed [`Mode`]s) | [`throughput::Pipeline`] (`message` for the pipeline's default mode, `message_with` for a per-message [`Mode`]) |
@@ -233,12 +233,12 @@
 //! for this machine on fixed inputs and compares the outputs with fixed
 //! values official BLAKE3 generated (on ARM64, all but the kernels for
 //! batches of short messages of unequal lengths). A mismatch stops the
-//! process, which no caller can catch: it writes a best-effort diagnostic
+//! process, which no caller can catch: it attempts a best-effort diagnostic
 //! directly to file descriptor 2 (bypassing Rust's stderr lock, skipping an
-//! already-full or broken pipe, and bounding the write with `alarm(1)`
-//! under default `SIGALRM` handling) and calls `std::process::abort`. Other
-//! threads that call `initialize` meanwhile wait for it (parked via
-//! `std::sync::Once`).
+//! already-full or broken pipe, and arming `alarm(1)` so default unblocked
+//! `SIGALRM` terminates if the pipe fills mid-write) and calls
+//! `std::process::abort` when control returns. Other threads that call
+//! `initialize` meanwhile wait for it (parked via `std::sync::Once`).
 //!
 //! # Build requirements
 //!

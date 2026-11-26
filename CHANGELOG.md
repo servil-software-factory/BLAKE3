@@ -6,15 +6,16 @@ figure names its machine.
 ## Breaking changes and migration
 
 - **Require `std`; removed `no_std` mode and the `std` Cargo feature**
-  (`blake3-servil-core` and `blake3-servil`, `0.12.0+dev`): both crates
-  already reject unsupported targets in `build.rs` (only std-capable 64-bit
-  little-endian x86-64 Linux and AArch64 Linux/macOS compile), and
-  `blake3-servil` always linked `std`. Callers upgrading from `0.11.0`
-  should remove `features = ["std"]` / `blake3-servil-core/std` /
-  `blake3-servil/std` from `Cargo.toml`. Disabling default features
-  (`default-features = false`) no longer opts out of `std`; programs that
-  must not link `std` should use official `blake3` with `default-features =
-  false`.
+  (`blake3-servil-core` and `blake3-servil`, `0.12.0+dev`): `build.rs`
+  accepts only std-capable 64-bit little-endian x86-64 Linux and AArch64
+  Linux/macOS (parallel Cargo builds on targets without installed `core`,
+  such as `x86_64-unknown-linux-none`, may also report `E0463` unless run
+  with `--keep-going`), and `blake3-servil` always linked `std`. Callers
+  upgrading from `0.11.0` should remove `features = ["std"]` /
+  `blake3-servil-core/std` / `blake3-servil/std` from `Cargo.toml`.
+  Disabling default features (`default-features = false`) no longer opts
+  out of `std`; programs that must not link `std` should use official
+  `blake3` with `default-features = false`.
 
 ## Memory and lifecycle
 

@@ -210,22 +210,6 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
             }
         }
         marked.active = false;
-        return;
-    }
-    #[cfg(not(any(blake3_neon, blake3_sse41_ffi)))]
-    {
-        finish_each(hashers, which, out);
-        marked.active = false;
-    }
-}
-
-/// Each hasher `which` names finished in place and reset, its digest into
-/// `out`: fallback for portable targets.
-#[cfg(not(any(blake3_neon, blake3_sse41_ffi)))]
-fn finish_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
-    for (&i, out) in which.iter().zip(out) {
-        *out = *hashers[i].take_root_hash().as_bytes();
-        hashers[i].reset();
     }
 }
 

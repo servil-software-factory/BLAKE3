@@ -80,7 +80,7 @@
 //! | One message in memory, repeated call after call | [`throughput::hash`] (on aligned [`Block`](throughput::Block)s), or [`throughput::TreeHasher::hash`] directly on caller-owned `&[u8]` slices without copying into aligned blocks |
 //! | One message arriving in pieces | [`convenience::Hasher`] |
 //! | Many messages of one length, in one buffer | [`throughput::hash_many`] over a [`throughput::Batch`] |
-//! | Many 16-, 32-, or 48-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many`] over a [`throughput::Batch`] (for data already in 64-byte padded slots) or [`throughput::Packed`] / `&[[u8; N]]` (compact storage; avoids refill copies in chains, loaded directly on AVX-512/NEON and expanded on SSE4.1) |
+//! | Many 16-, 32-, or 48-byte messages (a Merkle layer's leaves or digests) | [`throughput::hash_many`] over [`throughput::Packed`] / `&[[u8; N]]` (compact storage; avoids refill copies in chains; full groups loaded directly on AVX2, AVX-512, NEON, and SME2; short tails and SSE4.1 expand on the stack) or an owned [`throughput::Batch::new`] (note [`Batch::from_blocks`](throughput::Batch::from_blocks) requires whole-block lengths) |
 //! | Many messages of different lengths, in memory | [`throughput::hash_each`] |
 //! | Many messages arriving at once (a server's uploads) | [`throughput::update_each`], then [`throughput::finalize_each`] |
 //!
@@ -188,12 +188,13 @@
 //! for this machine on fixed inputs and compares the outputs with fixed
 //! values official BLAKE3 generated (on ARM64, all but the kernels for
 //! batches of short messages of unequal lengths). A mismatch stops the process, which no
-//! caller can catch: it writes a best-effort diagnostic directly to file
+//! caller can catch: it attempts a best-effort diagnostic directly to file
 //! descriptor 2 (bypassing Rust's stderr lock, skipping an already-full or
-//! broken pipe, and bounding the write with `alarm(1)` under default
-//! `SIGALRM` handling) and calls `std::process::abort`. Other threads that
-//! call `initialize` meanwhile wait for it (parked via `std::sync::Once`;
-//! programs that `fork` should finish `initialize` before forking).
+//! broken pipe, and arming `alarm(1)` so default unblocked `SIGALRM`
+//! terminates if the pipe fills mid-write) and calls `std::process::abort`
+//! when control returns. Other threads that call `initialize` meanwhile wait
+//! for it (parked via `std::sync::Once`; programs that `fork` should finish
+//! `initialize` before forking).
 //!
 //! # Build requirements
 //!
@@ -264,6 +265,7 @@ mod sse41;
 
 mod io;
 mod many;
+mod output_common;
 mod pair;
 mod self_test;
 mod stack_vec;
@@ -274,15 +276,8 @@ mod tree;
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 pub(crate) enum Ran {
-    /// The call went to the pool.
-    Pool = 1,
     /// The call wanted SME2 and another thread held the turn.
     TurnTaken = 2,
-    /// A task's members, all of one length, ran side by side on that
-    /// length's multi-lane kernel (lanes::Task::run_equal_members).
-    EqualMembers = 4,
-    /// A task's members ran one at a time (lanes::Task::run_members).
-    MemberAlone = 8,
     /// A batch of one-block messages ran on the kernels' table a run at a
     /// time (many::hash_many_on's first path).
     BlockRun = 16,

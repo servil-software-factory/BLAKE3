@@ -38,7 +38,10 @@ pub struct B3Hasher {
 }
 
 const HASHER_SIZE: usize = 26624;
-const _: () = assert!(size_of::<Hasher>() == HASHER_SIZE && align_of::<Hasher>() <= 64, "b3.h's B3_HASHER_SIZE and alignment hold a Hasher");
+const _: () = assert!(
+    size_of::<Hasher>() == HASHER_SIZE && align_of::<Hasher>() <= 64 && !core::mem::needs_drop::<Hasher>(),
+    "b3.h's B3_HASHER_SIZE and alignment hold a drop-free Hasher"
+);
 
 impl B3Mode {
     fn mode(&self) -> Mode<'_> {
@@ -107,12 +110,8 @@ unsafe fn hasher_mut<'a>(hasher: *mut B3Hasher) -> &'a mut Hasher {
 pub extern "C" fn b3_version() -> *const c_char {
     const N: usize = blake3_servil::BUILD_VERSION.len();
     static VERSION: [u8; N + 1] = {
-        let (mut text, version) = ([0; N + 1], blake3_servil::BUILD_VERSION.as_bytes());
-        let mut i = 0;
-        while i < N {
-            text[i] = version[i];
-            i += 1;
-        }
+        let mut text = [0; N + 1];
+        text.split_at_mut(N).0.copy_from_slice(blake3_servil::BUILD_VERSION.as_bytes());
         text
     };
     VERSION.as_ptr().cast()

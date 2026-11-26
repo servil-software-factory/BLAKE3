@@ -34,15 +34,6 @@ pub(crate) fn words_from_block(block: &[u8; BLOCK_LEN]) -> [u32; 16] {
 }
 
 #[inline]
-fn bytes_from_cv(cv: &CVWords) -> [u8; OUT_LEN] {
-    let mut out = [0u8; OUT_LEN];
-    for (chunk, &word) in out.as_chunks_mut::<4>().0.iter_mut().zip(cv.iter()) {
-        *chunk = word.to_le_bytes();
-    }
-    out
-}
-
-#[inline]
 fn wrapping_add_usize(start: u32, delta: usize) -> u32 {
     let bytes = delta.to_le_bytes();
     start.wrapping_add(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -195,7 +186,7 @@ pub(crate) fn hash_counter_range_on(template: &[u8], counter_word: usize, start:
         block[cw_off..cw_off + 4].copy_from_slice(&cur.to_le_bytes());
         let mut cv = *key;
         platform.compress_in_place(&mut cv, &block, blen_u8, 0, root_flags);
-        *slot = bytes_from_cv(&cv);
+        *slot = crate::hasher::le_bytes(&cv);
         cur = cur.wrapping_add(1);
     }
 }
@@ -208,14 +199,6 @@ const SELF_TEST_KEY: [u8; 32] = [
     0x17, 0x2b, 0x3f, 0x53, 0x67, 0x7b, 0x8f, 0xa3, 0xb7, 0xcb, 0xdf, 0xf3, 0x09, 0x1d, 0x31, 0x45, 0x59, 0x6d, 0x81, 0x95, 0xa9, 0xbd, 0xd1, 0xe5, 0xf9, 0x0e,
     0x22, 0x36, 0x4a, 0x5e, 0x72, 0x86,
 ];
-
-fn self_test_key_words() -> CVWords {
-    let mut words = [0u32; 8];
-    for i in 0..8 {
-        words[i] = u32::from_le_bytes([SELF_TEST_KEY[4 * i], SELF_TEST_KEY[4 * i + 1], SELF_TEST_KEY[4 * i + 2], SELF_TEST_KEY[4 * i + 3]]);
-    }
-    words
-}
 
 fn self_test_template() -> [u8; SELF_TEST_LEN] {
     let mut tmpl = [0u8; SELF_TEST_LEN];
@@ -233,7 +216,7 @@ const SELF_TEST_EXPECTED: u64 = 0xb837_cd90_1a80_d68b;
 
 #[inline(never)]
 pub(crate) fn self_test(platform: Platform) -> usize {
-    let key = self_test_key_words();
+    let key = crate::platform::words_from_le_bytes_32(&SELF_TEST_KEY);
     let tmpl = self_test_template();
     let mut out = [[0u8; OUT_LEN]; SELF_TEST_COUNT];
     hash_counter_range_on(&tmpl, SELF_TEST_CW, SELF_TEST_START, &key, crate::KEYED_HASH, &mut out, platform);

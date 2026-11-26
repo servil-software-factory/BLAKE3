@@ -237,8 +237,14 @@ impl<const N: usize> Packed<N> {
     /// Its bytes: the messages end to end.
     #[inline]
     pub(crate) fn bytes(&self) -> &[u8] {
-        // Sound: the lines hold count * N bytes, u8 needs no alignment.
+        // Sound: the lines hold at least `count * N` initialized bytes, and `u8` needs no alignment.
         unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count * N) }
+    }
+
+    #[inline]
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // Sound: as in `bytes`, with exclusive access to `self.lines`.
+        unsafe { core::slice::from_raw_parts_mut(self.lines.as_mut_ptr().cast(), self.count * N) }
     }
 }
 
@@ -250,9 +256,7 @@ impl Packed<32> {
     /// Hash a tree's nodes apart from its leaves ([`hash_many`](crate::throughput::hash_many)).
     pub fn as_blocks(&self) -> &[Block] {
         assert!(self.count % 2 == 0, "pairs of digests: an even count, not {}", self.count);
-        // Sound: count * 32 bytes on a 128-byte boundary, read as count / 2
-        // blocks of 64 on a 64-byte boundary.
-        unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count / 2) }
+        Block::from_bytes(self.bytes()).expect("128-byte aligned even count of 32-byte digests")
     }
 }
 
@@ -260,16 +264,14 @@ impl<const N: usize> core::ops::Deref for Packed<N> {
     type Target = [[u8; N]];
     #[inline]
     fn deref(&self) -> &[[u8; N]] {
-        // Sound: count messages of N bytes, [u8; N] with alignment 1.
-        unsafe { core::slice::from_raw_parts(self.lines.as_ptr().cast(), self.count) }
+        self.bytes().as_chunks::<N>().0
     }
 }
 
 impl<const N: usize> core::ops::DerefMut for Packed<N> {
     #[inline]
     fn deref_mut(&mut self) -> &mut [[u8; N]] {
-        // Sound: as in deref, and the borrow is exclusive.
-        unsafe { core::slice::from_raw_parts_mut(self.lines.as_mut_ptr().cast(), self.count) }
+        self.bytes_mut().as_chunks_mut::<N>().0
     }
 }
 

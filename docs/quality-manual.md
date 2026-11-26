@@ -243,11 +243,12 @@ the pool's cuts and merges, its thread caps, and 32 callers at once.
 calls `initialize()` (or `initialize_multithreaded`) before hashing. It
 hashes platform-specific fixed inputs and compares their folded outputs
 with constants derived from official BLAKE3 (`src/self_test.rs`). A
-mismatch writes a best-effort diagnostic to fd 2 (bypassing Rust's stderr
-lock, skipping an already-full or broken pipe, and bounding the write with
-`alarm(1)` under default `SIGALRM` handling) and calls `std::process::abort`;
-a caller cannot catch the failure and keep hashing. Tests plant a wrong last
-output byte in each case and require that stop. The fold is FNV-1a, not a
+mismatch attempts a best-effort diagnostic to fd 2 (bypassing Rust's stderr
+lock, skipping an already-full or broken pipe, and arming `alarm(1)` so
+default unblocked `SIGALRM` terminates if the pipe fills mid-write) and
+calls `std::process::abort` when control returns; a caller cannot catch the
+failure and keep hashing. Tests plant a wrong last output byte in each case
+and require that stop. The fold is FNV-1a, not a
 cryptographic integrity check.
 
 The cases exercise the selected kernel entries and public hashing paths.

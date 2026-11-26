@@ -4,23 +4,9 @@
 //! select grouping, allocation, or dispatch.
 #[cfg(test)]
 use crate::hasher;
-use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, ROOT, platform::Platform};
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub(crate) struct Input<'a> {
-    block: &'a [u8; BLOCK_LEN],
-    cv: &'a [u32; 8],
-    len: u8,
-    flags: u8,
-}
-const _: () = {
-    assert!(core::mem::size_of::<Input<'static>>() == 24);
-    assert!(core::mem::offset_of!(Input<'static>, block) == 0);
-    assert!(core::mem::offset_of!(Input<'static>, cv) == 8);
-    assert!(core::mem::offset_of!(Input<'static>, len) == 16);
-    assert!(core::mem::offset_of!(Input<'static>, flags) == 17);
-};
+pub(crate) use crate::output_common::{Input, input};
+use crate::output_common::{check_self_test, self_test_shape};
+use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, platform::Platform};
 
 unsafe extern "C" {
     fn blake3_servil_neon_output8(inputs: *const Input<'_>, out: *mut u8, groups: u64);
@@ -44,29 +30,6 @@ pub(crate) fn lanes(platform: Platform) -> usize {
         Platform::SME2 => 16,
         Platform::NEON => 8,
     }
-}
-
-/// A whole message whose root is one compression away: still in its first
-/// chunk, with no staged suffix or stacked subtree, its final block already
-/// padded by ChunkState; or a block or less waiting in the stage, padded
-/// there (`Stage::first_block`). Other states keep Hasher's existing path.
-pub(crate) fn input(hasher: &Hasher) -> Option<Input<'_>> {
-    let c = hasher.chunk_state();
-    if c.chunk_counter() != 0 {
-        return None;
-    }
-    let staged = hasher.staged_len();
-    if staged == 0 {
-        let (block, cv, len, flags) = c.output_parts();
-        return Some(Input { block, cv, len, flags: flags + ROOT });
-    }
-    const WHOLE_ROOT_FLAGS: u8 = CHUNK_START + CHUNK_END + ROOT;
-    (staged <= BLOCK_LEN && c.count() == 0).then(|| Input {
-        block: hasher.stage_first_block(),
-        cv: c.cv(),
-        len: staged.to_le_bytes()[0],
-        flags: hasher.domain().flags() + WHOLE_ROOT_FLAGS,
-    })
 }
 
 /// Hash all full 8-lane NEON groups of independent counter-zero compressions
@@ -218,7 +181,6 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
     }
 }
 
-const SELF_TEST_EXPECTED: u64 = 0x153e0dfbeac2bb44;
 #[cfg(blake3_sme2)]
 const CHUNKS_KEYED_SELF_TEST_EXPECTED: u64 = 0x199d_615f_c41e_830b;
 
@@ -227,30 +189,6 @@ const CHUNKS_KEYED_SELF_TEST_EXPECTED: u64 = 0x199d_615f_c41e_830b;
 /// 2 = corrupt last output byte of SME2 `chunks_keyed`.
 #[cfg(test)]
 pub(crate) static PLANTED_WRONG_OUTPUT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
-fn self_test_shape(mut hash: impl FnMut(&[Input<'_>; 16], &mut [[u8; OUT_LEN]])) -> u64 {
-    let mut lens: [u8; 16] = [0, 1, 31, 63, 64, 7, 32, 55, 3, 15, 48, 60, 2, 33, 62, 64];
-    let flags: [u8; 16] = core::array::from_fn(|i| {
-        let shape = [3u8, 2, 4][i % 3];
-        if shape == 4 {
-            lens[i] = 64;
-        }
-        shape + [0u8, 16, 32, 64][i % 4]
-    });
-    let cvs: [[u32; 8]; 16] = core::array::from_fn(|i| {
-        let i = u32::try_from(i).unwrap();
-        core::array::from_fn(|w| {
-            let w = u32::try_from(w).unwrap();
-            (0x1234abcdu32.wrapping_add(i * 0x9e37).wrapping_add(w * 0x1020304)).wrapping_mul(0x85ebca6b)
-        })
-    });
-    let blocks: [[u8; 64]; 16] =
-        core::array::from_fn(|i| core::array::from_fn(|j| if j < lens[i] as usize { ((i * 37 + j * 17) ^ 0x5a).to_le_bytes()[0] } else { 0 }));
-    let inputs = core::array::from_fn(|i| Input { block: &blocks[i], cv: &cvs[i], len: lens[i], flags: flags[i] + if (i / 4) % 2 == 0 { ROOT } else { 0 } });
-    let mut out = [[0u8; OUT_LEN]; 16];
-    hash(&inputs, &mut out);
-    crate::self_test::fold(out.as_flattened())
-}
 
 #[cfg(blake3_sme2)]
 #[inline(never)]
@@ -289,9 +227,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
             out[15][OUT_LEN - 1] = !out[15][OUT_LEN - 1];
         }
     });
-    if neon_answer != SELF_TEST_EXPECTED {
-        crate::self_test::fail(format_args!("blake3-servil startup self-test failed: independent counter-zero compressions"));
-    }
+    check_self_test(neon_answer);
 
     #[cfg(blake3_sme2)]
     if matches!(platform, Platform::SME2) {
@@ -352,6 +288,7 @@ pub(crate) unsafe fn call_sme2_chunks_keyed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output_common::SELF_TEST_EXPECTED;
 
     #[test]
     fn startup_answers_match_independent_compression() {

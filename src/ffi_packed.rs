@@ -141,14 +141,6 @@ const SELF_TEST_KEY: [u8; 32] = [
     0x1e, 0x32, 0x46, 0x5a, 0x6e, 0x82,
 ];
 
-fn self_test_key_words() -> CVWords {
-    let mut words = [0u32; 8];
-    for i in 0..8 {
-        words[i] = u32::from_le_bytes([SELF_TEST_KEY[4 * i], SELF_TEST_KEY[4 * i + 1], SELF_TEST_KEY[4 * i + 2], SELF_TEST_KEY[4 * i + 3]]);
-    }
-    words
-}
-
 fn fill_self_test_input(buf: &mut [u8], len: usize) {
     for (i, slot) in buf.chunks_exact_mut(len).enumerate() {
         for (j, b) in slot.iter_mut().enumerate() {
@@ -165,7 +157,7 @@ const SELF_TEST_EXPECTED: [u64; 3] = [0x13f1c329fc53200f, 0x1e4294615a858573, 0x
 
 #[inline(never)]
 pub(crate) fn self_test(platform: Platform) -> usize {
-    let key = self_test_key_words();
+    let key = crate::platform::words_from_le_bytes_32(&SELF_TEST_KEY);
     let mut input = [0u8; SELF_TEST_COUNT * 48];
     let mut out = [[0u8; OUT_LEN]; SELF_TEST_COUNT];
     for (idx, len) in [16usize, 32, 48].into_iter().enumerate() {
