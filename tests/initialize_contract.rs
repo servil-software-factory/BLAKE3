@@ -20,4 +20,25 @@ fn every_platform_constructor_before_initialize_panics() {
     };
     assert_panics("Platform::detect", Platform::detect);
     assert_panics("Platform::own_core", Platform::own_core);
+    let assert_panic_contains = |name: &str, expected: &str, f: fn()| {
+        let err = std::panic::catch_unwind(f).expect_err(&format!("{name} must panic"));
+        let msg = err.downcast_ref::<String>().map(String::as_str).or_else(|| err.downcast_ref::<&str>().copied()).unwrap_or("");
+        assert!(msg.contains(expected), "{name} panicked with {msg:?}, expected {expected:?}");
+    };
+    // Empty counter ranges must validate bounds first, then enforce initialize()
+    // on both the free function and `TreeHasher::hash_counter_range`.
+    assert_panic_contains("empty hash_counter_range (invalid template)", "fit in one block", || {
+        blake3_servil_core::throughput::hash_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 65], 0, 0, &mut []);
+    });
+    assert_panic_contains("empty hash_counter_range (valid)", "initialize()", || {
+        blake3_servil_core::throughput::hash_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 4], 0, 0, &mut []);
+    });
+    assert_panic_contains("empty TreeHasher::hash_counter_range (invalid template)", "fit in one block", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        tree.hash_counter_range(&[0u8; 65], 0, 0, &mut []);
+    });
+    assert_panic_contains("empty TreeHasher::hash_counter_range (valid)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        tree.hash_counter_range(&[0u8; 4], 0, 0, &mut []);
+    });
 }

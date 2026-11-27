@@ -40,14 +40,20 @@ pub trait Kernels {
     fn parent_root(&self, children: &[Cv; 2]) -> Cv;
 }
 
+/// The largest power of two strictly below `n` (`n >= 2`), in chunks/leaves:
+/// the single source of truth shared by `tree::left_len` and `each::subtree`.
+#[inline]
+pub(crate) const fn left_chunks(n: usize) -> usize {
+    assert!(n >= 2, "left_chunks requires at least 2 leaves");
+    // Largest power of two at most `n - 1` from its top 1-bit: no doubling
+    // loop that a mutant could keep from terminating.
+    1usize << (usize::BITS - 1 - (n - 1).leading_zeros())
+}
+
 /// The bytes of the left subtree of an input of `len` > CHUNK_LEN bytes:
 /// the largest power of two chunks below its chunk count.
 pub fn left_len(len: usize) -> usize {
-    let chunks = (len - 1) / CHUNK_LEN;
-    // The largest power of two at most `chunks` (1 or more), from its top
-    // 1-bit, as each.rs's left_len: no doubling loop that a change could
-    // keep from ending.
-    (1usize << (usize::BITS - 1 - chunks.leading_zeros())) * CHUNK_LEN
+    left_chunks(len.div_ceil(CHUNK_LEN)) * CHUNK_LEN
 }
 
 /// The chaining values of a cut through the subtree over `input` (at least
