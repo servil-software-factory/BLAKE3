@@ -1329,6 +1329,24 @@ pub(crate) const SME2_SIZED_LEN: usize = 16 * CHUNK_LEN;
 /// group of sixteen messages.
 pub(crate) const SME2_SIZED_BATCH: usize = 16;
 
+/// Fast one-chunk root hash (`input.len() <= CHUNK_LEN`) for
+/// [`throughput::TreeHasher::hash`], enforcing `initialize()` via
+/// `Platform::detect()` while bypassing `Sme2Turn::take`, `Platform::own_core`
+/// branching, and multi-chunk tree setup (#586).
+#[inline(always)]
+pub(crate) fn hash_one_chunk_root_checked(input: &[u8], key: &CVWords, flags: u8) -> Hash {
+    let platform = Platform::detect();
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = platform;
+        hash_one_chunk_root(input, key, flags)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        Hash(chunk_root::chunk_root(platform, input, key, flags))
+    }
+}
+
 /// [`hash_serial`] with the tree's kernels chosen by the caller (a pool
 /// piece runs the NEON hybrids); one chunk or less runs the scalar kernel
 /// on every platform.

@@ -656,9 +656,18 @@ impl TreeHasher {
     /// let tree = TreeHasher::new(Mode::DeriveKey("example.com 2026-11-16 session keys"));
     /// assert_eq!(tree.hash(b"material"), convenience::hash_with(Mode::DeriveKey("example.com 2026-11-16 session keys"), b"material"));
     /// ```
+    #[inline]
     pub fn hash(&self, input: &[u8]) -> Hash {
+        if input.len() <= CHUNK_LEN {
+            return crate::hash_one_chunk_root_checked(input, self.domain.key(), self.domain.flags());
+        }
+        self.hash_multi_chunk(input)
+    }
+
+    #[inline(never)]
+    fn hash_multi_chunk(&self, input: &[u8]) -> Hash {
         let turn = self.turn(input.len());
-        self.hash_on(turn.platform(), input)
+        Hash(crate::tree::hash_tree(&crate::tree::PlatformKernels { key: self.domain.key(), flags: self.domain.flags(), platform: turn.platform() }, input))
     }
 
     /// A worker already holds the turn for these kernels.

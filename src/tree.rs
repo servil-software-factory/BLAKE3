@@ -138,7 +138,8 @@ pub fn hash<K: Kernels>(k: &K, input: &[u8]) -> Cv {
 /// otherwise be set up on every call, a chunk or less included, whose one
 /// kernel call needs none of it.
 #[inline(never)]
-fn hash_tree<K: Kernels>(k: &K, input: &[u8]) -> Cv {
+pub(crate) fn hash_tree<K: Kernels>(k: &K, input: &[u8]) -> Cv {
+    assert!(input.len() > CHUNK_LEN, "hash_tree requires more than one chunk");
     k.parent_root(&root_children(k, input, 0, 0))
 }
 
