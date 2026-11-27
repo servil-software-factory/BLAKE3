@@ -123,15 +123,14 @@ ARM64_RELOC_DATA_ADDR_TYPES = frozenset({
 
 MAX_CALL_DEPTH = 16
 
-# Recognized external nonreturning panic/abort callees in compiled Rust probes.
-# Unrecognized external calls that reach a function boundary fail closed as
-# UNSUPPORTED rather than falling through into an adjacent symbol.
+# Exact external nonreturning panic/unwrap/abort symbols referenced by compiled
+# Rust probes (plus C `_abort`). Every entry is covered by unit tests (both at
+# a function boundary and before dead code); unrecognized external calls that
+# reach a function boundary fail closed as UNSUPPORTED.
 NORETURN_CALL_RE = re.compile(
     r"^(?:_abort|_rust_begin_unwind|"
     r"__RNvNtCs[A-Za-z0-9]+_3std7process5abort|"
-    r"__RNvNtCs[A-Za-z0-9]+_4core9panicking(?:"
-    r"18panic_bounds_check|5panic|9panic_fmt|14panic_explicit|"
-    r"14panic_nounwind|18panic_nounwind_fmt|19panic_cannot_unwind)|"
+    r"__RNvNtCs[A-Za-z0-9]+_4core9panicking(?:5panic|9panic_fmt|14panic_explicit|14panic_nounwind|18panic_nounwind_fmt|18panic_bounds_check|19panic_cannot_unwind)|"
     r"__RNvNtCs[A-Za-z0-9]+_4core6option(?:13expect_failed|13unwrap_failed)|"
     r"__RNvNtCs[A-Za-z0-9]+_4core6result13unwrap_failed)$"
 )

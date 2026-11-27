@@ -266,50 +266,102 @@ mod tests {
             let mut bad = std::vec::Vec::new();
             let orig_lines: std::vec::Vec<&str> = text.lines().collect();
             let mut line_no = 1usize;
-            let bytes = clean.as_bytes();
+            // Use Unicode-aware identifier continuations (including combining
+            // marks such as U+0301 in XID_Continue) and Rust Pattern_White_Space
+            // boundaries so `const AcquireΔ` and `const Acquire\u{0301}` are
+            // single identifiers (not `Acquire`) and U+200E/U+200F between
+            // `Ordering` and `as` cannot hide an import alias.
+            let is_rust_ws = |ch: char| ch.is_whitespace() || matches!(ch, '\u{200E}' | '\u{200F}');
+            let is_ident_char = |ch: char| {
+                if ch.is_ascii() { ch.is_ascii_alphanumeric() || ch == '_' } else { !is_rust_ws(ch) }
+            };
             let mut k = 0;
-            while k < bytes.len() {
-                if bytes[k] == b'\n' {
+            while k < clean.len() {
+                let ch = clean[k..].chars().next().unwrap();
+                if ch == '\n' {
                     line_no += 1;
                     k += 1;
                     continue;
                 }
-                if clean[k..].starts_with("Ordering")
-                    && (k == 0 || !(bytes[k - 1].is_ascii_alphanumeric() || bytes[k - 1] == b'_'))
-                    && (k + 8 == bytes.len() || !(bytes[k + 8].is_ascii_alphanumeric() || bytes[k + 8] == b'_'))
-                {
-                    let mut m = k + 8;
-                    while m < bytes.len() && bytes[m].is_ascii_whitespace() {
-                        m += 1;
+                if is_ident_char(ch) {
+                    let start = k;
+                    while k < clean.len() {
+                        let c = clean[k..].chars().next().unwrap();
+                        if !is_ident_char(c) {
+                            break;
+                        }
+                        k += c.len_utf8();
                     }
-                    if m + 2 <= bytes.len() && &bytes[m..m + 2] == b"::" {
-                        m += 2;
-                        while m < bytes.len() && bytes[m].is_ascii_whitespace() {
-                            m += 1;
-                        }
-                        let v_start = m;
-                        while m < bytes.len() && (bytes[m].is_ascii_alphanumeric() || bytes[m] == b'_') {
-                            m += 1;
-                        }
-                        if &clean[v_start..m] != "SeqCst" {
-                            bad.push((line_no, orig_lines.get(line_no - 1).copied().unwrap_or("").trim().to_string()));
-                        }
-                        k = m;
+                    let ident = &clean[start..k];
+                    // Reject any standalone weaker ordering variant identifier
+                    // regardless of how `Ordering` was imported (`O::Acquire`,
+                    // `use Ordering::Relaxed`, `use Ordering::*`, etc.).
+                    if matches!(ident, "Relaxed" | "Acquire" | "Release" | "AcqRel") {
+                        bad.push((line_no, orig_lines.get(line_no - 1).copied().unwrap_or("").trim().to_string()));
                         continue;
                     }
+                    if ident == "Ordering" {
+                        let mut m = k;
+                        while m < clean.len() {
+                            let c = clean[m..].chars().next().unwrap();
+                            if !is_rust_ws(c) {
+                                break;
+                            }
+                            m += c.len_utf8();
+                        }
+                        // Forbid renaming `Ordering` (`use ...::Ordering as O;`) or
+                        // mentioning any `Ordering :: <Variant>` other than `SeqCst`.
+                        if clean[m..].starts_with("as") && clean[m + 2..].chars().next().is_none_or(|c| !is_ident_char(c)) {
+                            bad.push((line_no, orig_lines.get(line_no - 1).copied().unwrap_or("").trim().to_string()));
+                            continue;
+                        }
+                        if clean[m..].starts_with("::") {
+                            m += 2;
+                            while m < clean.len() {
+                                let c = clean[m..].chars().next().unwrap();
+                                if !is_rust_ws(c) {
+                                    break;
+                                }
+                                m += c.len_utf8();
+                            }
+                            let v_start = m;
+                            while m < clean.len() {
+                                let c = clean[m..].chars().next().unwrap();
+                                if !is_ident_char(c) {
+                                    break;
+                                }
+                                m += c.len_utf8();
+                            }
+                            if &clean[v_start..m] != "SeqCst" {
+                                bad.push((line_no, orig_lines.get(line_no - 1).copied().unwrap_or("").trim().to_string()));
+                            }
+                            k = m;
+                            continue;
+                        }
+                    }
+                    continue;
                 }
-                k += clean[k..].chars().next().map_or(1, char::len_utf8);
+                k += ch.len_utf8();
             }
             bad
         };
 
         // Positive and negative controls: mixed CAS, trailing comment spoof,
-        // whitespace around `::`, char literal `'"'`, and block comments.
+        // whitespace around `::`, char literal `'"'`, block comments,
+        // `Ordering as O` (including Unicode Pattern_White_Space), Unicode
+        // identifier boundaries (`AcquireΔ`), and bare/glob-imported weaker variants.
         assert!(non_seqcst_lines("a.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);").is_empty());
-        assert!(non_seqcst_lines("/* Ordering::Relaxed */\nlet c = '\"'; a.load(Ordering::SeqCst);").is_empty());
+        assert!(non_seqcst_lines("/* Ordering::Relaxed Acquire */\nlet c = '\"'; a.load(Ordering::SeqCst);").is_empty());
+        assert!(non_seqcst_lines("const Acquire\u{0394}: usize = 0; a.load(Ordering::SeqCst);").is_empty());
+        assert!(non_seqcst_lines("const Acquire\u{0301}: usize = 0; a.load(Ordering::SeqCst);").is_empty());
         assert_eq!(non_seqcst_lines("a.compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed);").len(), 1);
         assert_eq!(non_seqcst_lines("a.load(Ordering::Acquire); // Ordering::SeqCst").len(), 1);
         assert_eq!(non_seqcst_lines("let c = '\"'; a.load(Ordering :: Relaxed);").len(), 1);
+        assert_eq!(non_seqcst_lines("use core::sync::atomic::Ordering as O;\na.load(O::Acquire);").len(), 2);
+        assert_eq!(non_seqcst_lines("use core::sync::atomic::Ordering\u{200E}as Dummy;").len(), 1);
+        assert_eq!(non_seqcst_lines("a.load(O::Release);").len(), 1);
+        assert_eq!(non_seqcst_lines("a.swap(1, AcqRel);").len(), 1);
+        assert_eq!(non_seqcst_lines("use core::sync::atomic::Ordering::*;").len(), 1);
         // Read at run time, not embedded (include_str!), so the test binary
         // holds none of the files' text: an embedded copy changed with every
         // mutant of them, and code_hash.py found none same code (#219).

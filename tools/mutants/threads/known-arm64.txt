@@ -32,7 +32,6 @@ src/lanes.rs	replace & with | in places::Node::within	1	compiled out off Linux: 
 src/lanes.rs	replace & with | in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace & with | in places::has	1	compiled out off Linux: testing a member of a CPU or node set
 src/lanes.rs	replace & with | in sme2_serve	1	speed: `arg | ACTION_SME2 == 0` is always false, running every pipeline action under Sme2Turn instead of NEON (identical digests)
-src/lanes.rs	replace && with || in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace && with || in places::Node::largest	3	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace && with || in places::Node::named	1	compiled out off Linux: a CPU's NUMA node by its directory
 src/lanes.rs	replace && with || in places::Plan::done	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
@@ -47,8 +46,6 @@ src/lanes.rs	replace - with + in Pool::run_job	4	OPEN: the pool's scheduling und
 src/lanes.rs	replace - with + in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace - with / in Pool::run_job	2	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace - with / in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
-src/lanes.rs	replace -= with += in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace -= with /= in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace / with % in places::Node::largest	2	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace / with % in places::affinity_syscall	1	compiled out off Linux: reading the thread affinity
 src/lanes.rs	replace / with % in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
@@ -59,17 +56,13 @@ src/lanes.rs	replace / with * in places::affinity_syscall	1	compiled out off Lin
 src/lanes.rs	replace / with * in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace / with * in places::cpu_set	2	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace / with * in places::has	1	compiled out off Linux: testing a member of a CPU or node set
-src/lanes.rs	replace < with <= in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with <= in places::number	1	compiled out off Linux: parsing Linux CPU lists
-src/lanes.rs	replace < with == in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with == in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace < with == in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace < with > in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with > in places::number	1	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace < with > in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace << with >>	1	no places off Linux: settle sets none here, so PLACES stays unset and FAR_LEN, the mutated constant, is never compared; the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace << with >> in sources::Source::unregister	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace == with != in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace == with != in initialize	1	compiled out off Linux: condition in the Linux-only node initialization
 src/lanes.rs	replace == with != in places::Node::largest	4	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace == with != in places::Node::within	1	compiled out off Linux: node mask intersection
@@ -160,7 +153,6 @@ src/lanes.rs	replace sources::visible -> bool with false	1	OPEN: the pool's sche
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
 src/lanes.rs	replace |= with &= in places::Node::largest	1	compiled out off Linux: choosing among NUMA nodes
 src/lanes.rs	replace |= with &= in places::cpu_set	1	compiled out off Linux: parsing Linux CPU lists
-src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace || with && in places::number	2	compiled out off Linux: parsing Linux CPU lists
 src/lanes.rs	replace || with && in sources::visible	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lib.rs	replace __all_workers_parked -> bool with true	1	a test-only hook (__all_workers_parked, the stream tests' wait for every worker parked): a yes too soon only shortens their wait, and they check what they checked before

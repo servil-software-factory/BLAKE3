@@ -449,6 +449,12 @@ mod lanes {
         }
 
         impl Source {
+            pub(crate) fn new() -> Source {
+                unsafe fn unused(_: *const (), _: u64, _: Platform) {
+                    unreachable!("a one-thread Source never publishes actions");
+                }
+                Source { waiting: Mutex::new(VecDeque::new()), actions: 0, run: unused }
+            }
             pub(crate) fn with_actions(actions: usize, run: unsafe fn(*const (), u64, Platform)) -> Source {
                 Source { waiting: Mutex::new(VecDeque::new()), actions, run }
             }

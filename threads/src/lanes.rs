@@ -446,14 +446,14 @@ pub(crate) fn hash_many_over_pool(tree: &TreeHasher, batch: crate::throughput::P
 /// [`next_piece_len`] of the bytes that remain, each range hashed by one
 /// thread. An item of MIN_SPLIT_LEN or more is skipped here (its output slot
 /// left untouched) and hashed by the caller over the whole pool after.
-pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block], usize)], small_bytes: usize, out: &mut [[u8; crate::OUT_LEN]]) {
+pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block], usize)], small_bytes: u128, out: &mut [[u8; crate::OUT_LEN]]) {
     let Some((pool, _caller)) = spare_pool() else {
         return hash_each_small(tree, items, out);
     };
-    let plan = pool.plan(places::Kind::Each, small_bytes);
+    let plan = pool.plan(places::Kind::Each, usize::try_from(small_bytes).unwrap_or(usize::MAX));
     with_scratch(
         |pieces| {
-            cut_items(pieces, items, plan.threads, |item| {
+            cut_items(pieces, items, small_bytes, plan.threads, |item| {
                 let n = crate::throughput::Block::bytes(item.0)[..item.1].len();
                 if n >= MIN_SPLIT_LEN { 0 } else { n }
             })
@@ -482,13 +482,13 @@ pub(crate) fn hash_each_small(tree: &TreeHasher, items: &[(&[crate::throughput::
 /// Cut `items` into consecutive ranges for `threads` threads, in order:
 /// each range takes items until it holds [`next_piece_len`] of the bytes
 /// that remain (one item at least, however long), so ranges shrink toward
-/// the end as subtree pieces do. Callers pass 0 weight for items of
+/// the end as subtree pieces do. Callers pass the exact pre-computed `u128`
+/// sum of `weight(item)` as `remaining` and 0 weight for items of
 /// MIN_SPLIT_LEN or more, which are hashed after over the pool.
-fn cut_items<I>(pieces: &mut Vec<Piece>, items: &[I], threads: usize, weight: impl Fn(&I) -> usize) {
-    let mut remaining: u128 = items.iter().map(|item| weight(item) as u128).sum();
+fn cut_items<I>(pieces: &mut Vec<Piece>, items: &[I], mut remaining: u128, threads: usize, weight: impl Fn(&I) -> usize) {
     let mut start = 0;
     while start < items.len() {
-        let want = next_piece_len(remaining.min(usize::MAX as u128) as usize, threads) as u128;
+        let want = next_piece_len(usize::try_from(remaining).unwrap_or(usize::MAX), threads) as u128;
         let (mut end, mut bytes) = (start, 0u128);
         while end < items.len() && (bytes < want || end == start) {
             bytes += weight(&items[end]) as u128;
@@ -922,7 +922,9 @@ fn cut_messages_vec(count: usize, message_len: usize, threads: usize) -> Vec<Pie
 #[cfg(test)]
 fn cut_items_vec(items: &[&[u8]], threads: usize) -> Vec<Piece> {
     let mut pieces = Vec::new();
-    cut_items(&mut pieces, items, threads, |item| if item.len() >= MIN_SPLIT_LEN { 0 } else { item.len() });
+    let weight = |item: &&[u8]| if item.len() >= MIN_SPLIT_LEN { 0 } else { item.len() };
+    let total: u128 = items.iter().map(|item| weight(item) as u128).sum();
+    cut_items(&mut pieces, items, total, threads, weight);
     pieces
 }
 
@@ -3022,6 +3024,48 @@ extern "C" fn mark_forked() {
     FORKED.store(true, Ordering::Relaxed);
 }
 
+/// Thread-local test override so unit tests running in a real multi-worker
+/// pool process (`threads > 1`) can verify `pool()`'s rejection path on the
+/// calling thread without setting process-wide `FORKED` under live workers.
+#[cfg(test)]
+std::thread_local! {
+    static TEST_THREAD_FORKED: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Whether `mark_forked` has recorded a post-pool `fork()` in this process.
+#[inline]
+pub(crate) fn is_forked() -> bool {
+    #[cfg(test)]
+    if TEST_THREAD_FORKED.with(core::cell::Cell::get) {
+        return true;
+    }
+    FORKED.load(Ordering::Relaxed)
+}
+
+/// RAII guard that marks the calling thread as forked for unit tests and
+/// clears the override on drop so later cleanup (such as `Pipeline::drop`)
+/// runs cleanly in a real multi-worker pool process.
+#[cfg(test)]
+pub(crate) struct ForkedForTestGuard {
+    prev: bool,
+}
+
+#[cfg(test)]
+impl Drop for ForkedForTestGuard {
+    fn drop(&mut self) {
+        TEST_THREAD_FORKED.with(|f| f.set(self.prev));
+    }
+}
+
+/// Mark the calling thread as forked in a normal un-forked test subprocess so
+/// panic diagnostics and rejection paths can be verified on a real multi-worker
+/// pool without running non-async-signal-safe Rust code after `fork()`.
+#[cfg(test)]
+pub(crate) fn mark_forked_for_test() -> ForkedForTestGuard {
+    let prev = TEST_THREAD_FORKED.with(|f| f.replace(true));
+    ForkedForTestGuard { prev }
+}
+
 /// A multithreaded call or stream in a forked child: the threads it would
 /// use stayed in the parent.
 #[cold]
@@ -3060,7 +3104,7 @@ pub(crate) fn pool_has_workers() -> bool {
 #[inline]
 fn pool() -> &'static Pool {
     match POOL.get() {
-        Some(_) if FORKED.load(Ordering::Relaxed) => forked(),
+        Some(_) if is_forked() => forked(),
         Some(pool) => pool,
         None => no_pool(),
     }
@@ -3332,6 +3376,7 @@ pub(crate) mod sources {
             }
         }
 
+        #[cfg(test)]
         pub(crate) fn actions_len(&self) -> usize {
             self.actions.len()
         }
@@ -4727,20 +4772,65 @@ mod test {
         // subtract cleanly back below the word boundary into exact cuts.
         let mut pieces = Vec::new();
         let huge = [usize::MAX / 2, usize::MAX / 2, usize::MAX / 2, 1024, 1024];
-        cut_items(&mut pieces, &huge, 4, |&w| w);
+        let huge_total: u128 = huge.iter().map(|&w| w as u128).sum();
+        cut_items(&mut pieces, &huge, huge_total, 4, |&w| w);
         assert_eq!(pieces, tiling(&[(3, 1), (1, 2)]));
         // Large items (>= MIN_SPLIT_LEN) weigh zero when filtered by the caller
         // and are covered alongside smaller items without overflowing.
         pieces.clear();
-        cut_items(&mut pieces, &huge, 4, |&n| if n >= MIN_SPLIT_LEN { 0 } else { n });
+        let small_total: u128 = huge.iter().map(|&n| if n >= MIN_SPLIT_LEN { 0 } else { n as u128 }).sum();
+        cut_items(&mut pieces, &huge, small_total, 4, |&n| if n >= MIN_SPLIT_LEN { 0 } else { n });
         assert_eq!(pieces, vec![Piece { offset: 0, len: huge.len() }]);
-        // The planner's all-items saturating byte sum handles aliased totals
-        // past `usize::MAX`.
-        let saturated = huge.iter().fold(0usize, |acc, &n| acc.saturating_add(n));
+        // The planner's clamped byte sum handles aliased totals past `usize::MAX`.
+        let saturated = usize::try_from(huge_total).unwrap_or(usize::MAX);
         assert_eq!(saturated, usize::MAX);
         let plan = pool().plan(places::Kind::Each, saturated);
         assert!(plan.threads >= 1);
         plan.done();
+    }
+
+    /// In an ordinary (un-forked) subprocess where the fork flag is marked,
+    /// multithreaded calls panic with a diagnostic naming `forked` while
+    /// single-threaded hashing still returns the right digest. Combined with
+    /// `tests/forked_child.rs` (which observes only the async-signal-safe flag
+    /// after a real `fork()`), this verifies the full fork contract without
+    /// running non-async-signal-safe code after a multithreaded `fork()`.
+    #[test]
+    fn marked_forked_state_rejects_multithreaded_and_allows_single_threaded() {
+        const ENV: &str = "BLAKE3_LANES_MARKED_FORK_CASE";
+        if std::env::var_os(ENV).is_some() {
+            // Exercise a real multi-worker pool (`threads == 2`, the configuration
+            // that registers `pthread_atfork`) using the calling-thread override so
+            // background workers keep running cleanly with zero abort race.
+            crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+            assert!(pool_has_workers(), "expected a multi-worker pool for fork rejection test");
+            let blocks = std::vec![crate::throughput::Block([7u8; 64]); (1 << 20) / 64];
+            let bytes: std::vec::Vec<u8> = blocks.iter().flat_map(|b| b.0).collect();
+            let want = crate::convenience::hash(&bytes);
+            assert_eq!(crate::throughput::hash_multithreaded(crate::Mode::Plain, &blocks, bytes.len()), want);
+            assert!(!is_forked());
+            let _fork_guard = mark_forked_for_test();
+            assert!(is_forked());
+            assert_eq!(crate::convenience::hash(&bytes), want, "single-threaded hash must work when FORKED is set");
+            let err = std::panic::catch_unwind(|| crate::throughput::hash_multithreaded(crate::Mode::Plain, &blocks, bytes.len()))
+                .expect_err("multithreaded hash must panic when FORKED is set");
+            let msg = err.downcast_ref::<&str>().copied().or_else(|| err.downcast_ref::<std::string::String>().map(|s| s.as_str())).unwrap_or("");
+            assert!(msg.contains("forked"), "unexpected fork panic message: {msg}");
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(&exe)
+            .env(ENV, "1")
+            .args(["--exact", "lanes::test::marked_forked_state_rejects_multithreaded_and_allows_single_threaded", "--nocapture"])
+            .output()
+            .unwrap();
+        let stdout = std::string::String::from_utf8_lossy(&out.stdout);
+        let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "marked-forked test failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            out.status
+        );
     }
 
     /// Where the pool begins (BLAKE3 #219: a threshold between two correct
