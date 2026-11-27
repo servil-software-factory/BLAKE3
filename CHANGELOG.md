@@ -329,7 +329,7 @@ figure names its machine. bench-hashes' page for this release sets 0.8,
   (`B: 'static`): a `Vec<u8>`, not a `&[u8]`.
 - `b3sum`'s Linux release binaries and the four crates are
   reproducible: anyone can rebuild one from the tag and compare its
-  bytes ([how](b3sum/README.md)). The crates are packed from a
+  bytes ([how](https://github.com/servil-software-factory/b3sum/blob/main/README.md)). The crates are packed from a
   committed dependency lock. A release's tag names its source by hash
   and cannot be moved. Releases come with SHA-256 files; the `.b3`
   files and the C library's archive are no longer published (build the

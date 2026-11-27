@@ -48,7 +48,7 @@ Its checks go further than most:
 
 - Assembly kernels are checked against BLAKE3's specification with **symbolic proofs**.
   [QUALITY.md](QUALITY.md) explains the proof coverage and its scope.
-- **The tests are tested:** more than 2,000 small mistakes are planted in the Rust code,
+- **The tests are tested:** more than 4,000 small mistakes are planted in the Rust code,
   one at a time, and the tests are checked against each one.
 - Digests are checked against the official test vectors and fixed answers from official
   BLAKE3, and each process checks its kernels before its first hash.

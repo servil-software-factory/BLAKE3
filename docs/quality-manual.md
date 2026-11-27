@@ -1056,14 +1056,15 @@ BLAKE3-Servil's concrete checks and measured numbers:
 
 - **Dependency & lockfile policy (`#479`, `#487`):** `python3 tools/dependency_policy.py`
   and `python3 tools/dependency_policy.py controls` (10 planted faults)
-  enforce `deny.toml`, `--locked` builds, and `cargo-vet` across both the
-  release workspace and standalone `b3sum/` (`b3sum` trimmed to
-  `blake3-servil` + `libc`, `b3sum/Cargo.lock` 57 → 26 in `2c221200`;
-  optional `serde` and direct test deps trimmed, `tools/release/Cargo.lock`
-  112 → 61 and exemptions 86 → 45 in `15194e18`; `src/ct.rs` and AArch64
-  runtime `libc` removed in `6366776f`, giving shipped libraries **zero
-  third-party runtime dependencies** on every supported platform).
-  Reproducible release verification runs via
+  enforce `deny.toml`, `--locked` builds, and `cargo-vet` across the
+  release workspace (`tools/release/Cargo.lock` trimmed from 112 → 48
+  registry packages and exemptions from 86 → 16 across `15194e18`, `#572`,
+  `#573`, and `#575`; `src/ct.rs` and AArch64 runtime `libc` removed in
+  `6366776f`, giving shipped libraries **zero third-party runtime
+  dependencies** on every supported platform; the standalone
+  [`servil-software-factory/b3sum`](https://github.com/servil-software-factory/b3sum)
+  repository enforces its own matching gate with a single registry
+  dependency, `libc`). Reproducible release verification runs via
   `tools/release_artifacts.py TAG --published --rebuilt`.
 - **Wall-clock gate calibration (Nov 23, 2026):** across all 7 `#499`
   commits, cross-family GPT Astra landing reviews averaged 14 min (78

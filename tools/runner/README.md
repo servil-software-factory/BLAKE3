@@ -52,12 +52,12 @@ command starts the runner every time, including after a change to
 
 ## Running a job
 
-Write `jobs/NNN-name.json` naming pushed commits (a branch's, or a pull
-request's head, from a fork too) and push it to the exchange repository (take the next free number); wait with
-`python3 tools/runner/wait_for.py NNN-name PATH-OF-YOUR-CLONE`, which
+Write `jobs/YYYYMMDDTHHMMSSZ-<author>-<kind>-<name>.json` naming pushed commits (a branch's, or a pull
+request's head, from a fork too) and push it to the exchange repository; wait with
+`python3 tools/runner/wait_for.py <job-name> PATH-OF-YOUR-CLONE`, which
 pulls before each look; results land in `results/` with the machine's
 name in the folder. A job runs once per file name, so a changed job takes
-a new number. The job format is the docstring at the top of `runner.py`.
+a new timestamped name. The job format is the docstring at the top of `runner.py`.
 A machine that serves the shared exchange runs nothing else, so a
 timing job there needs no arrangement with anyone. A job that ran into
 its time limit has `stacks.txt` among its results: its processes, and

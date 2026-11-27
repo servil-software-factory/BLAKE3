@@ -6,9 +6,9 @@ Report it privately, through GitHub's
 [private vulnerability report](https://github.com/servil-software-factory/BLAKE3/security/advisories/new)
 for this repository. Please do not open a public issue for something an
 attacker could use before a fix is released. A report is useful with the
-version (the full one, `b3sum --version` or the crate's, which carries
-the source commit), the machine, and the smallest input or program that
-shows the problem.
+version (the full crate version, `blake3_servil::BUILD_VERSION` or C
+`b3_version()`, which carries the source commit), the machine, and the
+smallest input or program that shows the problem.
 
 We answer in the report itself. A confirmed problem in a released
 version gets a fixed release, a GitHub security advisory, and, where
