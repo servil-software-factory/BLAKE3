@@ -7,8 +7,8 @@ A reason is a comment with "Sound:" in the eight lines above the block
 (blocks that stand together share one). Exit status 1 names each block
 without one. Covers every shipped `.rs` file across all four crates (`src/`,
 `threads/src/`, `capi/src/`, `version/src/`, plus all build
-scripts and helpers: `build.rs`, `threads/build.rs`, `version/build.rs`,
-`version/build_version.rs`), excluding only the explicit list of test-only
+scripts and helpers: `build.rs`, `threads/build.rs` (if present),
+`version/build.rs`, and `version/build_version.rs`), excluding only the explicit list of test-only
 source files (`TEST_ONLY_FILES`) and inline `mod ... { ... }` blocks whose
 attached `#[cfg(...)]` requires `test`.
 

@@ -479,19 +479,19 @@ pub(crate) fn ran(kind: Ran) {
 /// program that needs a predictable share beside others sizes its pool
 /// to its share of the machine.
 ///
-/// The threads are this process's: in a child forked after they started,
-/// every multithreaded call panics, saying so (the child has none of
-/// them), and so does a new [`Pipeline`](throughput::Pipeline). A
-/// Pipeline made before the fork is not to be used in the child: its
-/// calls panic the same way once one needs a worker, including while
-/// waiting for a free group or piece node when work was in flight at the
-/// fork.
-/// Nor is it to be dropped there with work in flight at the fork, which
+/// The threads are this process's: fork before starting threads, or `exec` in
+/// the child and initialize in the new process (POSIX restricts a pre-`exec`
+/// child of a multithreaded process to async-signal-safe calls; this library's
+/// fork guard does not make Rust allocation, TLS, or unwinding async-signal-safe).
+/// As a diagnostic in a child forked after the pool started, every multithreaded
+/// call and every new [`Pipeline`](throughput::Pipeline) panics, saying so (the
+/// child has no pool workers). A Pipeline made before the fork is not to be used
+/// in the child: its calls panic the same way once one needs a worker, including
+/// while waiting for a free group or piece node when work was in flight at the
+/// fork. Nor is it to be dropped there with work in flight at the fork, which
 /// the child never sees finished: that drop, or the drop of a
-/// [`Lent`](throughput::Lent) guard for such work, stops the child (a
-/// child that leaves by `_exit` or `exec` drops neither). A
-/// program that forks initializes the pool in the process that hashes,
-/// after any fork; its single-threaded calls work anywhere.
+/// [`Lent`](throughput::Lent) guard for such work, stops the child (a child
+/// that leaves by `_exit` or `exec` drops neither).
 ///
 /// Each thread that makes multithreaded calls keeps a little storage for
 /// them (its cut of the input, 56 KiB for up to 1,024 pieces, and its
@@ -656,9 +656,9 @@ pub mod throughput {
         crate::lanes::hash_in(kind, key, context, &Block::bytes(input)[..len])
     }
 
-    /// [`hash_each`], using other CPU cores where that is faster: the
-    /// same hashes, never slower. Collections of 512 KiB and more in all use
-    /// them, as [`hash_multithreaded`] does.
+    /// [`hash_each`], using other CPU cores for collections whose small items
+    /// total 512 KiB or more (and for individual items of 512 KiB or more, as
+    /// [`hash_multithreaded`] does), returning the same digests.
     /// Requires `out.len() == items.len()`.
     ///
     /// ```

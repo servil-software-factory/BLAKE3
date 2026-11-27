@@ -545,10 +545,21 @@ unsafe impl Sync for PipeStorage {}
 impl PipeStorage {
     /// Give up `n` holds on `st` (`Pipeline::drop` or surviving `Room::drop`):
     /// when `holders` reaches 0, free `PipeStorage` cleanly.
+    ///
+    /// # Safety
+    ///
+    /// `n > 0`, `st` must point to a live `PipeStorage` allocated by
+    /// `PipeStorage::alloc`, and the caller must exclusively surrender `n`
+    /// counted holds in `(*st).holders` without touching `*st` afterwards.
+    /// Releasing the Pipeline's initial hold is valid only after `Pipeline::drop`
+    /// has verified zero outstanding worker work, returned local room credits,
+    /// and reserved one hold per surviving `Room` before stamping
+    /// `ROOM_CLOSING_BIT`; each surviving `Room::drop` releases only its unique
+    /// reserved hold (`n = 1`).
     #[inline(never)]
-    fn release_n(st: *mut PipeStorage, n: usize) {
-        // Sound: the caller holds `n` references in `holders`, keeping `*st`
-        // live until this `fetch_sub`. When `fetch_sub(n, AcqRel)` returns `n`,
+    unsafe fn release_n(st: *mut PipeStorage, n: usize) {
+        // Sound: caller's safety contract guarantees `st` is live and owns `n`
+        // references in `holders`. When `fetch_sub(n, AcqRel)` returns `n`,
         // every worker task has already published completion (leaving zero
         // references into `*st`), and no `Pipeline` or `Room` retains any
         // pointer to `*st`.
@@ -561,11 +572,6 @@ impl PipeStorage {
             LIVE_STORAGES.fetch_sub(1, Ordering::Relaxed);
             crate::pipeline_sync::retire_storage!(st);
         }
-    }
-
-    #[inline]
-    fn release(st: *mut PipeStorage) {
-        Self::release_n(st, 1);
     }
 
     fn alloc(slot: &'static PipeSlot, tree: TreeHasher, messages: usize, rooms: usize, pieces: usize, groups: usize) -> *mut PipeStorage {
@@ -725,7 +731,11 @@ impl Drop for Room {
             // tasks finished and reserved a `holders` ref for this Room; drop
             // that hold so the last survivor frees `PipeStorage` cleanly.
             assert_eq!(prev & !ROOM_CLOSING_BIT, unused, "surviving room ref count");
-            PipeStorage::release(self.storage.as_ptr());
+            // Sound: `Pipeline::drop` reserved one hold in `holders` for every
+            // room that saw `prev != 0` when stamping `ROOM_CLOSING_BIT`, and
+            // this `Room::drop` consumes that unique hold once and never reads
+            // `self.storage` again.
+            unsafe { PipeStorage::release_n(self.storage.as_ptr(), 1) };
         } else if prev == unused {
             // Even if `Pipeline::drop` raced right after `fetch_sub` and freed
             // `PipeStorage`, `waker` lives in `&'static PipeSlot` and waking it
@@ -1654,6 +1664,10 @@ impl<T, B, P> Pipeline<T, B, P> {
     /// Wait for a free message slot and open a [`Message`] in this pipeline's
     /// default [`Mode`].
     ///
+    /// `length_hint` is currently ignored (`None` suffices); actual message
+    /// lengths are determined by the bytes submitted via `commit` + `end`,
+    /// `lent`, `owned`, or `batch`.
+    ///
     /// # Panics
     ///
     /// If no slot is free and waiting cannot free one: as many messages
@@ -1668,6 +1682,10 @@ impl<T, B, P> Pipeline<T, B, P> {
 
     /// Wait for a free message slot and open a [`Message`] hashed in `mode`,
     /// overriding this pipeline's default [`Mode`] for that message alone.
+    ///
+    /// `length_hint` is currently ignored (`None` suffices); actual message
+    /// lengths are determined by the bytes submitted via `commit` + `end`,
+    /// `lent`, `owned`, or `batch`.
     ///
     /// `mode` is prepared immediately, so the returned future does not borrow
     /// `mode`'s key or context string. Short messages opened with
@@ -2567,11 +2585,22 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         let release_holds = (room_count - survivors) + 1;
         let next_group_epoch = self.next_group_epoch;
         let next_loan_epoch = self.next_loan_epoch;
-        struct ReleaseStorage(*mut PipeStorage, usize, &'static PipeSlot, u64, u64);
+        struct ReleaseStorage {
+            storage: *mut PipeStorage,
+            holds: usize,
+            slot: &'static PipeSlot,
+            next_group_epoch: u64,
+            next_loan_epoch: u64,
+        }
         impl Drop for ReleaseStorage {
             fn drop(&mut self) {
-                PipeSlot::release(self.2, self.3, self.4);
-                PipeStorage::release_n(self.0, self.1);
+                PipeSlot::release(self.slot, self.next_group_epoch, self.next_loan_epoch);
+                // Sound: `Pipeline::drop` verified zero outstanding worker work,
+                // returned local room credits, reserved `room_count` holds before
+                // stamping `ROOM_CLOSING_BIT`, and surrenders
+                // `release_holds = (room_count - survivors) + 1` unique holds
+                // (all non-surviving rooms plus the Pipeline's initial hold).
+                unsafe { PipeStorage::release_n(self.storage, self.holds) };
             }
         }
         struct DrainPending<'a, T, B, P>(&'a mut Pipeline<T, B, P>);
@@ -2604,7 +2633,7 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         // dropping the saved waker or one owner unwinds, every remaining owner
         // and batch still drops, `PipeSlot` returns to `FREE_PIPE_SLOTS`, and
         // `PipeStorage` is released cleanly.
-        let _release = ReleaseStorage(storage_ptr, release_holds, pipe_slot, next_group_epoch, next_loan_epoch);
+        let _release = ReleaseStorage { storage: storage_ptr, holds: release_holds, slot: pipe_slot, next_group_epoch, next_loan_epoch };
         let _drain = DrainPending(self);
         pipe_slot.waker.clear();
     }

@@ -149,7 +149,7 @@ fn owed_wakes_cascade() {
             let (p, pub2) = (park.clone(), published.clone());
             threads.push(thread::spawn(move || {
                 pub2.store(3, Ordering::SeqCst);
-                p.wake_for(3, 3);
+                p.wake_for(3);
             }));
             for t in threads {
                 t.join().unwrap();
@@ -236,7 +236,7 @@ fn wakes_fan_out_no_waker_makes_more_than_its_share() {
                 while p.parked_count() < 5 {
                     thread::yield_now();
                 }
-                let direct = p.wake_for(5, 5);
+                let direct = p.wake_for(5);
                 most2.fetch_max(direct, Ordering::SeqCst);
                 made2.fetch_add(direct, Ordering::SeqCst);
             }));
@@ -293,7 +293,7 @@ fn coincident_publishers_and_payers_keep_fresh_fanout() {
                         }
                     }
                     published.store(round, Ordering::SeqCst);
-                    park.wake_for(4, 4);
+                    park.wake_for(4);
                 }));
             }
             for t in pubs {

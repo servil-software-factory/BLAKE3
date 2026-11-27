@@ -11,23 +11,28 @@ fn input(len: usize, seed: u8) -> Vec<u8> {
     (0..len).map(|i| (i as u32).wrapping_mul(0x9E37_79B1).to_le_bytes()[3] ^ seed).collect()
 }
 
-/// A batch and an input, from two threads at once through the
+/// A batch and an input (both above the 512 KiB `MIN_SPLIT_LEN` threshold so
+/// both genuinely enter the pool), from two threads at once through the
 /// multithreaded full forms.
 #[test]
 fn test_pool_from_two_callers() {
     crate::initialize_multithreaded(None);
-    let batch = input(1024 * 64, 1);
-    let tree = input(65 * 1024 + 3, 2);
-    let mut expected = vec![[0u8; OUT_LEN]; 1024];
+    let batch_count = 10 * 1024;
+    let batch = input(batch_count * 64, 1);
+    let tree = input(600 * 1024 + 3, 2);
+    let mut expected = vec![[0u8; OUT_LEN]; batch_count];
     throughput::hash_many(Mode::Plain, &Batch::in_place(&crate::test::blocks(&batch), 64), &mut expected);
     let expected_tree = crate::convenience::hash(&tree);
+    let ready = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         for caller in 0..2 {
-            let (batch, tree, expected) = (&batch, &tree, &expected);
+            let (batch, tree, expected, ready) = (&batch, &tree, &expected, &ready);
             scope.spawn(move || {
-                let mut out = vec![[0u8; OUT_LEN]; 1024];
+                let mut out = vec![[0u8; OUT_LEN]; batch_count];
+                ready.wait();
                 throughput::hash_many_multithreaded(Mode::Plain, &Batch::in_place(&crate::test::blocks(batch), 64), &mut out);
                 assert_eq!(&out, expected, "batch, caller {caller}");
+                ready.wait();
                 assert_eq!(throughput::hash_multithreaded(Mode::Plain, &crate::test::message(tree), tree.len()), expected_tree, "tree, caller {caller}");
             });
         }

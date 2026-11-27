@@ -154,15 +154,169 @@ mod tests {
     /// checker assumes; this fires on any other, with the reason above.
     #[test]
     fn every_atomic_in_the_handshake_files_is_seqcst() {
+        // Check a Rust source text (ignoring `//` line comments, nested `/* */`
+        // block comments, string/raw-string literals, and char literals) for
+        // any `Ordering :: <Variant>` token whose variant is not `SeqCst`.
+        // Kept inside this `#[test]` function so `cargo-mutants` does not
+        // mutate test-only parser helpers inside `#[cfg(all(test, not(shuttle)))]`.
+        let non_seqcst_lines = |text: &str| -> std::vec::Vec<(usize, std::string::String)> {
+            let b = text.as_bytes();
+            let n = b.len();
+            let mut stripped = std::vec::Vec::with_capacity(n);
+            let mut i = 0;
+            let mut block_depth = 0usize;
+            while i < n {
+                if block_depth > 0 {
+                    if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
+                        block_depth += 1;
+                        stripped.extend_from_slice(b"  ");
+                        i += 2;
+                    } else if b[i] == b'*' && i + 1 < n && b[i + 1] == b'/' {
+                        block_depth -= 1;
+                        stripped.extend_from_slice(b"  ");
+                        i += 2;
+                    } else {
+                        stripped.push(if b[i] == b'\n' { b'\n' } else { b' ' });
+                        i += 1;
+                    }
+                    continue;
+                }
+                if b[i] == b'/' && i + 1 < n && b[i + 1] == b'/' {
+                    while i < n && b[i] != b'\n' {
+                        stripped.push(b' ');
+                        i += 1;
+                    }
+                } else if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
+                    block_depth = 1;
+                    stripped.extend_from_slice(b"  ");
+                    i += 2;
+                } else if b[i] == b'r' && i + 1 < n && (b[i + 1] == b'"' || b[i + 1] == b'#') {
+                    let mut j = i + 1;
+                    while j < n && b[j] == b'#' {
+                        j += 1;
+                    }
+                    if j < n && b[j] == b'"' {
+                        let hashes = j - (i + 1);
+                        let start = i;
+                        i = j + 1;
+                        while i < n {
+                            if b[i] == b'"' && i + 1 + hashes <= n && b[i + 1..i + 1 + hashes].iter().all(|&c| c == b'#') {
+                                i += 1 + hashes;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        for &ch in &b[start..i] {
+                            stripped.push(if ch == b'\n' { b'\n' } else { b' ' });
+                        }
+                        continue;
+                    }
+                    stripped.push(b[i]);
+                    i += 1;
+                } else if b[i] == b'"' {
+                    stripped.push(b' ');
+                    i += 1;
+                    while i < n {
+                        if b[i] == b'\\' && i + 1 < n {
+                            stripped.push(if b[i] == b'\n' { b'\n' } else { b' ' });
+                            stripped.push(if b[i + 1] == b'\n' { b'\n' } else { b' ' });
+                            i += 2;
+                        } else if b[i] == b'"' {
+                            stripped.push(b' ');
+                            i += 1;
+                            break;
+                        } else {
+                            stripped.push(if b[i] == b'\n' { b'\n' } else { b' ' });
+                            i += 1;
+                        }
+                    }
+                } else if b[i] == b'\'' {
+                    // Skip char literal (`'a'`, `'"'`, `'\''`, `'\x7f'`, `'\u{...}'`), not lifetimes (`'a`).
+                    let mut j = i + 1;
+                    if j < n && b[j] == b'\\' {
+                        j += 2;
+                        while j < n && b[j] != b'\'' && b[j] != b'\n' {
+                            j += 1;
+                        }
+                        if j < n && b[j] == b'\'' {
+                            for _ in i..=j {
+                                stripped.push(b' ');
+                            }
+                            i = j + 1;
+                            continue;
+                        }
+                    } else if j + 1 < n && b[j] != b'\'' && b[j] != b'\n' {
+                        let ch_len = text[j..].chars().next().map_or(1, char::len_utf8);
+                        if j + ch_len < n && b[j + ch_len] == b'\'' {
+                            for _ in i..=(j + ch_len) {
+                                stripped.push(b' ');
+                            }
+                            i = j + ch_len + 1;
+                            continue;
+                        }
+                    }
+                    stripped.push(b[i]);
+                    i += 1;
+                } else {
+                    stripped.push(b[i]);
+                    i += 1;
+                }
+            }
+            let clean = std::str::from_utf8(&stripped).expect("ASCII-only replacements preserve UTF-8");
+            let mut bad = std::vec::Vec::new();
+            let orig_lines: std::vec::Vec<&str> = text.lines().collect();
+            let mut line_no = 1usize;
+            let bytes = clean.as_bytes();
+            let mut k = 0;
+            while k < bytes.len() {
+                if bytes[k] == b'\n' {
+                    line_no += 1;
+                    k += 1;
+                    continue;
+                }
+                if clean[k..].starts_with("Ordering")
+                    && (k == 0 || !(bytes[k - 1].is_ascii_alphanumeric() || bytes[k - 1] == b'_'))
+                    && (k + 8 == bytes.len() || !(bytes[k + 8].is_ascii_alphanumeric() || bytes[k + 8] == b'_'))
+                {
+                    let mut m = k + 8;
+                    while m < bytes.len() && bytes[m].is_ascii_whitespace() {
+                        m += 1;
+                    }
+                    if m + 2 <= bytes.len() && &bytes[m..m + 2] == b"::" {
+                        m += 2;
+                        while m < bytes.len() && bytes[m].is_ascii_whitespace() {
+                            m += 1;
+                        }
+                        let v_start = m;
+                        while m < bytes.len() && (bytes[m].is_ascii_alphanumeric() || bytes[m] == b'_') {
+                            m += 1;
+                        }
+                        if &clean[v_start..m] != "SeqCst" {
+                            bad.push((line_no, orig_lines.get(line_no - 1).copied().unwrap_or("").trim().to_string()));
+                        }
+                        k = m;
+                        continue;
+                    }
+                }
+                k += 1;
+            }
+            bad
+        };
+
+        // Positive and negative controls: mixed CAS, trailing comment spoof,
+        // whitespace around `::`, char literal `'"'`, and block comments.
+        assert!(non_seqcst_lines("a.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);").is_empty());
+        assert!(non_seqcst_lines("/* Ordering::Relaxed */\nlet c = '\"'; a.load(Ordering::SeqCst);").is_empty());
+        assert_eq!(non_seqcst_lines("a.compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed);").len(), 1);
+        assert_eq!(non_seqcst_lines("a.load(Ordering::Acquire); // Ordering::SeqCst").len(), 1);
+        assert_eq!(non_seqcst_lines("let c = '\"'; a.load(Ordering :: Relaxed);").len(), 1);
         // Read at run time, not embedded (include_str!), so the test binary
         // holds none of the files' text: an embedded copy changed with every
         // mutant of them, and code_hash.py found none same code (#219).
         for name in ["finish.rs", "park.rs", "waker.rs"] {
             let text = std::fs::read_to_string(std::format!("{}/src/{name}", env!("CARGO_MANIFEST_DIR"))).expect("the file, beside the crate's manifest");
-            for (n, line) in text.lines().enumerate() {
-                if line.contains("Ordering::") && !line.contains("Ordering::SeqCst") && !line.trim_start().starts_with("//") {
-                    panic!("{name}:{}: {} (every atomic here is SeqCst: see finish.rs's head)", n + 1, line.trim());
-                }
+            if let Some((line_no, line)) = non_seqcst_lines(&text).into_iter().next() {
+                panic!("{name}:{line_no}: {line} (every atomic here is SeqCst: see finish.rs's head)");
             }
         }
     }

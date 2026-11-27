@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0 OR TGPPL-1.0" # OR BOSL-1.0, see LICENSE-BOSL.txt
 # The repository's page: what BLAKE3-Servil is, for whoever finds this crate.
 readme = "../README.md"
 edition = "2024"
-include = ["/src", "/build.rs", "/LICENSE-*"]
+include = ["/src", "/LICENSE-*"]
 
 [dependencies]
 # The one-thread library: the kernels and their proofs, the Hasher, the
@@ -42,6 +42,7 @@ incremental = true
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
 unreachable_patterns = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(shuttle)'] }
 
 [lints.clippy]
 correctness = { level = "deny", priority = -1 }
