@@ -50,92 +50,114 @@ SOURCE = os.path.join("threads", "src", "pipeline.rs")
 # Git ignores them, and a build with --locked needs them.
 LOCK_FILES = ("Cargo.lock", os.path.join("threads", "Cargo.lock"))
 
-# (name, the text to find once, what replaces it)
+# Regex matching Shuttle's digest-comparison assertion failure lines alone
+# (rejecting unrelated panics such as `failed to read digest fixture` or
+# wrong-event-variant panics).
+DIGEST_MISMATCH_RE = r"assertion `left == right` failed:.*digest"
+
+# (name, the text to find once, what replaces it, admissible regexes matched against `how` alone)
 FAULTS = [
     (
         "a group is published done before its members are hashed",
         "        unsafe { task.run_members(tree, platform) };\n",
         "        self.slot.get().group_completed[group_idx].swap(epoch, Ordering::SeqCst);\n        unsafe { task.run_members(tree, platform) };\n",
+        (DIGEST_MISMATCH_RE,),
     ),
     (
         "a finished task wakes no one",
         "    publish();\n    waker.notify_after_seqcst();\n",
         "    publish();\n",
+        (r"^a deadlock$",),
     ),
     (
         "a room piece is published done before it is hashed",
         "        let slot = unsafe { *pnode.slot.get() } as usize;",
         "        pnode.done.swap(true, Ordering::SeqCst);\n        let slot = unsafe { *pnode.slot.get() } as usize;",
+        (r"a chaining value that was never set", DIGEST_MISMATCH_RE),
     ),
     (
         "a room piece gives its room back before it has read it",
         "        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        let tree = self.tree_for(slot, custom);\n        let value = if index == 0 {\n            RoomValue::First(tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))\n        } else if len == ROOM_LEN {\n            RoomValue::Whole(tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))\n        } else {\n            RoomValue::Last(tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))\n        };\n        // Sound: this piece's output is its worker's alone until `done`.\n        unsafe { *pnode.out.0.get() = value };\n        self.rooms.release_n(room_idx, 1);",
         "        self.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        let tree = self.tree_for(slot, custom);\n        let value = if index == 0 {\n            RoomValue::First(tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))\n        } else if len == ROOM_LEN {\n            RoomValue::Whole(tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))\n        } else {\n            RoomValue::Last(tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))\n        };\n        unsafe { *pnode.out.0.get() = value };",
+        (DIGEST_MISMATCH_RE,),
     ),
     (
         "a message's pieces are published done before the last is hashed",
         "                if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 1 {",
         "                if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } != 0 {",
+        (r"the last piece supplied its value", DIGEST_MISMATCH_RE),
     ),
     (
         "a storage is freed while a Room still holds it",
         "        if unsafe { (*st).holders.fetch_sub(n, Ordering::AcqRel) } == n {",
         "        if unsafe { (*st).holders.fetch_sub(n, Ordering::AcqRel) } >= n {",
+        (r"PipeStorage used after release", r"^the allocator stopped the process:"),
     ),
     (
         "a Room's drop gives back one credit more than it has",
         "        let unused = ROOM_CREDITS - (self.commits as usize);",
         "        let unused = ROOM_CREDITS - (self.commits as usize) + (self.commits != 0) as usize;",
+        (DIGEST_MISMATCH_RE,),
     ),
     (
         "a Room's drop wakes no one",
         "        } else if prev == unused {\n            // Even if `Pipeline::drop` raced right after `fetch_sub` and freed\n            // `PipeStorage`, `waker` lives in `&'static PipeSlot` and waking it\n            // is benign.\n            waker.notify_after_seqcst();\n        }",
         "        }",
+        (r"^a deadlock$",),
     ),
     (
         "a loan's event comes before the loan is marked complete",
         "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(slot, is_batch, custom);\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }\n                    finished(waker, || {\n                        // Sound: `done_ptr` points to `slot_done[slot]` inside `*st`,\n                        // live until this `SeqCst` swap completes.\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });",
         "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(slot, is_batch, custom);\n                    finished(waker, || {\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }",
+        (r"^the Pipeline stopped the process: a Pipeline Lent guard was dropped before its message finished hashing",),
     ),
     (
         "a batch's tasks are published done before the last has hashed",
         "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(slot, piece as usize, custom, platform);",
         "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(slot, piece as usize, custom, platform);\n                if is_batch && unsafe { (&*(&*st).multi[slot].get()).pieces } >= 2 {\n                    if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 2 {\n                        let (waker, done_ptr, _) = unsafe { &*st }.finish_multi_slot(slot, true, custom);\n                        finished(waker, || { unsafe { (*done_ptr).swap(true, Ordering::SeqCst) }; });\n                    }\n                    return;\n                }",
+        (DIGEST_MISMATCH_RE,),
     ),
     (
         "a storage retirement is omitted when its last holder drops",
         "            crate::pipeline_sync::retire_storage!(st);",
         "            let _ = st;",
+        (r"all allocated PipeStorages retired before run end",),
     ),
     (
         "a worker reads PipeSlot from storage after publishing completion",
         "                let (waker, completed, epoch) = unsafe { &*st }.run_group(group as usize, custom_slot, platform);\n                finished(waker, || {\n                    completed.swap(epoch, Ordering::SeqCst);\n                });",
         "                let (_, completed, epoch) = unsafe { &*st }.run_group(group as usize, custom_slot, platform);\n                completed.swap(epoch, Ordering::SeqCst);\n                unsafe { &*st }.slot.get().waker.notify_after_seqcst();",
+        (r"PipeStorage used after release", r"^the allocator stopped the process:"),
     ),
     (
         "a worker loads a storage atomic after publishing completion",
         "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(pnode as usize, custom, platform);\n                finished(waker, || {\n                    // Sound: `done_ptr` points to `pieces[pnode].done` inside `*st`,\n                    // live until this `SeqCst` swap completes.\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                });",
         "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(pnode as usize, custom, platform);\n                finished(waker, || {\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    let _ = unsafe { (*done_ptr).load(Ordering::Acquire) };\n                });",
+        (r"PipeStorage used after release", r"^the allocator stopped the process:"),
     ),
     (
         "Room::drop reads storage after releasing its credits",
         "        let (waker, ref_ptr) = {\n            let st = self.storage();\n            (&st.slot.get().waker, core::ptr::addr_of!(st.rooms.refs[self.index as usize]))\n        };\n        // Sound: `ref_ptr` points to `rooms.refs[self.index]` inside `*self.storage`,\n        // which stays live until this `SeqCst` subtraction completes.\n        let prev = unsafe { (*ref_ptr).fetch_sub(unused, Ordering::SeqCst) };",
         "        let ref_ptr = core::ptr::addr_of!(self.storage().rooms.refs[self.index as usize]);\n        let prev = unsafe { (*ref_ptr).fetch_sub(unused, Ordering::SeqCst) };\n        let waker = &self.storage().slot.get().waker;",
+        (r"PipeStorage used after release", r"^the allocator stopped the process:"),
     ),
     (
         "a reused PipeSlot drops its saved group epoch",
         "push(FreeSlot { slot, next_group_epoch,",
         "push(FreeSlot { slot, next_group_epoch: 1,",
+        (r"saved next_group_epoch must exceed completed group epoch",),
     ),
     (
         "a reused PipeSlot drops its saved loan epoch",
         "next_loan_epoch });",
         "next_loan_epoch: 1 });",
+        (r"reused PipeSlot must advance loan_completed epoch",),
     ),
     (
         "a non-last multi-piece worker reads storage after tasks_left decrement",
         "                    });\n                }\n            }\n        }\n    }",
         "                    });\n                } else {\n                    let _ = unsafe { (*tasks_left_ptr).load(Ordering::Acquire) };\n                }\n            }\n        }\n    }",
+        (r"PipeStorage used after release", r"^the allocator stopped the process:"),
     ),
 ]
 
@@ -265,20 +287,24 @@ def model_passes(copy, timeout=None):
     return run.returncode == 0, stdout + stderr
 
 
-def how_it_failed(said):
-    """Where and how a run of the model failed, for the reader of this
-    script's lines: the scenario it was in (the model names each as it
-    begins) and the failure's kind. The verdict is the model's exit
-    alone; this says whether the fault was caught for the reason its
-    name gives."""
+def how_it_failed_parts(said):
+    """Where and how a run of the model failed: `(scenario, how)` where
+    `scenario` is the last model scenario begun and `how` is the failure
+    kind (matched against each fault's admissible failure patterns so a
+    scenario name cannot accidentally satisfy a failure-kind pattern)."""
     scenarios = [line.split(": ", 1)[1].strip() for line in said.splitlines() if line.startswith("shuttle_pipeline: ")]
     lines = said.splitlines()
     at = [n for n, line in enumerate(lines) if "panicked at" in line]
+    deadlock_panic = any(
+        re.search(r"thread .* panicked.*deadlock!", line)
+        or (n in at and n + 1 < len(lines) and "deadlock!" in lines[n + 1])
+        for n, line in enumerate(lines)
+    )
     stops = [line.strip() for line in lines if line.startswith("blake3-servil: ")]
     # The C library's allocator, stopping a process whose memory it finds
     # broken (a storage freed twice, or given out while held).
     allocator = [line.strip() for line in lines if re.match(r"(free|malloc|realloc|munmap_chunk|double free|corrupted)\b.*(\(\)|:)", line.strip())]
-    if "deadlock!" in said:
+    if deadlock_panic:
         how = "a deadlock"
     elif at and at[0] + 1 < len(lines):
         how = lines[at[0] + 1].strip()[:100]
@@ -290,7 +316,16 @@ def how_it_failed(said):
         # Cargo's line for a test process that a signal ended.
         signalled = re.search(r"\(signal: [^)]*\)", said)
         how = "the process ended with no word of the model's" + (f" {signalled[0]}" if signalled else "")
-    return f"in {scenarios[-1] if scenarios else 'no scenario'}: {how}"
+    return (scenarios[-1] if scenarios else "no scenario"), how
+
+
+def matches_expected(how, expected):
+    return any(re.search(pat, how) for pat in expected)
+
+
+def how_it_failed(said):
+    scenario, how = how_it_failed_parts(said)
+    return f"in {scenario}: {how}"
 
 
 def tree_files():
@@ -434,9 +469,11 @@ def controls(copy):
         sys.exit(f"pipeline_model_controls: {SOURCE} must be a regular file, not a symbolic link")
     with open(source, "rb") as f:
         original = f.read().decode()
-    for name, find, _ in FAULTS:
+    for name, find, _, expected in FAULTS:
         if original.count(find) != 1:
             sys.exit(f"pipeline_model_controls: the place of the fault '{name}' is not there once: update this script")
+        if not expected:
+            sys.exit(f"pipeline_model_controls: fault '{name}' declares no admissible failure class")
     passes, said = model_passes(copy)
     if not passes:
         sys.exit(f"pipeline_model_controls: the model fails on the Pipeline as it is:\n{said[-6000:]}")
@@ -444,7 +481,8 @@ def controls(copy):
     shutil.rmtree(os.path.join(home(), "logs"), ignore_errors=True)
     os.makedirs(os.path.join(home(), "logs"))
     missed = []
-    for name, find, replace in FAULTS:
+    unattributed = []
+    for name, find, replace, expected in FAULTS:
         if os.path.islink(source):
             sys.exit(f"pipeline_model_controls: {SOURCE} became a symbolic link before fault '{name}'")
         with open(source, "wb") as f:
@@ -454,21 +492,24 @@ def controls(copy):
         # reading of it.
         with open(os.path.join(home(), "logs", f"{len(os.listdir(os.path.join(home(), 'logs'))):02}.log"), "w") as f:
             f.write(f"{name}\n\n{said}")
-        reason = how_it_failed(said)
-        # Control #10 tests premature publication of a multi-piece batch before
-        # the last worker finishes hashing; a deadlock is not evidence of that.
-        false_deadlock = (
-            not passes
-            and name == "a batch's tasks are published done before the last has hashed"
-            and "deadlock" in reason
-        )
-        failed = passes or false_deadlock
-        tag = f"MISSED  {name} (wrong failure: {reason})" if false_deadlock else (f"MISSED  {name}" if passes else f"caught  {name} ({reason})")
-        print(tag, flush=True)
-        if failed:
+        if passes:
+            print(f"MISSED  {name}", flush=True)
             missed.append(name)
-    if missed:
-        sys.exit(f"pipeline_model_controls: the model passes {len(missed)} planted faults")
+            continue
+        scenario, how = how_it_failed_parts(said)
+        reason = f"in {scenario}: {how}"
+        if matches_expected(how, expected):
+            print(f"caught  {name} ({reason})", flush=True)
+        else:
+            print(f"NO VERDICT  {name} (unrelated failure: {reason})", flush=True)
+            unattributed.append(name)
+    if missed or unattributed:
+        parts = []
+        if missed:
+            parts.append(f"passes {len(missed)} planted faults")
+        if unattributed:
+            parts.append(f"no verdict on {len(unattributed)} planted faults (unrelated failure)")
+        sys.exit(f"pipeline_model_controls: {'; '.join(parts)}")
     print(f"pipeline_model_controls: the model fails for each of {len(FAULTS)} planted faults")
 
 

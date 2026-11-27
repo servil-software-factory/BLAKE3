@@ -51,3 +51,7 @@ complexity = { level = "allow", priority = -1 }
 style = { level = "allow", priority = -1 }
 perf = { level = "allow", priority = -1 }
 cast_possible_truncation = "deny"
+
+[[test]]
+name = "forked_child_one_thread"
+harness = false

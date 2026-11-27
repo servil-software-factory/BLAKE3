@@ -484,12 +484,17 @@ def _test_item_spans(code):
         m_kw = _ITEM_OR_STMT_KW_RE.match(code, kw_pos)
         kw = m_kw.group(0) if m_kw else ""
         starts_item_kw = (not in_generic) and bool(m_kw)
+        is_const_block = False
         if kw == "const":
             rest_pos = m_kw.end()
             while rest_pos < n and code[rest_pos].isspace():
                 rest_pos += 1
+            # Any `const` item (`const NAME:`, `const r#match:`, `const Δ:`,
+            # `const _:`) ends at `;`; `const fn` / `const unsafe` / `const
+            # extern` and inline `const { ... }` blocks are brace-terminated.
+            is_const_block = rest_pos < n and code[rest_pos] == "{"
             is_const_fn = bool(re.match(r"(?:unsafe|extern|fn)\b", code[rest_pos:]))
-            must_end_semi = starts_item_kw and not is_const_fn
+            must_end_semi = starts_item_kw and not is_const_block and not is_const_fn
         else:
             must_end_semi = starts_item_kw and kw in ("let", "static", "type", "use")
         # Consume the annotated item/statement: track balanced delimiters and
@@ -567,11 +572,22 @@ def _test_item_spans(code):
                         seen_top_brace = False
                         j = m_else.end()
                         continue
-                    # Include an optional trailing `;` for braced statements
-                    # such as `#[cfg(test)] let _ = { 1 };`.
+                    # For inline `const { ... }` block expressions, keep
+                    # scanning if followed by a postfix continuation (`.foo`,
+                    # `?`, NOT a `..` range expression starting the next
+                    # statement) or consume a trailing `;` (even on the next
+                    # line) so its trailing comment is masked too.
                     k = j
-                    while k < n and code[k] in " \t":
+                    while k < n and code[k].isspace():
                         k += 1
+                    if is_const_block and k < n and (
+                        code[k] == "?"
+                        or (code[k] == "." and not code.startswith("..", k))
+                    ):
+                        must_end_semi = True
+                        seen_top_brace = False
+                        j = k + 1
+                        continue
                     if k < n and code[k] == ";":
                         end = k + 1
                     else:
@@ -816,7 +832,7 @@ def main():
             print(f"{path}:{number}: no reason (a `// Debug-only: ...` comment above): {line[:100]}")
     if bad or bad_da:
         sys.exit(f"unsafe_reasons: {bad} unsafe blocks and {bad_da} debug_asserts state no reason")
-    print(f"unsafe_reasons: every unsafe block and debug_assert across all {len(files)} shipped Rust files states its reason")
+    print(f"unsafe_reasons: all {len(files)} shipped Rust files pass Sound:/Debug-only: rationale checks")
 
 
 if __name__ == "__main__":
