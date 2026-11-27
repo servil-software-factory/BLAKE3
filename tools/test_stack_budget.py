@@ -331,6 +331,56 @@ StackSizes [
             self.assertEqual(code, 1, bad_sym)
             self.assertIn("failed to parse shipped symbol", headline, bad_sym)
 
+    def test_probe_wrappers_budgeted_under_matching_caps_and_required(self) -> None:
+        # Both v0 (direct + nested closure/async) and legacy/demangled probe wrappers
+        # are budgeted under their matching library caps while `main` is excluded.
+        cases = [
+            ("_RNvCs760tuxHRkot_18stack_budget_probe28probe_threads_pipeline_owned", ("threads", stack_budget.CAP_THREADS)),
+            ("_RNCNvCs760tuxHRkot_18stack_budget_probe29probe_threads_pipeline_cancel0B3_", ("threads", stack_budget.CAP_THREADS)),
+            ("_ZN18stack_budget_probe28probe_threads_pipeline_rooms27$u7b$$u7b$closure$u7d$$u7d$17h0123456789abcdefE", ("threads", stack_budget.CAP_THREADS)),
+            ("core::future::poll::<stack_budget_probe::probe_threads_pipeline_owned::{{closure}}>", ("threads", stack_budget.CAP_THREADS)),
+            ("_RNvCs760tuxHRkot_18stack_budget_probe24probe_threads_initialize", ("threads", stack_budget.CAP_THREADS)),
+            ("_RNvCs760tuxHRkot_18stack_budget_probe24probe_core_batch_prepare", ("core", stack_budget.CAP_CORE_B3SUM)),
+            ("_RNvCs760tuxHRkot_18stack_budget_probe26probe_core_hasher_finalize", ("core::Hasher", stack_budget.CAP_HASHER)),
+            ("_RNvCs760tuxHRkot_18stack_budget_probe24probe_core_hasher_update", ("core", stack_budget.CAP_CORE_B3SUM)),
+            ("_RNvCs760tuxHRkot_18stack_budget_probe22probe_threads_one_shot", ("threads", stack_budget.CAP_THREADS)),
+            ("_RNvCs760tuxHRkot_18stack_budget_probe23probe_threads_update_mt", ("threads", stack_budget.CAP_THREADS)),
+            ("_RNvCs760tuxHRkot_18stack_budget_probe4main", None),
+        ]
+        for sym, expected in cases:
+            self.assertEqual(stack_budget.classify_symbol(sym), expected, sym)
+
+        # Oversized `#[inline(always)]` library code folded into a threads probe wrapper fails 16 KiB cap.
+        _, violations, _ = stack_budget.check_entries(
+            [(20_480, "_RNvCs760tuxHRkot_18stack_budget_probe28probe_threads_pipeline_owned")]
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertIn("threads:", violations[0])
+
+        # Missing required wrapper fails closed — and nested closure / poll symbols alone
+        # must NOT satisfy direct wrapper presence.
+        base_items = [
+            (0x200, "_RNvMsq_CsdKSb5PDnG5P_18blake3_servil_coreNtB5_12OutputReader4fill"),
+            (0x300, "_RNvMs1_NtCsdKSb5PDnG5P_18blake3_servil_core11incrementalNtB5_6Hasher8finalize"),
+            (0x400, "_RNvNtCs760tuxHRkot_13blake3_servil5lanes8run_work"),
+            (0x400, "_RNvCs760tuxHRkot_18stack_budget_probe28probe_threads_pipeline_rooms"),
+            (0x100, "_RNCNvCs760tuxHRkot_18stack_budget_probe28probe_threads_pipeline_owned0B3_"),
+            (0x100, "core::future::poll::<stack_budget_probe::probe_threads_pipeline_owned::{{closure}}>"),
+        ]
+        code, headline, _ = stack_budget.evaluate_stack_sizes(
+            _make_entries(base_items),
+            required_wrappers=("probe_threads_pipeline_rooms", "probe_threads_pipeline_owned"),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("probe_threads_pipeline_owned", headline)
+        # Adding the direct wrapper symbol passes.
+        ok_items = base_items + [(0x200, "_RNvCs760tuxHRkot_18stack_budget_probe28probe_threads_pipeline_owned")]
+        code, headline, _ = stack_budget.evaluate_stack_sizes(
+            _make_entries(ok_items),
+            required_wrappers=("probe_threads_pipeline_rooms", "probe_threads_pipeline_owned"),
+        )
+        self.assertEqual(code, 0, headline)
+
     def test_collect_build_artifacts_uses_cargo_json_only(self) -> None:
         import json
         from pathlib import Path

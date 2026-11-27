@@ -913,7 +913,10 @@ class PostSplitRelease(unittest.TestCase):
         self.assertEqual(ra.expected_program_digests(self.release), [])
 
         # published() fetches ONLY the 3 library crates and never calls release.crate("b3sum").
+        fetched = []
+
         def fake_fetch(url):
+            fetched.append(url)
             if "/releases/tags/" in url:
                 return json.dumps({"assets": []}).encode()
             for name, raw in crates.items():
@@ -931,6 +934,10 @@ class PostSplitRelease(unittest.TestCase):
             with patch.object(ra, "fetch", fake_fetch):
                 bad = ra.check(ra.published(self.release), self.release, out=io.StringIO(), rebuilt=rebuilt, builders=builders)
             self.assertEqual(bad, 0)
+            # Assert exact network fetches: 3 library crate tarballs + 1 GitHub release listing.
+            self.assertEqual(len(fetched), 4, fetched)
+            self.assertEqual(sum("/crates/" in u for u in fetched), 3, fetched)
+            self.assertFalse(any("b3sum" in u for u in fetched), fetched)
             # Unexpected b3sum binary inside a post-split builder folder must fail.
             with open(os.path.join(rebuilt, "crates-X64", f"b3sum-{self.tag}-x86_64-unknown-linux-gnu"), "wb") as f:
                 f.write(b"stray")

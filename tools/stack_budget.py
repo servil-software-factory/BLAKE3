@@ -30,8 +30,21 @@ CAP_CORE_B3SUM = 128 * 1024  # 131,072 B
 CAP_HASHER = 32 * 1024       #  32,768 B
 CAP_THREADS = 16 * 1024      #  16,384 B
 
-SHIPPED_CRATES = frozenset({"blake3_servil_core", "blake3_servil"})
+SHIPPED_CRATES = frozenset({"blake3_servil_core", "blake3_servil", "stack_budget_probe"})
 EXPECTED_BUCKETS = frozenset({"core", "core::Hasher", "threads"})
+EXPECTED_PROBE_WRAPPERS = (
+    "probe_threads_initialize",
+    "probe_core_batch_prepare",
+    "probe_core_hasher_update",
+    "probe_core_hasher_finalize",
+    "probe_threads_update_mt",
+    "probe_threads_one_shot",
+    "probe_threads_pipeline_rooms",
+    "probe_threads_pipeline_owned",
+    "probe_threads_pipeline_batch",
+    "probe_threads_pipeline_message_with",
+    "probe_threads_pipeline_cancel",
+)
 
 # Match Entry blocks and anchored Size/Functions lines inside `llvm-readobj --stack-sizes`
 # so headers like `AddressSize: 64bit` outside `Entry { ... }` are never parsed as stack sizes.
@@ -62,9 +75,9 @@ _LEGACY_ESCAPES = {
 }
 _LEGACY_U_ESC_RE = re.compile(r"\$u([0-9a-fA-F]+)\$")
 _LEGACY_HASH_SEG_RE = re.compile(r"^h[0-9a-f]{16}$")
-_SHIPPED_TOKEN_RE = re.compile(r"(?:blake3_servil_core|blake3_servil)")
+_SHIPPED_TOKEN_RE = re.compile(r"(?:blake3_servil_core|blake3_servil|stack_budget_probe)")
 _DEMANGLED_SHIPPED_CRATE_RE = re.compile(
-    r"\b(blake3_servil_core|blake3_servil)(?:\[[0-9a-f]+\])?::"
+    r"\b(blake3_servil_core|blake3_servil|stack_budget_probe)(?:\[[0-9a-f]+\])?::([A-Za-z_][A-Za-z0-9_]*)?"
 )
 
 
@@ -80,6 +93,7 @@ class _PathInfo:
     leaf: str
     receiver: str
     method: str
+    is_nested: bool = False
 
 
 class _V0Parser:
@@ -335,6 +349,7 @@ class _V0Parser:
                     leaf=parent.leaf,
                     receiver=parent.receiver,
                     method=parent.method,
+                    is_nested=True,
                 )
             else:
                 info = _PathInfo(crate=parent.crate, leaf=ident, receiver=parent.receiver, method="")
@@ -524,6 +539,14 @@ def _bucket_for(owner_crate: str | None, receiver: str, method: str) -> tuple[st
         return ("core", CAP_CORE_B3SUM)
     if owner_crate == "blake3_servil":
         return ("threads", CAP_THREADS)
+    if owner_crate == "stack_budget_probe":
+        if method.startswith("probe_threads_"):
+            return ("threads", CAP_THREADS)
+        if method.startswith("probe_core_hasher_finalize"):
+            return ("core::Hasher", CAP_HASHER)
+        if method.startswith("probe_core_"):
+            return ("core", CAP_CORE_B3SUM)
+        return None
     return None
 
 
@@ -567,7 +590,12 @@ def _classify_demangled(demangled_sym: str) -> tuple[str, int] | None:
             segs = [_strip_crate_disambiguator(seg) for seg in _strip_generics(s).split("::") if seg]
             # Handle both direct methods (`...::Hasher::finalize`) and nested items/closures
             # (`...::Hasher::finalize::{{closure}}`) under legacy mangling.
-            if "Hasher" in segs:
+            if owner_crate == "stack_budget_probe":
+                method = next(
+                    (seg for seg in segs[1:] if seg.startswith(("probe_threads_", "probe_core_"))),
+                    segs[-1] if segs else "",
+                )
+            elif "Hasher" in segs:
                 h_idx = segs.index("Hasher")
                 if h_idx + 1 < len(segs):
                     receiver = "Hasher"
@@ -583,7 +611,7 @@ def _classify_demangled(demangled_sym: str) -> tuple[str, int] | None:
     # type, closure, or fn item under the tightest shipped cap named in the symbol.
     inlined: list[tuple[str, int]] = []
     for m in _DEMANGLED_SHIPPED_CRATE_RE.finditer(s):
-        b = _bucket_for(m.group(1), "", "")
+        b = _bucket_for(m.group(1), "", m.group(2) or "")
         if b is not None:
             inlined.append(b)
     return _tightest_bucket(inlined)
@@ -686,8 +714,50 @@ def check_entries(
     return max_by_bucket, violations, budgeted
 
 
-def evaluate_stack_sizes(text: str) -> tuple[int, str, list[str]]:
+def _direct_probe_wrapper(sym: str) -> str | None:
+    """Return the `stack_budget_probe` wrapper function name when `sym` is the
+    wrapper's own direct symbol (not a nested closure or std/core generic
+    instantiated over a closure)."""
+    raw = sym.strip()
+    if not raw:
+        return None
+    if raw.startswith("_R"):
+        cleaned = _LLVM_RAW_SUFFIX_RE.sub("", raw)
+        parser = _V0Parser(cleaned)
+        try:
+            info = parser.parse_symbol()
+        except SymbolParseError:
+            return None
+        if info.crate == "stack_budget_probe" and not info.is_nested and _bucket_for(info.crate, info.receiver, info.method) is not None:
+            return info.method
+        return None
+    if raw.startswith("_ZN"):
+        cleaned = _LLVM_RAW_SUFFIX_RE.sub("", raw)
+        try:
+            demangled = _parse_legacy_symbol(cleaned)
+        except SymbolParseError:
+            return None
+    else:
+        demangled = raw
+    s = _strip_demangled_suffixes(demangled)
+    if not s or s.startswith("<"):
+        return None
+    segs = [_strip_crate_disambiguator(seg) for seg in _strip_generics(s).split("::") if seg]
+    if len(segs) == 2 and segs[0] == "stack_budget_probe" and _bucket_for("stack_budget_probe", "", segs[1]) is not None:
+        return segs[1]
+    return None
+
+
+def evaluate_stack_sizes(
+    text: str,
+    required_wrappers: tuple[str, ...] = (),
+) -> tuple[int, str, list[str]]:
     """Parse and evaluate `llvm-readobj --stack-sizes` output.
+
+    When `required_wrappers` is non-empty, every named `stack_budget_probe`
+    wrapper must appear as its own direct budgeted `.stack_sizes` symbol (a
+    nested closure or generic poll frame alone does not satisfy presence) so
+    LLVM cannot silently inline a wrapper into `main()` and bypass budgeting.
 
     Returns `(exit_code, headline, detail_lines)`.
     """
@@ -707,6 +777,18 @@ def evaluate_stack_sizes(text: str) -> tuple[int, str, list[str]]:
             f"stack_budget: expected shipped buckets missing from .stack_sizes: {', '.join(missing)}",
             [],
         )
+
+    if required_wrappers:
+        direct_wrappers = {
+            w for _, sym in entries if (w := _direct_probe_wrapper(sym)) is not None
+        }
+        missing_wrappers = [w for w in required_wrappers if w not in direct_wrappers]
+        if missing_wrappers:
+            return (
+                1,
+                f"stack_budget: required probe wrappers missing from budgeted .stack_sizes: {', '.join(missing_wrappers)}",
+                [],
+            )
 
     summary = ", ".join(
         f"{bucket}={sz}B" for bucket, (sz, _) in sorted(max_by_bucket.items())
@@ -812,7 +894,10 @@ def main() -> int:
         text=True,
         check=True,
     )
-    code, headline, details = evaluate_stack_sizes(proc.stdout)
+    code, headline, details = evaluate_stack_sizes(
+        proc.stdout,
+        required_wrappers=EXPECTED_PROBE_WRAPPERS,
+    )
     stream = sys.stdout if code == 0 else sys.stderr
     print(headline, file=stream)
     for line in details:

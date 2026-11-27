@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -909,8 +910,21 @@ class Artifacts(unittest.TestCase):
                     z.writestr(name, data)
             return archive.getvalue()
 
-        one = zipped({f"dist/{crate}": b"the commit's crate", f"dist/{crate}.sha256": b"a sha256", f"dist/{crate}.b3": b"a b3", "dist/b3sum-x86": b"a program", "dist/b3sum-x86.sha256": b"a digest", "dist/b3sum-x86.b3": b"a b3 digest", "dist/notes.txt": b"aside"})
-        same = zipped({f"dist/{crate}": b"the commit's crate", "dist/b3sum-arm": b"another program"})
+        def digest_pair(name, data):
+            return {
+                f"{name}.sha256": f"{hashlib.sha256(data).hexdigest()}  {os.path.basename(name)}\n".encode(),
+                f"{name}.b3": f"{check.release_artifacts.blake3_ref.blake3_hex(data)}  {os.path.basename(name)}\n".encode(),
+            }
+
+        crate_bytes = b"the commit's crate"
+        prog_bytes = b"a program"
+        one = zipped({
+            f"dist/{crate}": crate_bytes,
+            **digest_pair(f"dist/{crate}", crate_bytes),
+            "dist/b3sum-x86": prog_bytes,
+            **digest_pair("dist/b3sum-x86", prog_bytes),
+        })
+        same = zipped({f"dist/{crate}": crate_bytes, "dist/b3sum-arm": b"another program"})
         other = zipped({f"dist/{crate}": b"another crate", "dist/b3sum-arm": b"another program"})
         for archives in ([("b3sum-x86", one), ("b3sum-arm", other)], [("b3sum-arm", other), ("b3sum-x86", one)]):
             with self.subTest(first=archives[0][0]), tempfile.TemporaryDirectory() as into:
@@ -920,8 +934,119 @@ class Artifacts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as into:
             self.assertEqual(check.unpack_builds([("b3sum-x86", one), ("b3sum-arm", same)], into), [])
             self.assertEqual(sorted(os.listdir(into)), ["b3sum-arm", "b3sum-x86"])
-            self.assertEqual(sorted(os.listdir(Path(into) / "b3sum-x86")), sorted(["b3sum-x86", crate]), "programs and crates, no digest file, nothing else")
-            self.assertEqual((Path(into) / "b3sum-x86" / crate).read_bytes(), b"the commit's crate")
+            self.assertEqual(sorted(os.listdir(Path(into) / "b3sum-x86")), sorted(["b3sum-x86", crate]), "validated programs and crates extracted")
+            self.assertEqual((Path(into) / "b3sum-x86" / crate).read_bytes(), crate_bytes)
+        # Flat root-level layout (as GitHub upload-artifact produces for `path: dist/`) passes too.
+        with tempfile.TemporaryDirectory() as into:
+            flat_crate = zipped({crate: crate_bytes, **digest_pair(crate, crate_bytes)})
+            self.assertEqual(
+                check.unpack_builds([("crates-X64", flat_crate), ("crates-ARM64", flat_crate)], into, expected_names=("crates-X64", "crates-ARM64")),
+                [],
+            )
+        # Unflattened ZIP inventory validation: reject unknown entries, nested/mixed paths, symlinks, and bad sidecars.
+        with tempfile.TemporaryDirectory() as into:
+            stray = zipped({f"dist/{crate}": crate_bytes, "dist/notes.txt": b"aside"})
+            differ = check.unpack_builds([("crates-X64", stray), ("crates-ARM64", zipped({f"dist/{crate}": crate_bytes}))], into)
+            self.assertTrue(any("notes.txt" in d and "unexpected file" in d for d in differ), differ)
+            self.assertFalse((Path(into) / "crates-X64").exists(), "rejected archive must not extract files")
+        with tempfile.TemporaryDirectory() as into:
+            nested = zipped({f"dist/sub/{crate}": crate_bytes})
+            differ = check.unpack_builds([("crates-X64", nested), ("crates-ARM64", zipped({f"dist/{crate}": crate_bytes}))], into)
+            self.assertTrue(any("unexpected path layout" in d for d in differ), differ)
+        with tempfile.TemporaryDirectory() as into:
+            mixed = zipped({crate: crate_bytes, f"dist/other-{crate}": crate_bytes})
+            differ = check.unpack_builds([("crates-X64", mixed), ("crates-ARM64", zipped({crate: crate_bytes}))], into)
+            self.assertTrue(any("mixes root and dist/" in d for d in differ), differ)
+        with tempfile.TemporaryDirectory() as into:
+            bad_sha = zipped({f"dist/{crate}": crate_bytes, f"dist/{crate}.sha256": b"0" * 64 + f"  {crate}\n".encode()})
+            differ = check.unpack_builds([("crates-X64", bad_sha), ("crates-ARM64", zipped({f"dist/{crate}": crate_bytes}))], into)
+            self.assertTrue(any("is not the SHA-256 line" in d for d in differ), differ)
+        with tempfile.TemporaryDirectory() as into:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as z:
+                info = zipfile.ZipInfo(f"dist/{crate}")
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                z.writestr(info, "target")
+            differ = check.unpack_builds([("crates-X64", buf.getvalue()), ("crates-ARM64", zipped({f"dist/{crate}": crate_bytes}))], into)
+            self.assertTrue(any("no plain file" in d for d in differ), differ)
+        # Release-aware builder inventory check:
+        # 1. Pre-split release: b3sum-X64 holding the ARM64 binary fails as an unexpected file.
+        with tempfile.TemporaryDirectory() as into, patch.object(check.release_artifacts, "CRATE_DIRS", ("",)):
+            rel = check.release_artifacts.Release(f"v0.3.0+{self.code}", str(self.repo), self.commit)
+            self.assertTrue(rel.has_b3sum())
+            wrong_target = zipped({f"dist/{crate}": crate_bytes, f"dist/b3sum-v0.3.0+{self.code}-aarch64-unknown-linux-gnu": prog_bytes})
+            good_arm = zipped({f"dist/{crate}": crate_bytes, f"dist/b3sum-v0.3.0+{self.code}-aarch64-unknown-linux-gnu": prog_bytes})
+            differ = check.unpack_builds(
+                [("b3sum-X64", wrong_target), ("b3sum-ARM64", good_arm)],
+                into,
+                expected_names=("b3sum-X64", "b3sum-ARM64"),
+                release=rel,
+            )
+            self.assertTrue(any("unexpected file" in d for d in differ), differ)
+        # 2. Post-split release: crates-X64 holding any b3sum binary fails as an unexpected file,
+        #    and incomplete/empty builder inventories fail before extracting anything.
+        with tempfile.TemporaryDirectory() as into, patch.object(check.release_artifacts, "CRATE_DIRS", ("",)), \
+             patch.object(check.release_artifacts.Release, "has_b3sum", return_value=False):
+            rel = check.release_artifacts.Release(f"v0.3.0+{self.code}", str(self.repo), self.commit)
+            stray_prog = zipped({f"dist/{crate}": crate_bytes, f"dist/b3sum-v0.3.0+{self.code}-x86_64-unknown-linux-gnu": prog_bytes})
+            differ = check.unpack_builds(
+                [("crates-X64", stray_prog), ("crates-ARM64", zipped({f"dist/{crate}": crate_bytes}))],
+                into,
+                expected_names=("crates-X64", "crates-ARM64"),
+                release=rel,
+            )
+            self.assertTrue(any("unexpected file" in d for d in differ), differ)
+            self.assertEqual(os.listdir(into), [], "no files written when any builder fails")
+            # Two empty zips must fail (missing required crate).
+            empty_zip = zipped({})
+            differ = check.unpack_builds(
+                [("crates-X64", empty_zip), ("crates-ARM64", empty_zip)],
+                into,
+                expected_names=("crates-X64", "crates-ARM64"),
+                release=rel,
+            )
+            self.assertTrue(any("missing required release artifact" in d for d in differ), differ)
+            self.assertEqual(os.listdir(into), [])
+        # 3. Incomplete multi-crate inventory (both builders supply 1 of 2 required crates) fails.
+        with tempfile.TemporaryDirectory() as into, \
+             patch.object(check.release_artifacts.Release, "has_b3sum", return_value=False), \
+             patch.object(check.release_artifacts.Release, "crate_dirs", return_value=("", "second")), \
+             patch.object(check.release_artifacts.Release, "crate", side_effect=lambda d: "second-crate" if d == "second" else "top-crate"):
+            rel = check.release_artifacts.Release(f"v0.3.0+{self.code}", str(self.repo), self.commit)
+            one_only = zipped({f"dist/{crate}": crate_bytes})
+            differ = check.unpack_builds(
+                [("crates-X64", one_only), ("crates-ARM64", one_only)],
+                into,
+                expected_names=("crates-X64", "crates-ARM64"),
+                release=rel,
+            )
+            self.assertTrue(any("second-crate" in d and "missing required release artifact" in d for d in differ), differ)
+            self.assertEqual(os.listdir(into), [])
+        # 4. Unsafe / duplicate / unexpected builder names and NUL-truncated ZIP names cause zero writes.
+        with tempfile.TemporaryDirectory() as into:
+            valid = zipped({f"dist/{crate}": crate_bytes})
+            differ = check.unpack_builds([("../escape", valid), ("crates-ARM64", valid)], into)
+            self.assertTrue(any("unsafe builder artifact name" in d for d in differ), differ)
+            self.assertEqual(os.listdir(into), [])
+            differ = check.unpack_builds([("crates-X64", valid), ("crates-X64", valid)], into)
+            self.assertTrue(any("duplicate builder artifact" in d for d in differ), differ)
+            self.assertEqual(os.listdir(into), [])
+            differ = check.unpack_builds(
+                [("crates-X64", valid), ("crates-ARM64", valid), ("crates-EXTRA", valid)],
+                into,
+                expected_names=("crates-X64", "crates-ARM64"),
+            )
+            self.assertTrue(any("unexpected builder artifact crates-EXTRA" in d for d in differ), differ)
+            self.assertEqual(os.listdir(into), [])
+            # NUL-truncated ZIP entry name (orig_filename != filename in raw ZIP bytes) is rejected.
+            nul_buf = io.BytesIO()
+            sentinel = f"dist/{crate}!evil.sh"
+            with zipfile.ZipFile(nul_buf, "w") as z:
+                z.writestr(sentinel, crate_bytes)
+            raw_zip = nul_buf.getvalue().replace(sentinel.encode(), f"dist/{crate}\x00evil.sh".encode())
+            differ = check.unpack_builds([("crates-X64", raw_zip), ("crates-ARM64", valid)], into)
+            self.assertTrue(any("NUL-containing" in d for d in differ), differ)
+            self.assertEqual(os.listdir(into), [])
         # Post-split builder validation: two X64 builders without ARM64 must fail.
         with tempfile.TemporaryDirectory() as into:
             crate_only = zipped({f"dist/{crate}": b"the commit's crate"})

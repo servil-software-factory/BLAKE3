@@ -4,10 +4,16 @@ name: release artifacts
 # version commit: crates.io's packages file by file against the commit
 # (tools/release_artifacts.py), and byte for byte what these two machines
 # package from the tag (tools/crates-release.sh, whose archives are
-# reproducible): a crate with other code or lock metadata fails here
-# whatever it says of itself. The tag itself is held to the code commit its
-# name gives and to main's history: a moved tag fails. Run when a release
-# is published, and by hand for any release's tag.
+# reproducible; historical pre-split tags carrying b3sum/Cargo.toml such as
+# v0.10.0 and v0.11.0 run their pinned container build recipe instead): an
+# artifact with other code or lock metadata fails here whatever it says of
+# itself. The tag is verified against main's history and its version-only
+# delta before either builder runs any code from the tag, and every job pins
+# the exact verified commit SHA. Run automatically when a release is
+# published (note: GitHub runs `release: published` from the tag's own
+# workflow revision; for authoritative verification independent of the tag,
+# trigger `workflow_dispatch` on `main` or run `tools/release_artifacts.py`
+# from a trusted `main` checkout).
 on:
   release:
     types: [published]
@@ -21,8 +27,69 @@ permissions:
   contents: read
 
 jobs:
+  verify-tag:
+    name: verify release tag ancestry and version-only delta
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      main_sha: ${{ steps.verify.outputs.main_sha }}
+      commit: ${{ steps.verify.outputs.commit }}
+      code: ${{ steps.verify.outputs.code }}
+      has_b3sum: ${{ steps.verify.outputs.has_b3sum }}
+      prefix: ${{ steps.verify.outputs.prefix }}
+    steps:
+    # Check out main (never the tag) so tag validation runs from a trusted
+    # branch before either builder executes any script from the tag.
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        ref: main
+        fetch-depth: 0
+    - name: Verify tag format, main ancestry, parent, and version-only diff
+      id: verify
+      shell: bash
+      env:
+        TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\+[0-9a-f]{40}$ ]]; then
+          echo "not a release tag (vX.Y.Z+<40 hex>): $TAG" >&2
+          exit 1
+        fi
+        main_sha=$(git rev-parse HEAD)
+        git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main "refs/tags/$TAG:refs/tags/$TAG"
+        commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+        code="${TAG#*+}"
+        if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+          echo "tag $TAG commit $commit is not in origin/main's history" >&2
+          exit 1
+        fi
+        parent=$(git rev-parse --verify "${commit}^")
+        if [[ "$parent" != "$code" ]]; then
+          echo "tag $TAG commit $commit parent $parent does not match tag code commit $code" >&2
+          exit 1
+        fi
+        python3 -c '
+        import sys
+        sys.path.insert(0, "tools")
+        import release_artifacts as ra
+        ra.Release(sys.argv[1], commit=sys.argv[2])
+        ' "$TAG" "$commit"
+        if git cat-file -e "${commit}:b3sum/Cargo.toml" 2>/dev/null; then
+          has_b3sum=true
+          prefix=b3sum
+        else
+          has_b3sum=false
+          prefix=crates
+        fi
+        printf 'main_sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
+        printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+        printf 'code=%s\n' "$code" >> "$GITHUB_OUTPUT"
+        printf 'has_b3sum=%s\n' "$has_b3sum" >> "$GITHUB_OUTPUT"
+        printf 'prefix=%s\n' "$prefix" >> "$GITHUB_OUTPUT"
+
   build:
-    name: crates, packaged again from the tag
+    name: release artifacts, rebuilt from the verified commit
+    needs: verify-tag
     strategy:
       fail-fast: false
       matrix:
@@ -32,41 +99,54 @@ jobs:
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
-        ref: ${{ github.event.release.tag_name || inputs.tag }}
-        # The version commit and its parent, which it names.
+        ref: ${{ needs.verify-tag.outputs.commit }}
+        # The verified version commit and its parent, which it names.
         fetch-depth: 2
-    - run: sh tools/ci-rust.sh stable
-    - run: sh tools/crates-release.sh --no-verify
+    # Historical pre-split tags (v0.10.0, v0.11.0) carry b3sum/Cargo.toml and
+    # build both b3sum binaries and all four crates in their pinned container.
+    # Post-split library-only tags (v0.12.0+) package the three library crates.
+    - name: Build historical pre-split b3sum and crates in pinned container
+      if: needs.verify-tag.outputs.has_b3sum == 'true'
+      run: docker run --rm -v "$PWD":/src -w /src "$(sed -n 's/^image //p' tools/b3sum-release.toolchain)" sh tools/b3sum-release-container.sh
+    - name: Install Rust toolchain (library-only release)
+      if: needs.verify-tag.outputs.has_b3sum != 'true'
+      run: sh tools/ci-rust.sh stable
+    - name: Package library crates (library-only release)
+      if: needs.verify-tag.outputs.has_b3sum != 'true'
+      run: sh tools/crates-release.sh --no-verify
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: crates-${{ runner.arch }}
+        name: ${{ needs.verify-tag.outputs.prefix }}-${{ runner.arch }}
         path: dist/
+        if-no-files-found: error
 
   clean:
     name: every published artifact is a clean build of the version commit
-    needs: build
+    needs: [verify-tag, build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+    # Check out the exact trusted main SHA verified in verify-tag so every
+    # historical (v0.10.0, v0.11.0) and post-split (v0.12.0+) release runs
+    # the same current checker with --commit and --builders NAME=TARGET.
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
-        ref: ${{ github.event.release.tag_name || inputs.tag }}
-        # The tag and its commit's files, to compare the crates with.
+        ref: ${{ needs.verify-tag.outputs.main_sha }}
         fetch-depth: 0
-    # The checker is the code commit's, which the tag's name gives by its
-    # hash: the tag's own commit is what is being checked, and a forged one
-    # could bring a checker that passes it. The check then holds the tag's
-    # commit to that code commit with the version written in, so what the
-    # jobs above built with was the code commit's too.
-    - name: Take the checker from the code commit in the tag's name
+    - name: Fetch main and verify tag still resolves to verified commit
+      shell: bash
       env:
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        COMMIT: ${{ needs.verify-tag.outputs.commit }}
       run: |
-        # main by name, whatever the checkout above fetched: the check asks
-        # whether the tag's commit is in its history (BLAKE3 #438).
-        git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
-        git checkout --quiet --detach "${TAG#*+}"
-        test -f tools/release_artifacts.py || { echo "this release is from before the check (0.9.0 and earlier): run a later commit's checker on its tag by hand"; exit 1; }
+        set -euo pipefail
+        git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main "refs/tags/$TAG:refs/tags/$TAG"
+        current=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+        if [[ "$current" != "$COMMIT" ]]; then
+          echo "tag $TAG moved from $COMMIT to $current during verification" >&2
+          exit 1
+        fi
+        test -f tools/release_artifacts.py || { echo "trusted main commit has no tools/release_artifacts.py" >&2; exit 1; }
     # Each job's files in a folder of their own under rebuilt/, not merged
     # into one: merged, the later job's crates replace the earlier job's
     # unread, and a builder whose crate differed would go unseen. The
@@ -75,17 +155,19 @@ jobs:
     # artifacts' names): each must have left its folder, with every crate.
     - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       with:
-        pattern: crates-*
+        pattern: ${{ needs.verify-tag.outputs.prefix }}-*
         path: rebuilt
-    - name: tools/release_artifacts.py TAG --published --rebuilt rebuilt --builders crates-X64=x86_64-unknown-linux-gnu,crates-ARM64=aarch64-unknown-linux-gnu
+    - name: tools/release_artifacts.py TAG --commit COMMIT --published --rebuilt rebuilt --builders
       env:
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        COMMIT: ${{ needs.verify-tag.outputs.commit }}
+        PREFIX: ${{ needs.verify-tag.outputs.prefix }}
         GITHUB_TOKEN: ${{ github.token }}
-      run: python3 tools/release_artifacts.py "$TAG" --published --rebuilt rebuilt --builders crates-X64=x86_64-unknown-linux-gnu,crates-ARM64=aarch64-unknown-linux-gnu
+      run: python3 tools/release_artifacts.py "$TAG" --commit "$COMMIT" --published --rebuilt rebuilt --builders "${PREFIX}-X64=x86_64-unknown-linux-gnu,${PREFIX}-ARM64=aarch64-unknown-linux-gnu"
 
   close-milestone:
     name: close the release's completed milestone
-    needs: clean
+    needs: [verify-tag, clean]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -95,18 +177,12 @@ jobs:
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
-        ref: ${{ github.event.release.tag_name }}
-        fetch-depth: 2
-    - name: Take the milestone helper from the code commit in the tag's name
-      env:
-        TAG: ${{ github.event.release.tag_name }}
-      run: |
-        git checkout --quiet --detach "${TAG#*+}"
-        test -f tools/close_release_milestone.py || { echo "release predates tools/close_release_milestone.py; skipping"; exit 0; }
+        ref: ${{ needs.verify-tag.outputs.code }}
+        fetch-depth: 1
     - name: close completed milestone for TAG
       env:
         TAG: ${{ github.event.release.tag_name }}
         GITHUB_TOKEN: ${{ github.token }}
       run: |
-        test -f tools/close_release_milestone.py || exit 0
+        test -f tools/close_release_milestone.py || { echo "release predates tools/close_release_milestone.py; skipping"; exit 0; }
         python3 tools/close_release_milestone.py "$TAG"

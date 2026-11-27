@@ -411,7 +411,8 @@ use stack_vec::StackVec;
 /// This build's version: the crate's version, and for any build but a
 /// release's own commit, the commit built and, from a dirty tree, the Git
 /// tree id of its working tree, e.g. `0.8.0+dev.<commit>.dirty.<tree>`.
-/// `b3sum --version` and the C library's `b3_version()` print it.
+/// The C library's `b3_version()` prints it (the standalone
+/// `servil-software-factory/b3sum` tool prints its own build version).
 pub use blake3_servil_version::BUILD_VERSION;
 
 /// The number of bytes in a [`struct@Hash`], 32.

@@ -20,11 +20,10 @@ Every copy of the version carries it in full, hash included, whether or
 not today's tools check it, since future tools may (Zooko, October 20):
 both libraries (crates.io, their docs) and their build version's crate
 (version/, its exact dependency), the tag, and, where the repository has
-them, the CHANGELOG's title, b3sum's own version (`b3sum --version`) and
-its exact requirement on the crate (`=X.Y.Z+<hash>`: Cargo reads it up to
-the `+` today, and warns), the C library's crate (`b3_version()`), header
-(`B3_VERSION`); cargo-c generates the pkg-config version from the crate.
-The soname alone takes X.Y: its format holds digits and dots.
+them, the CHANGELOG's title, the C library's crate (`b3_version()`), header
+(`B3_VERSION`), and `tools/release/Cargo.lock`; cargo-c generates the
+pkg-config version from the crate. The soname alone takes X.Y: its format
+holds digits and dots.
 
 A release's version names its code, so the commits after it must not keep
 it: the first change after a release, on any branch, sets X.Y.Z+dev
@@ -185,8 +184,8 @@ def check_index_unlocked():
 
 def stamped(full, message, notes=True):
     """The version written into the stamp's files and committed, whole or
-    not at all: where it stops after it has written (Cargo's update of
-    b3sum's lock fails, a copy does not agree, the commit is refused),
+    not at all: where it stops after it has written (the release lock
+    update fails, a copy does not agree, the commit is refused),
     its files go back as they were, and only they. Returns `(parent, commit, snapshot)`."""
     check_index_unlocked()
     files = stamp_files(notes)
@@ -310,7 +309,7 @@ parent, stamp, snapshot = stamped(full, f"Version {full}")
 # The release check's own reading of a version commit, before the tag
 # names this one: its parent with the version written in, and nothing
 # else. A stamp can write more than that where a tool it runs rewrites a
-# whole file (Cargo's update of b3sum's lock drops a comment there), and
+# whole file (such as Cargo updating a lockfile), and
 # the release check then refused a tag that already stood. The tag names
 # the commit that was read, whatever the branch's last commit is by then.
 try:

@@ -193,7 +193,7 @@ def sync_charts(
     git_ref: str | None = None,
     allow_mismatch: bool = False,
 ) -> tuple[str, str]:
-    """Copy both SVGs from `bench` into `repo/docs/images/` after validation."""
+    """Copy the README benchmark SVG from `bench` into `repo/docs/images/` after validation."""
     cargo_toml = (repo / "Cargo.toml").read_text(encoding="utf-8")
     source_name, texts = (
         _load_from_bench_git(bench, git_ref, machine_prefix)
@@ -209,9 +209,9 @@ def sync_charts(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sync or check the README benchmark SVGs.")
+    parser = argparse.ArgumentParser(description="Sync or check the README benchmark SVG.")
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent, help="BLAKE3 repository root")
-    parser.add_argument("--check", nargs="?", const="", metavar="COMMIT", help="verify both SVGs match Cargo.toml (working tree or COMMIT)")
+    parser.add_argument("--check", nargs="?", const="", metavar="COMMIT", help="verify the README benchmark SVG matches Cargo.toml (working tree or COMMIT)")
     parser.add_argument("--bench", type=Path, default=None, help="bench-hashes checkout (default: <repo>/../bench-hashes)")
     parser.add_argument("--git-ref", default=None, help="read charts from a git ref in --bench instead of its working tree")
     parser.add_argument("--machine", default="AMDEPYC9255", help="machine directory prefix under benchmark-results/ (default: AMDEPYC9255)")

@@ -42,19 +42,18 @@ and the rest timed out or have no verdict.
     packages' dry-run in CONTRIBUTING.md, followed by "publish-dry-run: ok"
     only on success.
 - The release's artifacts, gathered in this checkout's dist/ before any
-  is published: b3sum for each machine (tools/b3sum-release.sh writes it
-  there) and the four crates' archives (the packages' dry-run's, copied
-  there), each a clean build of this commit by tools/release_artifacts.py:
-  the programs by the build version they hold and, byte for byte, by the
-  builds GitHub's machines made of the commit in the CI run above (the
-  build is reproducible, so two honest builders agree, and neither's
-  word is taken alone); the crates file by file against the commit. 0.9.0's two b3sum programs were built in checkouts
+  is published: the three library crates' archives (`tools/crates-release.sh`,
+  plus `b3sum` binaries and `b3sums` crate for historical pre-split tags
+  through 0.11.0), each a clean build of this commit by
+  `tools/release_artifacts.py`: file by file against the commit and, byte
+  for byte, matching both Linux CI builders in the CI run above (the
+  packaging is reproducible, so two honest builders agree, and neither's
+  word is taken alone). 0.9.0's two b3sum programs were built in checkouts
   holding untracked files and say "dirty" (BLAKE3 #435); no step looked.
 - The pages: README.md, QUALITY.md, CHANGELOG.md changed since the
   previous release (a release rewrites them for its readers), and the
-  README benchmark SVGs (`docs/images/hash-epyc-128mib.svg`,
-  `docs/images/b3sum-epyc-1000-files.svg`) match this release's X.Y.Z
-  version (`python3 tools/sync_readme_charts.py`).
+  README benchmark SVG (`docs/images/hash-epyc-128mib.svg`) matches this
+  release's X.Y.Z version (`python3 tools/sync_readme_charts.py`).
 
 By default the previous release is the nearest reachable v* tag other
 than the candidate. If a patch release is on a separate line, pass its
@@ -200,53 +199,195 @@ def expected_builders(release):
     return [f"{prefix}-X64=x86_64-unknown-linux-gnu", f"{prefix}-ARM64=aarch64-unknown-linux-gnu"]
 
 
-def unpack_builds(archives, into, expected_names=None):
-    """Write each CI builder zip's b3sum programs and crates into its own
-    subfolder under `into` (`into/<artifact>/`), and name where the builders
-    do not bear each other out. Both Linux builders package the crates, and
-    each crate is to be the same bytes from both:
-    - a required builder missing, or an unexpected builder present;
+def _safe_builder_name(name):
+    """Whether `name` is a single safe path component (no slashes, NUL, or dot dirs)."""
+    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name and "\x00" not in name
+
+
+def _validate_zip_inventory(artifact, files, required_primary=None, optional_sidecars=None):
+    """Validate an unflattened CI builder ZIP inventory before extracting
+    anything: rejects NUL-truncated or normalized entry names, duplicate entry
+    names or basenames, unsafe/nested/mixed paths, symlinks or non-regular
+    file kinds, empty inventories, missing required primary artifacts,
+    unexpected files outside the builder's allowed release artifacts and
+    their .sha256/.b3 sidecars, and orphan or mismatched digest sidecars.
+
+    Returns `(validated_files, problems)` where `validated_files` is a list of
+    `(base, data)` tuples for the builder's release artifacts (programs and
+    crates), empty when `problems` is non-empty."""
+    infos = files.infolist()
+    raw_names = [getattr(info, "orig_filename", info.filename) for info in infos]
+    problems = []
+    for name in sorted({n for n in raw_names if raw_names.count(n) > 1}):
+        problems.append(f"{os.path.basename(name)} ({artifact} holds it {raw_names.count(name)} times)")
+
+    prefixes = set()
+    seen_bases = {}
+    file_entries = []
+    for info in infos:
+        orig_name = getattr(info, "orig_filename", info.filename)
+        name = info.filename
+        if orig_name != name or "\x00" in orig_name:
+            problems.append(f"{orig_name!r} ({artifact} holds a normalized or NUL-containing entry name)")
+            continue
+        mode = info.external_attr >> 16
+        fmt = stat.S_IFMT(mode)
+        if "\\" in name or name.startswith("/") or ".." in name.split("/"):
+            problems.append(f"{name} ({artifact} holds an unsafe path)")
+            continue
+        if info.is_dir():
+            if fmt not in (0, stat.S_IFDIR):
+                problems.append(f"{name} ({artifact} holds what is no plain directory)")
+            elif name != "dist/":
+                problems.append(f"{name} ({artifact} holds an unexpected directory)")
+            continue
+        if fmt not in (0, stat.S_IFREG):
+            problems.append(f"{name} ({artifact} holds what is no plain file)")
+            continue
+        parts = name.split("/")
+        if len(parts) == 1 and parts[0]:
+            prefix, base = "", parts[0]
+        elif len(parts) == 2 and parts[0] == "dist" and parts[1]:
+            prefix, base = "dist/", parts[1]
+        else:
+            problems.append(f"{name} ({artifact} holds an unexpected path layout)")
+            continue
+        prefixes.add(prefix)
+        if base in seen_bases:
+            # Avoid duplicating the raw-name duplicate message already recorded above.
+            if seen_bases[base] != name:
+                problems.append(f"{base} ({artifact} holds duplicate entries {seen_bases[base]} and {name})")
+            continue
+        seen_bases[base] = name
+        file_entries.append((base, info))
+
+    if len(prefixes) > 1:
+        problems.append(f"{artifact} mixes root and dist/ layouts")
+    if problems:
+        return [], problems
+
+    allowed_files = (required_primary | (optional_sidecars or set())) if required_primary is not None else None
+    artifact_bytes = {}
+    digest_entries = []
+    for base, info in file_entries:
+        if allowed_files is not None and base not in allowed_files:
+            problems.append(f"{base} ({artifact} holds an unexpected file)")
+            continue
+        if release_artifacts.is_digest(base):
+            digest_entries.append((base, info))
+            continue
+        if not (base.startswith("b3sum-") or base.endswith(".crate")):
+            problems.append(f"{base} ({artifact} holds an unexpected file)")
+            continue
+        artifact_bytes[base] = files.read(info)
+
+    if required_primary is not None:
+        missing = sorted(required_primary - set(artifact_bytes))
+        for name in missing:
+            problems.append(f"{name} ({artifact} is missing required release artifact)")
+    elif not artifact_bytes:
+        problems.append(f"{artifact} holds no release artifacts")
+
+    for base, info in digest_entries:
+        data = files.read(info)
+        for p in release_artifacts.digest_problems(base, data, artifact_bytes):
+            problems.append(f"{base} ({artifact}: {p})")
+
+    if problems:
+        return [], problems
+    return sorted(artifact_bytes.items()), []
+
+
+def unpack_builds(archives, into, expected_names=None, release=None):
+    """Validate every CI builder name and complete unflattened zip inventory
+    before extracting any files into `into/<artifact>/`, and name where the
+    builders do not bear each other out. Rejects:
+    - unsafe, repeated, missing, or unexpected builder artifact names (no
+      files or directories created for rejected builders);
+    - NUL-truncated/unsafe paths, nested or mixed layouts, symlinks or
+      non-regular entries, empty zips, missing required release artifacts,
+      unexpected files, or orphan/mismatched digest sidecars;
+    - a zip that holds a name or basename twice;
     - a crate two builders made with different bytes;
     - a crate one builder made and another builder of crates did not;
-    - crates from one builder alone;
-    - a zip that holds a name twice."""
+    - crates from one builder alone."""
     made_by, made_bytes, crates, differ = {}, {}, {}, []
-    seen_builders = []
+    seen_builders = set()
+    rejected_builders = set()
+    expected_set = set(expected_names) if expected_names is not None else None
+    required_by_builder = None
+    sidecars_by_builder = None
+    if release is not None:
+        crate_names = {f"{release.crate(folder)}-{release.version}.crate" for folder in release.crate_dirs()}
+        required_by_builder = {}
+        sidecars_by_builder = {}
+        for spec in expected_builders(release):
+            bname, target = spec.split("=", 1)
+            primary = set(crate_names)
+            if release.has_b3sum():
+                primary.add(f"b3sum-{release.tag}-{target}")
+            required_by_builder[bname] = primary
+            sidecars_by_builder[bname] = {n + suffix for n in primary for suffix in release_artifacts.DIGEST_SUFFIXES}
+        if expected_set is None:
+            expected_set = set(required_by_builder)
+
+    staged = []
     for artifact, archive in archives:
-        seen_builders.append(artifact)
-        sub = os.path.join(into, artifact)
-        os.makedirs(sub, exist_ok=True)
+        if not _safe_builder_name(artifact):
+            rejected_builders.add(artifact)
+            differ.append(f"unsafe builder artifact name {artifact!r}")
+            continue
+        if artifact in seen_builders:
+            rejected_builders.add(artifact)
+            differ.append(f"duplicate builder artifact {artifact}")
+            continue
+        seen_builders.add(artifact)
+        if expected_set is not None and artifact not in expected_set:
+            rejected_builders.add(artifact)
+            differ.append(f"unexpected builder artifact {artifact}")
+            continue
         with zipfile.ZipFile(io.BytesIO(archive)) as files:
-            names = files.namelist()
-            for name in sorted({n for n in names if names.count(n) > 1}):
-                differ.append(f"{os.path.basename(name)} ({artifact} holds it {names.count(name)} times)")
-            for name in names:
-                base = os.path.basename(name)
-                if not (base.startswith("b3sum-") or name.endswith(".crate")) or release_artifacts.is_digest(name):
-                    continue
-                if name.endswith(".crate"):
-                    crates.setdefault(artifact, set()).add(base)
-                data = files.read(name)
-                with open(os.path.join(sub, base), "wb") as f:
-                    f.write(data)
-                if base in made_by:
-                    if made_bytes[base] != data:
-                        differ.append(f"{base} ({made_by[base]} and {artifact})")
-                    continue
-                made_by[base] = artifact
-                made_bytes[base] = data
-    if expected_names is not None:
-        want = set(expected_names)
-        for missing in sorted(want - set(seen_builders)):
+            req_primary = required_by_builder[artifact] if required_by_builder is not None else None
+            opt_sidecars = sidecars_by_builder[artifact] if sidecars_by_builder is not None else None
+            validated, zip_problems = _validate_zip_inventory(
+                artifact, files, required_primary=req_primary, optional_sidecars=opt_sidecars
+            )
+        if zip_problems:
+            rejected_builders.add(artifact)
+            differ.extend(zip_problems)
+            continue
+        staged.append((artifact, validated))
+
+    if expected_set is not None:
+        for missing in sorted(expected_set - seen_builders):
             differ.append(f"builder {missing} is absent from CI's artifacts")
-        for extra in sorted(set(seen_builders) - want):
-            differ.append(f"unexpected builder artifact {extra}")
+
+    # Compare validated artifacts across builders and extract only validated entries.
+    for artifact, validated in staged:
+        for base, data in validated:
+            if base.endswith(".crate"):
+                crates.setdefault(artifact, set()).add(base)
+            if base in made_by:
+                if made_bytes[base] != data:
+                    differ.append(f"{base} ({made_by[base]} and {artifact})")
+                continue
+            made_by[base] = artifact
+            made_bytes[base] = data
+
     every = set().union(*crates.values()) if crates else set()
     for artifact in sorted(crates):
         for base in sorted(every - crates[artifact]):
             differ.append(f"{base} ({made_by[base]} made it and {artifact} did not)")
-    if len(crates) == 1:
+    if len(crates) == 1 and not rejected_builders:
         differ.append(f"the crates ({next(iter(crates))} alone made them: no second builder bears them out)")
+
+    if not differ:
+        for artifact, validated in staged:
+            sub = os.path.join(into, artifact)
+            os.makedirs(sub, exist_ok=True)
+            for base, data in validated:
+                with open(os.path.join(sub, base), "wb") as f:
+                    f.write(data)
     return differ
 
 
@@ -266,7 +407,7 @@ def ci_builds(run, into, release=None):
             yield artifact["name"], subprocess.run(["gh", "api", f"repos/servil-software-factory/BLAKE3/actions/artifacts/{artifact['id']}/zip"],
                                                    env={**os.environ, "GH_TOKEN": token}, capture_output=True, check=True, timeout=300).stdout
 
-    return unpack_builds(archives(), into, expected_names=expected_names)
+    return unpack_builds(archives(), into, expected_names=expected_names, release=release)
 
 
 def version_at(commit):
