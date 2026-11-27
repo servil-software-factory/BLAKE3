@@ -1175,3 +1175,114 @@ fn the_pipeline_under_shuttle() {
         scenario();
     }
 }
+
+/// Shuttle model of `lanes::sources::Source`'s lock-free atomic publish/claim
+/// ring protocol (M4): one publisher publishes 6 distinct `(context, arg)`
+/// tickets across a 3-slot ring (two full wrap-around laps), while two
+/// competing claimers snapshot atomic slot fields BEFORE winning
+/// `claimed.compare_exchange_weak` (the exact ordering in `lanes.rs`).
+/// Verifies every ticket is claimed exactly once with its matching payload.
+#[test]
+fn action_ring_publish_claim_two_laps_under_shuttle() {
+    use shuttle::sync::Arc;
+    use shuttle::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+
+    struct Slot {
+        context: AtomicPtr<()>,
+        arg: AtomicU64,
+        near: AtomicBool,
+    }
+    struct Ring {
+        claimed: AtomicUsize,
+        published: AtomicUsize,
+        slots: Box<[Slot]>,
+    }
+    impl Ring {
+        fn new(cap: usize) -> Self {
+            Self {
+                claimed: AtomicUsize::new(0),
+                published: AtomicUsize::new(0),
+                slots: (0..cap)
+                    .map(|_| Slot { context: AtomicPtr::new(core::ptr::null_mut()), arg: AtomicU64::new(0), near: AtomicBool::new(false) })
+                    .collect(),
+            }
+        }
+        fn try_publish(&self, ctx: *const (), arg: u64, near: bool) -> bool {
+            let p = self.published.load(Ordering::Relaxed);
+            if p - self.claimed.load(Ordering::Acquire) >= self.slots.len() {
+                return false;
+            }
+            let slot = &self.slots[p % self.slots.len()];
+            slot.context.store(ctx as *mut (), Ordering::Relaxed);
+            slot.arg.store(arg, Ordering::Relaxed);
+            slot.near.store(near, Ordering::Relaxed);
+            self.published.store(p + 1, Ordering::Release);
+            true
+        }
+        fn take(&self) -> Option<(usize, u64, bool)> {
+            let mut c = self.claimed.load(Ordering::Acquire);
+            loop {
+                let p = self.published.load(Ordering::Acquire);
+                if c >= p {
+                    return None;
+                }
+                let slot = &self.slots[c % self.slots.len()];
+                let ctx = slot.context.load(Ordering::Relaxed) as usize;
+                let arg = slot.arg.load(Ordering::Relaxed);
+                let near = slot.near.load(Ordering::Relaxed);
+                match self.claimed.compare_exchange_weak(c, c + 1, Ordering::AcqRel, Ordering::Acquire) {
+                    Ok(_) => return Some((ctx, arg, near)),
+                    Err(now) => c = now,
+                }
+            }
+        }
+    }
+
+    shuttle::check_pct(
+        || {
+            const TOTAL: usize = 6; // two full laps on a 3-slot ring
+            let ring = Arc::new(Ring::new(3));
+            let done_pub = Arc::new(AtomicBool::new(false));
+            let seen: Arc<Vec<AtomicUsize>> = Arc::new((0..TOTAL).map(|_| AtomicUsize::new(0)).collect());
+
+            let workers: Vec<_> = (0..2)
+                .map(|_| {
+                    let ring = Arc::clone(&ring);
+                    let done_pub = Arc::clone(&done_pub);
+                    let seen = Arc::clone(&seen);
+                    shuttle::thread::spawn(move || {
+                        loop {
+                            if let Some((ctx, arg, near)) = ring.take() {
+                                let idx = arg as usize;
+                                assert!(idx < TOTAL, "corrupt ticket index {idx}");
+                                assert_eq!(ctx, 0x1000 + idx * 17, "context mismatch for ticket {idx}");
+                                assert_eq!(near, idx % 2 == 0, "near mismatch for ticket {idx}");
+                                assert_eq!(seen[idx].fetch_add(1, Ordering::SeqCst), 0, "ticket {idx} claimed twice");
+                            } else if done_pub.load(Ordering::Acquire) && ring.claimed.load(Ordering::Acquire) == TOTAL {
+                                break;
+                            } else {
+                                shuttle::thread::yield_now();
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for idx in 0..TOTAL {
+                let ctx = (0x1000 + idx * 17) as *const ();
+                while !ring.try_publish(ctx, idx as u64, idx % 2 == 0) {
+                    shuttle::thread::yield_now();
+                }
+            }
+            done_pub.store(true, Ordering::Release);
+            for w in workers {
+                w.join().unwrap();
+            }
+            for (idx, count) in seen.iter().enumerate() {
+                assert_eq!(count.load(Ordering::SeqCst), 1, "ticket {idx} must be claimed exactly once");
+            }
+        },
+        400,
+        3,
+    );
+}

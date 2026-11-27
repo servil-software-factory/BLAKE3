@@ -494,13 +494,16 @@ pub(crate) fn ran(kind: Ran) {
 /// that leaves by `_exit` or `exec` drops neither).
 ///
 /// Each thread that makes multithreaded calls keeps a little storage for
-/// them (its piece cut, its job record, and — for tree calls — its chaining-value
-/// scratch, 56 KiB together for up to 1,024 pieces), grown on its first call of
-/// that kind and on the first call that outgrows it, and otherwise untouched: a
-/// tree call that needs no more pieces than an earlier tree call (or than
-/// `prepare_thread` preallocated) allocates nothing, and batch/collection calls
-/// do not grow the chaining-value vector. This call prepares the calling thread's;
-/// a call from another thread prepares that thread's the first time.
+/// them (its piece cut, its job record, and — for pooled tree calls — its
+/// chaining-value scratch; the two 1,024-piece vectors take 56 KiB together,
+/// plus the job record), grown on its first call of that kind and on the first
+/// call that outgrows it, and otherwise untouched: a call whose pieces fit in
+/// its thread's existing piece cut (and, for pooled tree calls including large
+/// items in [`hash_each_multithreaded`](throughput::hash_each_multithreaded),
+/// its existing chaining-value scratch) allocates nothing. Batch jobs and the
+/// small-item pass of `hash_each_multithreaded` do not grow the chaining-value
+/// vector. This call prepares the calling thread's storage for both up to
+/// 1,024 pieces; a call from another thread prepares that thread's on first use.
 ///
 /// ```
 /// blake3_servil::initialize_multithreaded(None);

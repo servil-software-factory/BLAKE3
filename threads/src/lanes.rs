@@ -444,8 +444,8 @@ pub(crate) fn hash_many_over_pool(tree: &TreeHasher, batch: crate::throughput::P
 /// [`crate::throughput::hash_each_multithreaded`]'s pool job: the items under
 /// MIN_SPLIT_LEN (totaling `small_bytes`), cut into ranges of about
 /// [`next_piece_len`] of the bytes that remain, each range hashed by one
-/// thread. An item of MIN_SPLIT_LEN or more is set aside here (its digest
-/// zero, a stand-in) and hashed by the caller over the whole pool after.
+/// thread. An item of MIN_SPLIT_LEN or more is skipped here (its output slot
+/// left untouched) and hashed by the caller over the whole pool after.
 pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block], usize)], small_bytes: usize, out: &mut [[u8; crate::OUT_LEN]]) {
     let Some((pool, _caller)) = spare_pool() else {
         return hash_each_small(tree, items, out);
@@ -2585,6 +2585,23 @@ pub(crate) mod places {
                 }
             }
             assert!(nears >= 2, "a trial tries near: two jobs at the least, where the second finds it hopeless");
+            // M6 control: a mixed collection [256 KiB, 512 KiB, 256 KiB] charges
+            // Kind::Each for only the 512 KiB of small items (not the 1 MiB total)
+            // and hashes the 512 KiB large item separately under Kind::Tree.
+            let small_a = &input[..(256 << 10) / 64];
+            let big = &input[(256 << 10) / 64..(768 << 10) / 64];
+            let small_b = &input[(768 << 10) / 64..(1024 << 10) / 64];
+            let each_before_512k = learned(Kind::Each, 512 << 10);
+            let each_before_1m = learned(Kind::Each, 1 << 20);
+            let tree_before_512k = learned(Kind::Tree, 512 << 10);
+            let mut outs = [[0u8; crate::OUT_LEN]; 3];
+            crate::throughput::hash_each_multithreaded(crate::Mode::Plain, &[(small_a, 256 << 10), (big, 512 << 10), (small_b, 256 << 10)], &mut outs);
+            assert_eq!(outs[0], *crate::convenience::hash(crate::throughput::Block::bytes(small_a)).as_bytes());
+            assert_eq!(outs[1], *crate::convenience::hash(crate::throughput::Block::bytes(big)).as_bytes());
+            assert_eq!(outs[2], *crate::convenience::hash(crate::throughput::Block::bytes(small_b)).as_bytes());
+            assert_ne!(learned(Kind::Each, 512 << 10), each_before_512k, "Each must charge small_bytes (512 KiB)");
+            assert_eq!(learned(Kind::Each, 1 << 20), each_before_1m, "Each must not charge total bytes (1 MiB)");
+            assert_ne!(learned(Kind::Tree, 512 << 10), tree_before_512k, "large item must charge Tree (512 KiB)");
         }
 
         /// A machine of `sockets` sockets, each of `caches` caches of
@@ -3238,7 +3255,7 @@ pub(crate) mod sources {
 
     /// Sources registered at once. A stream or a job that finds none free
     /// is hashed on its own thread.
-    const SLOTS: usize = 64;
+    pub(super) const SLOTS: usize = 64;
 
     static REGISTERED: [AtomicPtr<Source>; SLOTS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; SLOTS];
     static ACTIVE: AtomicU64 = AtomicU64::new(0);
@@ -5117,6 +5134,24 @@ mod test {
         };
         assert!(!sources::open(), "the pipeline dropped: nothing open");
         assert_eq!(digest, crate::convenience::hash(&[7u8; 64]));
+    }
+
+    /// Filling all `sources::LIMIT` slots leaves the next Pipeline unregistered
+    /// (synchronous): dropping all registered Pipelines clears `sources::open()`
+    /// while the unregistered one is still live, and dropping the unregistered
+    /// one must not underflow `OPEN` back to non-zero.
+    #[test]
+    fn test_overflow_unregistered_pipeline_drop_does_not_underflow_sources_open() {
+        use crate::throughput::{Limits, Pipeline};
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+        assert!(!sources::open(), "at rest, nothing is open");
+        let registered: Vec<_> = (0..sources::SLOTS).map(|_| Pipeline::<()>::new(crate::Mode::Plain, Limits { messages: 1, rooms: 0 })).collect();
+        let overflow = Pipeline::<()>::new(crate::Mode::Plain, Limits { messages: 1, rooms: 0 });
+        assert!(sources::open(), "registered pipelines keep sources open");
+        drop(registered);
+        assert!(!sources::open(), "only the unregistered overflow pipeline remains");
+        drop(overflow);
+        assert!(!sources::open(), "dropping an unregistered pipeline must not decrement OPEN");
     }
 
     /// A task of one member runs it alone, whatever its length: the

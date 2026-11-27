@@ -262,6 +262,39 @@ class Reasons(unittest.TestCase):
         )
         self.assertEqual([n for n, _ in ur.debug_assert_without_reason(underscores)], [3])
         self.assertEqual([n for n, _ in ur.without_reason(underscores)], [5])
+        # Const-generic `#[cfg(test)] const N: usize` inside `<...>` must stop
+        # at the enclosing `>` instead of consuming the shipped function body.
+        const_generic_param = (
+            "fn read<#[cfg(test)] const N: usize>(p: *const u8) -> u8 {\n"
+            "    debug_assert!(!p.is_null());\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(const_generic_param)], [2])
+        self.assertEqual([n for n, _ in ur.without_reason(const_generic_param)], [3])
+        # Nested generics ending with `>>>` on a test-only generic parameter
+        # (`fn bounded<#[cfg(test)] T: Into<Vec<u8>>>() { ... }`) must stop
+        # before the enclosing `>` and still check the shipped function body.
+        nested_generic_param = (
+            "pub fn bounded<#[cfg(test)] T: Into<Vec<u8>>>(p: &u8) -> u8 {\n"
+            "    debug_assert!(*p < 10);\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(nested_generic_param)], [2])
+        self.assertEqual([n for n, _ in ur.without_reason(nested_generic_param)], [3])
+        # A multi-line trailing block comment attached to a masked `#[cfg(test)]`
+        # statement must not donate a rationale to the next shipped line.
+        trailing_block_comment = (
+            "pub fn trail(x: u32, p: &u8) -> u8 {\n"
+            "    #[cfg(test)] debug_assert!(x > 0); /* trailing test note\n"
+            "       Debug-only: test-only comment; Sound: test-only comment */\n"
+            "    debug_assert!(x < 10);\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(trailing_block_comment)], [4])
+        self.assertEqual([n for n, _ in ur.without_reason(trailing_block_comment)], [5])
         # Non-ASCII Unicode rationales must still be accepted.
         unicode_ok = (
             "fn f(p: &u8) -> u8 {\n"
