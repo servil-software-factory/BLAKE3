@@ -181,6 +181,13 @@ pub(crate) mod guard {
         pub(crate) fn as_bytes(&self) -> &[u8] {
             self.0.as_bytes()
         }
+
+        /// Raw pointer to the read-only body, for typed struct tables that may
+        /// contain padding bytes and must not be viewed as `&[u8]`.
+        pub(crate) fn as_ptr(&self) -> *const u8 {
+            // Sound: `self.0.start` lies inside the mapped region.
+            unsafe { self.0.base.add(self.0.start) }
+        }
     }
 
     impl Drop for Guarded {
@@ -198,6 +205,6 @@ pub(crate) mod guard {
     /// Guarded storage for `count` 32-byte digests flush against a guard page;
     /// call `.digests()` on the returned owner to borrow `&mut [[u8; OUT_LEN]]`.
     pub(crate) fn digests(count: usize, at_end: bool) -> Guarded {
-        Guarded::new(count * crate::OUT_LEN, at_end)
+        Guarded::new(count.checked_mul(crate::OUT_LEN).expect("guarded digests size overflow"), at_end)
     }
 }

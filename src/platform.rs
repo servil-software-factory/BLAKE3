@@ -141,12 +141,39 @@ impl Drop for Sme2Turn {
 /// What this process has detected. The low byte: the platform `initialize`
 /// detected, as its discriminant (1 and up), or 0 before it has run. Bits 8
 /// and 9: whether the cores are Apple's, and whether that has been asked
-/// (neon_hybrid::apple_cores: AArch64's kernel plans differ by it, the
-/// self-test's too, which runs before the platform is recorded). One word, so that the second answer
-/// costs a call no cache line the first did not already bring: read from
-/// a static of its own, it made calls after a pause 3 to 12% slower on an
-/// AmpereOne (bench-hashes, 64 pairs, #395).
-pub(crate) static DETECTED: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+/// (`apple_cores_cached`: AArch64's kernel plans differ by it, the self-test's
+/// too, which runs before the platform is recorded). One word, private to this
+/// module so no other module can corrupt the low byte that licenses unsafe
+/// instructions, while keeping both answers on one cache line (#395).
+static DETECTED: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+/// Read the high-byte auxiliary cache bits (`bits 8..15`) of `DETECTED`
+/// without exposing the low platform byte.
+#[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
+#[inline]
+pub(crate) fn high_bits() -> u16 {
+    DETECTED.load(core::sync::atomic::Ordering::Relaxed) & 0xff00
+}
+
+/// Set auxiliary cache bits inside the high byte (`bits 8..15`) of `DETECTED`
+/// without ever touching the low platform byte that licenses unsafe kernels.
+#[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
+#[inline]
+pub(crate) fn set_high_bits(bits: u16) {
+    assert_eq!(bits & 0x00ff, 0, "high-byte cache write must not touch low platform byte");
+    DETECTED.fetch_or(bits, core::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn seed_high_bits_for_test(bits: u16) {
+    assert_eq!(bits & 0x00ff, 0, "high-bit test seed must not touch low platform byte");
+    DETECTED.store(bits, core::sync::atomic::Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn high_bits_for_test() -> u16 {
+    DETECTED.load(core::sync::atomic::Ordering::Acquire) & 0xff00
+}
 
 /// DETECTED's word with `platform` in its low byte and its other bits as
 /// they were.
@@ -228,11 +255,12 @@ impl Platform {
     /// platform (throughput::TreeHasher::on_this_core, and the pool's pieces).
     #[inline]
     pub fn own_core() -> Self {
+        let detected = Self::detect();
         #[cfg(target_arch = "aarch64")]
-        if matches!(Self::detect(), Platform::SME2) {
+        if matches!(detected, Platform::SME2) {
             return Platform::NEON;
         }
-        Self::detect()
+        detected
     }
 
     /// Make `self` what [`Platform::detect`] returns from now on, in every
@@ -617,18 +645,31 @@ const fn os_saves_avx(leaf1_ecx: u32) -> bool {
     leaf1_ecx & avx == avx
 }
 
+/// Whether CPUID reports basic or extended `leaf` as supported given the
+/// corresponding maximum leaf (`leaf0.eax` for basic leaves, `0x8000_0000.eax`
+/// for extended leaves).
+#[cfg(target_arch = "x86_64")]
+pub(crate) const fn cpuid_has_leaf(max_leaf: u32, leaf: u32) -> bool {
+    max_leaf >= leaf
+}
+
 #[cfg(target_arch = "x86_64")]
 #[cold]
 fn read_cpu_words() -> CpuWords {
     use core::arch::x86_64 as arch;
+    let leaf0 = arch::__cpuid(0);
+    if !cpuid_has_leaf(leaf0.eax, 1) {
+        return CpuWords::default();
+    }
     let leaf1 = arch::__cpuid(1);
     let mut words = CpuWords { leaf1_eax: leaf1.eax, leaf1_ecx: leaf1.ecx, ..CpuWords::default() };
     if os_saves_avx(leaf1.ecx) {
         // Sound: OSXSAVE (bit 27) says the OS enabled XGETBV.
         words.xcr0 = u32::from_le_bytes(unsafe { arch::_xgetbv(0) }.to_le_bytes()[..4].try_into().unwrap());
-        let (leaf7, leaf0) = (arch::__cpuid_count(7, 0), arch::__cpuid(0));
-        words.leaf7_ebx = leaf7.ebx;
         words.amd = (leaf0.ebx, leaf0.edx, leaf0.ecx) == (0x6874_7541, 0x6974_6e65, 0x444d_4163); // "AuthenticAMD"
+        if cpuid_has_leaf(leaf0.eax, 7) {
+            words.leaf7_ebx = arch::__cpuid_count(7, 0).ebx;
+        }
     }
     words
 }
@@ -1040,6 +1081,13 @@ mod x86_features_test {
         ] {
             assert_eq!(os_saves_avx(ecx), saves, "ecx {ecx:#x}");
         }
+        // Capped basic/extended CPUID ranges must not read absent leaves.
+        assert!(!super::cpuid_has_leaf(0, 1));
+        assert!(super::cpuid_has_leaf(1, 1));
+        assert!(!super::cpuid_has_leaf(6, 7));
+        assert!(super::cpuid_has_leaf(7, 7));
+        assert!(!super::cpuid_has_leaf(0x8000_0000, 0x8000_0001));
+        assert!(super::cpuid_has_leaf(0x8000_0001, 0x8000_0001));
         let words = read_cpu_words();
         assert_eq!(words.leaf1_ecx & (1 << 19) != 0, std::is_x86_feature_detected!("sse4.1"));
         assert_eq!(os_saves_avx(words.leaf1_ecx), std::is_x86_feature_detected!("avx"), "an OS that saves AVX's registers is how std finds AVX");

@@ -388,7 +388,7 @@ mod tests {
                     unsafe { table_ptr.add(i).write(Input { block, cv, len: inputs[i].len, flags: inputs[i].flags }) };
                 }
                 let table = table.read_only();
-                let descriptors = unsafe { &*table.as_bytes().as_ptr().cast::<[Input<'_>; 16]>() };
+                let descriptors = unsafe { &*table.as_ptr().cast::<[Input<'_>; 16]>() };
                 let mut output = Guarded::new(16 * OUT_LEN, at_end);
                 let guarded_out = output.digests();
                 assert_eq!(hash_groups_arm(descriptors, guarded_out), 16);

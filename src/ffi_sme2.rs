@@ -73,9 +73,6 @@ pub const DEGREE: usize = 128;
 /// 1 to 12 left over, +2 to +69% where the SME unit stayed fast).
 const OVERLAP_MIN: usize = 13;
 
-/// Chunk-group and parent-group entry points share one signature.
-type Kernel = unsafe extern "C" fn(*const u8, *const u32, u64, u32, *mut u8, u64) -> u64;
-
 /// Return the calling thread's streaming vector length in 32-bit lanes without
 /// entering streaming mode or touching ZA / `TPIDR2_EL0`.
 ///
@@ -112,57 +109,39 @@ pub unsafe fn hash_many<const N: usize>(
     assert!(inputs.len() <= out.len() / OUT_LEN);
 
     let full_groups = inputs.len() / GROUP;
-    // The chunk kernel takes flags, flags_start, and flags_end packed into
-    // one word; the parent kernel applies flags | flags_start | flags_end to
-    // its single block, which is what hash_many means for one-block inputs.
-    let (kernel, packed_flags): (Option<Kernel>, u32) = if N == CHUNK_LEN && increment_counter.yes() {
-        (Some(ffi::blake3_servil_sme2_hash16_chunks_512), flags as u32 | (flags_start as u32) << 8 | (flags_end as u32) << 16)
-    } else if N == BLOCK_LEN && !increment_counter.yes() {
-        (Some(ffi::blake3_servil_sme2_hash16_parents_512), (flags | flags_start | flags_end) as u32)
-    } else {
-        (None, 0)
-    };
-
     let mut done = 0;
-    // Separate messages of 2 to 16 whole blocks, every one at counter zero:
-    // the message kernel, sixteen per group (the chunk kernel with a block
-    // count and one counter for every lane).
-    let blocks = N / BLOCK_LEN;
-    if kernel.is_none() && N % BLOCK_LEN == 0 && (2..=16).contains(&blocks) && !increment_counter.yes() && full_groups > 0 {
-        // Sound: caller verified SME2 support; `inputs` holds `full_groups * GROUP` valid `N`-byte pointers and `out` was asserted large enough above.
-        let lanes = unsafe {
-            ffi::blake3_servil_sme2_hash16_messages_512(
-                inputs.as_ptr() as *const *const u8,
-                key.as_ptr(),
-                counter,
-                flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16,
-                out.as_mut_ptr(),
-                full_groups as u64,
-                blocks as u64,
-            )
-        };
-        if svl_ok(lanes) {
-            crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
-            done = full_groups * GROUP;
-        }
-    }
-    if let (Some(kernel), true) = (kernel, full_groups > 0) {
-        let count = full_groups * GROUP;
-        if N == BLOCK_LEN {
+    if full_groups > 0 {
+        let blocks = N / BLOCK_LEN;
+        if N == CHUNK_LEN && increment_counter.yes() {
+            let packed_flags = flags as u32 | (flags_start as u32) << 8 | (flags_end as u32) << 16;
+            // Sound: caller verified SME2 support; `inputs` holds `full_groups * GROUP` valid chunk pointers and `out` has matching room.
+            let lanes = unsafe {
+                ffi::blake3_servil_sme2_hash16_chunks_512(
+                    inputs.as_ptr().cast::<*const u8>(),
+                    key.as_ptr(),
+                    counter,
+                    packed_flags,
+                    out.as_mut_ptr(),
+                    full_groups as u64,
+                )
+            };
+            if svl_ok(lanes) {
+                crate::ran_kernel(ffi::blake3_servil_sme2_hash16_chunks_512 as *const ());
+                done = full_groups * GROUP;
+            }
+        } else if N == BLOCK_LEN && !increment_counter.yes() {
             // The parent kernel reads a group's sixteen 64-byte blocks
             // through one pointer, and a table's inputs are sixteen
             // borrows of 64 bytes each: no pointer of theirs may read a
-            // neighbour's bytes, wherever in memory the inputs lie (to
-            // find them one after another by their addresses would give
-            // no pointer leave to read them all). So a table's blocks are
-            // copied into one buffer, which the kernel reads. The callers
-            // whose blocks lie in one buffer already hand that buffer to
-            // [`hash_block_run`], which takes no copy of them (a table
-            // made from such a buffer is copied like any other).
+            // neighbour's bytes, wherever in memory the inputs lie. So a
+            // table's blocks are copied into one buffer, which the kernel
+            // reads. Callers whose blocks lie in one buffer hand that
+            // buffer directly to [`hash_block_run`].
             //
             // Gather up to GATHER groups per kernel call, so one entry
             // into streaming mode covers them all.
             crate::ran(crate::Ran::Gathered);
+            let packed_flags = (flags | flags_start | flags_end) as u32;
             const GATHER: usize = DEGREE / GROUP;
             let mut buf = [0u8; GATHER * GROUP * BLOCK_LEN];
             let mut group = 0;
@@ -172,20 +151,40 @@ pub unsafe fn hash_many<const N: usize>(
                     buf[i * BLOCK_LEN..][..BLOCK_LEN].copy_from_slice(&input[..]);
                 }
                 // Sound: caller verified SME2 support; `buf` holds `groups * GROUP` contiguous 64-byte blocks and `out` has room for all groups.
-                let lanes = unsafe { kernel(buf.as_ptr(), key.as_ptr(), counter, packed_flags, out[group * GROUP * OUT_LEN..].as_mut_ptr(), groups as u64) };
+                let lanes = unsafe {
+                    ffi::blake3_servil_sme2_hash16_parents_512(
+                        buf.as_ptr(),
+                        key.as_ptr(),
+                        counter,
+                        packed_flags,
+                        out[group * GROUP * OUT_LEN..].as_mut_ptr(),
+                        groups as u64,
+                    )
+                };
                 if !svl_ok(lanes) {
                     break;
                 }
-                crate::ran_kernel(kernel as *const ());
+                crate::ran_kernel(ffi::blake3_servil_sme2_hash16_parents_512 as *const ());
                 group += groups;
             }
             done = group * GROUP;
-        } else {
-            // Sound: caller verified SME2 support; `inputs` holds `full_groups * GROUP` valid chunk pointers and `out` has matching room.
-            let lanes = unsafe { kernel(inputs.as_ptr() as *const u8, key.as_ptr(), counter, packed_flags, out.as_mut_ptr(), full_groups as u64) };
+        } else if (2..=16).contains(&blocks) && !increment_counter.yes() {
+            // Separate messages of 2 to 16 whole blocks, every one at counter zero.
+            // Sound: caller verified SME2 support; `inputs` holds `full_groups * GROUP` valid `N`-byte pointers and `out` was asserted large enough above.
+            let lanes = unsafe {
+                ffi::blake3_servil_sme2_hash16_messages_512(
+                    inputs.as_ptr().cast::<*const u8>(),
+                    key.as_ptr(),
+                    counter,
+                    flags as u64 | (flags_start as u64) << 8 | (flags_end as u64) << 16,
+                    out.as_mut_ptr(),
+                    full_groups as u64,
+                    blocks as u64,
+                )
+            };
             if svl_ok(lanes) {
-                crate::ran_kernel(kernel as *const ());
-                done = count;
+                crate::ran_kernel(ffi::blake3_servil_sme2_hash16_messages_512 as *const ());
+                done = full_groups * GROUP;
             }
         }
     }
@@ -756,7 +755,7 @@ unsafe fn walk_in(
         }
         let done = HYBRID_GROUP * lane_groups;
         let lanes = ffi::blake3_servil_sme2_hash16_chunks_512(
-            table.add(done) as *const u8,
+            table.add(done),
             key.as_ptr(),
             chunk_counter + done as u64,
             chunk_flags,
@@ -1056,7 +1055,7 @@ pub mod ffi {
         /// and increments per chunk; `flags` packs `flags | flags_start << 8
         /// | flags_end << 16`. Writes `16 * groups` 32-byte chaining values
         /// to `out`. Returns the streaming vector length in 32-bit lanes.
-        pub fn blake3_servil_sme2_hash16_chunks_512(inputs: *const u8, key: *const u32, counter: u64, flags: u32, out: *mut u8, groups: u64) -> u64;
+        pub fn blake3_servil_sme2_hash16_chunks_512(inputs: *const *const u8, key: *const u32, counter: u64, flags: u32, out: *mut u8, groups: u64) -> u64;
 
         /// Sixteen parent compressions per group. `pairs` points at
         /// `16 * groups` adjacent 64-byte parent blocks; `counter` is used
@@ -1135,10 +1134,9 @@ mod test {
     /// On SME2 hardware (such as Apple M4/M6), verify the AAPCS64 private-ZA
     /// lazy-save contract on real silicon:
     /// 1. `svl_lanes()` leaves `TPIDR2_EL0` and live ZA untouched.
-    /// 2. Nonzero AAPCS64 reserved bytes `[10..15]` cause representative
-    ///    working kernels (chunks and x2 here; packed/counter/keyed-chunks have
-    ///    dedicated controls in their modules) to decline (returning 0) with
-    ///    `TPIDR2_EL0` and live ZA untouched.
+    /// 2. Nonzero AAPCS64 reserved bytes `[10..15]` cause tested working kernels
+    ///    (chunks, x2, packed16/32/48, counter, and keyed chunks) to decline
+    ///    (returning 0) with `TPIDR2_EL0` and live ZA untouched.
     /// 3. Every SME2 assembly entry point commits all 64 distinct slices of
     ///    dormant caller ZA into `za_save_buffer` bit-for-bit, clears
     ///    `TPIDR2_EL0`, and computes exact BLAKE3 digests.
@@ -1245,14 +1243,7 @@ mod test {
         // Nonzero reserved byte in TPIDR2 block -> return 0, ZA untouched.
         assert_eq!(
             run_with_dormant_za([1, 0, 0, 0, 0, 0], false, &mut || unsafe {
-                ffi::blake3_servil_sme2_hash16_chunks_512(
-                    chunk_ptrs.as_ptr() as *const u8,
-                    crate::IV.as_ptr(),
-                    0,
-                    chunk_flags,
-                    out_18.as_flattened_mut().as_mut_ptr(),
-                    1,
-                )
+                ffi::blake3_servil_sme2_hash16_chunks_512(chunk_ptrs.as_ptr(), crate::IV.as_ptr(), 0, chunk_flags, out_18.as_flattened_mut().as_mut_ptr(), 1)
             }),
             0
         );
@@ -1266,14 +1257,7 @@ mod test {
         let root_flags = crate::CHUNK_START as u64 | ((crate::CHUNK_END | crate::ROOT) as u64) << 16;
         assert_eq!(
             run_with_dormant_za([0; 6], true, &mut || unsafe {
-                ffi::blake3_servil_sme2_hash16_chunks_512(
-                    chunk_ptrs.as_ptr() as *const u8,
-                    crate::IV.as_ptr(),
-                    0,
-                    chunk_flags,
-                    out_18.as_flattened_mut().as_mut_ptr(),
-                    1,
-                )
+                ffi::blake3_servil_sme2_hash16_chunks_512(chunk_ptrs.as_ptr(), crate::IV.as_ptr(), 0, chunk_flags, out_18.as_flattened_mut().as_mut_ptr(), 1)
             }),
             16
         );

@@ -50,8 +50,8 @@ TEST_ONLY_FILES = frozenset({
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
 DEBUG_ASSERT = re.compile(r"\bdebug_assert(?:_eq|_ne)?\s*!")
-SOUND_RE = re.compile(r"Sound:(?:(?!/\*|\*/)[^A-Za-z0-9])*[A-Za-z0-9]")
-DEBUG_ONLY_RE = re.compile(r"Debug-only:(?:(?!/\*|\*/)[^A-Za-z0-9])*[A-Za-z0-9]")
+SOUND_RE = re.compile(r"Sound:(?:(?!/\*|\*/)[^\w])*\w")
+DEBUG_ONLY_RE = re.compile(r"Debug-only:(?:(?!/\*|\*/)[^\w])*\w")
 _OUTER_CFG_RE = re.compile(r"^#\[\s*cfg\s*\(")
 _CFG_CALL_RE = re.compile(r"\bcfg\s*\(")
 _PUB_PREFIX_RE = re.compile(r"pub(?:\s*\([^)]*\))?\s+")
@@ -424,6 +424,7 @@ def _test_item_spans(code):
         bracket = 0
         angle = 0
         seen_top_brace = False
+        seen_top_eq = False
         end = n
         while j < n:
             ch = code[j]
@@ -441,9 +442,14 @@ def _test_item_spans(code):
                     end = j
                     break
                 bracket -= 1
-            elif ch == "<" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
-                angle += 1
-            elif ch == ">" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
+            elif ch == "=" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0 and angle == 0:
+                seen_top_eq = True
+            elif ch == "<" and not starts_item_kw and not seen_top_brace and not seen_top_eq and brace == 0 and paren == 0 and bracket == 0:
+                prev = code[j - 1] if j > 0 else ""
+                nxt = code[j + 1] if j + 1 < n else ""
+                if prev != "<" and nxt not in ("<", "="):
+                    angle += 1
+            elif ch == ">" and not starts_item_kw and not seen_top_brace and not seen_top_eq and brace == 0 and paren == 0 and bracket == 0:
                 prev = code[j - 1] if j > 0 else ""
                 if prev not in ("-", "="):
                     if angle == 0:
@@ -629,6 +635,12 @@ def debug_assert_without_reason(text):
             p = masked.rfind(sep, line_start, m.start())
             if p != -1:
                 left_bound = max(left_bound, p + 1)
+        same_line_masked = False
+        for ts_start, ts_end in test_spans:
+            if ts_start < m.start() and ts_end > line_start:
+                same_line_masked = True
+                if ts_end <= m.start():
+                    left_bound = max(left_bound, ts_end)
         right_bound = call_end
         if not masked[call_end:line_end].strip():
             # Nothing follows this invocation on `e_idx`, so a trailing comment
@@ -637,12 +649,8 @@ def debug_assert_without_reason(text):
         has_reason = _comment_has_reason(comm_text[left_bound:right_bound], DEBUG_ONLY_RE)
 
         # 2. Check directly attached comment lines above ONLY if no other code
-        # precedes this invocation on `s_idx` (prevents one-line `if ... else`
-        # branches from borrowing a comment from an earlier branch or above).
-        # Check for intervening non-assertion code BEFORE accepting comments on
-        # line `k` so `if x == 0 { /* Debug-only: ... */ debug_assert!(...); }`
-        # cannot discharge an unrelated assertion on the next line.
-        if not has_reason and masked[line_start:m.start()].strip() == "":
+        # (including a masked `#[cfg(test)]` statement) precedes this invocation on `s_idx`.
+        if not has_reason and not same_line_masked and masked[line_start:m.start()].strip() == "":
             k = s_idx - 1
             while k >= 0:
                 if k in masked_test_lines:

@@ -480,8 +480,10 @@ pub(crate) fn self_test(platform: Platform) -> usize {
             if PLANTED_WRONG_OUTPUT.load(core::sync::atomic::Ordering::Relaxed) == 1 {
                 out[15][OUT_LEN - 1] = !out[15][OUT_LEN - 1];
             }
-            // Check the wide output before the remainder kernel reuses it.
+            // Check the wide output and poison `out` before the remainder
+            // kernel writes into it so a silent no-op cannot pass on stale bytes.
             check_self_test(crate::self_test::fold(out.as_flattened()));
+            out.fill([0xa5; OUT_LEN]);
             // Sound: `lanes(platform) == 16` means `Platform::AVX512`, which implies AVX2; `inputs` and `out` hold 16 entries.
             unsafe { hash_eight_groups(inputs, out) };
             checked = 2;
@@ -555,12 +557,13 @@ mod tests {
                     unsafe { table_ptr.add(i).write(Input { block, cv, len: inputs[i].len, flags: inputs[i].flags }) };
                 }
                 let table = table.read_only();
-                let descriptors = unsafe { &*table.as_bytes().as_ptr().cast::<[Input<'_>; 16]>() };
+                let descriptors = unsafe { &*table.as_ptr().cast::<[Input<'_>; 16]>() };
                 let mut output = Guarded::new(16 * OUT_LEN, at_end);
                 let guarded_out = output.digests();
                 unsafe { hash_on_platform(Platform::detect(), descriptors, guarded_out) };
                 let expected = crate::self_test::fold(guarded_out.as_flattened());
                 if crate::platform::avx2_detected() {
+                    guarded_out.fill([0xa5; OUT_LEN]);
                     unsafe { hash_eight_groups(descriptors, guarded_out) };
                     assert_eq!(crate::self_test::fold(guarded_out.as_flattened()), expected);
                 }

@@ -405,6 +405,44 @@ const OTHER_PLANS: [&[usize]; 17] =
 
 static OTHER: Family = Family { chunk_plans: &OTHER_PLANS, chunk_kernels: &OTHER_CHUNK_KERNELS, parent_plans: &PARENT_PLANS, parent_kernels: &PARENT_KERNELS };
 
+/// Compile-time validation of every NEON plan table against its kernel table:
+/// every row `i` in `0..=16` must sum to `i`, every step must be positive and
+/// within bounds, and every step must map to a non-`None` kernel entry (except
+/// `LAST_PLANS` row 1, where step `1` runs the scalar single-lane fallback).
+macro_rules! check_neon_plans {
+    ($plans:expr, $kernels:expr, $allow_scalar_one:expr) => {{
+        let plans: &[&[usize]; 17] = &$plans;
+        let kernels = &$kernels;
+        let mut i = 0;
+        while i < 17 {
+            let plan = plans[i];
+            let mut sum = 0;
+            let mut j = 0;
+            while j < plan.len() {
+                let step = plan[j];
+                assert!(step > 0, "NEON plan step must be positive");
+                assert!(step < kernels.len(), "NEON plan step out of kernel table bounds");
+                if !($allow_scalar_one && step == 1) {
+                    assert!(kernels[step].is_some(), "NEON plan step references None kernel");
+                }
+                sum += step;
+                j += 1;
+            }
+            assert!(sum == i, "NEON plan row steps must sum to row index");
+            i += 1;
+        }
+    }};
+}
+
+const _: () = {
+    check_neon_plans!(CHUNK_PLANS, CHUNK_KERNELS, false);
+    check_neon_plans!(PARENT_PLANS, PARENT_KERNELS, false);
+    check_neon_plans!(LAST_PLANS, LAST_KERNELS, true);
+    check_neon_plans!(PLAIN_PLANS, PLAIN_CHUNK_KERNELS, false);
+    check_neon_plans!(PLAIN_PLANS, PLAIN_PARENT_KERNELS, false);
+    check_neon_plans!(OTHER_PLANS, OTHER_CHUNK_KERNELS, false);
+};
+
 /// This CPU's family: without SHA-3 the scalars and quads; with it,
 /// Apple's cores the plans measured on them, and other cores theirs.
 fn family() -> &'static Family {
@@ -574,7 +612,7 @@ pub fn apple_cores() -> bool {
     }
     #[cfg(not(target_vendor = "apple"))]
     {
-        let detected = crate::platform::DETECTED.load(core::sync::atomic::Ordering::Relaxed);
+        let detected = crate::platform::high_bits();
         if detected & CORES_ASKED == 0 {
             return ask_cores();
         }
@@ -582,7 +620,7 @@ pub fn apple_cores() -> bool {
     }
 }
 
-/// platform::DETECTED's bits for the cores: Apple's, and asked.
+/// High-byte cache bits stored in `platform::DETECTED` via `platform::{high_bits, set_high_bits}`.
 #[cfg(not(target_vendor = "apple"))]
 const APPLE_CORES: u16 = 1 << 8;
 #[cfg(not(target_vendor = "apple"))]
@@ -593,7 +631,7 @@ const CORES_ASKED: u16 = 1 << 9;
 #[inline(never)]
 fn ask_cores() -> bool {
     let apple = midr_implementer() == Some(0x61);
-    crate::platform::DETECTED.fetch_or(CORES_ASKED | if apple { APPLE_CORES } else { 0 }, core::sync::atomic::Ordering::Relaxed);
+    crate::platform::set_high_bits(CORES_ASKED | if apple { APPLE_CORES } else { 0 });
     apple
 }
 

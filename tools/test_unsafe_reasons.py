@@ -202,6 +202,40 @@ class Reasons(unittest.TestCase):
             "}\n"
         )
         self.assertEqual([n for n, _ in ur.debug_assert_without_reason(donated)], [5])
+        # A shift expression in a test-only enum variant must not open a generic
+        # parameter list and swallow the following shipped variant.
+        enum_shift = (
+            "pub enum E {\n"
+            "    #[cfg(test)] A = 1 << 2,\n"
+            "    B = {\n"
+            "        debug_assert!(3 > 2);\n"
+            "        unsafe { core::ptr::read(&7) }\n"
+            "    },\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(enum_shift)], [4])
+        self.assertEqual([n for n, _ in ur.without_reason(enum_shift)], [5])
+        # A comment attached to a masked `#[cfg(test)]` assertion on the same
+        # line (or line above) cannot bleed onto a following shipped assertion.
+        same_line_donated = (
+            "fn f(x: u32) {\n"
+            "    // Debug-only: test fixture.\n"
+            "    #[cfg(test)] debug_assert!(x < 99); debug_assert!(x != 0);\n"
+            "    /* Debug-only: inline test. */ #[cfg(test)] debug_assert!(x < 88); debug_assert!(x != 1);\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(same_line_donated)], [3, 4])
+        # Non-ASCII Unicode rationales must still be accepted.
+        unicode_ok = (
+            "fn f(p: &u8) -> u8 {\n"
+            "    // Debug-only: ホットパス。\n"
+            "    debug_assert!(*p < 10);\n"
+            "    // Sound: 有効な参照。\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual(ur.debug_assert_without_reason(unicode_ok), [])
+        self.assertEqual(ur.without_reason(unicode_ok), [])
         # Comments inside a preceding statement or `#[cfg(test)]` block cannot
         # satisfy a following shipped `debug_assert!`.
         prev_stmt = (
