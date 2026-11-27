@@ -522,56 +522,22 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 }
 
 /// Say why, and end the process, from a thread the pool's callers may be
-/// waiting on. The words go straight to descriptor 2, and only if it
-/// says, asked for up to a tenth of a second, that it takes words:
-/// `std::io::stderr` takes a lock, and a caller that holds it while it
-/// waits for this thread would wait for ever; so would a write to a full
-/// pipe whose reader waits for that caller. A reader that is only behind
-/// has that tenth of a second to make room.
-///
-/// The tenth of a second bounds the asking, not the writing. A
-/// descriptor that took words when asked may not when written to: another
-/// writer filled the pipe in between, a terminal's flow was stopped, a
-/// file's storage waits. The write then waits as any write does, and the
-/// end with it.
+/// waiting on. Delegates to `blake3_servil_core::thread_support::fail_stop`:
+/// bypasses `std::io::stderr`'s mutex, checks `poll(0)` for exact `POLLOUT`
+/// (skipping already-full pipes and reader-less pipes so `SIGPIPE` cannot
+/// replace `SIGABRT`), arms `alarm(1)` to bound the TOCTOU window where fd 2
+/// fills or storage stalls mid-write under default `SIGALRM`, writes straight
+/// to fd 2 (preserving file offsets and `O_APPEND` without mutating descriptor
+/// flags or reopening `/proc`), and calls `std::process::abort()`.
 ///
 /// A panic is not this: it goes through the process's panic hook before
-/// anything here runs. The standard hook ordinarily writes its message
-/// to descriptor 2 without asking first (a write that can wait, as
-/// above; a test harness that captures output has it write there
-/// instead), and a hook of the program's does what it does, for as long
-/// as it takes. The stops that follow a panic on a pool thread
-/// (`AbortOnUnwind`, a worker's own) say their words that way.
+/// anything here runs. The standard hook ordinarily writes its message to
+/// descriptor 2 without asking first, and a hook of the program's does what it
+/// does, for as long as it takes. The stops that follow a panic on a pool
+/// thread (`AbortOnUnwind`, a worker's own) say their words that way.
+#[cold]
 pub(crate) fn stop(why: &str) -> ! {
-    #[repr(C)]
-    struct PollFd {
-        fd: i32,
-        events: i16,
-        revents: i16,
-    }
-    // The count's type in poll's declaration: Linux's nfds_t is an
-    // unsigned long, macOS's an unsigned int.
-    #[cfg(target_os = "linux")]
-    type Count = core::ffi::c_ulong;
-    #[cfg(not(target_os = "linux"))]
-    type Count = core::ffi::c_uint;
-    const POLLOUT: i16 = 4;
-    unsafe extern "C" {
-        fn poll(fds: *mut PollFd, count: Count, timeout_ms: i32) -> i32;
-        fn write(fd: i32, bytes: *const core::ffi::c_void, len: usize) -> isize;
-    }
-    let mut stderr = PollFd { fd: 2, events: POLLOUT, revents: 0 };
-    // Sound: one PollFd, written by poll, which is asked for 100 ms at most.
-    let ready = unsafe { poll(&mut stderr, 1, 100) };
-    // One descriptor ready, and for writing alone: a poll that failed or
-    // timed out says nothing of `revents`, and one that reports an error
-    // beside the room to write (a pipe nobody reads) has nobody to tell.
-    if (ready, stderr.revents) == (1, POLLOUT) {
-        // Sound: `why` is `len` readable bytes. Whether they were written
-        // changes nothing here.
-        let _ = unsafe { write(2, why.as_ptr().cast(), why.len()) };
-    }
-    std::process::abort()
+    blake3_servil_core::thread_support::fail_stop(why)
 }
 
 #[cfg(test)]

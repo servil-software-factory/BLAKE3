@@ -915,12 +915,12 @@ fn lent_messages_are_complete_when_their_events_come() {
                 match pipe.next_event() {
                     Some(Event::Hashed { tag: 98, hash, .. }) => {
                         assert!(!seen_98, "duplicate tag 98");
-                        assert_eq!(hash, tail_want);
+                        assert_eq!(hash, tail_want, "tail message digest");
                         seen_98 = true;
                     }
                     Some(Event::Hashed { tag: 99, hash, .. }) => {
                         assert!(!seen_99, "duplicate tag 99");
-                        assert_eq!(hash, tail_want);
+                        assert_eq!(hash, tail_want, "tail message digest");
                         seen_99 = true;
                     }
                     Some(_) => panic!("an event that is no digest"),

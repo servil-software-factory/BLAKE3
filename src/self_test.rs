@@ -535,6 +535,52 @@ pub(crate) fn fail(why: core::fmt::Arguments) -> ! {
     stop(why)
 }
 
+/// Best-effort diagnostic directly to fd 2, then `std::process::abort()` (`SIGABRT`).
+///
+/// Bypasses Rust's stderr mutex, allocates nothing, starts no threads, and
+/// mutates no shared descriptor flags:
+/// - `poll(&mut pfd, 1, 0)` with exact `(ready, pfd.revents) == (1, POLLOUT)`
+///   skips already-full pipes (preventing deadlock with a caller waiting on
+///   this thread) and broken/closed pipes (preventing `SIGPIPE` instead of
+///   `SIGABRT` when `SIGPIPE` is at its default, e.g. in C hosts or CLIs).
+/// - Writing directly to fd 2 honors regular-file offsets and `O_APPEND`
+///   without reopening `/proc/self/fd/2`, and works in chroots, sandboxes,
+///   after privilege drops, and at `EMFILE`.
+/// - Arming `alarm(1)` before `write` bounds the rare TOCTOU race where
+///   another writer fills a blocking stderr pipe after `poll` or storage
+///   (NFS/FUSE) stalls `write`, when `SIGALRM` is default and unblocked (a
+///   caller that both blocks `SIGALRM` and stalls fd 2 can delay `abort`,
+///   trading that corner case for a readable failure reason in normal hosts).
+#[cold]
+pub(crate) fn fail_stop_bytes(bytes: &[u8]) -> ! {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    const POLLOUT: i16 = 0x0004;
+    #[cfg(target_os = "macos")]
+    type Nfds = core::ffi::c_uint;
+    #[cfg(not(target_os = "macos"))]
+    type Nfds = core::ffi::c_ulong;
+    unsafe extern "C" {
+        fn alarm(seconds: u32) -> u32;
+        fn poll(fds: *mut PollFd, nfds: Nfds, timeout: i32) -> i32;
+        fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
+    }
+    let mut pfd = PollFd { fd: 2, events: POLLOUT, revents: 0 };
+    // Sound: valid PollFd pointer and readable byte slice `bytes`.
+    unsafe {
+        let ready = poll(&mut pfd, 1, 0);
+        if (ready, pfd.revents) == (1, POLLOUT) {
+            let _ = alarm(1);
+            let _ = write(2, bytes.as_ptr().cast(), bytes.len());
+        }
+    }
+    std::process::abort()
+}
+
 #[cold]
 fn stop(why: core::fmt::Arguments) -> ! {
     use core::fmt::Write as _;
@@ -554,44 +600,10 @@ fn stop(why: core::fmt::Arguments) -> ! {
             Ok(())
         }
     }
-    #[repr(C)]
-    struct PollFd {
-        fd: i32,
-        events: i16,
-        revents: i16,
-    }
-    const POLLOUT: i16 = 0x0004;
-    #[cfg(target_os = "macos")]
-    type Nfds = u32;
-    #[cfg(not(target_os = "macos"))]
-    type Nfds = usize;
-    unsafe extern "C" {
-        fn alarm(seconds: u32) -> u32;
-        fn poll(fds: *mut PollFd, nfds: Nfds, timeout: i32) -> i32;
-        fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
-    }
-    // Best-effort diagnostic directly to fd 2, bypassing Rust's stderr
-    // mutex, with zero heap allocation and zero threads. Requiring exact
-    // `pfd.revents == POLLOUT` skips already-full pipes and broken/closed
-    // pipes (avoiding SIGPIPE in C hosts and b3sum). Arming `alarm(1)`
-    // before `write` bounds the rare TOCTOU race where another writer
-    // fills a blocking stderr pipe after `poll` when SIGALRM is default
-    // and unblocked (a hostile caller that both blocks SIGALRM and jams
-    // fd 2 mid-write can delay `abort`, trading that corner case for a
-    // readable failure reason in normal hosts).
     let mut buf = StackBuf { bytes: [0; 320], len: 0 };
     let _ = buf.write_fmt(why);
     let _ = buf.write_str("\n");
-    let mut pfd = PollFd { fd: 2, events: POLLOUT, revents: 0 };
-    // Sound: valid PollFd pointer and initialized stack slice of length `buf.len <= 320 <= PIPE_BUF`.
-    unsafe {
-        let _ = poll(&mut pfd, 1, 0);
-        if pfd.revents == POLLOUT {
-            let _ = alarm(1);
-            let _ = write(2, buf.bytes.as_ptr().cast(), buf.len);
-        }
-    }
-    std::process::abort()
+    fail_stop_bytes(&buf.bytes[..buf.len])
 }
 
 static INIT: std::sync::Once = std::sync::Once::new();

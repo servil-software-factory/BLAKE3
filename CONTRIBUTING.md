@@ -49,12 +49,12 @@ The README lists what BLAKE3-Servil adds for callers; the code is laid out so:
   stack, loop, and chunk state), and `tree.rs` (the tree walk).
 - `threads/`: `blake3-servil`, the crate most programs use. It
   re-exports the core whole and adds the pool and a multithreaded form
-  of each call: `lanes.rs` (the pool), `park.rs` and `finish.rs` (its
-  handshakes), `lib.rs` (the calls). It hashes through the core's checked
-  calls, and takes its scheduling and storage setup from
-  `thread_support`, a hidden module of the core that changes with the
-  two crates. `stream.rs` is the engine the Pipeline is to be built on
-  (BLAKE3 #356), compiled for this crate's tests alone until then.
+  of each call: `lanes.rs` (the pool), `action_ring.rs` (the lock-free
+  action ring), `waker.rs`, `park.rs`, and `finish.rs` (its wait
+  handshakes), `pipeline.rs` (the shipped async/sync `Pipeline` API),
+  and `lib.rs` (the calls). It hashes through the core's checked calls,
+  and takes its scheduling and storage setup from `thread_support`, a
+  hidden module of the core that changes with the two crates.
 - `version/`: `blake3-servil-version`, the build's version string, in a
   crate of its own so that the kernels are not rebuilt for every edit.
 - The command-line tool `b3sum` lives in its own repository:

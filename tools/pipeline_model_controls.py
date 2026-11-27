@@ -50,13 +50,13 @@ SOURCE = os.path.join("threads", "src", "pipeline.rs")
 # Git ignores them, and a build with --locked needs them.
 LOCK_FILES = ("Cargo.lock", os.path.join("threads", "Cargo.lock"))
 
-# Anchored regex matching Shuttle's exact digest-comparison assertion failure
-# lines alone (rejecting unrelated `assert_eq!` messages such as
-# `expected a digest event, got Aborted` or `failed to read digest fixture`).
+# Anchored regex matching Shuttle's exact labelled digest-comparison assertion
+# failure lines alone (rejecting bare unlabelled `assert_eq!` failures such as
+# batch-shape checks as well as unrelated `assert_eq!` messages).
 DIGEST_MISMATCH_RE = (
-    r"^assertion `left == right` failed"
-    r"(?:: (?:message \d+'s digest|batch \d+'s digest \d+|"
-    r"second Plain message digest|reused-slot distinct-key override digest))?$"
+    r"^assertion `left == right` failed: "
+    r"(?:message \d+'s digest|batch \d+'s digest \d+|tail message digest|"
+    r"second Plain message digest|reused-slot distinct-key override digest)$"
 )
 BATCH_DIGEST_MISMATCH_RE = r"^assertion `left == right` failed: batch \d+'s digest \d+$"
 STORAGE_UAF_RE = r"^PipeStorage used after release$"
@@ -305,10 +305,10 @@ def how_it_failed_parts(said):
     scenarios = [line.split(": ", 1)[1].strip() for line in said.splitlines() if line.startswith("shuttle_pipeline: ")]
     lines = said.splitlines()
     at = [n for n, line in enumerate(lines) if PANIC_HEADER_RE.match(line)]
-    deadlock_panic = any(
-        re.search(r"panicked at 'deadlock!", lines[n])
-        or (n + 1 < len(lines) and re.match(r"^deadlock!(?:\s|$)", lines[n + 1].strip()))
-        for n in at
+    first = at[0] if at else None
+    deadlock_panic = first is not None and (
+        bool(re.search(r"panicked at 'deadlock!", lines[first]))
+        or (first + 1 < len(lines) and bool(re.match(r"^deadlock!(?:\s|$)", lines[first + 1].strip())))
     )
     stops = [line.strip() for line in lines if line.startswith("blake3-servil: ")]
     # The C library's allocator, stopping a process whose memory it finds

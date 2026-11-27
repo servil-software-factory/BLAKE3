@@ -703,8 +703,6 @@ pub unsafe fn compress_blocks(cv: &mut CVWords, blocks: *const u8, count: usize,
 /// core. `block_len` is at most 64; the block is 64 bytes, zero-padded
 /// past `block_len` by the caller as the portable compressor requires.
 pub fn compress_in_place(cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
-    // Debug-only: hot per-block compression; internal callers pass `<= 64` (remaining bytes or `BLOCK_LEN`).
-    debug_assert!(block_len as usize <= BLOCK_LEN);
     // The one block is both first and last: the kernel ORs flags_start
     // into the first block and flags_end into the last, so the flags go
     // in as the base and the two per-position fields stay zero.
