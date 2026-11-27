@@ -444,8 +444,8 @@ pub(crate) fn hash_many_over_pool(tree: &TreeHasher, batch: crate::throughput::P
 /// [`crate::throughput::hash_each_multithreaded`]'s pool job: the items under
 /// MIN_SPLIT_LEN (totaling `small_bytes`), cut into ranges of about
 /// [`next_piece_len`] of the bytes that remain, each range hashed by one
-/// thread. An item of MIN_SPLIT_LEN or more is set aside here (its digest
-/// zero, a stand-in) and hashed by the caller over the whole pool after.
+/// thread. An item of MIN_SPLIT_LEN or more is skipped here (its output slot
+/// left untouched) and hashed by the caller over the whole pool after.
 pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block], usize)], small_bytes: usize, out: &mut [[u8; crate::OUT_LEN]]) {
     let Some((pool, _caller)) = spare_pool() else {
         return hash_each_small(tree, items, out);
@@ -2585,6 +2585,23 @@ pub(crate) mod places {
                 }
             }
             assert!(nears >= 2, "a trial tries near: two jobs at the least, where the second finds it hopeless");
+            // M6 control: a mixed collection [256 KiB, 512 KiB, 256 KiB] charges
+            // Kind::Each for only the 512 KiB of small items (not the 1 MiB total)
+            // and hashes the 512 KiB large item separately under Kind::Tree.
+            let small_a = &input[..(256 << 10) / 64];
+            let big = &input[(256 << 10) / 64..(768 << 10) / 64];
+            let small_b = &input[(768 << 10) / 64..(1024 << 10) / 64];
+            let each_before_512k = learned(Kind::Each, 512 << 10);
+            let each_before_1m = learned(Kind::Each, 1 << 20);
+            let tree_before_512k = learned(Kind::Tree, 512 << 10);
+            let mut outs = [[0u8; crate::OUT_LEN]; 3];
+            crate::throughput::hash_each_multithreaded(crate::Mode::Plain, &[(small_a, 256 << 10), (big, 512 << 10), (small_b, 256 << 10)], &mut outs);
+            assert_eq!(outs[0], *crate::convenience::hash(crate::throughput::Block::bytes(small_a)).as_bytes());
+            assert_eq!(outs[1], *crate::convenience::hash(crate::throughput::Block::bytes(big)).as_bytes());
+            assert_eq!(outs[2], *crate::convenience::hash(crate::throughput::Block::bytes(small_b)).as_bytes());
+            assert_ne!(learned(Kind::Each, 512 << 10), each_before_512k, "Each must charge small_bytes (512 KiB)");
+            assert_eq!(learned(Kind::Each, 1 << 20), each_before_1m, "Each must not charge total bytes (1 MiB)");
+            assert_ne!(learned(Kind::Tree, 512 << 10), tree_before_512k, "large item must charge Tree (512 KiB)");
         }
 
         /// A machine of `sockets` sockets, each of `caches` caches of
@@ -3238,7 +3255,7 @@ pub(crate) mod sources {
 
     /// Sources registered at once. A stream or a job that finds none free
     /// is hashed on its own thread.
-    const SLOTS: usize = 64;
+    pub(super) const SLOTS: usize = 64;
 
     static REGISTERED: [AtomicPtr<Source>; SLOTS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; SLOTS];
     static ACTIVE: AtomicU64 = AtomicU64::new(0);
@@ -3249,17 +3266,7 @@ pub(crate) mod sources {
     /// the SME2 turn (a subtree of 16 KiB or more) rather than on NEON.
     pub(crate) const ACTION_SME2: u64 = 1 << 63;
 
-    /// A pipeline's item in a source: atomic fields read before the claimer's
-    /// CAS (`take`) and rewritten only after `claimed` has passed it
-    /// (`publish_actions`), so no claimer copies non-atomic memory after its
-    /// claim (BLAKE3 #302). Each slot carries its own `near` wake-preference
-    /// hint so mixed publications in one queue never overwrite earlier items'
-    /// wake policy.
-    struct Action {
-        context: AtomicPtr<()>,
-        arg: AtomicU64,
-        near: core::sync::atomic::AtomicBool,
-    }
+    use crate::action_ring::Action;
 
     #[repr(align(128))]
     pub(crate) struct Source {
@@ -3316,13 +3323,7 @@ pub(crate) mod sources {
             assert!(actions > 0, "an action source has at least one slot");
             Source {
                 claimed: OwnLine(AtomicUsize::new(0)),
-                actions: (0..actions)
-                    .map(|_| Action {
-                        context: AtomicPtr::new(core::ptr::null_mut()),
-                        arg: AtomicU64::new(0),
-                        near: core::sync::atomic::AtomicBool::new(false),
-                    })
-                    .collect(),
+                actions: (0..actions).map(|_| Action::empty()).collect(),
                 action_run: Some(run),
                 job: AtomicPtr::new(core::ptr::null_mut()),
                 base: AtomicUsize::new(0),
@@ -3362,19 +3363,7 @@ pub(crate) mod sources {
         /// time, and every `(context, arg)` pair published must be safe for the
         /// source's bound runner to invoke once with the assigned `Platform`.
         pub(crate) unsafe fn publish_actions(&self, context: *const (), args: &[u64], near: bool) {
-            // Debug-only: internal pool entry; callers only publish non-empty job slices.
-            debug_assert!(!args.is_empty());
-            let p = self.finish.published.load(Ordering::Relaxed);
-            let next = p.checked_add(args.len()).expect("Source action ticket counter exhausted");
-            assert!(p - self.claimed.load(Ordering::Acquire) + args.len() <= self.actions.len(), "a source's actions hold every item not yet taken");
-            let cap = self.actions.len();
-            for (k, &arg) in args.iter().enumerate() {
-                let slot = &self.actions[(p + k) % cap];
-                slot.context.store(context as *mut (), Ordering::Relaxed);
-                slot.arg.store(arg, Ordering::Relaxed);
-                slot.near.store(near, Ordering::Relaxed);
-            }
-            self.finish.published.store(next, Ordering::Release);
+            crate::action_ring::publish_slice(&self.actions, &self.finish.published, &self.claimed, context, args, near);
             core::sync::atomic::fence(Ordering::SeqCst);
             let pool = pool();
             if pool.sme2 {
@@ -3454,23 +3443,15 @@ pub(crate) mod sources {
 
         /// Claim the next published item, if any.
         pub(crate) fn take(&self) -> Option<Item> {
+            if let Some(run) = self.action_run {
+                let (_, context, arg) = crate::action_ring::take_one(&self.actions, &self.finish.published, &self.claimed)?;
+                return Some(Item::Action { run, context, arg });
+            }
             let mut c = self.claimed.load(Ordering::Acquire);
             loop {
                 let p = self.finish.published.load(Ordering::Acquire);
                 if c >= p {
                     return None;
-                }
-                if let Some(run) = self.action_run {
-                    let slot = &self.actions[c % self.actions.len()];
-                    let context = slot.context.load(Ordering::Relaxed) as *const ();
-                    let arg = slot.arg.load(Ordering::Relaxed);
-                    match self.claimed.compare_exchange_weak(c, c + 1, Ordering::AcqRel, Ordering::Acquire) {
-                        Ok(_) => return Some(Item::Action { run, context, arg }),
-                        Err(now) => {
-                            c = now;
-                            continue;
-                        }
-                    }
                 }
                 let n = Self::run_len(p - c, pool().threads);
                 match self.claimed.compare_exchange_weak(c, c + n, Ordering::AcqRel, Ordering::Acquire) {
@@ -5117,6 +5098,24 @@ mod test {
         };
         assert!(!sources::open(), "the pipeline dropped: nothing open");
         assert_eq!(digest, crate::convenience::hash(&[7u8; 64]));
+    }
+
+    /// Filling all `sources::LIMIT` slots leaves the next Pipeline unregistered
+    /// (synchronous): dropping all registered Pipelines clears `sources::open()`
+    /// while the unregistered one is still live, and dropping the unregistered
+    /// one must not underflow `OPEN` back to non-zero.
+    #[test]
+    fn test_overflow_unregistered_pipeline_drop_does_not_underflow_sources_open() {
+        use crate::throughput::{Limits, Pipeline};
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+        assert!(!sources::open(), "at rest, nothing is open");
+        let registered: Vec<_> = (0..sources::SLOTS).map(|_| Pipeline::<()>::new(crate::Mode::Plain, Limits { messages: 1, rooms: 0 })).collect();
+        let overflow = Pipeline::<()>::new(crate::Mode::Plain, Limits { messages: 1, rooms: 0 });
+        assert!(sources::open(), "registered pipelines keep sources open");
+        drop(registered);
+        assert!(!sources::open(), "only the unregistered overflow pipeline remains");
+        drop(overflow);
+        assert!(!sources::open(), "dropping an unregistered pipeline must not decrement OPEN");
     }
 
     /// A task of one member runs it alone, whatever its length: the

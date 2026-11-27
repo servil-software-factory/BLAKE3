@@ -77,9 +77,22 @@ fn threads_pipeline_and_pool_never_overread_under_guard_pages() {
     let digests = vec![[0u8; 32]; 37].into_boxed_slice();
     pipe.batch(batch_msg, batch, digests);
 
-    let mut seen_tags = Vec::with_capacity(4);
+    // A split owned batch (> 1 MiB total) so workers hash disjoint slices of
+    // both the guarded input batch and guarded output digest buffer in parallel.
+    let mut split_batch = Batch::new(65_537, 17);
+    let mut split_wants = Vec::with_capacity(17);
+    for i in 0..17usize {
+        let item: Vec<u8> = (0..65_537).map(|j| low_byte(i * 31 + j * 11 + (j >> 8))).collect();
+        split_wants.push(*blake3::hash(&item).as_bytes());
+        split_batch.set(i, &item);
+    }
+    let split_msg = block_on(pipe.message(5, None));
+    let split_digests = vec![[0u8; 32]; 17].into_boxed_slice();
+    pipe.batch(split_msg, split_batch, split_digests);
+
+    let mut seen_tags = Vec::with_capacity(5);
     let mut lent_guard = Some(lent_guard);
-    while seen_tags.len() < 4 {
+    while seen_tags.len() < 5 {
         if let Some(ev) = pipe.next_event() {
             match ev {
                 Event::Hashed { tag: 1, hash, owner } => {
@@ -103,11 +116,18 @@ fn threads_pipeline_and_pool_never_overread_under_guard_pages() {
                     }
                     seen_tags.push(4);
                 }
+                Event::Batch { tag: 5, digests, .. } => {
+                    assert_eq!(digests.len(), split_wants.len());
+                    for (got, want) in digests.iter().zip(&split_wants) {
+                        assert_eq!(got, want);
+                    }
+                    seen_tags.push(5);
+                }
                 _ => panic!("unexpected pipeline event"),
             }
         } else {
             block_on(pipe.ready());
         }
     }
-    assert_eq!(seen_tags, vec![1, 2, 3, 4], "pipeline must deliver all four distinct events in FIFO end order");
+    assert_eq!(seen_tags, vec![1, 2, 3, 4, 5], "pipeline must deliver all five distinct events in FIFO end order");
 }

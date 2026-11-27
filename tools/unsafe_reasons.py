@@ -379,6 +379,49 @@ def _preceding_attr_stack_start(code, pos):
         return cur
 
 
+def _in_generic_param_list(code, pos):
+    """Return True iff `pos` (in blanked code) sits directly inside `<...>` generics."""
+    p = b = c = a = 0
+    k = pos - 1
+    while k >= 0:
+        ch = code[k]
+        if ch == ")":
+            p += 1
+        elif ch == "(":
+            if p == 0:
+                return False
+            p -= 1
+        elif ch == "]":
+            b += 1
+        elif ch == "[":
+            if b == 0:
+                return False
+            b -= 1
+        elif ch == "}":
+            c += 1
+        elif ch == "{":
+            if c == 0:
+                return False
+            c -= 1
+        elif p == 0 and b == 0 and c == 0:
+            if ch == ";":
+                return False
+            if ch == ">":
+                prev = code[k - 1] if k > 0 else ""
+                if prev not in ("-", "="):
+                    a += 1
+            elif ch == "<":
+                prev = code[k - 1] if k > 0 else ""
+                nxt = code[k + 1] if k + 1 < len(code) else ""
+                if nxt != "=":
+                    if a > 0:
+                        a -= 1
+                    elif prev != "<" and nxt != "<":
+                        return True
+        k -= 1
+    return False
+
+
 def _test_item_spans(code):
     """Return sorted `(start, end)` spans of every outer `#[cfg(...)]` requiring
     `test` together with its stacked attributes and attached item, block,
@@ -409,11 +452,12 @@ def _test_item_spans(code):
         # attributed construct starts with an item/statement keyword (so
         # `#[cfg(test)] pub field: u32,` stops at `,`, whereas
         # `#[cfg(test)] pub fn f<A, B>() {}` stops at `}`).
+        in_generic = _in_generic_param_list(code, span_start)
         kw_pos = j
         m_pub = _PUB_PREFIX_RE.match(code, kw_pos)
         if m_pub:
             kw_pos = m_pub.end()
-        starts_item_kw = bool(_ITEM_OR_STMT_KW_RE.match(code, kw_pos))
+        starts_item_kw = (not in_generic) and bool(_ITEM_OR_STMT_KW_RE.match(code, kw_pos))
         # Consume the annotated item/statement: track balanced delimiters and
         # only mark `seen_top_brace` for a `{` at outer level (`paren == 0`
         # and `bracket == 0`), so closures inside `FOO.with(|x| { ... });`
@@ -423,10 +467,14 @@ def _test_item_spans(code):
         paren = 0
         bracket = 0
         angle = 0
+        just_closed_angle = False
         seen_top_brace = False
+        seen_top_eq = False
         end = n
         while j < n:
             ch = code[j]
+            if ch != ">":
+                just_closed_angle = False
             if ch == "(":
                 paren += 1
             elif ch == ")":
@@ -441,10 +489,18 @@ def _test_item_spans(code):
                     end = j
                     break
                 bracket -= 1
+            elif ch == "=" and brace == 0 and paren == 0 and bracket == 0 and angle == 0:
+                prev = code[j - 1] if j > 0 else ""
+                nxt = code[j + 1] if j + 1 < n else ""
+                if prev not in ("=", "!", "<", ">") and nxt not in ("=", ">"):
+                    seen_top_eq = True
             elif ch == "<" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
                 prev = code[j - 1] if j > 0 else ""
                 nxt = code[j + 1] if j + 1 < n else ""
-                if prev != "<" and nxt not in ("<", "="):
+                if in_generic and not seen_top_eq:
+                    if nxt != "=":
+                        angle += 1
+                elif prev != "<" and nxt not in ("<", "="):
                     angle += 1
             elif ch == ">" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
                 prev = code[j - 1] if j > 0 else ""
@@ -454,7 +510,11 @@ def _test_item_spans(code):
                     # `Vec<Vec<u8>>`) closes one nesting level unless `->`/`=>`.
                     if prev not in ("-", "="):
                         angle -= 1
-                elif prev not in ("-", "=", ">") and nxt not in (">", "="):
+                        just_closed_angle = True
+                elif prev not in ("-", "=") and (just_closed_angle or (prev != ">" and nxt not in (">", "="))):
+                    # Stop before the closing `>` of an enclosing generic list
+                    # (including `T: Into<Vec<u8>>>` where the preceding `>`
+                    # just closed nested `angle`).
                     end = j
                     break
             elif ch == "{":
@@ -474,7 +534,15 @@ def _test_item_spans(code):
                         seen_top_brace = False
                         j = m_else.end()
                         continue
-                    end = j
+                    # Include an optional trailing `;` for braced statements
+                    # such as `#[cfg(test)] let _ = { 1 };`.
+                    k = j
+                    while k < n and code[k] in " \t":
+                        k += 1
+                    if k < n and code[k] == ";":
+                        end = k + 1
+                    else:
+                        end = j
                     break
             elif ch == ";" and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
                 end = j + 1
@@ -507,10 +575,36 @@ def mask_test_items(code):
     return _blank_spans(code, _test_item_spans(code))
 
 
+def _extend_trailing_comment_spans(code_text, comm_text, spans):
+    """Extend each masked `#[cfg(test)]` span across any immediately following
+    trailing comment tokens on its ending line (including nested or multi-line
+    `/* ... */` tokens starting on that line), bridging ONLY horizontal
+    whitespace (`' '`, `'\\t'`) and stopping at newlines or code. Prevents
+    trailing comments on masked test statements from donating rationales to
+    later shipped lines without ever touching a next-line shipped comment."""
+    n = len(code_text)
+    comment_by_start = {s: e for s, e, _ in _iter_comment_tokens(comm_text)}
+    out = []
+    for start, end in spans:
+        c_end = end
+        j = end
+        while j < n:
+            while j < n and code_text[j] in " \t" and comm_text[j] == " ":
+                j += 1
+            if j in comment_by_start:
+                j = comment_by_start[j]
+                c_end = j
+            else:
+                break
+        out.append((start, c_end))
+    return out
+
+
 def _masked_code_and_spans(text):
     code_text, comm_text = split_code_and_comments(text)
     spans = _test_item_spans(code_text)
-    return _blank_spans(code_text, spans), _blank_spans(comm_text, spans), spans
+    comm_spans = _extend_trailing_comment_spans(code_text, comm_text, spans)
+    return _blank_spans(code_text, spans), _blank_spans(comm_text, comm_spans), spans
 
 
 def _span_lines(spans, starts):
