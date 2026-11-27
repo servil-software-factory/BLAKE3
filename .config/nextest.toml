@@ -3,8 +3,8 @@
 # One clock a run, and only here: each profile's slow-timeout is the one
 # limit on a test's time in that run. Tests hold no watchdogs of their own
 # (with one documented exception: `forked_child_stops_in_acquire_free_group_and_alloc_piece_node`
-# supervises its own forked child with an 8 s parent waitpid deadline so a
-# mutant removing the fork guard fails cleanly instead of hitting the 15 s
+# supervises its exec'd child subprocess with an 8 s `Child::try_wait` deadline
+# so a mutant removing the fork guard fails cleanly instead of hitting the 15 s
 # mutants timeout), and check.py's cargo-mutants limit is a backstop whose
 # firing is an error, not a verdict (two clocks over one test made its outcome
 # depend on which ran out first, and on the machine's load: an EPYC 9255, October 22).

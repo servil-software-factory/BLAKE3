@@ -546,6 +546,16 @@ pub fn __all_workers_parked() -> bool {
     lanes::all_workers_parked()
 }
 
+/// Whether the process-wide `pthread_atfork` child handler has marked this
+/// process as a child forked after the pool started worker threads.
+/// Undocumented and unstable, for the async-signal-safe fork test only: a
+/// forked child reads this atomic flag and calls `_exit` without touching the
+/// allocator or unwinding machinery.
+#[doc(hidden)]
+pub fn __is_forked() -> bool {
+    lanes::is_forked()
+}
+
 /// The throughput API: the core's, and the calls that use other cores.
 pub mod throughput {
     pub use crate::pipeline::{Event, Lent, Limits, Message, Pipeline, ROOM_LEN, Room, block_on};
@@ -692,9 +702,18 @@ pub mod throughput {
         let tree = TreeHasher::new(mode);
         let alone = |len: usize| len >= crate::lanes::MIN_SPLIT_LEN;
         // The items that hash alone are set aside in the collection's
-        // call and hashed after, each over the whole pool.
-        let small_bytes = items.iter().map(|i| i.1).filter(|&len| !alone(len)).fold(0usize, usize::saturating_add);
-        if small_bytes < crate::lanes::MIN_SPLIT_LEN {
+        // call and hashed after, each over the whole pool. Validate every
+        // item's slice bound upfront and compute the exact small-item byte
+        // total once in u128 so `lanes::hash_each` / `cut_items` never
+        // re-traverse the collection just to sum weights.
+        let small_bytes: u128 = items
+            .iter()
+            .map(|i| {
+                let n = Block::bytes(i.0)[..i.1].len();
+                if alone(n) { 0 } else { n as u128 }
+            })
+            .sum();
+        if small_bytes < crate::lanes::MIN_SPLIT_LEN as u128 {
             crate::lanes::hash_each_small(&tree, items, out);
         } else {
             crate::lanes::hash_each(&tree, items, small_bytes, out);

@@ -33,6 +33,9 @@ BLRAAZ_X8 = 0xD63F091F
 SVC_0 = 0xD4000001
 BRK_1 = 0xD4200020
 UDF_0 = 0x00000000
+SVE_PTRUE_P0_B = 0x2518E3E0  # op0 = 0010 (SVE)
+RESERVED_OP0_1 = 0x02000000  # op0 = 0001 (unallocated)
+RESERVED_OP0_3 = 0x06000000  # op0 = 0011 (unallocated)
 
 MOV_W8_1 = 0x52800028
 ADD_X0_X0_1 = 0x91000400
@@ -250,11 +253,12 @@ class CheckWakerOrderBinaryTests(unittest.TestCase):
             unfenced = build_macho_arm64([insn, LDAPR_X8_X0, RET], [("_f", 0)])
             cwo.verify_function(fenced, unfenced, "f", name)
 
-        # Unrelated RMW (`ldclral`), non-acquire-release `ldset*`, and narrower
-        # `stlr*`/`ldsetal*` widths must NOT satisfy the required announce opcode.
+        # Unrelated loads (`ldar`, `ldr`), RMWs (`ldclral`), non-acquire-release
+        # `ldset*`, and narrower `stlr*`/`ldsetal*` widths must NOT satisfy the
+        # required announce opcode.
         for announce, wrong_insns in (
-            ("stlr", (STLRB_W8_X0, STLRH_W8_X0)),
-            ("stlrb", (STLR_W8_X0, STLR_X8_X0, STLRH_W8_X0)),
+            ("stlr", (STLRB_W8_X0, STLRH_W8_X0, LDAR_X8_X0, LDR_X8_X0)),
+            ("stlrb", (STLR_W8_X0, STLR_X8_X0, STLRH_W8_X0, LDAR_X8_X0)),
             (
                 "ldsetal",
                 (
@@ -356,6 +360,9 @@ class CheckWakerOrderBinaryTests(unittest.TestCase):
             (SVC_0, "unsupported branch/system"),
             (BRK_1, "unsupported branch/system"),
             (UDF_0, "unsupported reserved/SVE/SME"),
+            (SVE_PTRUE_P0_B, "unsupported reserved/SVE/SME"),
+            (RESERVED_OP0_1, "unsupported reserved/SVE/SME"),
+            (RESERVED_OP0_3, "unsupported reserved/SVE/SME"),
             (0xD50330DF, "unsupported branch/system"),  # non-SY `isb #0`
         ):
             obj = build_macho_arm64(
@@ -496,24 +503,37 @@ class CheckWakerOrderBinaryTests(unittest.TestCase):
         )
         self.assertEqual(cwo.check_cfg(callee_loops, "f", "stlr").verdict, Verdict.UNSUPPORTED)
 
-        # 6. Same-file `_abort: ret` resolves as returning callee, NOT external noreturn!
-        local_abort = build_macho_arm64(
-            [
-                cbz(0, 5), STLR_X8_X0, DMB_ISH, LDAPR_X8_X0, RET,
-                STLR_X8_X0, bl_imm(0), LDAPR_X8_X0, RET,
-                RET,
-            ],
-            [("_f", 0), ("_abort", 9)],
-            [(6, 1, cwo.ARM64_RELOC_BRANCH26, 1, 2, 1)],
-        )
-        self.assertEqual(cwo.check_cfg(local_abort, "f", "stlr").verdict, Verdict.UNORDERED)
+        # 6. Same-file symbols matching noreturn names (both C `_abort` and
+        # mangled Rust `std::process::abort`) resolve as returning callees, NOT
+        # external noreturn!
+        for local_sym in ("_abort", "__RNvNtCsdnanKjkF2cC_3std7process5abort"):
+            local_abort = build_macho_arm64(
+                [
+                    cbz(0, 5), STLR_X8_X0, DMB_ISH, LDAPR_X8_X0, RET,
+                    STLR_X8_X0, bl_imm(0), LDAPR_X8_X0, RET,
+                    RET,
+                ],
+                [("_f", 0), (local_sym, 9)],
+                [(6, 1, cwo.ARM64_RELOC_BRANCH26, 1, 2, 1)],
+            )
+            self.assertEqual(cwo.check_cfg(local_abort, "f", "stlr").verdict, Verdict.UNORDERED, local_sym)
 
-        # 7. External recognized noreturn panic/unwrap/abort calls prune dead
-        # continuation cleanly (even as the last instruction before `_other`).
+        # 7. Every external recognized noreturn panic/unwrap/abort call prunes
+        # dead continuation cleanly — both at function end before `_other` AND
+        # mid-function (so dead code after `bl _abort` cannot fabricate ORDERED).
         for noreturn_sym in (
+            "_abort",
+            "_rust_begin_unwind",
+            "__RNvNtCs8Mbv00yxnRz_4core9panicking5panic",
+            "__RNvNtCs8Mbv00yxnRz_4core9panicking9panic_fmt",
+            "__RNvNtCs8Mbv00yxnRz_4core9panicking14panic_explicit",
+            "__RNvNtCs8Mbv00yxnRz_4core9panicking14panic_nounwind",
+            "__RNvNtCs8Mbv00yxnRz_4core9panicking18panic_nounwind_fmt",
             "__RNvNtCs8Mbv00yxnRz_4core9panicking18panic_bounds_check",
-            "__RNvNtCs8Mbv00yxnRz_4core6result13unwrap_failed",
+            "__RNvNtCs8Mbv00yxnRz_4core9panicking19panic_cannot_unwind",
+            "__RNvNtCs8Mbv00yxnRz_4core6option13expect_failed",
             "__RNvNtCs8Mbv00yxnRz_4core6option13unwrap_failed",
+            "__RNvNtCs8Mbv00yxnRz_4core6result13unwrap_failed",
             "__RNvNtCsdnanKjkF2cC_3std7process5abort",
         ):
             ext_panic = build_macho_arm64(
@@ -525,6 +545,15 @@ class CheckWakerOrderBinaryTests(unittest.TestCase):
                 [(5, 2, cwo.ARM64_RELOC_BRANCH26, 1, 2, 1)],
             )
             self.assertEqual(cwo.check_cfg(ext_panic, "f", "ldsetal").verdict, Verdict.ORDERED, noreturn_sym)
+
+            dead_after_noreturn = build_macho_arm64(
+                [bl_imm(0), STLR_X8_X0, DMB_ISH, LDAPR_X8_X0, RET],
+                [("_f", 0), (noreturn_sym, None)],
+                [(0, 1, cwo.ARM64_RELOC_BRANCH26, 1, 2, 1)],
+            )
+            res_dead = cwo.check_cfg(dead_after_noreturn, "f", "stlr")
+            self.assertEqual(res_dead.verdict, Verdict.UNSUPPORTED, noreturn_sym)
+            self.assertIn("no reachable RCpc load", res_dead.detail, noreturn_sym)
 
         # 8. Unrecognized external name mid-function is treated as returning.
         fake_panic = build_macho_arm64(
@@ -618,6 +647,36 @@ class CheckWakerOrderBinaryTests(unittest.TestCase):
         )
         self.assertEqual(cwo.check_cfg(tail_noreturn, "f", "stlr").verdict, Verdict.ORDERED)
 
+        # 12. Callee's unannounced RCpc load (before caller announces) propagates
+        # as UNORDERED (`missing_fence_after_announce=False`).
+        callee_unann = build_macho_arm64(
+            [bl_imm(0), STLR_X8_X0, DMB_ISH, LDAPR_X8_X0, RET, LDAPR_X8_X0, RET],
+            [("_f", 0), ("_load", 5)],
+            [(0, 1, cwo.ARM64_RELOC_BRANCH26, 1, 2, 1)],
+        )
+        res_unann = cwo.check_cfg(callee_unann, "f", "stlr")
+        self.assertEqual(res_unann.verdict, Verdict.UNORDERED)
+        self.assertFalse(res_unann.missing_fence_after_announce)
+
+        # 13. Callee returning via a sibling tail call (`_g: b _h`, `_h: ret`)
+        # propagates exit states back to `_f`'s continuation after `bl _g`.
+        callee_tail_exit = build_macho_arm64(
+            [
+                cbz(0, 5), STLR_X8_X0, DMB_ISH, LDAPR_X8_X0, RET,
+                STLR_X8_X0, bl_imm(0), LDAPR_X8_X0, RET,
+                b_imm(0),
+                RET,
+            ],
+            [("_f", 0), ("_g", 9), ("_h", 10)],
+            [
+                (6, 1, cwo.ARM64_RELOC_BRANCH26, 1, 2, 1),
+                (9, 2, cwo.ARM64_RELOC_BRANCH26, 1, 2, 1),
+            ],
+        )
+        res_te = cwo.check_cfg(callee_tail_exit, "f", "stlr")
+        self.assertEqual(res_te.verdict, Verdict.UNORDERED)
+        self.assertTrue(res_te.missing_fence_after_announce)
+
     def test_call_depth_limit_holds_even_with_primed_cache_and_deep_chains(self):
         # Exact boundary: depth 16 (`MAX_CALL_DEPTH`) passes; depth 17 fails.
         def build_chain(depth):
@@ -691,13 +750,22 @@ class CheckWakerOrderBinaryTests(unittest.TestCase):
             "reachable fallthrough past function boundary",
         )
 
-        # Direct local branch crossing into `_other` fails closed as UNSUPPORTED.
+        # Direct local unconditional OR conditional branch crossing into `_other`
+        # fails closed as UNSUPPORTED.
         branch_into_next = build_macho_arm64(
             [STLR_X8_X0, DMB_ISH, cbz(0, 3), LDAPR_X8_X0, RET, b_imm(1), LDAPR_X8_X0, RET],
             [("_f", 0), ("_other", 6)],
         )
         self.assert_unsupported_reason(
             cwo.check_cfg(branch_into_next, "f", "stlr"),
+            "crosses function boundary",
+        )
+        cond_into_next = build_macho_arm64(
+            [STLR_X8_X0, DMB_ISH, cbz(0, 3), LDAPR_X8_X0, RET, LDAPR_X8_X0, RET],
+            [("_f", 0), ("_other", 5)],
+        )
+        self.assert_unsupported_reason(
+            cwo.check_cfg(cond_into_next, "f", "stlr"),
             "crosses function boundary",
         )
 

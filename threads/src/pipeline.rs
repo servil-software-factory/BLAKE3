@@ -425,11 +425,13 @@ struct MemberGroup {
 /// zero worker-side epoch fences, no worker grace period or join in
 /// `Pipeline::drop`, and zero `holders` atomics on [`Pipeline::lent`] /
 /// [`Lent::drop`] (#465). Matched exact-tier first then best-fit via per-tier
-/// stacks indexed by power-of-two action capacity (minimum 1,024 = 24 KiB
-/// action ring plus per-tier completion lines), so ascending `Limits` keep
-/// retained action-ring capacity below `2x` the largest tier at peak
-/// concurrency (group lines cap at 256 per slot) and acquisition is O(tiers)
-/// independent of peak count.
+/// stacks indexed by power-of-two tier capacity (minimum 1,024: a 24 KiB
+/// action ring on multi-worker pools, or 0 action slots on one-thread pools,
+/// plus per-tier loan completion lines and up to 256 group completion lines),
+/// so ascending `Limits` keep retained action-ring and loan-line tier units
+/// below `2x` the largest tier at peak concurrency (while capped group lines
+/// and fixed per-slot headers scale linearly with distinct retained tiers) and
+/// acquisition is O(tiers) independent of peak count.
 struct PipeSlot {
     source: Source,
     waker: WakerSlot,
@@ -501,8 +503,10 @@ process_static! {
 pub(crate) mod model_storages;
 
 impl PipeSlot {
-    fn acquire(actions: usize) -> (&'static PipeSlot, u64, u64) {
-        let cap = actions.max(1024).checked_next_power_of_two().expect("admitted action capacity fits power of two");
+    fn acquire(actions: usize, messages: usize) -> (&'static PipeSlot, u64, u64) {
+        let has_workers = crate::lanes::pool_has_workers();
+        let need = if has_workers { actions } else { messages * MAX_SLOT_PIECES };
+        let cap = need.max(1024).checked_next_power_of_two().expect("admitted action capacity fits power of two");
         let tier = slot_tier(cap);
         if let Some(FreeSlot { slot, next_group_epoch, next_loan_epoch }) = FREE_PIPE_SLOTS.lock().unwrap()[tier..].iter_mut().find_map(Vec::pop) {
             return (slot, next_group_epoch, next_loan_epoch);
@@ -511,8 +515,12 @@ impl PipeSlot {
         let max_groups = max_slots.clamp(4, 256);
         #[cfg(any(test, shuttle))]
         PIPE_SLOTS_MADE.fetch_add(1, Ordering::Relaxed);
+        // A one-thread pool never registers a `Source` or dispatches tickets to
+        // workers, so keep its ticket ring empty while retaining stable waker
+        // and group/loan completion lines for synchronous execution.
+        let source = if has_workers { Source::with_actions(cap, PipeStorage::run_action) } else { Source::new() };
         let raw = Box::into_raw(Box::new(PipeSlot {
-            source: Source::with_actions(cap, PipeStorage::run_action),
+            source,
             waker: WakerSlot::new(),
             group_completed: (0..max_groups).map(|_| OwnLine(AtomicU64::new(0))).collect(),
             loan_completed: (0..max_slots).map(|_| OwnLine(AtomicU64::new(0))).collect(),
@@ -525,7 +533,7 @@ impl PipeSlot {
     }
 
     fn release(slot: &'static PipeSlot, next_group_epoch: u64, next_loan_epoch: u64) {
-        let tier = slot_tier(slot.source.actions_len());
+        let tier = slot_tier(slot.loan_completed.len() * MAX_SLOT_PIECES);
         FREE_PIPE_SLOTS.lock().unwrap()[tier].push(FreeSlot { slot, next_group_epoch, next_loan_epoch });
     }
 }
@@ -539,8 +547,9 @@ pub(crate) struct PipeStorage {
     rooms: Rooms,
     groups: Box<[MemberGroup]>,
     /// Per-slot prepared mode, written by the owner only when a slot opens via
-    /// `message_with` (`MessageWithFut::poll`) and read-only by workers until
-    /// the slot finishes. Default `message()` slots leave this untouched.
+    /// `message_with` (`OverrideOpenMode::install`) before any work for that
+    /// slot is dispatched, and read-only by workers until the slot finishes.
+    /// Default `message()` slots leave this untouched.
     slot_trees: Box<[UnsafeCell<TreeHasher>]>,
     hashes: Box<[UnsafeCell<[u8; OUT_LEN]>]>,
     cvs: Box<[UnsafeCell<PieceValues>]>,
@@ -816,8 +825,8 @@ fn finished(waker: &'static WakerSlot, publish: impl FnOnce()) {
 
 impl PipeStorage {
     /// Prepared mode selected by `custom`: either `slot_trees[slot]` (written
-    /// by `MessageWithFut::poll` before dispatch and immutable until completion)
-    /// or the Pipeline's default `tree`.
+    /// by `OverrideOpenMode::install` before dispatch and immutable until
+    /// completion) or the Pipeline's default `tree`.
     #[inline(always)]
     fn tree_for(&self, slot: usize, custom: bool) -> &TreeHasher {
         if custom {
@@ -1147,21 +1156,30 @@ process_static! {
 /// (as `# Giving up a message` recommends) rather than creating and
 /// dropping one per short message.
 ///
-/// Only the worker-facing action ring, waker slot, and monotonic
-/// completion lines (`PipeSlot`) are retained for reuse by later Pipelines:
-/// 24 bytes per action (at least 1,024 actions = 24 KiB) plus 128-byte
-/// completion lines sized to the rounded power-of-two tier (`cap / 64`
-/// slot lines and `clamp(cap / 64, 4, 256)` group lines), where action
-/// capacity rounds up to a power of two (`actions = messages * 64` when
-/// `rooms == 0`, else `messages * 64 + rooms + messages + 1 + clamp(messages, 4, 256)`).
+/// Only the worker-facing action ring (on pools with workers), waker slot, and
+/// monotonic completion lines (`PipeSlot`) are retained for reuse by later
+/// Pipelines:
+/// - **Multi-worker pools (`threads > 1`):** 24 bytes per action (at least
+///   1,024 actions = 24 KiB) plus 128-byte completion lines sized to the
+///   rounded power-of-two tier (`cap / 64` slot lines and
+///   `clamp(cap / 64, 4, 256)` group lines), where `cap` rounds up
+///   `actions` (`messages * 64` when `rooms == 0`, else
+///   `messages * 64 + rooms + messages + 1 + clamp(messages, 4, 256)`).
+/// - **One-thread pools (`threads == 1`):** zero ticket slots are allocated or
+///   retained (`actions_len() == 0`), while waker and completion lines size to
+///   the power-of-two tier of `(messages * 64).max(1024)` (independent of
+///   `rooms`).
+///
 /// Because slots round to powers of two and match exact-tier first then
-/// best-fit (`actions_len() >= actions`), ascending `Limits` keep total
-/// retained action-ring capacity below twice the largest tier per peak
+/// best-fit (`loan_completed.len() * 64 >= need`), ascending `Limits` keep
+/// retained power-of-two tier units (action-ring tickets on worker pools and
+/// `loan_completed` lines on all pools) below twice the largest tier per peak
 /// overlapping slot acquisition (counting concurrent constructors/destructors
-/// from cache lookup through return to the free list; group lines cap at 256
-/// per slot), and varying `Limits.rooms` within a power-of-two action tier
-/// reuses the same slot. As before, no call of this crate wipes freed memory
-/// or keys.
+/// from cache lookup through return to the free list; `group_completed` caps
+/// at 256 lines per slot and fixed per-slot headers scale linearly with the
+/// number of distinct retained tiers), and varying `Limits.rooms` within a
+/// power-of-two tier reuses the same slot. As before, no call of this crate
+/// wipes freed memory or keys.
 ///
 /// # Giving up a message
 ///
@@ -1290,8 +1308,8 @@ pub struct Pipeline<T, B = (), P = Batch<'static>> {
     /// Mode of the open group (`Default` or `Plain`; `Custom` groups publish
     /// immediately). Valid whenever `open_group.is_some()`.
     local_group_mode: SlotMode,
-    /// Override slot index in `Shared::slot_trees` for the open group, or
-    /// `NONE` when the open group uses `Shared::tree` (default mode).
+    /// Override slot index in `PipeStorage::slot_trees` for the open group, or
+    /// `NONE` when the open group uses `PipeStorage::tree` (default mode).
     local_custom_slot: u32,
     /// Count of registered split `Pipeline::batch` plans not yet reaped.
     /// When zero, `try_reap_one` skips `PipelineBufs::batch_plans`.
@@ -1557,7 +1575,7 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
 /// Validate `Limits` and compute `(p_cap, g_cap, actions_cap)` without
 /// allocating. Preserves the uniform public `Limits` contract (`messages > 0`
 /// and `messages + rooms < (1 << 29) - 1`, matching 29-bit action indices in
-/// `pack_arg`), including when `rooms == 0` allocates zero `PieceNode`s.
+/// `ActionArg`), including when `rooms == 0` allocates zero `PieceNode`s.
 /// For roomless pipelines (`rooms == 0`), each message slot holds either a
 /// split submission (at most `MAX_SLOT_PIECES = 64` actions) or a grouped
 /// short message (at most 1 group ticket, never both), so `m * 64` actions
@@ -1636,7 +1654,7 @@ impl<T, B, P> Pipeline<T, B, P> {
             batch_plans,
         });
 
-        let (pipe_slot, next_group_epoch, next_loan_epoch) = PipeSlot::acquire(actions_cap);
+        let (pipe_slot, next_group_epoch, next_loan_epoch) = PipeSlot::acquire(actions_cap, m);
         let storage = PipeStorage::alloc(pipe_slot, tree, m, limits.rooms, p_cap, g_cap);
         // A pool of one thread has no worker to take a published action,
         // and only this crate's block_on would run it: an outside executor
@@ -3117,10 +3135,15 @@ mod test {
 
         // Exact power-of-two boundary for actions_cap = m*64 + (rooms+m+1) + g_cap:
         // (248, 15) -> 15872 + 264 + 248 = 16384; (248, 16) -> 16385 -> 32768.
+        // On a one-thread pool (e.g. `taskset -c 0`), ticket slots stay 0 while
+        // `loan_completed` sizes to `(messages * 64).next_power_of_two() / 64 = 256`.
+        let has_workers = crate::lanes::pool_has_workers();
         let p_cap_exact = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 15 });
-        assert_eq!(p_cap_exact.storage().slot.get().source.actions_len(), 16384);
+        assert_eq!(p_cap_exact.storage().slot.get().source.actions_len(), if has_workers { 16384 } else { 0 });
+        assert_eq!(p_cap_exact.storage().slot.get().loan_completed.len(), 256);
         let p_cap_over = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 16 });
-        assert_eq!(p_cap_over.storage().slot.get().source.actions_len(), 32768);
+        assert_eq!(p_cap_over.storage().slot.get().source.actions_len(), if has_workers { 32768 } else { 0 });
+        assert_eq!(p_cap_over.storage().slot.get().loan_completed.len(), if has_workers { 512 } else { 256 });
         drop((p_cap_exact, p_cap_over));
 
         let mut p = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 4, rooms: 2 });
@@ -3761,17 +3784,36 @@ mod test {
 
     #[test]
     fn roomless_action_tier_boundary_64_vs_65() {
-        // Fresh process (nextest) with empty PipeSlot cache: (64, 0) fits in
-        // 4,096 actions exactly (64*64 = 4,096), whereas (65, 0) crosses into
-        // 8,192 (65*64 = 4,160).
-        crate::initialize_multithreaded(None);
-        let p64 = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 64, rooms: 0 });
-        assert_eq!(p64.storage().slot.get().source.actions_len(), 4096);
-        assert!(p64.storage().pieces.is_empty());
-        drop(p64);
-        let p65 = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 65, rooms: 0 });
-        assert_eq!(p65.storage().slot.get().source.actions_len(), 8192);
-        assert!(p65.storage().pieces.is_empty());
+        // Run in an isolated 2-thread subprocess so worker action-ring tier
+        // boundaries (64 -> 4,096 actions; 65 -> 8,192 actions) are always
+        // verified even when the test binary runs under a 1-CPU affinity mask.
+        const ENV: &str = "BLAKE3_PIPELINE_ROOMLESS_TIER_2T";
+        if std::env::var_os(ENV).is_some() {
+            crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+            let p64 = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 64, rooms: 0 });
+            assert_eq!(p64.storage().slot.get().source.actions_len(), 4096);
+            assert_eq!(p64.storage().slot.get().loan_completed.len(), 64);
+            assert!(p64.storage().pieces.is_empty());
+            drop(p64);
+            let p65 = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 65, rooms: 0 });
+            assert_eq!(p65.storage().slot.get().source.actions_len(), 8192);
+            assert_eq!(p65.storage().slot.get().loan_completed.len(), 128);
+            assert!(p65.storage().pieces.is_empty());
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(&exe)
+            .env(ENV, "1")
+            .args(["--exact", "pipeline::test::roomless_action_tier_boundary_64_vs_65", "--nocapture"])
+            .output()
+            .unwrap();
+        let stdout = std::string::String::from_utf8_lossy(&out.stdout);
+        let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "roomless 2-thread tier check failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            out.status
+        );
     }
 
     fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
@@ -4259,7 +4301,7 @@ mod test {
     }
 
     #[test]
-    fn pack_unpack_arg_roundtrips_every_field() {
+    fn action_arg_roundtrips_every_field() {
         let cases = [
             ActionArg::Group { group: 0, custom_slot: 0 },
             ActionArg::Group { group: ActionArg::MAX_A, custom_slot: u32::MAX },
@@ -4876,6 +4918,7 @@ mod test {
     #[test]
     fn unit_internal_capacities_group_thresholds_aborts_and_drop_cleanup() {
         crate::initialize_multithreaded(None);
+        let has_workers = crate::lanes::pool_has_workers();
 
         let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
         let p_small = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
@@ -4885,7 +4928,7 @@ mod test {
         assert_eq!(slot_tier(2048), 1);
         assert_eq!(slot_tier(16384), 4);
         assert_eq!(slot_tier(32768), 5);
-        assert_eq!(p_small.storage().slot.get().source.actions_len(), 1024);
+        assert_eq!(p_small.storage().slot.get().source.actions_len(), if has_workers { 1024 } else { 0 });
         assert_eq!(p_small.storage().slot.get().loan_completed.len(), 1024 / MAX_SLOT_PIECES);
         assert_eq!(p_small.storage().slot.get().group_completed.len(), 16);
         let slot_small = p_small.storage().slot.get() as *const PipeSlot as usize;
@@ -4897,10 +4940,12 @@ mod test {
         assert_eq!(p_mid.free_pieces.buf.len(), 0, "roomless Pipeline allocates zero PieceNodes");
         assert_eq!(p_mid.local_free_rooms.buf.len(), 0, "roomless Pipeline allocates zero local_free_rooms");
         assert!(p_mid.storage().pieces.is_empty(), "roomless PipeStorage has zero PieceNodes");
-        assert_eq!(p_mid.storage().slot.get().source.actions_len(), 2048);
+        assert_eq!(p_mid.storage().slot.get().source.actions_len(), if has_workers { 2048 } else { 0 });
+        assert_eq!(p_mid.storage().slot.get().loan_completed.len(), 2048 / MAX_SLOT_PIECES);
         let slot_mid = p_mid.storage().slot.get() as *const PipeSlot as usize;
         let p_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 200, rooms: 1 });
-        assert_eq!(p_big.storage().slot.get().source.actions_len(), 16384);
+        assert_eq!(p_big.storage().slot.get().source.actions_len(), if has_workers { 16384 } else { 0 });
+        assert_eq!(p_big.storage().slot.get().loan_completed.len(), 16384 / MAX_SLOT_PIECES);
         let slot_big = p_big.storage().slot.get() as *const PipeSlot as usize;
         assert_ne!(slot_big, slot_small);
         assert_ne!(slot_mid, slot_small);
@@ -4921,13 +4966,17 @@ mod test {
             "best-fit fallback picks 2,048 over 16,384 when exact 1,024 tier is absent"
         );
         let p_exact_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 15 });
-        assert_eq!(p_exact_big.storage().slot.get() as *const PipeSlot as usize, slot_big, "exact actions_len match reuses 16,384 PipeSlot");
+        assert_eq!(p_exact_big.storage().slot.get() as *const PipeSlot as usize, slot_big, "exact tier match reuses 16,384 PipeSlot");
         assert_eq!(PIPE_SLOTS_MADE.load(Ordering::Relaxed), slots_before_reuse, "no extra PipeSlot allocated across exact + best-fit fallback");
         drop(p_exact_big);
         drop(p_fallback);
-        // Free slots are 2,048 and 16,384; requesting 16,385 must NOT take either.
-        let p_too_big = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 248, rooms: 16 });
-        assert_eq!(p_too_big.storage().slot.get().source.actions_len(), 32768);
+        // Free slots are 2,048 and 16,384; requesting past 16,384 must NOT take either
+        // (for multi-worker pools `(248, 16)` crosses 16,384 via rooms; for 1-thread
+        // pools `(257, 0)` crosses 256 messages = 16,384).
+        let too_big_limits = if has_workers { Limits { messages: 248, rooms: 16 } } else { Limits { messages: 257, rooms: 0 } };
+        let p_too_big = Pipeline::<usize>::new(Mode::Plain, too_big_limits);
+        assert_eq!(p_too_big.storage().slot.get().source.actions_len(), if has_workers { 32768 } else { 0 });
+        assert_eq!(p_too_big.storage().slot.get().loan_completed.len(), 32768 / MAX_SLOT_PIECES);
         assert_ne!(p_too_big.storage().slot.get() as *const PipeSlot as usize, slot_big, "off-by-one larger request must not take 16384 slot");
         drop((p_too_big, p_best_fit));
         assert_eq!(LIVE_STORAGES.load(Ordering::Relaxed), live_before);
@@ -5311,7 +5360,7 @@ mod test {
         assert_eq!(got_r[0], (11, ref_hash(Mode::Plain, &[0x55; 64])));
         assert_eq!(got_r[1], (10, ref_hash(Mode::Keyed(&key_a), &[0x44; 64])));
 
-        // 8. Dropping a Pending MessageWithFut must clear the registered Waker.
+        // 8. Dropping a Pending MessageOpenFut (override mode) must clear the registered Waker.
         struct NoopWake;
         impl std::task::Wake for NoopWake {
             fn wake(self: Arc<Self>) {}
@@ -5332,7 +5381,7 @@ mod test {
             assert_eq!(Arc::strong_count(&wake_arc), 2, "Pending poll must register waker");
             drop(fut);
         }
-        assert_eq!(Arc::strong_count(&wake_arc), 1, "Dropping Pending MessageWithFut must clear waker");
+        assert_eq!(Arc::strong_count(&wake_arc), 1, "Dropping Pending MessageOpenFut must clear waker");
         p1.storage().slot.get().group_completed[0].store(pending_epoch, Ordering::SeqCst);
         assert!(matches!(p1.try_reap_one(), Some(Event::Aborted { tag: 0, owner: None })));
     }
@@ -5648,17 +5697,81 @@ mod test {
         assert_eq!(hash, blake3_servil_core::convenience::hash(b"hello"));
     }
 
+    /// A one-thread pool allocates zero worker ticket slots and recycles its
+    /// `PipeSlot` across Pipelines (including multi-piece loans) without
+    /// allocating a fresh slot.
+    #[test]
+    fn one_thread_pool_pipeline_allocates_zero_worker_tickets() {
+        const ENV: &str = "BLAKE3_PIPELINE_ONE_THREAD_TICKETS";
+        if std::env::var_os(ENV).is_some() {
+            crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+            let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1024, rooms: 0 });
+            assert!(p.source_slot.is_none(), "one-thread pool must not register a worker Source");
+            assert_eq!(p.pipe_slot.source.actions_len(), 0, "one-thread pool must allocate zero ticket slots");
+            assert_eq!(p.pipe_slot.loan_completed.len(), 1024);
+            assert_eq!(p.pipe_slot.group_completed.len(), 256);
+            let slot_ptr = p.pipe_slot as *const PipeSlot as usize;
+            let made_after_p = PIPE_SLOTS_MADE.load(Ordering::Relaxed);
+            // Prove the synchronous execution path hashes messages and recycles the slot.
+            let msg = [0x5Au8; 64];
+            let m = block_on(p.message(7, None));
+            // Sound: `lent` is held across `ready()` and dropped only after completion.
+            let lent = unsafe { p.lent(m, &msg) };
+            block_on(p.ready());
+            drop(lent);
+            match p.next_event() {
+                Some(Event::Hashed { tag: 7, hash, .. }) => assert_eq!(hash.as_bytes(), blake3::hash(&msg).as_bytes()),
+                _ => panic!("expected Hashed event"),
+            }
+            drop(p);
+            let mut p2 = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 16, rooms: 2 });
+            assert_eq!(p2.pipe_slot as *const PipeSlot as usize, slot_ptr, "one-thread PipeSlot must be recycled by identity");
+            assert_eq!(PIPE_SLOTS_MADE.load(Ordering::Relaxed), made_after_p, "recycling one-thread PipeSlot allocates no new slot");
+            assert_eq!(p2.pipe_slot.source.actions_len(), 0, "reused one-thread PipeSlot keeps zero ticket slots");
+            // Exercise a multi-piece (> TASK_LEN) loan across the recycled slot.
+            let big = vec![0xA5u8; 200_000];
+            let m2 = block_on(p2.message(9, None));
+            // Sound: `lent2` is held across `ready()` and dropped only after completion.
+            let lent2 = unsafe { p2.lent(m2, &big) };
+            block_on(p2.ready());
+            drop(lent2);
+            match p2.next_event() {
+                Some(Event::Hashed { tag: 9, hash, .. }) => assert_eq!(hash.as_bytes(), blake3::hash(&big).as_bytes()),
+                _ => panic!("expected Hashed event for multi-piece loan"),
+            }
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(&exe)
+            .env(ENV, "1")
+            .args(["--exact", "pipeline::test::one_thread_pool_pipeline_allocates_zero_worker_tickets", "--nocapture"])
+            .output()
+            .unwrap();
+        let stdout = std::string::String::from_utf8_lossy(&out.stdout);
+        let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "one-thread ticket-capacity check failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            out.status
+        );
+    }
+
     /// Forked children entering `acquire_free_group` or `alloc_piece_node`
     /// while waiting on work must stop via `lanes::require()` instead of
     /// spinning forever (#465).
-    #[cfg(unix)]
     #[test]
     fn forked_child_stops_in_acquire_free_group_and_alloc_piece_node() {
         const ENV: &str = "BLAKE3_PIPELINE_FORK_WAIT_CASE";
         if let Ok(which) = std::env::var(ENV) {
+            // Exercise a real multi-worker pool (`threads == 2`) using the
+            // calling-thread override so background workers stay unaffected and
+            // `Pipeline::drop` runs cleanly after the guard drops.
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+            assert!(crate::lanes::pool_has_workers(), "expected a multi-worker pool for fork wait test");
             let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-            // Mark every group / piece unavailable before simulating a forked child.
+            // Mark every group / piece unavailable, then set the calling-thread
+            // fork override in this normal un-forked subprocess (no UB from
+            // calling allocator or unwinding after a multithreaded fork()).
             if which == "group" {
                 for slot in &mut p.assigned_group_epoch {
                     *slot = u64::MAX;
@@ -5666,96 +5779,69 @@ mod test {
             } else {
                 while p.free_pieces.pop_front().is_some() {}
             }
-            // Sound: test runs in an isolated child process and triggers the
-            // fork flag so `acquire_free_group`/`alloc_piece_node` hits `require()`.
-            unsafe {
-                let pid = libc::fork();
-                assert!(pid >= 0, "fork failed");
-                if pid == 0 {
-                    // Long backstop in case the parent dies before reaping; normal
-                    // timeouts are enforced by the parent's 8 s waitpid deadline below.
-                    libc::alarm(30);
-                    let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-                        if which == "group" {
-                            let _ = p.acquire_free_group();
-                        } else {
-                            let _ = p.alloc_piece_node(0);
-                        }
-                    }));
-                    let fork_panic = match res {
-                        Err(payload) => {
-                            let msg = payload
-                                .downcast_ref::<&str>()
-                                .copied()
-                                .or_else(|| payload.downcast_ref::<std::string::String>().map(|s| s.as_str()))
-                                .unwrap_or("");
-                            msg.contains("fork")
-                        }
-                        Ok(()) => false,
-                    };
-                    libc::_exit(if fork_panic { 0 } else { 1 });
-                }
-                // Parent-supervised deadline: immune to inherited SIG_IGN on SIGALRM,
-                // above the slowest loaded baseline (> 5.1 s) yet well below nextest's
-                // 15 s mutants timeout so a removed fork guard fails cleanly instead of
-                // timing out (documented exception in .config/nextest.toml; #557).
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-                let mut status: libc::c_int = 0;
-                let mut timed_out = false;
-                let mut wait_err: Option<i32> = None;
-                loop {
-                    let got = libc::waitpid(pid, &mut status, libc::WNOHANG);
-                    if got == pid {
-                        break;
+            let res = {
+                let _fork_guard = crate::lanes::mark_forked_for_test();
+                std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                    if which == "group" {
+                        let _ = p.acquire_free_group();
+                    } else {
+                        let _ = p.alloc_piece_node(0);
                     }
-                    if got < 0 {
-                        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                        if err == libc::EINTR {
-                            continue;
-                        }
-                        wait_err = Some(err);
-                        break;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        timed_out = true;
-                        let krc = libc::kill(pid, libc::SIGKILL);
-                        let kerr = if krc < 0 { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) } else { 0 };
-                        if krc == 0 || kerr == libc::ESRCH {
-                            loop {
-                                let r = libc::waitpid(pid, &mut status, 0);
-                                if r == pid || (r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)) {
-                                    break;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                // Clear synthetic busy state before any assertion so parent `Drop` stays clean.
-                for slot in &mut p.assigned_group_epoch {
-                    *slot = 0;
-                }
-                assert!(wait_err.is_none(), "waitpid failed with errno {:?}", wait_err);
-                assert!(!timed_out, "forked child hung waiting on {which} (killed by parent deadline)");
-                assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child failed: status={status}");
+                }))
+            };
+            // Clear synthetic busy state before any assertion so `Drop` stays clean.
+            for slot in &mut p.assigned_group_epoch {
+                *slot = 0;
             }
+            let fork_panic = match res {
+                Err(payload) => {
+                    let msg =
+                        payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<std::string::String>().map(|s| s.as_str())).unwrap_or("");
+                    msg.contains("fork")
+                }
+                Ok(()) => false,
+            };
+            assert!(fork_panic, "expected fork panic on {which}");
             return;
         }
         let exe = std::env::current_exe().unwrap();
+        let pid = std::process::id();
         for case in ["group", "piece"] {
-            let out = std::process::Command::new(&exe)
+            // Redirect stdout and stderr to temporary files rather than pipes so
+            // verbose child output (e.g. `LD_DEBUG=all`) cannot fill a 64 KiB
+            // pipe buffer and stall before the parent stops calling `try_wait`.
+            let out_path = std::env::temp_dir().join(std::format!("blake3-fork-wait-{pid}-{case}.out"));
+            let err_path = std::env::temp_dir().join(std::format!("blake3-fork-wait-{pid}-{case}.err"));
+            let out_file = std::fs::File::create(&out_path).unwrap();
+            let err_file = std::fs::File::create(&err_path).unwrap();
+            let mut child = std::process::Command::new(&exe)
                 .env(ENV, case)
                 .args(["--exact", "pipeline::test::forked_child_stops_in_acquire_free_group_and_alloc_piece_node", "--nocapture"])
-                .output()
+                .stdout(std::process::Stdio::from(out_file))
+                .stderr(std::process::Stdio::from(err_file))
+                .spawn()
                 .unwrap();
-            let stdout = std::string::String::from_utf8_lossy(&out.stdout);
-            let stderr = std::string::String::from_utf8_lossy(&out.stderr);
-            assert!(
-                out.status.success() && stdout.contains("1 passed"),
-                "fork wait case {case} failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                out.status
-            );
+            // Parent-supervised deadline well below nextest's 15 s mutants timeout
+            // so a removed fork guard fails cleanly instead of timing out (#557).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let mut timed_out = false;
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break child.wait().unwrap();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
+            let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+            let _ = std::fs::remove_file(&out_path);
+            let _ = std::fs::remove_file(&err_path);
+            assert!(!timed_out, "fork wait case {case} hung (killed by parent deadline)\nstdout:\n{stdout}\nstderr:\n{stderr}");
+            assert!(status.success() && stdout.contains("1 passed"), "fork wait case {case} failed: status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}");
         }
     }
 

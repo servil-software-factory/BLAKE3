@@ -65,7 +65,7 @@ pub(crate) fn free_storages_for_model() -> (usize, usize, usize) {
         let mut tiers = FREE_PIPE_SLOTS.lock().unwrap();
         for (tier_idx, bucket) in tiers.iter_mut().enumerate() {
             for FreeSlot { slot, next_group_epoch, next_loan_epoch } in bucket.drain(..) {
-                assert_eq!(slot_tier(slot.source.actions_len()), tier_idx, "PipeSlot returned to wrong tier bucket");
+                assert_eq!(slot_tier(slot.loan_completed.len() * super::MAX_SLOT_PIECES), tier_idx, "PipeSlot returned to wrong tier bucket");
                 for g in slot.group_completed.iter() {
                     assert!(next_group_epoch > g.0.load(Ordering::Acquire), "saved next_group_epoch must exceed completed group epoch");
                 }

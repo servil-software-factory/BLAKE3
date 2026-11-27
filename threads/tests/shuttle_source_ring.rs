@@ -45,11 +45,22 @@ fn action_ring_publish_claim_two_laps_under_shuttle() {
                     loop {
                         if let Some((seq, ctx, arg)) = take_one(&actions, &published, &claimed) {
                             assert!(seq < TOTAL, "corrupt sequence number {seq}");
-                            let expected_batch = arg >> 32;
-                            let expected_seq = (arg & 0xffff_ffff) as usize;
-                            assert_eq!(expected_seq, seq, "arg seq mismatch for ticket {seq}");
-                            let expected_ctx = (0x1000usize + (expected_batch as usize) * 0x100) as *const ();
-                            assert_eq!(ctx, expected_ctx, "context mismatch for ticket {seq}");
+                            // Derive expected `(batch, arg, ctx)` strictly from
+                            // `seq` and `BATCHES`, never from the returned `arg`.
+                            let (expected_batch, expected_arg, expected_ctx) = {
+                                let mut base = 0usize;
+                                let mut found = None;
+                                for (b, &len) in BATCHES.iter().enumerate() {
+                                    if seq < base + len {
+                                        found = Some((b, ((b as u64) << 32) | (seq as u64), (0x1000usize + b * 0x100) as *const ()));
+                                        break;
+                                    }
+                                    base += len;
+                                }
+                                found.expect("seq < TOTAL lies within BATCHES")
+                            };
+                            assert_eq!(arg, expected_arg, "arg mismatch for ticket {seq} (batch {expected_batch})");
+                            assert_eq!(ctx, expected_ctx, "context mismatch for ticket {seq} (batch {expected_batch})");
                             assert_eq!(seen[seq].fetch_add(1, Ordering::SeqCst), 0, "ticket {seq} claimed twice");
                         } else if done_pub.load(Ordering::Acquire) && claimed.load(Ordering::Acquire) == TOTAL {
                             break;

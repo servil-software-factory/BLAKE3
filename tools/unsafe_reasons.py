@@ -446,6 +446,11 @@ def _in_generic_param_list(code, pos):
     return False
 
 
+def _is_rust_ws(ch):
+    # Rust Pattern_White_Space includes Unicode whitespace plus U+200E / U+200F.
+    return ch.isspace() or ch in ("\u200e", "\u200f")
+
+
 def _test_item_spans(code):
     """Return sorted `(start, end)` spans of every outer `#[cfg(...)]` requiring
     `test` together with its stacked attributes and attached item, block,
@@ -463,10 +468,10 @@ def _test_item_spans(code):
             i = attr_end
             continue
         span_start = _preceding_attr_stack_start(code, pos)
-        # Advance past whitespace and any stacked outer `#[...]` attributes.
+        # Advance past Rust whitespace and any stacked outer `#[...]` attributes.
         j = attr_end
         while j < n:
-            while j < n and code[j].isspace():
+            while j < n and _is_rust_ws(code[j]):
                 j += 1
             if j + 1 < n and code[j] == "#" and code[j + 1] == "[":
                 j = _find_attr_end(code, j)
@@ -484,12 +489,20 @@ def _test_item_spans(code):
         m_kw = _ITEM_OR_STMT_KW_RE.match(code, kw_pos)
         kw = m_kw.group(0) if m_kw else ""
         starts_item_kw = (not in_generic) and bool(m_kw)
+        is_const_block = False
         if kw == "const":
             rest_pos = m_kw.end()
-            while rest_pos < n and code[rest_pos].isspace():
+            while rest_pos < n and _is_rust_ws(code[rest_pos]):
                 rest_pos += 1
+            # Any `const` item (`const NAME:`, `const r#match:`, `const Δ:`,
+            # `const _:`) ends at `;`; `const fn` / `const unsafe` / `const
+            # extern` are brace-terminated items; inline `const { ... }` is an
+            # expression (so inside arrays/tuples/calls it stops at top-level `,`).
+            is_const_block = rest_pos < n and code[rest_pos] == "{"
+            if is_const_block:
+                starts_item_kw = False
             is_const_fn = bool(re.match(r"(?:unsafe|extern|fn)\b", code[rest_pos:]))
-            must_end_semi = starts_item_kw and not is_const_fn
+            must_end_semi = starts_item_kw and not is_const_block and not is_const_fn
         else:
             must_end_semi = starts_item_kw and kw in ("let", "static", "type", "use")
         # Consume the annotated item/statement: track balanced delimiters and
@@ -567,12 +580,23 @@ def _test_item_spans(code):
                         seen_top_brace = False
                         j = m_else.end()
                         continue
-                    # Include an optional trailing `;` for braced statements
-                    # such as `#[cfg(test)] let _ = { 1 };`.
+                    # For inline `const { ... }` block expressions, keep
+                    # scanning if followed by a postfix continuation (`.foo`,
+                    # `?`, NOT a `..` range expression starting the next
+                    # statement) or consume a trailing `;` or `,` (even on the
+                    # next line) so its trailing comment is masked too.
                     k = j
-                    while k < n and code[k] in " \t":
+                    while k < n and _is_rust_ws(code[k]):
                         k += 1
-                    if k < n and code[k] == ";":
+                    if is_const_block and k < n and (
+                        code[k] == "?"
+                        or (code[k] == "." and not code.startswith("..", k))
+                    ):
+                        must_end_semi = True
+                        seen_top_brace = False
+                        j = k + 1
+                        continue
+                    if k < n and (code[k] == ";" or (is_const_block and code[k] == ",")):
                         end = k + 1
                     else:
                         end = j
@@ -622,7 +646,7 @@ def _extend_trailing_comment_spans(code_text, comm_text, spans):
         c_end = end
         j = end
         while j < n:
-            while j < n and code_text[j] in " \t" and comm_text[j] == " ":
+            while j < n and code_text[j] in (" ", "\t", "\u200e", "\u200f") and comm_text[j] == " ":
                 j += 1
             if j in comment_by_start:
                 tok_end = comment_by_start[j]
@@ -816,7 +840,7 @@ def main():
             print(f"{path}:{number}: no reason (a `// Debug-only: ...` comment above): {line[:100]}")
     if bad or bad_da:
         sys.exit(f"unsafe_reasons: {bad} unsafe blocks and {bad_da} debug_asserts state no reason")
-    print(f"unsafe_reasons: every unsafe block and debug_assert across all {len(files)} shipped Rust files states its reason")
+    print(f"unsafe_reasons: all {len(files)} shipped Rust files pass Sound:/Debug-only: rationale checks")
 
 
 if __name__ == "__main__":

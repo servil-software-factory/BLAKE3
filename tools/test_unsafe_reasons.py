@@ -379,6 +379,75 @@ class Reasons(unittest.TestCase):
             "pub fn read(p: &u8) -> u8 { unsafe { *p } }\n"
         )
         self.assertEqual(ur.without_reason(doc_after_block), [])
+        # Inline `#[cfg(test)] const { ... }` block statement ends at `}` (no
+        # semicolon required) and must NEVER swallow the next shipped statement.
+        inline_const_block = (
+            "fn f(p: *const u8) -> u8 {\n"
+            "    #[cfg(test)]\n"
+            "    const { assert!(true) }\n"
+            "    debug_assert!(!p.is_null());\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(inline_const_block)], [4])
+        self.assertEqual([n for n, _ in ur.without_reason(inline_const_block)], [5])
+        # Raw-identifier and Unicode const item names (`const r#match:`, `const Δ:`)
+        # must still scan through `;` before blanking trailing comments.
+        raw_unicode_const = (
+            "fn f(p: *const u8) -> u8 {\n"
+            "    #[cfg(test)] const r#match: u8 = { 1 } + 2; // Sound: test fixture.\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(raw_unicode_const)], [3])
+        unicode_const = (
+            "fn f(p: *const u8) -> u8 {\n"
+            "    #[cfg(test)] const \u0394: u8 = { 1 } + 2; // Sound: test fixture.\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(unicode_const)], [3])
+        # Inline `const { Some(1) }.unwrap();` and next-line `;` continuations
+        # must mask through `;` and their trailing comments.
+        const_block_postfix = (
+            "fn f(p: *const u8) -> u8 {\n"
+            "    #[cfg(test)] const { Some(1) }.unwrap(); // Sound: test fixture.\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(const_block_postfix)], [3])
+        const_block_nl_semi = (
+            "fn f(p: *const u8) -> u8 {\n"
+            "    #[cfg(test)] const { 1 }\n"
+            "    ; // Sound: test fixture.\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(const_block_nl_semi)], [4])
+        # Postfix `?` after `#[cfg(test)] const { ... }?;` masks through `;` and
+        # its trailing comment; conversely a separate `..unsafe { *q };` range
+        # statement on the next line must NOT be mistaken for `.` method syntax.
+        const_block_try = (
+            "fn f(p: *const u8) -> Result<u8, ()> {\n"
+            "    #[cfg(test)] const { Ok::<(), ()>(()) }?; // Sound: test fixture.\n"
+            "    Ok(unsafe { *p })\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(const_block_try)], [3])
+        const_block_range_next = (
+            "fn f(p: *const u8) {\n"
+            "    #[cfg(test)] const { 1 }\n"
+            "    let _ = ..unsafe { *p };\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(const_block_range_next)], [3])
+        const_block_bare_range = (
+            "fn f(p: *const u8) {\n"
+            "    #[cfg(test)] const { () }\n"
+            "    ..unsafe { *p };\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(const_block_bare_range)], [3])
         # Nested generics ending with `>>>` on a test-only generic parameter
         # (`fn bounded<#[cfg(test)] T: Into<Vec<u8>>>() { ... }`) must stop
         # before the enclosing `>` and still check the shipped function body.
@@ -445,6 +514,40 @@ class Reasons(unittest.TestCase):
         )
         self.assertEqual(ur.without_reason(multiline), [])
         self.assertEqual(ur.debug_assert_without_reason(multiline), [])
+
+        # Inline `#[cfg(test)] const { ... }` inside an array/tuple with postfix
+        # `.wrapping_add(2),` must stop at `,` (never masking the next shipped
+        # element), a plain `const { 1u8 }, // Sound:` must mask its trailing
+        # comment, and Pattern_White_Space (`\u200E`) between `const` and `{`
+        # must still be recognized as an inline const block.
+        const_array_postfix = (
+            "fn f(p: &u8) -> [u8; 1] {\n"
+            "    [\n"
+            "        #[cfg(test)] const { 1u8 }.wrapping_add(2),\n"
+            "        unsafe { *(p as *const u8) },\n"
+            "    ]\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(const_array_postfix)], [4])
+        const_array_trailing_comment = (
+            "fn f(p: &u8) -> [u8; 1] {\n"
+            "    [\n"
+            "        #[cfg(test)] const { 1u8 }, // Sound: test fixture. Debug-only: test fixture.\n"
+            "        { debug_assert!(*p < 255); unsafe { *(p as *const u8) } },\n"
+            "    ]\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(const_array_trailing_comment)], [4])
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(const_array_trailing_comment)], [4])
+        const_lrm_ws = (
+            "fn f(p: &u8) -> u8 {\n"
+            "    #[cfg(test)] const\u200e{ () }\n"
+            "    debug_assert!(*p < 255);\n"
+            "    unsafe { *(p as *const u8) }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(const_lrm_ws)], [3])
+        self.assertEqual([n for n, _ in ur.without_reason(const_lrm_ws)], [4])
 
     def test_cfg_test_fn_items_are_excluded(self):
         src = (
