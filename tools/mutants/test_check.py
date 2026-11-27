@@ -228,6 +228,19 @@ class Leftovers(unittest.TestCase):
             self.assertTrue(check.unclassified("src/a.rs\treplace e with f", "times out", lists).startswith("UNCLASSIFIED"))
             self.assertTrue(check.unclassified("src/a.rs\treplace g with h", "survives", lists).startswith("UNCLASSIFIED"))
 
+    def test_default_worktrees_dir_isolates_users(self):
+        # Shared build hosts share /tmp across users; per-UID paths keep one
+        # user's lock file and worktrees from colliding with another's.
+        uid_a = check.default_worktrees_dir("/tmp", 1001)
+        uid_b = check.default_worktrees_dir("/tmp", 1002)
+        self.assertNotEqual(uid_a, uid_b)
+        self.assertEqual(uid_a, "/tmp/blake3-servil-mutants-1001")
+        self.assertEqual(uid_b, "/tmp/blake3-servil-mutants-1002")
+        self.assertTrue(
+            check.WORKTREES.endswith(f"blake3-servil-mutants-{os.getuid()}"),
+            check.WORKTREES,
+        )
+
     def test_only_the_shards_worktrees_go(self):
         listed = "\n".join([
             "worktree /repo", "HEAD a", "",

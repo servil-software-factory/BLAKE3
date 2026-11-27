@@ -659,12 +659,21 @@ def scratch_dir():
     return path
 
 
+def default_worktrees_dir(tempdir=None, uid=None):
+    """Per-user default worktree directory under the system temp dir.
+    Keying by UID prevents shared-host `/tmp/blake3-servil-mutants.lock`
+    permission collisions when two users run `check.py` on one machine."""
+    base = tempfile.gettempdir() if tempdir is None else tempdir
+    user = os.getuid() if uid is None else uid
+    return os.path.join(base, f"blake3-servil-mutants-{user}")
+
+
 # The shards' worktrees: sources alone (their builds go under TARGET_DIR),
 # a few MB each, in the system's temporary directory. In the repository's
 # tmp/ they sat on the VM's shared mount, which runs nothing and fails to
 # delete a large tree ("Directory not empty"): a run lost its verdict so
 # on October 24.
-WORKTREES = os.path.join(tempfile.gettempdir(), "blake3-servil-mutants")
+WORKTREES = default_worktrees_dir()
 
 
 # Set by a run of every crate for each crate's process: the number of the

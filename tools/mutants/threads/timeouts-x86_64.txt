@@ -20,7 +20,6 @@ src/pipeline.rs	replace += with -= in PipeStorage::run_group	1	hang: `cur_n -= 1
 src/pipeline.rs	replace - with + in <impl Drop for Room>::drop	1	hang: Room::drop releases ROOM_CREDITS + commits instead of ROOM_CREDITS - commits, wrapping refs past zero so the room never becomes free
 src/pipeline.rs	replace == with != in Pipeline<T, B, P>::drain_pieces	1	hang: drain_pieces returns immediately while head != NONE, never draining completed room pieces
 src/pipeline.rs	replace == with != in Pipeline<T, B, P>::front_uses_open_group	1	hang: front_uses_open_group reports false when the front slot sits in open_group, so poll_ready parks without publishing open_group
-src/pipeline.rs	replace == with != in PipeStorage::run_group	1	hang: `cur_room` starts at `NONE`, so `meta.room != cur_room` holds for every real room and leaves `cur_room` at `NONE`, never releasing room credits so poll_room parks forever
 src/pipeline.rs	replace Pipeline<T, B, P>::flush_sealed_short_rooms with ()	1	hang: sealed rooms holding uncommitted short messages are never dispatched when poll_room waits for a room
 src/pipeline.rs	replace Pipeline<T, B, P>::front_uses_open_group -> bool with false	1	hang: poll_ready parks without publishing open_group when the front message sits in open_group
 src/pipeline.rs	replace Pipeline<T, B, P>::try_take_room -> Option<Room> with None	1	hang: poll_room never acquires a free room and parks forever

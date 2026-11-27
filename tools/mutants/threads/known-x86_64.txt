@@ -7,6 +7,7 @@ model files: src/action_ring.rs src/finish.rs src/park.rs src/waker.rs
 src/finish.rs	delete ! in Finish::wait	1	OPEN: the pool's scheduling: `if poll()` leaves the polls for the park as soon as a poll did work; whether a test then hangs depends on the machine: it survives on five x86-64 machines of 16 to 112 threads (whole runs at 5c0247cd, November 12), and on aarch64 since the first pipeline's tests went (known-aarch64.txt)
 src/lanes.rs	delete ! in initialize	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	delete ! in sme2_serve	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/lanes.rs	replace != with == in places::affinity_syscall	1	fallback: when sched_getaffinity returns 0 and the mutated check treats it as an error, places::affinity() falls back to /proc/thread-self/status (Cpus_allowed_list:) and returns the same allowed CPU mask
 src/lanes.rs	replace % with + in places::allowed	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace % with + in places::assign	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/lanes.rs	replace & with ^ in sme2_serve	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -28,10 +29,10 @@ src/lanes.rs	replace sme2_main with ()	1	same code: every test binary of a relea
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
 src/lib.rs	replace waker_sync::spin with ()	1	speed: core::hint::spin_loop() is a CPU pause hint with identical semantics (Shuttle uses yield_now in tests/shuttle_waker.rs)
 src/park.rs	replace > with >= in Park::wake_for	1	equivalent: `later >= 0` adds `later` to the owed when it is 0, which is adding nothing; the `if` keeps an atomic add off the path of a job that owes none
+src/park.rs	replace | with ^ in Park::wake_for	1	equivalent: (next_gen << 32) and next_count (<= u32::MAX) are disjoint 32-bit fields
 src/pipeline.rs	delete ! in Pipeline<T, B, P>::acquire_free_group	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
 src/pipeline.rs	delete ! in Pipeline<T, B, P>::alloc_piece_node	1	speed: only flips when core::hint::spin_loop() runs around run_waiting_action(); semantics are identical
 src/pipeline.rs	replace * with +	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the piece alongside NEON workers (identical digests)
 src/pipeline.rs	replace < with <= in Pipeline<T, B, P>::acquire_free_group	1	speed: seen_group_epoch is a producer-local cache of completed_epoch; reloading from the atomic checks the same >= assigned condition
 src/pipeline.rs	replace >= with < in Pipeline<T, B, P>::commit_multi	1	speed: SME2_MIN_LEN threshold selects only whether the SME2 worker thread may also take the room piece (identical digests)
 src/pipeline.rs	replace >= with < in block_on	1	speed: SPIN_BEFORE_SLEEP governs only how long block_on spins before parking; ThreadPark wakes the thread either way
-src/park.rs	replace | with ^ in Park::wake_for	1	equivalent: (next_gen << 32) and next_count (<= u32::MAX) are disjoint 32-bit fields
