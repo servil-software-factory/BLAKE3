@@ -603,7 +603,7 @@ pub(crate) fn try_whole_group<'a>(
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn hash_run_padded(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], last_len: usize) {
-    let mut slots: PtrSlots = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+    let mut slots = crate::stack_vec::StackVec::<*const u8, TABLE>::new();
     let lanes = fill_ptrs(&mut slots, messages, BLOCK_LEN, outputs.len(), outputs.len().next_multiple_of(16));
     // Sound: the caller found SME2 (platform_is_sme2); `fill_ptrs` verified `messages` holds `outputs.len()` blocks.
     unsafe { crate::sme2::hash_messages_raw(lanes, 1, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut()) };
@@ -630,7 +630,7 @@ fn hash_run_short(messages: &[u8], key: &CVWords, flags: u8, outputs: &mut [[u8;
     }
     #[cfg(target_arch = "aarch64")]
     {
-        let mut slots: PtrSlots = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+        let mut slots = crate::stack_vec::StackVec::<*const u8, TABLE>::new();
         let lanes = fill_ptrs(&mut slots, messages, BLOCK_LEN, outputs.len(), outputs.len());
         // Sound: all supported AArch64 targets assume NEON; `fill_ptrs` verified `messages` holds `outputs.len()` blocks.
         unsafe { crate::neon_hybrid::hash_many_one_block_raw(lanes, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, outputs.as_flattened_mut()) };
@@ -668,31 +668,27 @@ pub(crate) const ONE_BLOCK_PAD_MIN: usize = 11;
 #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) const ONE_BLOCK_PAD_AFTER_GROUPS: usize = 5;
 
-/// Room for a pointer table: TABLE messages and a padded group's spare
-/// lanes, uninitialised on the caller's stack.
-#[cfg(target_arch = "aarch64")]
-type PtrSlots = [core::mem::MaybeUninit<*const u8>; TABLE + 16];
-
 /// Fill `slots` with pointers to the first `count` slots of `stride` bytes in
-/// `messages`, then spare lanes repeating the last up to `lanes`; the
-/// table's filled part.
+/// `messages`, then pad spare lanes repeating the last up to `lanes`; return
+/// the filled slice. Statically enforces `TABLE % 16 == 0` so rounding any
+/// `<= TABLE` tile up to 16 fits inside `TABLE`.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn fill_ptrs<'s>(slots: &'s mut PtrSlots, messages: &[u8], stride: usize, count: usize, lanes: usize) -> &'s [*const u8] {
+fn fill_ptrs<'s>(slots: &'s mut crate::stack_vec::StackVec<*const u8, TABLE>, messages: &[u8], stride: usize, count: usize, lanes: usize) -> &'s [*const u8] {
+    const { assert!(TABLE % 16 == 0, "TABLE must be a multiple of the 16-lane SME2 group width") };
     assert!(
-        stride > 0 && 0 < count && count <= lanes && lanes <= TABLE + 16 && count <= messages.chunks_exact(stride).len(),
-        "a table of 1 to TABLE + 16 lanes over the messages"
+        stride > 0 && 0 < count && count <= lanes && lanes <= TABLE && count <= messages.chunks_exact(stride).len(),
+        "a table of 1 to TABLE lanes over the messages"
     );
     let mut last = messages.as_ptr();
-    for (slot, message) in slots[..count].iter_mut().zip(messages.chunks_exact(stride)) {
+    for message in messages.chunks_exact(stride).take(count) {
         last = message.as_ptr();
-        slot.write(last);
+        slots.push(last);
     }
-    for slot in &mut slots[count..lanes] {
-        slot.write(last);
+    for _ in count..lanes {
+        slots.push(last);
     }
-    // Sound: the first `lanes` slots were written just above.
-    unsafe { core::slice::from_raw_parts(slots.as_ptr() as *const *const u8, lanes) }
+    slots.as_slice()
 }
 
 /// [`hash_run`] for messages of 2 to 16 whole blocks (`blocks`), the last block
@@ -729,7 +725,7 @@ fn hash_blocks(messages: &[u8], blocks: usize, key: &CVWords, flags: u8, outputs
         0
     };
     let lanes = if padded { count.next_multiple_of(GROUP) } else { count };
-    let mut slots: PtrSlots = [core::mem::MaybeUninit::uninit(); TABLE + 16];
+    let mut slots = crate::stack_vec::StackVec::<*const u8, TABLE>::new();
     let table = fill_ptrs(&mut slots, messages, blocks * BLOCK_LEN, count, lanes);
     let (groups, rest) = outputs.split_at_mut(on_sme2);
     if !rest.is_empty() {

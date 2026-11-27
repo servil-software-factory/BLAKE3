@@ -502,10 +502,12 @@ fn compiled_features_present() {
                 "blake3-servil: this binary was compiled for CPUs with {feature}, which this CPU lacks, and here it would compute wrong digests; build it for this CPU"
             ))
         };
-        if cfg!(target_feature = "lzcnt") && cpuid(0x8000_0001, 0).ecx & (1 << 5) == 0 {
+        if cfg!(target_feature = "lzcnt")
+            && (!crate::platform::cpuid_has_leaf(cpuid(0x8000_0000, 0).eax, 0x8000_0001) || cpuid(0x8000_0001, 0).ecx & (1 << 5) == 0)
+        {
             lacks("LZCNT");
         }
-        if cfg!(target_feature = "bmi1") && cpuid(7, 0).ebx & (1 << 3) == 0 {
+        if cfg!(target_feature = "bmi1") && (!crate::platform::cpuid_has_leaf(cpuid(0, 0).eax, 7) || cpuid(7, 0).ebx & (1 << 3) == 0) {
             lacks("BMI1 (TZCNT)");
         }
     }
@@ -772,7 +774,7 @@ mod test {
             // write occurring before `platform.record()`) so the real
             // `is_initialized()` fast path is tested against nonzero high bits
             // with low byte zero, and verified to preserve high bits on record.
-            crate::platform::DETECTED.store(0x0200, Release);
+            crate::platform::seed_high_bits_for_test(0x0200);
             assert!(!crate::platform::is_initialized(), "high bits alone must not mark platform initialized");
             HOLD_RUN.store(true, Release);
             let winner = std::thread::spawn(crate::initialize);
@@ -808,7 +810,7 @@ mod test {
             }
             assert_eq!(done.load(Acquire), 3);
             assert!(crate::platform::is_initialized());
-            assert_ne!(crate::platform::DETECTED.load(Acquire) & 0x0200, 0, "platform.record() must preserve high-byte cache bits");
+            assert_ne!(crate::platform::high_bits_for_test() & 0x0200, 0, "platform.record() must preserve high-byte cache bits");
             std::process::exit(0);
         }
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1037,7 +1039,7 @@ mod stops {
         use core::sync::atomic::Ordering::Relaxed;
         const CHILD: &str = "BLAKE3_SERVIL_TEST_PLANTED_FAILURE";
         if std::env::var_os(CHILD).is_some() {
-            crate::platform::DETECTED.store(0, Relaxed);
+            crate::platform::seed_high_bits_for_test(0);
             PLANTED_FAILURE.store(true, Relaxed);
             let _ = std::panic::catch_unwind(ensure_slow);
             std::process::exit(0);

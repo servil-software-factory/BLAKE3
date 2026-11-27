@@ -1099,21 +1099,21 @@ pub(crate) mod guard_pages {
     #[cfg(target_arch = "x86_64")]
     fn test_chunk_root_against_a_guard_page() {
         let mut variants = Vec::new();
-        if platform::Platform::sse41().is_some() {
-            variants.push(false);
+        if let Some(p) = platform::Platform::sse41() {
+            variants.push(p);
         }
         #[cfg(target_arch = "x86_64")]
-        if platform::Platform::avx512().is_some() {
-            variants.push(true);
+        if let Some(p) = platform::Platform::avx512() {
+            variants.push(p);
         }
         let mut golden = crate::test::Golden::new("chunk_root_against_a_guard_page");
         for at_end in [true, false] {
             for len in [0, 1, 63, 64, 65, 127, 128, 960, 1023, 1024] {
                 let mut g = filled(len, at_end);
                 let input = g.bytes();
-                let first = unsafe { crate::chunk_root::chunk_root(variants[0], input, IV, 0) };
-                for &avx512 in &variants[1..] {
-                    assert_eq!(unsafe { crate::chunk_root::chunk_root(avx512, input, IV, 0) }, first, "avx512={avx512} len={len} at_end={at_end}");
+                let first = crate::chunk_root::chunk_root(variants[0], input, IV, 0);
+                for &platform in &variants[1..] {
+                    assert_eq!(crate::chunk_root::chunk_root(platform, input, IV, 0), first, "platform={platform:?} len={len} at_end={at_end}");
                 }
                 golden.add(&first, || crate::test::official::hash(crate::Mode::Plain, input).to_vec());
             }

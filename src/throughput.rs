@@ -143,20 +143,19 @@ pub fn hash_counter_range(mode: Mode, template: &[u8], counter_word: usize, star
     // Validate template/word and enforce `initialize()` before checking empty
     // output, and borrow via `mode.key()` so empty `Mode::DeriveKey` skips
     // context hashing and nonempty calls avoid constructing a `TreeHasher`.
-    crate::ffi_counter::validate_counter_range(template, counter_word);
+    let validated = crate::ffi_counter::ValidatedTemplate::new(template, counter_word);
     let platform = crate::Platform::detect();
     if out.is_empty() {
         return;
     }
     let mut derived = core::mem::MaybeUninit::uninit();
     let (key, flags) = mode.key(&mut derived);
-    hash_counter_range_checked(template, counter_word, start, key, flags, out, platform);
+    hash_counter_range_checked(validated, start, key, flags, out, platform);
 }
 
 #[inline(always)]
 fn hash_counter_range_checked(
-    template: &[u8],
-    counter_word: usize,
+    template: crate::ffi_counter::ValidatedTemplate<'_>,
     start: u32,
     key: &crate::CVWords,
     flags: u8,
@@ -164,7 +163,7 @@ fn hash_counter_range_checked(
     platform: crate::platform::Platform,
 ) {
     let turn = crate::platform::Sme2Turn::take(platform, out.len() >= 16);
-    crate::ffi_counter::hash_counter_range_on(template, counter_word, start, key, flags, out, turn.platform());
+    crate::ffi_counter::hash_counter_range_on(template, start, key, flags, out, turn.platform());
 }
 
 /// Hash a key-derivation context string and return a [`ContextKey`].
@@ -688,12 +687,12 @@ impl TreeHasher {
     /// `counter_word * 4 + 4 > template.len()` (checked in every build, even
     /// when `out` is empty).
     pub fn hash_counter_range(&self, template: &[u8], counter_word: usize, start: u32, out: &mut [[u8; OUT_LEN]]) {
-        crate::ffi_counter::validate_counter_range(template, counter_word);
+        let validated = crate::ffi_counter::ValidatedTemplate::new(template, counter_word);
         let platform = self.platform();
         if out.is_empty() {
             return;
         }
-        hash_counter_range_checked(template, counter_word, start, self.domain.key(), self.domain.flags(), out, platform);
+        hash_counter_range_checked(validated, start, self.domain.key(), self.domain.flags(), out, platform);
     }
 
     /// A worker's checked slice of a [`Prepared`] batch, on `platform`'s

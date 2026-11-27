@@ -162,15 +162,20 @@ fn test_every_multithreaded_call_inside_guard_pages() {
                 let count = 3;
                 let slot = crate::slot_len(len);
                 let mut batch = filled(slot * count, at_end);
+                let mut batch_wants = std::vec::Vec::with_capacity(count);
                 for i in 0..count {
                     let m = &mut batch.bytes()[i * slot..][..slot];
                     m[..len].copy_from_slice(&message);
+                    if len > 0 {
+                        m[0] ^= u8::try_from(i).unwrap();
+                    }
                     m[len..].fill(0);
+                    batch_wants.push(*blake3_servil_core::convenience::hash_with(mode, &m[..len]).as_bytes());
                 }
                 let batch_blocks = Block::from_bytes(batch.as_bytes()).expect("a page-end batch starts aligned");
                 let mut guarded_batch_out = digests(count, at_end);
                 throughput::hash_many_multithreaded(mode, &Batch::in_place(batch_blocks, len), guarded_batch_out.digests());
-                assert!(guarded_batch_out.digests().iter().all(|h| *h == want), "hash_many_multithreaded guarded batch, {what}");
+                assert_eq!(guarded_batch_out.digests(), batch_wants.as_slice(), "hash_many_multithreaded guarded batch, {what}");
                 let input: &[u8] = flush.as_bytes();
                 let mut owned_batch = Batch::new(len, count);
                 for i in 0..count {

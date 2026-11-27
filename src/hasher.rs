@@ -46,7 +46,7 @@ pub struct CvStack {
     /// storage is never zeroed and never moved as a value of its own: a
     /// stack that started it as `None` with 1.7 KiB to follow was copied,
     /// those bytes and all, into every new Hasher on AArch64 (41 ns).
-    cvs: core::mem::MaybeUninit<[Cv; DEPTH]>,
+    cvs: [core::mem::MaybeUninit<Cv>; DEPTH],
     len: usize,
     /// Bit i: entry i is a row, kept in `rows[i % ROWS]`.
     wide: u64,
@@ -55,7 +55,7 @@ pub struct CvStack {
     /// Bit s: the rows' place s has been written whole (zeroed as it was
     /// first given out).
     ready: u64,
-    rows: core::mem::MaybeUninit<[[Cv; ROW]; ROWS]>,
+    rows: [[core::mem::MaybeUninit<Cv>; ROW]; ROWS],
 }
 
 impl Clone for CvStack {
@@ -70,9 +70,7 @@ impl Clone for CvStack {
     /// In place, only what the source holds: its entries' values, and the
     /// rows among them (not the 8 KiB of the rows' storage).
     fn clone_from(&mut self, source: &CvStack) {
-        // Sound: `len` values of each array, plain bytes; entries that are
-        // rows have stale single values, copied as bytes and never read.
-        unsafe { core::ptr::copy_nonoverlapping(source.cvs.as_ptr() as *const Cv, self.cvs.as_mut_ptr() as *mut Cv, source.len) };
+        self.cvs[..source.len].copy_from_slice(&source.cvs[..source.len]);
         self.len = source.len;
         self.wide = 0;
         for i in (0..source.len).filter(|&i| source.is_row(i)) {
@@ -84,7 +82,14 @@ impl Clone for CvStack {
 impl CvStack {
     #[inline(always)]
     pub fn new() -> CvStack {
-        CvStack { cvs: core::mem::MaybeUninit::uninit(), len: 0, wide: 0, widths: [0; ROWS], ready: 0, rows: core::mem::MaybeUninit::uninit() }
+        CvStack {
+            cvs: [core::mem::MaybeUninit::uninit(); DEPTH],
+            len: 0,
+            wide: 0,
+            widths: [0; ROWS],
+            ready: 0,
+            rows: [[core::mem::MaybeUninit::uninit(); ROW]; ROWS],
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -94,8 +99,13 @@ impl CvStack {
     /// Entry `i`'s single value, written.
     fn set(&mut self, i: usize, cv: Cv) {
         assert!(i < DEPTH, "the stack holds DEPTH entries");
-        // Sound: within the array.
-        unsafe { (self.cvs.as_mut_ptr() as *mut Cv).add(i).write(cv) };
+        self.cvs[i].write(cv);
+    }
+
+    /// Read single entry `i` (caller checked `i < self.len && !self.is_row(i)`).
+    fn cv_at(&self, i: usize) -> Cv {
+        // Sound: single entries below `self.len` are initialized by `push`/`merge`/`narrow`.
+        unsafe { self.cvs[i].assume_init() }
     }
 
     fn is_row(&self, i: usize) -> bool {
@@ -104,19 +114,16 @@ impl CvStack {
 
     /// Entry `i`'s row (it is one).
     fn row(&self, i: usize) -> &[Cv] {
-        // Debug-only: `row` is internal to `CvStack`; every caller checks `is_row` or pops a pushed row.
-        debug_assert!(self.is_row(i));
-        let n = self.widths[i % ROWS] as usize;
-        // Sound: a row's first `width` values were written when it was pushed or merged.
-        unsafe { core::slice::from_raw_parts((self.rows.as_ptr() as *const Cv).add((i % ROWS) * ROW), n) }
+        assert!(self.is_row(i), "row entry required");
+        let slot = i % ROWS;
+        let n = self.widths[slot] as usize;
+        // Sound: a row's first `n` values were initialized when pushed or merged.
+        unsafe { core::slice::from_raw_parts(self.rows[slot].as_ptr().cast::<Cv>(), n) }
     }
 
     fn set_row(&mut self, i: usize, row: &[Cv]) {
         let slot = i % ROWS;
-        // Sound: MaybeUninit has the same layout as Cv and permits every
-        // byte here to be unwritten. clone_from may write a fresh slot.
-        let rows = unsafe { &mut *self.rows.as_mut_ptr().cast::<[[core::mem::MaybeUninit<Cv>; ROW]; ROWS]>() };
-        rows[slot][..row.len()].write_copy_of_slice(row);
+        self.rows[slot][..row.len()].write_copy_of_slice(row);
         self.widths[slot] = u8::try_from(row.len()).expect("row width <= TILE");
         self.wide |= 1 << i;
     }
@@ -127,8 +134,7 @@ impl CvStack {
     pub fn get<H: Hooks>(&self, k: &Kernels<'_, H>, i: usize) -> Cv {
         assert!(i < self.len, "a value below the stack's length");
         if !self.is_row(i) {
-            // Sound: a single entry below the length was written (push, merge, narrow).
-            return unsafe { *(self.cvs.as_ptr() as *const Cv).add(i) };
+            return self.cv_at(i);
         }
         let mut a = [[0u8; 32]; ROW];
         let mut b = [[0u8; 32]; ROW];
@@ -257,8 +263,7 @@ impl CvStack {
         if self.is_row(i) {
             return rows[i % ROWS];
         }
-        // Sound: a single entry below the length was written (push, merge, narrow).
-        unsafe { *(self.cvs.as_ptr() as *const Cv).add(i) }
+        self.cv_at(i)
     }
 
     /// `cv` on top; the stack holds fewer than DEPTH values.
@@ -297,15 +302,12 @@ impl CvStack {
             }
         }
         let slot = self.len % ROWS;
-        // Sound: `slot < ROWS`, so `place` stays within `self.rows`'s `ROWS` elements.
-        let place = unsafe { (self.rows.as_mut_ptr() as *mut [Cv; ROW]).add(slot) };
         if self.ready >> slot & 1 == 0 {
-            // Sound: the slot's own storage.
-            unsafe { place.write_bytes(0, 1) };
+            self.rows[slot].fill(core::mem::MaybeUninit::new([0u8; 32]));
             self.ready |= 1 << slot;
         }
-        // Sound: the slot's storage, every byte of it written (now or before).
-        let width = fill(unsafe { &mut *place });
+        // Sound: `self.rows[slot]` was fully initialized either just above or on its first use (`ready` bit set).
+        let width = fill(unsafe { &mut *self.rows[slot].as_mut_ptr().cast::<[Cv; ROW]>() });
         assert!((4..=ROW).contains(&width) && width.is_power_of_two(), "a row of 4 to ROW values, a power of two");
         self.widths[slot] = u8::try_from(width).expect("row width <= TILE");
         self.wide |= 1 << self.len;
@@ -370,16 +372,13 @@ impl CvStack {
                 let (left, right) = (self.row(a), self.row(b));
                 let n = left.len();
                 assert_eq!(n, right.len(), "two rows merge at one width");
-                let mut children = core::mem::MaybeUninit::<[Cv; 2 * ROW]>::uninit();
-                let at = children.as_mut_ptr() as *mut Cv;
-                // Sound: 2n values written into room for 2 ROW, then read.
-                let children = unsafe {
-                    core::ptr::copy_nonoverlapping(left.as_ptr(), at, n);
-                    core::ptr::copy_nonoverlapping(right.as_ptr(), at.add(n), n);
-                    core::slice::from_raw_parts(at, 2 * n)
-                };
-                // Sound: row a's place, its first n values written (they are row a).
-                let place = unsafe { core::slice::from_raw_parts_mut((self.rows.as_mut_ptr() as *mut Cv).add((a % ROWS) * ROW), n) };
+                let mut children = [core::mem::MaybeUninit::<Cv>::uninit(); 2 * ROW];
+                children[..n].write_copy_of_slice(left);
+                children[n..2 * n].write_copy_of_slice(right);
+                // Sound: `children[..2 * n]` were initialized just above.
+                let children = unsafe { core::slice::from_raw_parts(children.as_ptr().cast::<Cv>(), 2 * n) };
+                // Sound: row `a`'s first `n` values were initialized as row `a` and are overwritten in place.
+                let place = unsafe { core::slice::from_raw_parts_mut(self.rows[a % ROWS].as_mut_ptr().cast::<Cv>(), n) };
                 let made = k.parents(children, place);
                 assert_eq!(made, n, "a parent for every two children");
             } else {
@@ -1238,8 +1237,9 @@ mod test {
         let hooks = Rows { platform: Platform::detect(), width: |_| 4, parents: Default::default(), children: Default::default() };
         let k = Kernels { key: crate::IV, flags: 0, platform: hooks.platform, hooks: &hooks };
         let mut stack = CvStack::new();
-        // Sound: the rows' own storage, every byte written.
-        unsafe { stack.rows.as_mut_ptr().write_bytes(0xff, 1) };
+        for row in &mut stack.rows {
+            row.fill(core::mem::MaybeUninit::new([0xff; 32]));
+        }
         for round in 0..2 {
             for entry in 0..ROWS {
                 stack.push_row_with(&k, |place| {

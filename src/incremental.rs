@@ -178,8 +178,8 @@ mod stage {
         #[inline(always)]
         pub(crate) fn pad_first_block(&mut self, input: &[u8]) {
             assert!(self.len == 0 && input.len() <= BLOCK_LEN, "pad_first_block requires empty stage and at most one block");
-            // Sound: the stage holds 64 bytes and more; the reads stay inside `input`.
-            unsafe { crate::chunk_root::pad_block(self.buf.as_mut_ptr().cast(), input.as_ptr(), input.len()) };
+            let first: &mut [core::mem::MaybeUninit<u8>; BLOCK_LEN] = (&mut self.buf[..BLOCK_LEN]).try_into().expect("STAGE_LEN >= BLOCK_LEN");
+            crate::chunk_root::pad_block(first, input);
             self.len = input.len();
         }
 
@@ -675,16 +675,13 @@ impl Hasher {
             #[cfg(target_arch = "x86_64")]
             if self.stage.len() <= BLOCK_LEN {
                 let n = u8::try_from(self.stage.len()).expect("stage length <= BLOCK_LEN");
-                // Sound: the platform's instructions were detected.
-                return Hash(unsafe {
-                    crate::chunk_root::block_root(
-                        self.core.chunk_state.platform(),
-                        self.stage.first_block(),
-                        n,
-                        self.fresh_key(),
-                        self.core.chunk_state.flags(),
-                    )
-                });
+                return Hash(crate::chunk_root::block_root(
+                    self.core.chunk_state.platform(),
+                    self.stage.first_block(),
+                    n,
+                    self.fresh_key(),
+                    self.core.chunk_state.flags(),
+                ));
             }
             return crate::hash_serial_from(self.core.chunk_state.platform(), self.stage.as_bytes(), self.fresh_key(), self.core.domain.flags(), false);
         }

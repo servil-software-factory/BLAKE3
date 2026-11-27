@@ -12,16 +12,44 @@ use crate::{BLOCK_LEN, CHUNK_END, CHUNK_START, CVWords, OUT_LEN, ROOT, platform:
 
 /// Validate the `template` length and `counter_word` bounds upfront in every
 /// build, including when `out` is empty.
-#[inline]
-pub(crate) fn validate_counter_range(template: &[u8], counter_word: usize) {
-    assert!(template.len() <= BLOCK_LEN, "hash_counter_range template must fit in one block ({BLOCK_LEN} bytes), got {}", template.len(),);
-    assert!(
-        counter_word < 16 && counter_word * 4 + 4 <= template.len(),
-        "hash_counter_range counter_word {counter_word} (bytes {}..{}) out of bounds for {}-byte template",
-        counter_word.saturating_mul(4),
-        counter_word.saturating_mul(4).saturating_add(4),
-        template.len(),
-    );
+/// A validated single-block counter-range template and counter-word index.
+/// Checking once at construction (`template.len() <= BLOCK_LEN` and
+/// `counter_word < template.len() / 4`) eliminates redundant re-validation
+/// across public wrappers and FFI dispatch.
+#[derive(Clone, Copy)]
+pub(crate) struct ValidatedTemplate<'a> {
+    bytes: &'a [u8],
+    counter_word: usize,
+}
+
+impl<'a> ValidatedTemplate<'a> {
+    #[inline]
+    pub(crate) fn new(template: &'a [u8], counter_word: usize) -> Self {
+        assert!(template.len() <= BLOCK_LEN, "hash_counter_range template must fit in one block ({BLOCK_LEN} bytes), got {}", template.len());
+        assert!(
+            counter_word < template.len() / 4,
+            "hash_counter_range counter_word {counter_word} (bytes {}..{}) out of bounds for {}-byte template",
+            counter_word.saturating_mul(4),
+            counter_word.saturating_mul(4).saturating_add(4),
+            template.len(),
+        );
+        Self { bytes: template, counter_word }
+    }
+
+    #[inline]
+    fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    #[inline]
+    fn counter_word(self) -> usize {
+        self.counter_word
+    }
+
+    #[inline]
+    fn len_u8(self) -> u8 {
+        u8::try_from(self.bytes.len()).expect("validated <= BLOCK_LEN")
+    }
 }
 
 #[inline]
@@ -140,22 +168,19 @@ fn hash_counter_groups(
     done
 }
 
-/// Hash `out.len()` single-block messages derived from `template` on
+/// Hash `out.len()` single-block messages derived from a validated template on
 /// `platform`, replacing the 4-byte little-endian word at `counter_word * 4`
 /// with `start.wrapping_add(i)` (modulo 2^32) for `i in 0..out.len()`.
-pub(crate) fn hash_counter_range_on(template: &[u8], counter_word: usize, start: u32, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
-    validate_counter_range(template, counter_word);
-    if out.is_empty() {
-        return;
-    }
-
+pub(crate) fn hash_counter_range_on(template: ValidatedTemplate<'_>, start: u32, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]], platform: Platform) {
+    let bytes = template.bytes();
+    let counter_word = template.counter_word();
     let mut block = [0u8; BLOCK_LEN];
-    block[..template.len()].copy_from_slice(template);
+    block[..bytes.len()].copy_from_slice(bytes);
     let tmpl_words = words_from_block(&block);
 
     const ROOT_BLOCK_FLAGS: u8 = CHUNK_START + CHUNK_END + ROOT;
     let root_flags = flags + ROOT_BLOCK_FLAGS;
-    let blen_u8 = u8::try_from(template.len()).expect("validated <= BLOCK_LEN");
+    let blen_u8 = template.len_u8();
     let done = hash_counter_groups(&tmpl_words, blen_u8, counter_word, start, key, root_flags, out, platform);
 
     // Serial tail (< 16 / < 11 / < 8, or SSE4.1).
@@ -198,7 +223,7 @@ pub(crate) fn self_test(platform: Platform) -> usize {
     let key = crate::platform::words_from_le_bytes_32(&SELF_TEST_KEY);
     let tmpl = self_test_template();
     let mut out = [[0u8; OUT_LEN]; SELF_TEST_COUNT];
-    hash_counter_range_on(&tmpl, SELF_TEST_CW, SELF_TEST_START, &key, crate::KEYED_HASH, &mut out, platform);
+    hash_counter_range_on(ValidatedTemplate::new(&tmpl, SELF_TEST_CW), SELF_TEST_START, &key, crate::KEYED_HASH, &mut out, platform);
     let got = crate::self_test::fold(out.as_flattened());
     if got != SELF_TEST_EXPECTED {
         crate::self_test::fail(format_args!(
@@ -274,11 +299,19 @@ mod tests {
         let off = counter_word * 4;
         (0..count)
             .map(|i| {
-                let c = wrapping_add_usize(start, i);
+                // Independent mod-2^32 counter progression (not calling production `wrapping_add_usize`).
+                let c = start.wrapping_add(u32::try_from(i % (1usize << 32)).unwrap());
                 msg[off..off + 4].copy_from_slice(&c.to_le_bytes());
                 crate::test::official::hash(mode, &msg)
             })
             .collect()
+    }
+
+    #[test]
+    fn wrapping_add_usize_truncates_high_bits_without_overflow() {
+        assert_eq!(wrapping_add_usize(u32::MAX, 1), 0);
+        assert_eq!(wrapping_add_usize(7, (1usize << 32) + 5), 12);
+        assert_eq!(wrapping_add_usize(u32::MAX - 2, (3usize << 32) + 5), 2);
     }
 
     #[test]
@@ -437,7 +470,7 @@ mod tests {
                     let mut out = Guarded::new(count * OUT_LEN, at_end);
                     let out_slice = out.bytes().as_chunks_mut::<OUT_LEN>().0;
                     let cw = (len / 4) - 1;
-                    hash_counter_range_on(tmpl.bytes(), cw, u32::MAX - 3, &crate::IV, 0, out_slice, platform);
+                    hash_counter_range_on(ValidatedTemplate::new(tmpl.bytes(), cw), u32::MAX - 3, &crate::IV, 0, out_slice, platform);
                     let want = official_counter_range(Mode::Plain, tmpl.bytes(), cw, u32::MAX - 3, count);
                     assert_eq!(out_slice, &want[..], "len={len} count={count} at_end={at_end}");
                 }

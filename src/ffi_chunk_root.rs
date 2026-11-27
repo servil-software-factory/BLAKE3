@@ -6,76 +6,72 @@
 //! the reason (4 KiB aliasing against a caller's just-written message,
 //! bench-hashes #65) and the contract.
 
+use crate::platform::Platform;
 use crate::{BLOCK_LEN, CHUNK_LEN, CVWords, OUT_LEN};
 use core::mem::MaybeUninit;
 
-/// `input`'s root output (its first 32 bytes), one chunk at counter 0.
-/// Requires SSE4.1, and AVX-512F and AVX-512VL with `avx512`.
+/// `input`'s root output (its first 32 bytes), one chunk at counter 0,
+/// dispatched using the verified CPU capability carried by `platform`.
 #[inline(always)]
-pub(crate) unsafe fn chunk_root(avx512: bool, input: &[u8], key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
+pub(crate) fn chunk_root(platform: Platform, input: &[u8], key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
     assert!(input.len() <= CHUNK_LEN, "one chunk or less");
     let blocks = input.len() / BLOCK_LEN;
     if blocks == 0 || input.len() % BLOCK_LEN != 0 {
-        // Sound: caller verified SSE4.1 (and AVX-512 if `avx512`) and `input.len() <= CHUNK_LEN` above.
-        return unsafe { chunk_root_partial(avx512, input, key, flags) };
+        return chunk_root_partial(platform, input, key, flags);
     }
     // Whole blocks only, the last in place: no copy, and no aligned stack
     // buffer, whose dynamic realignment (and the spills around it) would
     // put stack traffic back on this path (John, #141).
-    // Sound: the input holds `blocks` whole blocks; the last is in place.
-    let last = unsafe { input.as_ptr().add((blocks - 1) * BLOCK_LEN) };
-    unsafe { call(avx512, input, key, last, flags as u64 | (BLOCK_LEN as u64) << 8 | ((blocks - 1) as u64) << 16) }
+    let last: &[u8; BLOCK_LEN] = input[(blocks - 1) * BLOCK_LEN..].try_into().expect("last whole block");
+    call(platform, input, key, last, flags as u64 + ((BLOCK_LEN as u64) << 8) + (((blocks - 1) as u64) << 16))
 }
 
 /// An input that ends in a partial block, or is empty: the final block
 /// zero-padded in a 64-byte-aligned copy on this function's own stack.
 #[cold]
 #[inline(never)]
-unsafe fn chunk_root_partial(avx512: bool, input: &[u8], key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
+fn chunk_root_partial(platform: Platform, input: &[u8], key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
     let blocks = input.len() / BLOCK_LEN;
-    let tail = input.len() % BLOCK_LEN;
+    let tail = &input[blocks * BLOCK_LEN..];
     /// The zero-padded final block, 64-byte aligned.
     #[repr(align(64))]
-    struct Padded {
-        _block: [u8; BLOCK_LEN],
-    }
-    let mut padded = MaybeUninit::<Padded>::uninit();
-    // Sound: the input holds `tail` bytes after its whole blocks; `padded`
-    // holds 64 bytes, all written here.
-    unsafe {
-        pad_block(padded.as_mut_ptr().cast(), input.as_ptr().add(blocks * BLOCK_LEN), tail);
-        call(avx512, input, key, padded.as_ptr().cast(), flags as u64 | (tail as u64) << 8 | (blocks as u64) << 16)
-    }
+    struct Padded([MaybeUninit<u8>; BLOCK_LEN]);
+    let mut padded = Padded([MaybeUninit::uninit(); BLOCK_LEN]);
+    pad_block(&mut padded.0, tail);
+    // Sound: `pad_block` initialized all 64 bytes of `padded.0`.
+    let last: &[u8; BLOCK_LEN] = unsafe { &*(padded.0.as_ptr().cast::<[u8; BLOCK_LEN]>()) };
+    call(platform, input, key, last, flags as u64 + ((tail.len() as u64) << 8) + ((blocks as u64) << 16))
 }
 
-/// `n` bytes at `src` (64 at most) as a zero-padded block at `dst`,
-/// written in four 16-byte stores at the offsets the kernel loads. A store
-/// narrower than the load that reads it back cannot be forwarded to it,
-/// and the kernel's first round waits for the stores to reach the cache:
-/// padded with a byte copy over zeros, `convenience::hash` of 1 to 63 bytes
-/// took 52 ns against 37 ns for 64 bytes (one Zen 4 core, John,
-/// November 14, 2026). Reads stay inside the `n` bytes.
+/// `src` (at most 64 bytes) as a zero-padded block in `dst`, written in four
+/// 16-byte stores at the offsets the kernel loads. A store narrower than the
+/// load that reads it back cannot be forwarded to it, and the kernel's first
+/// round waits for the stores to reach the cache: padded with a byte copy over
+/// zeros, `convenience::hash` of 1 to 63 bytes took 52 ns against 37 ns for 64
+/// bytes (one Zen 4 core, John, November 14, 2026). Reads stay inside `src`.
 #[inline(always)]
-pub(crate) unsafe fn pad_block(dst: *mut u8, src: *const u8, n: usize) {
+pub(crate) fn pad_block(dst: &mut [MaybeUninit<u8>; BLOCK_LEN], src: &[u8]) {
     use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_set_epi64x, _mm_setzero_si128, _mm_storeu_si128};
+    let n = src.len();
     // Debug-only: `pad_block` is called on every short message hot path; all
-    // callers enforce `n <= BLOCK_LEN` (remainder `% BLOCK_LEN` or stage cap).
+    // callers enforce `src.len() <= BLOCK_LEN` (remainder `% BLOCK_LEN` or stage cap).
     debug_assert!(n <= BLOCK_LEN);
-    let mut piece = 0;
-    while piece < BLOCK_LEN {
-        // Sound: each read is of bytes below `n`; each store is of 16 of the 64 bytes at `dst`.
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr().cast::<u8>();
+    for piece in [0, 16, 32, 48] {
+        // Sound: each read stays within `src[..n]` (`piece < n` checked above);
+        // each store writes 16 bytes within `dst`'s 64-byte array (`piece + 16 <= 64`).
         unsafe {
             let v = if n >= piece + 16 {
-                _mm_loadu_si128(src.add(piece) as *const __m128i)
+                _mm_loadu_si128(src_ptr.add(piece) as *const __m128i)
             } else if n > piece {
-                let (low, high) = load_under_16(src.add(piece), n - piece);
+                let (low, high) = load_under_16(src_ptr.add(piece), n - piece);
                 _mm_set_epi64x(high as i64, low as i64)
             } else {
                 _mm_setzero_si128()
             };
-            _mm_storeu_si128(dst.add(piece) as *mut __m128i, v);
+            _mm_storeu_si128(dst_ptr.add(piece) as *mut __m128i, v);
         }
-        piece += 16;
     }
 }
 
@@ -84,15 +80,12 @@ pub(crate) unsafe fn pad_block(dst: *mut u8, src: *const u8, n: usize) {
 /// stored by `pad_block`). One kernel call on the block where it lies:
 /// copied to a padded block of this function's own first, the same message
 /// took 53 ns against 40 (one Zen 4 core, November 14, 2026).
-/// Requires `platform`'s instructions.
 #[inline(always)]
-pub(crate) unsafe fn block_root(platform: crate::platform::Platform, block: &[u8; BLOCK_LEN], n: u8, key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
+pub(crate) fn block_root(platform: Platform, block: &[u8; BLOCK_LEN], n: u8, key: &CVWords, flags: u8) -> [u8; OUT_LEN] {
     // Debug-only: O(64) scan verifying the caller's zero-padded block invariant
     // on every <= 64 B finalize hot path; `n: u8` makes bit-16 carry unwriteable.
     debug_assert!(usize::from(n) <= BLOCK_LEN && block[usize::from(n)..].iter().all(|&b| b == 0), "a block zero-padded past its {n} bytes");
-    // Sound: no whole block before the last; `block` is 64 readable bytes.
-    // The AVX-512 kernel where the platform is that; else the SSE4.1 one, which every x86-64 platform has.
-    unsafe { call(matches!(platform, crate::platform::Platform::AVX512), &[], key, block.as_ptr(), flags as u64 | (n as u64) << 8) }
+    call(platform, &[], key, block, flags as u64 + ((n as u64) << 8))
 }
 
 /// The `n` bytes at `p` (1 to 15) as a little-endian 128-bit value, its low
@@ -119,18 +112,18 @@ unsafe fn load_under_16(p: *const u8, n: usize) -> (u64, u64) {
 
 /// One kernel call: `packed` is flags | last_len << 8 | whole << 16.
 #[inline(always)]
-unsafe fn call(avx512: bool, input: &[u8], key: &CVWords, last: *const u8, packed: u64) -> [u8; OUT_LEN] {
+fn call(platform: Platform, input: &[u8], key: &CVWords, last: &[u8; BLOCK_LEN], packed: u64) -> [u8; OUT_LEN] {
     let mut out = MaybeUninit::<[u8; OUT_LEN]>::uninit();
-    // Sound: the caller passes `whole` blocks of input before `last`, and
-    // `last` holding 64 readable bytes; `out` has 32 writable ones; the
-    // caller has the ISA.
+    // Sound: `platform` verified SSE4.1 (and AVX-512F+VL for `Platform::AVX512`);
+    // `input` holds the `whole` preceding blocks, `last` holds 64 readable bytes,
+    // and `out` has 32 writable bytes.
     unsafe {
-        if avx512 {
+        if matches!(platform, Platform::AVX512) {
             crate::ran_kernel(ffi::blake3_servil_avx512_chunk_root as *const ());
-            ffi::blake3_servil_avx512_chunk_root(input.as_ptr(), key.as_ptr(), last, packed, out.as_mut_ptr().cast());
+            ffi::blake3_servil_avx512_chunk_root(input.as_ptr(), key.as_ptr(), last.as_ptr(), packed, out.as_mut_ptr().cast());
         } else {
             crate::ran_kernel(ffi::blake3_servil_sse41_chunk_root as *const ());
-            ffi::blake3_servil_sse41_chunk_root(input.as_ptr(), key.as_ptr(), last, packed, out.as_mut_ptr().cast());
+            ffi::blake3_servil_sse41_chunk_root(input.as_ptr(), key.as_ptr(), last.as_ptr(), packed, out.as_mut_ptr().cast());
         }
         out.assume_init()
     }
@@ -152,14 +145,14 @@ mod test {
         crate::ChunkState::new(key, 0, flags, Platform::SSE41).update(input).output().root_bytes()
     }
 
-    fn variants() -> Vec<bool> {
+    fn variants() -> Vec<Platform> {
         let mut v = Vec::new();
-        if Platform::sse41().is_some() {
-            v.push(false);
+        if let Some(p) = Platform::sse41() {
+            v.push(p);
         }
         #[cfg(target_arch = "x86_64")]
-        if Platform::avx512().is_some() {
-            v.push(true);
+        if let Some(p) = Platform::avx512() {
+            v.push(p);
         }
         v
     }
@@ -172,24 +165,24 @@ mod test {
         // SSE4.1 itself, not merely some kernel: on AVX-512 machines the AVX-512
         // variant alone would keep the list nonempty (a mutant hiding SSE4.1
         // survived there, the EPYC 9255, October 26).
-        assert!(variants.contains(&false), "an x86-64 test machine has SSE4.1");
+        assert!(variants.contains(&Platform::SSE41), "an x86-64 test machine has SSE4.1");
         // And AVX-512 wherever the CPU has it: a list of SSE4.1 alone passed
         // every test here on AVX-512 machines (the whole mutation run of
         // November 10, 2026, on an EPYC 9255 and an Ice Lake Xeon).
         #[cfg(target_arch = "x86_64")]
-        assert_eq!(variants.contains(&true), Platform::avx512().is_some(), "the AVX-512 kernel is checked wherever the CPU has it");
+        assert_eq!(variants.contains(&Platform::AVX512), Platform::avx512().is_some(), "the AVX-512 kernel is checked wherever the CPU has it");
         let mut buf = vec![0u8; CHUNK_LEN + 3];
         crate::test::paint_test_input(&mut buf);
         let keyed = crate::platform::words_from_le_bytes_32(&[0x42; 32]);
         let derive = crate::platform::words_from_le_bytes_32(&crate::throughput::context_key("chunk root"));
         let modes = [(crate::IV, 0), (&keyed, crate::KEYED_HASH), (&derive, crate::DERIVE_KEY_MATERIAL)];
-        for &avx512 in &variants {
+        for &platform in &variants {
             for offset in 0..4 {
                 for len in 0..=CHUNK_LEN.min(buf.len() - offset) {
                     for &(key, flags) in &modes {
                         let input = &buf[offset..][..len];
-                        let got = unsafe { chunk_root(avx512, input, key, flags) };
-                        assert_eq!(got, reference(input, key, flags), "avx512={avx512} offset={offset} len={len} flags={flags}");
+                        let got = chunk_root(platform, input, key, flags);
+                        assert_eq!(got, reference(input, key, flags), "platform={platform:?} offset={offset} len={len} flags={flags}");
                     }
                 }
             }
@@ -207,13 +200,13 @@ mod test {
         let mut lines = Lines([0; 2 * CHUNK_LEN]);
         crate::test::paint_test_input(&mut lines.0);
         let keyed = crate::platform::words_from_le_bytes_32(&[0x42; 32]);
-        for &avx512 in &variants {
+        for &platform in &variants {
             for offset in [0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64 + 16, 64 + 48] {
                 for len in 0..=CHUNK_LEN {
                     for (key, flags) in [(crate::IV, 0), (&keyed, crate::KEYED_HASH)] {
                         let input = &lines.0[offset..][..len];
-                        let got = unsafe { chunk_root(avx512, input, key, flags) };
-                        assert_eq!(got, reference(input, key, flags), "avx512={avx512} offset={offset} len={len} flags={flags}");
+                        let got = chunk_root(platform, input, key, flags);
+                        assert_eq!(got, reference(input, key, flags), "platform={platform:?} offset={offset} len={len} flags={flags}");
                     }
                 }
             }

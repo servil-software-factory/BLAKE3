@@ -199,12 +199,8 @@ impl Kernels for PlatformKernels<'_> {
         return crate::hash_one_chunk_root(input, self.key, self.flags).0;
         // One kernel call that keeps off the stack (src/ffi_chunk_root.rs):
         // a caller's just-written message has none of our loads to hold back.
-        // Sound: detect() found the platform's instructions.
         #[cfg(target_arch = "x86_64")]
-        match self.platform {
-            crate::platform::Platform::AVX512 => unsafe { crate::chunk_root::chunk_root(true, input, self.key, self.flags) },
-            crate::platform::Platform::SSE41 | crate::platform::Platform::AVX2 => unsafe { crate::chunk_root::chunk_root(false, input, self.key, self.flags) },
-        }
+        crate::chunk_root::chunk_root(self.platform, input, self.key, self.flags)
     }
 
     #[inline(always)]

@@ -56,6 +56,7 @@ src/ffi_neon_hybrid.rs	replace | with ^ in ask_cores	1	[cpu lacks sme2] a core t
 src/ffi_neon_hybrid.rs	replace | with ^ in compress_in_place	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/ffi_neon_hybrid.rs	replace | with ^ in xof_block	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/ffi_neon_hybrid.rs	replace | with ^ in xof_many	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/ffi_output_aarch64.rs	replace | with ^ in held_groups_in	1	equivalent: domain flags (0, KEYED_HASH=16, DERIVE_KEY_MATERIAL=64) and PARENT (4) occupy disjoint bits
 src/ffi_sme2.rs	replace prefetch_code with ()	1	speed: whether and what to prefetch after a pause (no effect on results)
 src/hasher.rs	replace + with *	1	untested bound: `const DEPTH: usize = MAX_DEPTH + 1` (55 -> 53 or 54) holds lazy-merged stack entries up to 2^64 bytes; no test feeds >= 2^53 chunks (8 EiB)
 src/hasher.rs	replace + with -	1	untested bound: `const DEPTH: usize = MAX_DEPTH + 1` (55 -> 53 or 54) holds lazy-merged stack entries up to 2^64 bytes; no test feeds >= 2^53 chunks (8 EiB)
@@ -224,6 +225,7 @@ src/pair.rs	replace takes -> bool with false	1	same code: every test binary hash
 src/pair.rs	replace takes_platform -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/pair.rs	replace | with & in parent	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/pair.rs	replace | with ^ in parent	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/platform.rs	delete ! in read_cpu_words	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	delete ! in sme2_detect_uncached	1	detection, on a machine with SME2: a wrong no runs NEON (equally correct), a wrong yes is this machine's answer (a machine without SME2 would stop on it)
 src/platform.rs	delete field leaf1_eax from struct CpuWords expression in read_cpu_words	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	delete field leaf1_ecx from struct CpuWords expression in read_cpu_words	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -277,6 +279,7 @@ src/platform.rs	replace == with != in os_saves_avx	1	same code: every test binar
 src/platform.rs	replace == with != in read_cpu_words	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace == with != in sme2_reported	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace >= with < in Platform::xof_many	1	speed: moves a threshold between equally correct paths
+src/platform.rs	replace >= with < in cpuid_has_leaf	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace >= with < in wide_cpu	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace >> with << in family	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace Platform::name -> &'static str with ""	1	a name for reports and legends, with no reader since the kernel reports went
@@ -285,6 +288,8 @@ src/platform.rs	replace avx2_detected -> bool with false	1	same code: every test
 src/platform.rs	replace avx2_detected -> bool with true	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/platform.rs	replace avx512_detected -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/platform.rs	replace avx512_detected -> bool with true	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
+src/platform.rs	replace cpuid_has_leaf -> bool with false	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
+src/platform.rs	replace cpuid_has_leaf -> bool with true	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/platform.rs	replace family -> u32 with 0	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/platform.rs	replace family -> u32 with 1	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/platform.rs	replace features_of -> u8 with 0	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
@@ -317,6 +322,7 @@ src/platform.rs	replace | with ^ in Platform::compress_blocks	1	same code: every
 src/platform.rs	replace | with ^ in features_of	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace | with ^ in os_saves_avx	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	replace |= with &= in features_of	4	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/self_test.rs	delete ! in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace & with ^ in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace & with | in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace && with || in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -332,12 +338,12 @@ src/self_test.rs	replace == with != in compiled_features_present	2	same code: ev
 src/self_test.rs	replace ^= with &= in run_checks	1	test-only: the planted wrong digest's flip; as &= 1 the byte still changes wherever it is above 1, as every planted case's last byte is, so the digest is still wrong and the test still sees it
 src/self_test.rs	replace compiled_features_present with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/self_test.rs	replace || with && in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace < with <= in last_max	1	equivalent: `whole` is a multiple of 1024 and `room` (2^64 - 1 less a multiple of 1024) never is, so the two are never equal and either branch gives the smaller
-src/throughput.rs	replace >= with < in hash_counter_range_checked	1	[cpu lacks sme2] speed: whether hash_counter_range takes the SME2 turn (caught on SME2 hosts)
 src/throughput.rs	replace >= with < in TreeHasher::parent_cvs	1	[cpu lacks sme2] speed: whether parent_cvs takes the SME2 turn (caught on SME2 hosts by parent_cvs_and_hash_each_honor_a_held_sme2_turn)
 src/throughput.rs	replace >= with < in TreeHasher::turn	1	speed: moves a threshold between equally correct paths
+src/throughput.rs	replace >= with < in hash_counter_range_checked	1	[cpu lacks sme2] speed: whether hash_counter_range takes the SME2 turn (caught on SME2 hosts)
 src/tree.rs	replace + with * in wide	1	speed: how far past its input a subtree prefetches (a prefetch never faults)
 src/tree.rs	replace + with - in wide	1	speed: how far past its input a subtree prefetches (a prefetch never faults)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::children -> Option<[Cv; 2]> with None	1	[cpu lacks sme2] speed: SME2 flat-to-parent shortcut; falls back to the same two-child tree walk (caught on SME2 hosts)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	speed: subtrees then hash on the walk's one-chunk path, the same digests
-src/ffi_output_aarch64.rs	replace | with ^ in held_groups_in	1	equivalent: domain flags (0, KEYED_HASH=16, DERIVE_KEY_MATERIAL=64) and PARENT (4) occupy disjoint bits
