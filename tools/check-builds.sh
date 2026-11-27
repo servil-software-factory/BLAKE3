@@ -41,6 +41,7 @@ step sh -c 'cd threads && RUSTFLAGS="--cfg shuttle" cargo test -q --release --te
 # in a copy of this tree: no fault is ever planted here).
 step python3 tools/pipeline_model_controls.py
 # Shuttle's SC model cannot check the RCpc wake-publication barrier.
+step python3 tools/test_check_waker_order.py
 step python3 tools/check-waker-order.py
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --release --all-features --tests'
 RUSTFLAGS="-D warnings" step sh -c 'cd threads && cargo check -q --tests --target x86_64-unknown-linux-gnu'
