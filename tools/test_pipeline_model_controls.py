@@ -30,54 +30,105 @@ TOOLS = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(TOOLS, "pipeline_model_controls.py")
 
 # Run in the copy's threads/ as `cargo test ... --test shuttle_pipeline`.
-CARGO = """#!/bin/sh
-echo "$(pwd) $CARGO_TARGET_DIR" >> "$CONTROLS_RAN_IN"
-passes() { echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"; exit 0; }
-compiles() {
-    if [ "${CARGO_TERM_COLOR:-}" = always ]; then
-        printf '\033[1;32m   Compiling\033[0m blake3-servil v0.0.0 (%s)\n' "$(pwd)" >&2
-    else
-        echo "   Compiling blake3-servil v0.0.0 ($(pwd))" >&2
-    fi
-}
-if cmp -s src/pipeline.rs "$CONTROLS_ORIGINAL"; then
-    compiles
-    echo "running 1 test"
-    [ "${CONTROLS_AS_IT_IS:-0}" = 0 ] && passes
-    exit "$CONTROLS_AS_IT_IS"
-fi
-# Cargo takes the fault's source for unchanged: the build before it runs.
-[ "$CONTROLS_FAULT" = stale ] || compiles
-[ "$CONTROLS_FAULT" = runs-no-test ] && { echo "running 0 tests"; exit 0; }
-echo "running 1 test"
-case "$CONTROLS_FAULT" in
-caught|stale) exit 101 ;;
-missed) passes ;;
-allocator)
-    echo "shuttle_pipeline: messages_through_rooms_complete_with_their_own_digests" >&2
-    echo "free(): invalid pointer" >&2
-    echo "error: test failed (signal: 6, SIGABRT: process abort signal)" >&2
-    exit 101
-    ;;
-deadlock)
-    echo "test batches_are_whole_when_their_events_come ... FAILED"
-    echo "thread 'batches_are_whole_when_their_events_come' panicked: deadlock!" >&2
-    exit 101
-    ;;
-saves)
-    # Someone saves the tree's source while a fault's model runs.
-    echo "// saved during the run" >> "$CONTROLS_TREE/threads/src/pipeline.rs"
-    exit 101
-    ;;
-never-ends)
-    # The model is a child of Cargo's, as the test binary is.
-    sleep 600 &
-    echo $! > "$CONTROLS_RUNNING.part"
-    mv "$CONTROLS_RUNNING.part" "$CONTROLS_RUNNING"
-    wait
-    ;;
-esac
-exit 2
+CARGO = """#!{python}
+import importlib.util, os, subprocess, sys
+
+with open(os.environ["CONTROLS_RAN_IN"], "a") as f:
+    f.write(f"{{os.getcwd()}} {{os.environ['CARGO_TARGET_DIR']}}\\n")
+
+def compiles():
+    if os.environ.get("CARGO_TERM_COLOR") == "always":
+        sys.stderr.write(f"\\033[1;32m   Compiling\\033[0m blake3-servil v0.0.0 ({{os.getcwd()}})\\n")
+    else:
+        sys.stderr.write(f"   Compiling blake3-servil v0.0.0 ({{os.getcwd()}})\\n")
+    sys.stderr.flush()
+
+def passes():
+    print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out", flush=True)
+    sys.exit(0)
+
+with open("src/pipeline.rs", "rb") as f:
+    cur = f.read()
+with open(os.environ["CONTROLS_ORIGINAL"], "rb") as f:
+    orig = f.read()
+
+if cur == orig:
+    compiles()
+    print("running 1 test", flush=True)
+    rc = int(os.environ.get("CONTROLS_AS_IT_IS", "0"))
+    if rc == 0:
+        passes()
+    sys.exit(rc)
+
+mode = os.environ["CONTROLS_FAULT"]
+if mode != "stale":
+    compiles()
+if mode == "runs-no-test":
+    print("running 0 tests", flush=True)
+    sys.exit(0)
+
+print("running 1 test", flush=True)
+
+def emit_expected_failure():
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("pmc", os.environ["CONTROLS_SCRIPT"])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    orig_text = orig.decode()
+    cur_text = cur.decode()
+    for _name, find, replace, expected in mod.FAULTS:
+        if orig_text.replace(find, replace) == cur_text:
+            pat = expected[0]
+            sys.stderr.write("shuttle_pipeline: planted_fault_scenario\\n")
+            if "deadlock" in pat:
+                sys.stderr.write("thread 'planted_fault_scenario' panicked: deadlock!\\n")
+            elif "Lent guard" in pat:
+                sys.stderr.write(f"blake3-servil: a Pipeline {{pat}}\\n")
+            else:
+                sys.stderr.write(f"thread 'planted_fault_scenario' panicked at threads/tests/shuttle_pipeline.rs:1:1:\\n{{pat}}\\n")
+            sys.stderr.flush()
+            return
+    sys.stderr.write("thread 'unknown' panicked at line 1:\\nunknown fault\\n")
+    sys.stderr.flush()
+
+if mode == "caught":
+    emit_expected_failure()
+    sys.exit(101)
+elif mode == "stale":
+    emit_expected_failure()
+    sys.exit(101)
+elif mode == "missed":
+    passes()
+elif mode == "allocator":
+    sys.stderr.write("shuttle_pipeline: messages_through_rooms_complete_with_their_own_digests\\n")
+    sys.stderr.write("free(): invalid pointer\\n")
+    sys.stderr.write("error: test failed (signal: 6, SIGABRT: process abort signal)\\n")
+    sys.stderr.flush()
+    sys.exit(101)
+elif mode == "deadlock":
+    print("test batches_are_whole_when_their_events_come ... FAILED", flush=True)
+    sys.stderr.write("thread 'batches_are_whole_when_their_events_come' panicked: deadlock!\\n")
+    sys.stderr.flush()
+    sys.exit(101)
+elif mode == "signal":
+    sys.stderr.write("shuttle_pipeline: messages_through_rooms_complete_with_their_own_digests\\n")
+    sys.stderr.write("error: test failed (signal: 9, SIGKILL: kill)\\n")
+    sys.stderr.flush()
+    sys.exit(101)
+elif mode == "saves":
+    with open(os.path.join(os.environ["CONTROLS_TREE"], "threads", "src", "pipeline.rs"), "a") as f:
+        f.write("// saved during the run\\n")
+    emit_expected_failure()
+    sys.exit(101)
+elif mode == "never-ends":
+    child = subprocess.Popen(["sleep", "600"])
+    part = os.environ["CONTROLS_RUNNING"] + ".part"
+    with open(part, "w") as f:
+        f.write(str(child.pid) + "\\n")
+    os.replace(part, os.environ["CONTROLS_RUNNING"])
+    child.wait()
+    sys.exit(101)
+sys.exit(2)
 """
 
 
@@ -136,7 +187,7 @@ class Controls(unittest.TestCase):
         shutil.copy(SCRIPT, self.script)
         self.source = os.path.join(self.root, "threads", "src", "pipeline.rs")
         # A source that holds each fault's place once, as the Pipeline's does.
-        self.original = "".join(f"// The place of fault {i}.\n{find}\n" for i, (_, find, _) in enumerate(faults()))
+        self.original = "".join(f"// The place of fault {i}.\n{find}\n" for i, (_, find, _, _) in enumerate(faults()))
         self.write("threads/src/pipeline.rs", self.original)
         self.write(".gitignore", "target\nCargo.lock\n")
         self.write("Cargo.lock", "# the core's lock\n")
@@ -147,7 +198,7 @@ class Controls(unittest.TestCase):
             f.write(self.original)
         cargo = os.path.join(self.base, "bin", "cargo")
         with open(cargo, "w") as f:
-            f.write(CARGO)
+            f.write(CARGO.format(python=sys.executable))
         os.chmod(cargo, 0o755)
         self.running = os.path.join(self.base, "running")
         self.ran_in = os.path.join(self.base, "ran-in")
@@ -159,7 +210,7 @@ class Controls(unittest.TestCase):
             f.write(text)
 
     def env(self, fault, **more):
-        env = {**os.environ, "PATH": os.path.join(self.base, "bin") + os.pathsep + os.environ["PATH"], "CONTROLS_ORIGINAL": self.as_it_was, "CONTROLS_FAULT": fault, "CONTROLS_RUNNING": self.running, "CONTROLS_RAN_IN": self.ran_in, "CONTROLS_TREE": self.root}
+        env = {**os.environ, "PATH": os.path.join(self.base, "bin") + os.pathsep + os.environ["PATH"], "CONTROLS_ORIGINAL": self.as_it_was, "CONTROLS_SCRIPT": self.script, "CONTROLS_FAULT": fault, "CONTROLS_RUNNING": self.running, "CONTROLS_RAN_IN": self.ran_in, "CONTROLS_TREE": self.root}
         # The tree's own build directory, unless the test names another.
         env.pop("CARGO_TARGET_DIR", None)
         return {**env, **more}
@@ -233,16 +284,25 @@ class Controls(unittest.TestCase):
         self.assertNotIn("MISSED  ", run.stdout)
         self.assert_untouched()
 
-    def test_each_faults_run_is_kept_whole_and_the_allocators_stop_is_named(self):
+    def test_each_faults_run_is_kept_whole_and_unrelated_allocator_stop_is_no_verdict(self):
+        # An allocator stop is admissible ONLY for storage-lifetime faults,
+        # NOT for wake/digest/epoch faults (which must report NO VERDICT).
         run = self.run_script("allocator")
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        lines = [line for line in run.stdout.splitlines() if line.startswith("caught  ")]
-        self.assertEqual(len(lines), len(faults()))
-        for (name, _, _), line in zip(faults(), lines):
-            self.assertEqual(line, f"caught  {name} (in messages_through_rooms_complete_with_their_own_digests: the allocator stopped the process: free(): invalid pointer)")
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        alloc_expected = sum(1 for _, _, _, exp in faults() if any("allocator stopped" in p for p in exp))
+        other = len(faults()) - alloc_expected
+        self.assertGreater(alloc_expected, 0)
+        self.assertGreater(other, 0)
+        self.assertEqual(run.stdout.count("caught  "), alloc_expected, run.stdout)
+        self.assertEqual(run.stdout.count("NO VERDICT  "), other, run.stdout)
+        self.assertIn(f"no verdict on {other} planted faults (unrelated failure)", run.stderr)
+        self.assertIn(
+            "NO VERDICT  a finished task wakes no one (unrelated failure: in messages_through_rooms_complete_with_their_own_digests: the allocator stopped the process: free(): invalid pointer)",
+            run.stdout,
+        )
         logs = os.path.join(os.path.dirname(self.copy), "logs")
         self.assertEqual(sorted(os.listdir(logs)), [f"{n:02}.log" for n in range(len(faults()))])
-        for n, (name, _, _) in enumerate(faults()):
+        for n, (name, _, _, _) in enumerate(faults()):
             with open(os.path.join(logs, f"{n:02}.log")) as f:
                 said = f.read()
             self.assertTrue(said.startswith(name + "\n"), said[:200])
@@ -269,7 +329,7 @@ class Controls(unittest.TestCase):
         self.assert_untouched()
 
     def test_a_fault_whose_place_is_gone_stops_the_run_before_any_build(self):
-        _, find, _ = faults()[3]
+        _, find, _, _ = faults()[3]
         self.write("threads/src/pipeline.rs", self.original.replace(find, "// rewritten\n"))
         self.before = files_under(self.root)
         run = self.run_script("caught")
@@ -483,11 +543,26 @@ class Controls(unittest.TestCase):
         self.assertIn("takes no argument", run.stderr)
         self.assertFalse(os.path.exists(self.ran_in))
 
-    def test_batch_ordering_control_rejects_a_deadlock(self):
+    def test_unrelated_deadlock_or_unexplained_signal_is_no_verdict(self):
+        # Deadlock only matches the two wake-omission faults; every other fault
+        # (including the batch premature-publication control) is NO VERDICT.
         run = self.run_script("deadlock")
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn("MISSED  a batch's tasks are published done before the last has hashed (wrong failure:", run.stdout)
-        self.assertIn("passes 1 planted faults", run.stderr)
+        deadlock_expected = sum(1 for _, _, _, exp in faults() if any("deadlock" in p for p in exp))
+        other = len(faults()) - deadlock_expected
+        self.assertEqual(deadlock_expected, 2)
+        self.assertEqual(run.stdout.count("caught  "), deadlock_expected, run.stdout)
+        self.assertEqual(run.stdout.count("NO VERDICT  "), other, run.stdout)
+        self.assertIn("NO VERDICT  a batch's tasks are published done before the last has hashed (unrelated failure:", run.stdout)
+        self.assertIn(f"no verdict on {other} planted faults (unrelated failure)", run.stderr)
+        self.assert_untouched()
+
+        # An unexplained signal (no panic / allocator / model word) is NO VERDICT for every fault.
+        sig_run = self.run_script("signal")
+        self.assertNotEqual(sig_run.returncode, 0)
+        self.assertEqual(sig_run.stdout.count("caught  "), 0, sig_run.stdout)
+        self.assertEqual(sig_run.stdout.count("NO VERDICT  "), len(faults()), sig_run.stdout)
+        self.assertIn(f"no verdict on {len(faults())} planted faults (unrelated failure)", sig_run.stderr)
         self.assert_untouched()
 
 

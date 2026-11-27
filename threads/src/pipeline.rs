@@ -501,8 +501,10 @@ process_static! {
 pub(crate) mod model_storages;
 
 impl PipeSlot {
-    fn acquire(actions: usize) -> (&'static PipeSlot, u64, u64) {
-        let cap = actions.max(1024).checked_next_power_of_two().expect("admitted action capacity fits power of two");
+    fn acquire(actions: usize, messages: usize) -> (&'static PipeSlot, u64, u64) {
+        let has_workers = crate::lanes::pool_has_workers();
+        let need = if has_workers { actions } else { messages * MAX_SLOT_PIECES };
+        let cap = need.max(1024).checked_next_power_of_two().expect("admitted action capacity fits power of two");
         let tier = slot_tier(cap);
         if let Some(FreeSlot { slot, next_group_epoch, next_loan_epoch }) = FREE_PIPE_SLOTS.lock().unwrap()[tier..].iter_mut().find_map(Vec::pop) {
             return (slot, next_group_epoch, next_loan_epoch);
@@ -511,8 +513,12 @@ impl PipeSlot {
         let max_groups = max_slots.clamp(4, 256);
         #[cfg(any(test, shuttle))]
         PIPE_SLOTS_MADE.fetch_add(1, Ordering::Relaxed);
+        // A one-thread pool never registers a `Source` or dispatches tickets to
+        // workers, so keep its ticket ring empty while retaining stable waker
+        // and group/loan completion lines for synchronous execution.
+        let source = if has_workers { Source::with_actions(cap, PipeStorage::run_action) } else { Source::new() };
         let raw = Box::into_raw(Box::new(PipeSlot {
-            source: Source::with_actions(cap, PipeStorage::run_action),
+            source,
             waker: WakerSlot::new(),
             group_completed: (0..max_groups).map(|_| OwnLine(AtomicU64::new(0))).collect(),
             loan_completed: (0..max_slots).map(|_| OwnLine(AtomicU64::new(0))).collect(),
@@ -525,7 +531,7 @@ impl PipeSlot {
     }
 
     fn release(slot: &'static PipeSlot, next_group_epoch: u64, next_loan_epoch: u64) {
-        let tier = slot_tier(slot.source.actions_len());
+        let tier = slot_tier(slot.loan_completed.len() * MAX_SLOT_PIECES);
         FREE_PIPE_SLOTS.lock().unwrap()[tier].push(FreeSlot { slot, next_group_epoch, next_loan_epoch });
     }
 }
@@ -539,8 +545,9 @@ pub(crate) struct PipeStorage {
     rooms: Rooms,
     groups: Box<[MemberGroup]>,
     /// Per-slot prepared mode, written by the owner only when a slot opens via
-    /// `message_with` (`MessageWithFut::poll`) and read-only by workers until
-    /// the slot finishes. Default `message()` slots leave this untouched.
+    /// `message_with` (`OverrideOpenMode::install`) before any work for that
+    /// slot is dispatched, and read-only by workers until the slot finishes.
+    /// Default `message()` slots leave this untouched.
     slot_trees: Box<[UnsafeCell<TreeHasher>]>,
     hashes: Box<[UnsafeCell<[u8; OUT_LEN]>]>,
     cvs: Box<[UnsafeCell<PieceValues>]>,
@@ -816,8 +823,8 @@ fn finished(waker: &'static WakerSlot, publish: impl FnOnce()) {
 
 impl PipeStorage {
     /// Prepared mode selected by `custom`: either `slot_trees[slot]` (written
-    /// by `MessageWithFut::poll` before dispatch and immutable until completion)
-    /// or the Pipeline's default `tree`.
+    /// by `OverrideOpenMode::install` before dispatch and immutable until
+    /// completion) or the Pipeline's default `tree`.
     #[inline(always)]
     fn tree_for(&self, slot: usize, custom: bool) -> &TreeHasher {
         if custom {
@@ -1290,8 +1297,8 @@ pub struct Pipeline<T, B = (), P = Batch<'static>> {
     /// Mode of the open group (`Default` or `Plain`; `Custom` groups publish
     /// immediately). Valid whenever `open_group.is_some()`.
     local_group_mode: SlotMode,
-    /// Override slot index in `Shared::slot_trees` for the open group, or
-    /// `NONE` when the open group uses `Shared::tree` (default mode).
+    /// Override slot index in `PipeStorage::slot_trees` for the open group, or
+    /// `NONE` when the open group uses `PipeStorage::tree` (default mode).
     local_custom_slot: u32,
     /// Count of registered split `Pipeline::batch` plans not yet reaped.
     /// When zero, `try_reap_one` skips `PipelineBufs::batch_plans`.
@@ -1557,7 +1564,7 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
 /// Validate `Limits` and compute `(p_cap, g_cap, actions_cap)` without
 /// allocating. Preserves the uniform public `Limits` contract (`messages > 0`
 /// and `messages + rooms < (1 << 29) - 1`, matching 29-bit action indices in
-/// `pack_arg`), including when `rooms == 0` allocates zero `PieceNode`s.
+/// `ActionArg`), including when `rooms == 0` allocates zero `PieceNode`s.
 /// For roomless pipelines (`rooms == 0`), each message slot holds either a
 /// split submission (at most `MAX_SLOT_PIECES = 64` actions) or a grouped
 /// short message (at most 1 group ticket, never both), so `m * 64` actions
@@ -1636,7 +1643,7 @@ impl<T, B, P> Pipeline<T, B, P> {
             batch_plans,
         });
 
-        let (pipe_slot, next_group_epoch, next_loan_epoch) = PipeSlot::acquire(actions_cap);
+        let (pipe_slot, next_group_epoch, next_loan_epoch) = PipeSlot::acquire(actions_cap, m);
         let storage = PipeStorage::alloc(pipe_slot, tree, m, limits.rooms, p_cap, g_cap);
         // A pool of one thread has no worker to take a published action,
         // and only this crate's block_on would run it: an outside executor
@@ -4259,7 +4266,7 @@ mod test {
     }
 
     #[test]
-    fn pack_unpack_arg_roundtrips_every_field() {
+    fn action_arg_roundtrips_every_field() {
         let cases = [
             ActionArg::Group { group: 0, custom_slot: 0 },
             ActionArg::Group { group: ActionArg::MAX_A, custom_slot: u32::MAX },
@@ -5311,7 +5318,7 @@ mod test {
         assert_eq!(got_r[0], (11, ref_hash(Mode::Plain, &[0x55; 64])));
         assert_eq!(got_r[1], (10, ref_hash(Mode::Keyed(&key_a), &[0x44; 64])));
 
-        // 8. Dropping a Pending MessageWithFut must clear the registered Waker.
+        // 8. Dropping a Pending MessageOpenFut (override mode) must clear the registered Waker.
         struct NoopWake;
         impl std::task::Wake for NoopWake {
             fn wake(self: Arc<Self>) {}
@@ -5332,7 +5339,7 @@ mod test {
             assert_eq!(Arc::strong_count(&wake_arc), 2, "Pending poll must register waker");
             drop(fut);
         }
-        assert_eq!(Arc::strong_count(&wake_arc), 1, "Dropping Pending MessageWithFut must clear waker");
+        assert_eq!(Arc::strong_count(&wake_arc), 1, "Dropping Pending MessageOpenFut must clear waker");
         p1.storage().slot.get().group_completed[0].store(pending_epoch, Ordering::SeqCst);
         assert!(matches!(p1.try_reap_one(), Some(Event::Aborted { tag: 0, owner: None })));
     }
@@ -5653,12 +5660,58 @@ mod test {
     /// spinning forever (#465).
     #[cfg(unix)]
     #[test]
+    fn one_thread_pool_pipeline_allocates_zero_worker_tickets() {
+        const ENV: &str = "BLAKE3_PIPELINE_ONE_THREAD_TICKETS";
+        if std::env::var_os(ENV).is_some() {
+            crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+            let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1024, rooms: 0 });
+            assert!(p.source_slot.is_none(), "one-thread pool must not register a worker Source");
+            assert_eq!(p.pipe_slot.source.actions_len(), 0, "one-thread pool must allocate zero ticket slots");
+            assert_eq!(p.pipe_slot.loan_completed.len(), 1024);
+            assert_eq!(p.pipe_slot.group_completed.len(), 256);
+            // Prove the synchronous execution path still hashes messages and recycles the slot.
+            let msg = [0x5Au8; 64];
+            let m = block_on(p.message(7, None));
+            // Sound: `lent` is held across `ready()` and dropped only after completion.
+            let lent = unsafe { p.lent(m, &msg) };
+            block_on(p.ready());
+            drop(lent);
+            match p.next_event() {
+                Some(Event::Hashed { tag: 7, hash, .. }) => assert_eq!(hash.as_bytes(), blake3::hash(&msg).as_bytes()),
+                _ => panic!("expected Hashed event"),
+            }
+            drop(p);
+            let p2 = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 16, rooms: 2 });
+            assert_eq!(p2.pipe_slot.source.actions_len(), 0, "reused one-thread PipeSlot keeps zero ticket slots");
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(&exe)
+            .env(ENV, "1")
+            .args(["--exact", "pipeline::test::one_thread_pool_pipeline_allocates_zero_worker_tickets", "--nocapture"])
+            .output()
+            .unwrap();
+        let stdout = std::string::String::from_utf8_lossy(&out.stdout);
+        let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "one-thread ticket-capacity check failed: status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            out.status
+        );
+    }
+
+    #[test]
     fn forked_child_stops_in_acquire_free_group_and_alloc_piece_node() {
         const ENV: &str = "BLAKE3_PIPELINE_FORK_WAIT_CASE";
         if let Ok(which) = std::env::var(ENV) {
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
+            while !crate::lanes::all_workers_parked() {
+                std::thread::yield_now();
+            }
             let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-            // Mark every group / piece unavailable before simulating a forked child.
+            // Mark every group / piece unavailable, then set the fork flag in
+            // this normal un-forked subprocess (no UB from calling allocator or
+            // unwinding after a multithreaded fork()).
             if which == "group" {
                 for slot in &mut p.assigned_group_epoch {
                     *slot = u64::MAX;
@@ -5666,89 +5719,55 @@ mod test {
             } else {
                 while p.free_pieces.pop_front().is_some() {}
             }
-            // Sound: test runs in an isolated child process and triggers the
-            // fork flag so `acquire_free_group`/`alloc_piece_node` hits `require()`.
-            unsafe {
-                let pid = libc::fork();
-                assert!(pid >= 0, "fork failed");
-                if pid == 0 {
-                    // Long backstop in case the parent dies before reaping; normal
-                    // timeouts are enforced by the parent's 8 s waitpid deadline below.
-                    libc::alarm(30);
-                    let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-                        if which == "group" {
-                            let _ = p.acquire_free_group();
-                        } else {
-                            let _ = p.alloc_piece_node(0);
-                        }
-                    }));
-                    let fork_panic = match res {
-                        Err(payload) => {
-                            let msg = payload
-                                .downcast_ref::<&str>()
-                                .copied()
-                                .or_else(|| payload.downcast_ref::<std::string::String>().map(|s| s.as_str()))
-                                .unwrap_or("");
-                            msg.contains("fork")
-                        }
-                        Ok(()) => false,
-                    };
-                    libc::_exit(if fork_panic { 0 } else { 1 });
+            crate::lanes::mark_forked_for_test();
+            let res = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                if which == "group" {
+                    let _ = p.acquire_free_group();
+                } else {
+                    let _ = p.alloc_piece_node(0);
                 }
-                // Parent-supervised deadline: immune to inherited SIG_IGN on SIGALRM,
-                // above the slowest loaded baseline (> 5.1 s) yet well below nextest's
-                // 15 s mutants timeout so a removed fork guard fails cleanly instead of
-                // timing out (documented exception in .config/nextest.toml; #557).
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-                let mut status: libc::c_int = 0;
-                let mut timed_out = false;
-                let mut wait_err: Option<i32> = None;
-                loop {
-                    let got = libc::waitpid(pid, &mut status, libc::WNOHANG);
-                    if got == pid {
-                        break;
-                    }
-                    if got < 0 {
-                        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                        if err == libc::EINTR {
-                            continue;
-                        }
-                        wait_err = Some(err);
-                        break;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        timed_out = true;
-                        let krc = libc::kill(pid, libc::SIGKILL);
-                        let kerr = if krc < 0 { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) } else { 0 };
-                        if krc == 0 || kerr == libc::ESRCH {
-                            loop {
-                                let r = libc::waitpid(pid, &mut status, 0);
-                                if r == pid || (r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)) {
-                                    break;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                // Clear synthetic busy state before any assertion so parent `Drop` stays clean.
-                for slot in &mut p.assigned_group_epoch {
-                    *slot = 0;
-                }
-                assert!(wait_err.is_none(), "waitpid failed with errno {:?}", wait_err);
-                assert!(!timed_out, "forked child hung waiting on {which} (killed by parent deadline)");
-                assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child failed: status={status}");
+            }));
+            // Clear synthetic busy state before any assertion so `Drop` stays clean.
+            for slot in &mut p.assigned_group_epoch {
+                *slot = 0;
             }
+            let fork_panic = match res {
+                Err(payload) => {
+                    let msg =
+                        payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<std::string::String>().map(|s| s.as_str())).unwrap_or("");
+                    msg.contains("fork")
+                }
+                Ok(()) => false,
+            };
+            assert!(fork_panic, "expected fork panic on {which}");
             return;
         }
         let exe = std::env::current_exe().unwrap();
         for case in ["group", "piece"] {
-            let out = std::process::Command::new(&exe)
+            let mut child = std::process::Command::new(&exe)
                 .env(ENV, case)
                 .args(["--exact", "pipeline::test::forked_child_stops_in_acquire_free_group_and_alloc_piece_node", "--nocapture"])
-                .output()
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
                 .unwrap();
+            // Parent-supervised deadline well below nextest's 15 s mutants timeout
+            // so a removed fork guard fails cleanly instead of timing out (#557).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let mut timed_out = false;
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let out = child.wait_with_output().unwrap();
+            assert!(!timed_out, "fork wait case {case} hung (killed by parent deadline)");
             let stdout = std::string::String::from_utf8_lossy(&out.stdout);
             let stderr = std::string::String::from_utf8_lossy(&out.stderr);
             assert!(

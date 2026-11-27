@@ -17,7 +17,6 @@ src/lanes.rs	replace % with + in places::assign	3	same code: every test binary h
 src/lanes.rs	replace & with ^ in sme2_serve	1	speed: in `arg & ACTION_SME2 == 0`, `^` makes the test false for every packed action, running it under Sme2Turn instead of pool_platform() (identical digests)
 src/lanes.rs	replace & with | in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace & with | in sme2_serve	1	speed: `arg | ACTION_SME2 == 0` is always false, running every pipeline action under Sme2Turn instead of NEON (identical digests)
-src/lanes.rs	replace && with || in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace && with || in initialize	2	SME2 CPUs: the same pool (the second place differs only with one thread, where no SME2 thread starts; the first would start the SME2 thread on a CPU without SME2, a case only CI's QEMU Cortex-A72 job reaches)
 src/lanes.rs	replace && with || in places::Plan::done	1	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace * with +	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
@@ -26,17 +25,11 @@ src/lanes.rs	replace * with /	1	OPEN: the pool's scheduling under interleavings 
 src/lanes.rs	replace + with * in Pool::run_job	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace - with + in Pool::run_job	4	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace - with / in Pool::run_job	2	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace -= with += in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace -= with /= in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace / with % in places::allowed	2	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
-src/lanes.rs	replace < with <= in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace < with == in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with == in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace < with > in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace < with > in sources::keeps_polling	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace << with >>	1	no places off Linux: settle sets none here, so PLACES stays unset and FAR_LEN, the mutated constant, is never compared; the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace << with >> in sources::Source::unregister	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
-src/lanes.rs	replace == with != in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace == with != in places::Plan::done	2	no places off Linux: settle sets none here, so PLACES stays unset and this code returns before the mutated part (or is never called); the Linux lists judge it, on a pretended two-cache machine
 src/lanes.rs	replace == with != in places::allowed	1	compiled out off Linux: places::read and places::allowed ask Linux and are cfg(target_os = "linux"); the Linux lists judge it
 src/lanes.rs	replace == with != in sme2_serve	1	speed: swaps which actions run under Sme2Turn vs pool_platform() on the SME2 thread (identical digests)
@@ -77,7 +70,6 @@ src/lanes.rs	replace sources::open -> bool with true	1	OPEN: the pool's scheduli
 src/lanes.rs	replace sources::run_one -> bool with false	1	OPEN: the pool's scheduling: the workers never run a source's item, and the caller hashes every piece itself: the same digests. The tests it hung here were the first pipeline's (the VM's whole run at 5c0247cd, November 12); on x86-64 it times out (timeouts-x86_64.txt)
 src/lanes.rs	replace sources::visible -> bool with false	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace wake_sme2 with ()	1	speed: without waking the SME2 thread, worker threads or the caller run every published action (identical digests; on x86-64 no SME2 thread exists)
-src/lanes.rs	replace || with && in cut_items	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 src/lanes.rs	replace || with && in sources::visible	1	OPEN: the pool's scheduling under interleavings the tests leave to chance; Loom would force them (#103)
 # Linux affinity and NUMA code excluded on macOS (M6 3418). The
 # unbound two-node Linux job judges these sites; do not list them there.
