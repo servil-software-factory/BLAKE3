@@ -179,9 +179,12 @@ fn register_overwrite_wakes_replacement_and_clear_suppresses_wake() {
             let wa = make_count_waker(&a);
             let wb = make_count_waker(&b);
 
-            // Replacing A with distinct B must deliver a subsequent wake to B only.
+            // Replacing A with distinct B must not wake either yet, and must
+            // deliver a subsequent wake to B only.
             slot.register(&Context::from_waker(&wa));
             slot.register(&Context::from_waker(&wb));
+            assert_eq!(a.0.load(Ordering::SeqCst), 0, "registration must not wake A");
+            assert_eq!(b.0.load(Ordering::SeqCst), 0, "registration must not wake B");
             slot.notify_after_seqcst();
             assert_eq!(a.0.load(Ordering::SeqCst), 0, "replaced waker must not be woken");
             assert_eq!(b.0.load(Ordering::SeqCst), 1, "replacement waker must be woken once");

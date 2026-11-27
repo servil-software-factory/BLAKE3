@@ -298,7 +298,7 @@ mod tests {
                         continue;
                     }
                 }
-                k += 1;
+                k += clean[k..].chars().next().map_or(1, char::len_utf8);
             }
             bad
         };

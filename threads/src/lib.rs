@@ -494,11 +494,13 @@ pub(crate) fn ran(kind: Ran) {
 /// that leaves by `_exit` or `exec` drops neither).
 ///
 /// Each thread that makes multithreaded calls keeps a little storage for
-/// them (its cut of the input, 56 KiB for up to 1,024 pieces, and its
-/// job record), grown on its first call and on the first call that
-/// outgrows it, and otherwise untouched: a call that needs no more
-/// pieces than an earlier one allocates nothing. This call prepares the calling thread's; a call from another
-/// thread prepares that thread's the first time.
+/// them (its piece cut, its job record, and — for tree calls — its chaining-value
+/// scratch, 56 KiB together for up to 1,024 pieces), grown on its first call of
+/// that kind and on the first call that outgrows it, and otherwise untouched: a
+/// tree call that needs no more pieces than an earlier tree call (or than
+/// `prepare_thread` preallocated) allocates nothing, and batch/collection calls
+/// do not grow the chaining-value vector. This call prepares the calling thread's;
+/// a call from another thread prepares that thread's the first time.
 ///
 /// ```
 /// blake3_servil::initialize_multithreaded(None);
@@ -682,7 +684,7 @@ pub mod throughput {
         if small_bytes < crate::lanes::MIN_SPLIT_LEN {
             crate::lanes::hash_each_small(&tree, items, out);
         } else {
-            crate::lanes::hash_each(&tree, items, out);
+            crate::lanes::hash_each(&tree, items, small_bytes, out);
         }
         for (item, out) in items.iter().zip(out.iter_mut()) {
             if alone(item.1) {

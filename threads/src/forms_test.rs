@@ -31,9 +31,9 @@ fn test_pool_from_two_callers() {
                 let mut out = vec![[0u8; OUT_LEN]; batch_count];
                 ready.wait();
                 throughput::hash_many_multithreaded(Mode::Plain, &Batch::in_place(&crate::test::blocks(batch), 64), &mut out);
+                let tree_hash = throughput::hash_multithreaded(Mode::Plain, &crate::test::message(tree), tree.len());
                 assert_eq!(&out, expected, "batch, caller {caller}");
-                ready.wait();
-                assert_eq!(throughput::hash_multithreaded(Mode::Plain, &crate::test::message(tree), tree.len()), expected_tree, "tree, caller {caller}");
+                assert_eq!(tree_hash, expected_tree, "tree, caller {caller}");
             });
         }
     });
