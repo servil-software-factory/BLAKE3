@@ -52,9 +52,10 @@ UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
 DEBUG_ASSERT = re.compile(r"\bdebug_assert(?:_eq|_ne)?\s*!")
 SOUND_RE = re.compile(r"Sound:\s*\S")
 DEBUG_ONLY_RE = re.compile(r"Debug-only:\s*\S")
-_COMMENT_TOKEN_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
 _OUTER_CFG_RE = re.compile(r"^#\[\s*cfg\s*\(")
-_ITEM_OR_STMT_KW_RE = re.compile(r"(?:pub|fn|impl|struct|enum|trait|type|use|static|const|let|mod|unsafe|async|extern|if|match|for|while|loop)\b")
+_CFG_CALL_RE = re.compile(r"\bcfg\s*\(")
+_PUB_PREFIX_RE = re.compile(r"pub(?:\s*\([^)]*\))?\s+")
+_ITEM_OR_STMT_KW_RE = re.compile(r"(?:fn|impl|struct|enum|trait|type|use|static|const|let|mod|unsafe|async|extern|if|match|for|while|loop)\b")
 _ELSE_RE = re.compile(r"\s*else\b")
 _RAW_STR_RE = re.compile(r"(?:[bc]?r)(#*)\"")
 _CHAR_RE = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\\n])'")
@@ -122,14 +123,11 @@ def _extract_cfg_exprs(attr_line):
     exprs = []
     idx = 0
     while True:
-        pos = attr_line.find("cfg(", idx)
-        if pos < 0:
+        m = _CFG_CALL_RE.search(attr_line, idx)
+        if not m:
             break
-        if pos > 0 and (attr_line[pos - 1].isalnum() or attr_line[pos - 1] == "_"):
-            idx = pos + 4
-            continue
         depth = 0
-        start = pos + 4
+        start = m.end()
         j = start
         while j < len(attr_line):
             if attr_line[j] == "(":
@@ -270,16 +268,57 @@ def strip_code_preserving_lines(text):
     return split_code_and_comments(text)[0]
 
 
+def _iter_comment_tokens(comm_text):
+    """Yield `(start, end, body)` for every `//` line comment and nested
+    `/* ... */` block comment in `comm_text` (already stripped of non-comments)."""
+    n = len(comm_text)
+    i = 0
+    while i < n:
+        if comm_text[i] == "/" and i + 1 < n and comm_text[i + 1] == "/":
+            start = i
+            nl = comm_text.find("\n", i + 2)
+            end = n if nl == -1 else nl
+            yield start, end, comm_text[start + 2:end]
+            i = end
+        elif comm_text[i] == "/" and i + 1 < n and comm_text[i + 1] == "*":
+            start = i
+            depth = 1
+            i += 2
+            while i < n and depth > 0:
+                if comm_text[i] == "/" and i + 1 < n and comm_text[i + 1] == "*":
+                    depth += 1
+                    i += 2
+                elif comm_text[i] == "*" and i + 1 < n and comm_text[i + 1] == "/":
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            end = i
+            body = comm_text[start + 2:end - 2] if depth == 0 else comm_text[start + 2:end]
+            yield start, end, body
+        else:
+            i += 1
+
+
 def _comment_has_reason(comm_slice, pattern):
-    """True iff at least one individual `//` or `/* ... */` comment token in
-    `comm_slice` matches `pattern` after stripping its comment delimiters
-    (so `/* Debug-only: */` cannot count `*/` as the rationale text)."""
-    for m in _COMMENT_TOKEN_RE.finditer(comm_slice):
-        tok = m.group(0)
-        body = tok[2:] if tok.startswith("//") else tok[2:-2]
-        if pattern.search(body):
-            return True
-    return False
+    """True iff at least one complete comment token in `comm_slice` matches
+    `pattern` after stripping its delimiters."""
+    return any(pattern.search(body) for _s, _e, body in _iter_comment_tokens(comm_slice))
+
+
+def _lines_with_reason(comm_text, starts, pattern):
+    """Return the set of 0-based line numbers spanned by any complete comment
+    token in `comm_text` whose delimiter-stripped body matches `pattern`
+    (supports both `//` and multiline nested `/* ... */` rationales)."""
+    covered = set()
+    for start, end, body in _iter_comment_tokens(comm_text):
+        if not pattern.search(body):
+            continue
+        s_ln = bisect.bisect_right(starts, start) - 1
+        e_ln = bisect.bisect_right(starts, max(start, end - 1)) - 1
+        for ln in range(s_ln, e_ln + 1):
+            covered.add(ln)
+    return covered
 
 
 def _line_starts(text):
@@ -312,13 +351,40 @@ def _find_attr_end(code, start):
     return n
 
 
-def mask_test_items(code):
-    """Mask every outer `#[cfg(...)]` requiring `test` together with its exact
-    attached item, block, or statement in comment/string-stripped `code`,
-    replacing masked characters with spaces while preserving every `\\n` so
-    line numbers and character offsets stay aligned with the source."""
+def _preceding_attr_stack_start(code, pos):
+    """Walk backward from outer attribute at `pos` across any immediately
+    preceding outer `#[...]` attributes (separated only by whitespace) so
+    stacked attributes such as `#[allow(...)] #[cfg(test)] fn f()` are masked
+    together."""
+    cur = pos
+    while True:
+        k = cur - 1
+        while k >= 0 and code[k].isspace():
+            k -= 1
+        if k < 0 or code[k] != "]":
+            return cur
+        depth = 0
+        j = k
+        while j >= 0:
+            if code[j] == "]":
+                depth += 1
+            elif code[j] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            j -= 1
+        if j >= 1 and code[j - 1] == "#" and (j < 2 or code[j - 2] != "!"):
+            cur = j - 1
+            continue
+        return cur
+
+
+def _test_item_spans(code):
+    """Return sorted `(start, end)` spans of every outer `#[cfg(...)]` requiring
+    `test` together with its stacked attributes and attached item, block,
+    statement, field, or parameter in comment/string-stripped `code`."""
     n = len(code)
-    out = list(code)
+    spans = []
     i = 0
     while i < n:
         pos = code.find("#[", i)
@@ -329,6 +395,7 @@ def mask_test_items(code):
         if not _attr_requires_test(attr_text):
             i = attr_end
             continue
+        span_start = _preceding_attr_stack_start(code, pos)
         # Advance past whitespace and any stacked outer `#[...]` attributes.
         j = attr_end
         while j < n:
@@ -338,15 +405,19 @@ def mask_test_items(code):
                 j = _find_attr_end(code, j)
                 continue
             break
-        # Determine whether the attributed construct begins with an item or
-        # statement keyword (so a struct field / enum variant ending in `,`
-        # terminates cleanly without skipping the next field, while generic
-        # lists like `fn f<A, B>()` do not terminate on `,`).
-        starts_item_kw = bool(_ITEM_OR_STMT_KW_RE.match(code, j))
+        # Strip optional `pub` / `pub(...)` before checking whether the
+        # attributed construct starts with an item/statement keyword (so
+        # `#[cfg(test)] pub field: u32,` stops at `,`, whereas
+        # `#[cfg(test)] pub fn f<A, B>() {}` stops at `}`).
+        kw_pos = j
+        m_pub = _PUB_PREFIX_RE.match(code, kw_pos)
+        if m_pub:
+            kw_pos = m_pub.end()
+        starts_item_kw = bool(_ITEM_OR_STMT_KW_RE.match(code, kw_pos))
         # Consume the annotated item/statement: track balanced delimiters and
         # only mark `seen_top_brace` for a `{` at outer level (`paren == 0`
         # and `bracket == 0`), so closures inside `FOO.with(|x| { ... });`
-        # still terminate at the statement's `;`.
+        # still terminate at `;`. Never cross an enclosing `)`, `]`, or `}`.
         brace = 0
         paren = 0
         bracket = 0
@@ -357,22 +428,23 @@ def mask_test_items(code):
             if ch == "(":
                 paren += 1
             elif ch == ")":
-                if paren > 0:
-                    paren -= 1
+                if paren == 0:
+                    end = j
+                    break
+                paren -= 1
             elif ch == "[":
                 bracket += 1
             elif ch == "]":
-                if bracket > 0:
-                    bracket -= 1
+                if bracket == 0:
+                    end = j
+                    break
+                bracket -= 1
             elif ch == "{":
                 if brace == 0 and paren == 0 and bracket == 0:
                     seen_top_brace = True
                 brace += 1
             elif ch == "}":
                 if not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
-                    # Reached the closing `}` of an enclosing struct/block
-                    # (e.g. a trailing test-only struct field without a comma);
-                    # never escape out of the enclosing scope.
                     end = j
                     break
                 if brace > 0:
@@ -393,19 +465,38 @@ def mask_test_items(code):
                 end = j + 1
                 break
             j += 1
-        for k in range(pos, end):
+        spans.append((span_start, end))
+        i = end
+    return spans
+
+
+def _blank_spans(text, spans):
+    if not spans:
+        return text
+    out = list(text)
+    for start, end in spans:
+        for k in range(start, end):
             if out[k] != "\n":
                 out[k] = " "
-        i = end
     return "".join(out)
 
 
+def mask_test_items(code):
+    """Mask every outer `#[cfg(...)]` requiring `test` together with its exact
+    attached item, block, statement, field, or parameter in comment/string-
+    stripped `code`, replacing masked characters with spaces while preserving
+    every `\\n`."""
+    return _blank_spans(code, _test_item_spans(code))
+
+
 def masked_code(text):
-    """Return `(masked_code_text, comment_text)` with comments/strings stripped
-    from `masked_code_text` and all `#[cfg(...)]` test-only items/statements
-    blanked out at exact token boundaries while preserving every `\\n`."""
+    """Return `(masked_code_text, masked_comment_text)` with comments/strings
+    stripped from `masked_code_text` and all `#[cfg(...)]` test-only spans
+    blanked out in BOTH code and comments (preserving every `\\n`) so comments
+    inside `#[cfg(test)]` blocks can never satisfy shipped-code rationales."""
     code_text, comm_text = split_code_and_comments(text)
-    return mask_test_items(code_text), comm_text
+    spans = _test_item_spans(code_text)
+    return _blank_spans(code_text, spans), _blank_spans(comm_text, spans)
 
 
 def non_test_lines(text):
@@ -453,10 +544,9 @@ def without_reason(text):
     that have no non-empty `Sound:` comment within REACH lines above, skipping
     test-only `#[cfg(test)]` modules/items."""
     raw_lines = text.split("\n")
-    code_text, comm_text = split_code_and_comments(text)
-    masked = mask_test_items(code_text)
-    comm_lines = comm_text.split("\n")
+    masked, comm_text = masked_code(text)
     starts = _line_starts(masked)
+    sound_lines = _lines_with_reason(comm_text, starts, SOUND_RE)
     found = []
     seen_lines = set()
     for m in UNSAFE.finditer(masked):
@@ -464,8 +554,7 @@ def without_reason(text):
         if idx in seen_lines:
             continue
         seen_lines.add(idx)
-        above = comm_lines[max(0, idx - REACH):idx + 1]
-        if not any(_comment_has_reason(c, SOUND_RE) for c in above):
+        if not any(ln in sound_lines for ln in range(max(0, idx - REACH), idx + 1)):
             found.append((idx + 1, raw_lines[idx].strip()))
     return found
 
@@ -478,11 +567,10 @@ def debug_assert_without_reason(text):
     `debug_assert*!` statements share one directly attached comment above;
     any other code or branch boundary breaks attachment."""
     raw_lines = text.split("\n")
-    code_text, comm_text = split_code_and_comments(text)
-    masked = mask_test_items(code_text)
+    masked, comm_text = masked_code(text)
     masked_lines = masked.split("\n")
-    comm_lines = comm_text.split("\n")
     starts = _line_starts(masked)
+    debug_lines = _lines_with_reason(comm_text, starts, DEBUG_ONLY_RE)
     matches = list(DEBUG_ASSERT.finditer(masked))
     # Track lines occupied by standalone `debug_assert*!` statements so
     # consecutive multi-line assertions can share one header comment above.
@@ -522,20 +610,19 @@ def debug_assert_without_reason(text):
         # 2. Check directly attached comment lines above ONLY if no other code
         # precedes this invocation on `s_idx` (prevents one-line `if ... else`
         # branches from borrowing a comment from an earlier branch or above).
+        # Check for intervening non-assertion code BEFORE accepting comments on
+        # line `k` so `if x == 0 { /* Debug-only: ... */ debug_assert!(...); }`
+        # cannot discharge an unrelated assertion on the next line.
         if not has_reason and masked[line_start:m.start()].strip() == "":
             k = s_idx - 1
             while k >= 0:
-                if _comment_has_reason(comm_lines[k], DEBUG_ONLY_RE):
+                c_strip = masked_lines[k].strip()
+                if c_strip and k not in da_stmt_lines:
+                    break
+                if k in debug_lines:
                     has_reason = True
                     break
-                c_strip = masked_lines[k].strip()
-                if not c_strip:
-                    k -= 1
-                    continue
-                if k in da_stmt_lines:
-                    k -= 1
-                    continue
-                break
+                k -= 1
         if not has_reason:
             found.append((s_idx + 1, raw_lines[s_idx].strip()))
     return found

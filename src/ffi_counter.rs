@@ -158,7 +158,7 @@ pub(crate) fn hash_counter_range_on(template: &[u8], counter_word: usize, start:
     let blen_u8 = u8::try_from(template.len()).expect("validated <= BLOCK_LEN");
     let done = hash_counter_groups(&tmpl_words, blen_u8, counter_word, start, key, root_flags, out, platform);
 
-    // Serial tail (< 16 / < 11 / < 8, or SSE4.1 / portable builds).
+    // Serial tail (< 16 / < 11 / < 8, or SSE4.1).
     let cw_off = counter_word * 4;
     let mut cur = wrapping_add_usize(start, done);
     for slot in &mut out[done..] {

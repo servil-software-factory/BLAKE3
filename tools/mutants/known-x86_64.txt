@@ -255,8 +255,8 @@ src/self_test.rs	replace * with / in chunk_values	1	AArch64 only: chunk values s
 src/self_test.rs	replace * with / in outputs	1	AArch64 only: the AArch64 CASES table is cfg(target_arch = "aarch64"), compiled out on x86
 src/self_test.rs	replace + with *	10	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace + with -	10	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace += with *= in run	1	[cpu lacks avx512f avx512vl amd_family_ge_1a] AVX-512 only: the wide kernels' self-test cases join the count only where the platform is AVX512 (test_self_test_run_checks_every_case checks the sum there)
-src/self_test.rs	replace += with -= in run	1	[cpu lacks avx512f avx512vl amd_family_ge_1a] AVX-512 only: the wide kernels' self-test cases join the count only where the platform is AVX512 (test_self_test_run_checks_every_case checks the sum there)
+src/self_test.rs	replace += with *= in run_checks	1	[cpu lacks avx512f avx512vl amd_family_ge_1a] AVX-512 only: the wide kernels' self-test cases join the count only where the platform is AVX512 (test_self_test_run_checks_every_case checks the sum there)
+src/self_test.rs	replace += with -= in run_checks	1	[cpu lacks avx512f avx512vl amd_family_ge_1a] AVX-512 only: the wide kernels' self-test cases join the count only where the platform is AVX512 (test_self_test_run_checks_every_case checks the sum there)
 src/self_test.rs	replace - with +	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace - with /	3	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace / with % in chunk_values	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -265,7 +265,7 @@ src/self_test.rs	replace << with >> in chunk_values	2	same code: every test bina
 src/self_test.rs	replace << with >> in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace == with != in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace == with != in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace ^= with &= in run	1	as on aarch64: survives (known-aarch64.txt): test-only: the planted wrong digest's flip; as &= 1 the byte still changes wherever it is above 1, as every planted case's last byte is, so the digest is still wrong and the test still sees it
+src/self_test.rs	replace ^= with &= in run_checks	1	as on aarch64: survives (known-aarch64.txt): test-only: the planted wrong digest's flip; as &= 1 the byte still changes wherever it is above 1, as every planted case's last byte is, so the digest is still wrong and the test still sees it
 src/self_test.rs	replace chunk_values -> usize with 0	1	AArch64 only: the AArch64 CASES table is cfg(target_arch = "aarch64"), compiled out on x86
 src/self_test.rs	replace chunk_values -> usize with 1	1	AArch64 only: the AArch64 CASES table is cfg(target_arch = "aarch64"), compiled out on x86
 src/self_test.rs	replace compiled_features_present with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)

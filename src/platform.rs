@@ -273,8 +273,7 @@ impl Platform {
                 return Platform::SME2;
             }
         }
-        // We don't use dynamic feature detection for NEON. If the "neon"
-        // feature is on, NEON is assumed to be supported.
+        // NEON is mandatory on AArch64.
         #[cfg(target_arch = "aarch64")]
         {
             return Platform::NEON;
@@ -490,9 +489,7 @@ impl Platform {
                 }
                 // SSE4.1 and AVX2, without an xof_many kernel: block by block.
                 #[cfg(target_arch = "x86_64")]
-                for out_block in out.chunks_exact_mut(BLOCK_LEN) {
-                    // TODO: Use array_chunks_mut here once that's stable.
-                    let out_array: &mut [u8; BLOCK_LEN] = out_block.try_into().unwrap();
+                for out_array in out.as_chunks_mut::<BLOCK_LEN>().0 {
                     *out_array = self.compress_xof(cv, block, block_len, counter, flags);
                     counter += 1;
                 }

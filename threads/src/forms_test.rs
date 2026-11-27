@@ -81,10 +81,11 @@ fn test_hash_many_multithreaded_inside_guard_pages() {
                     message[len..].fill(0);
                 }
                 let data = input.bytes().to_vec();
-                let (_page, mt) = digests(count, at_end);
+                let mut out_page = digests(count, at_end);
+                let mt = out_page.digests();
                 throughput::hash_many_multithreaded(
                     Mode::Plain,
-                    &Batch::in_place(Block::from_bytes(input.bytes()).expect("a page-end batch starts aligned"), len),
+                    &Batch::in_place(Block::from_bytes(input.as_bytes()).expect("a page-end batch starts aligned"), len),
                     mt,
                 );
                 for (i, digest) in mt.iter().enumerate() {
@@ -109,11 +110,12 @@ fn test_hash_each_multithreaded_each_item_against_a_guard_page() {
             for at_end in [true, false] {
                 let lens: Vec<usize> = (0..count).map(|i| len + (i % 3)).collect();
                 let guarded: Vec<Guarded> = lens.iter().map(|&l| filled(l.div_ceil(64).max(1) * 64, at_end)).collect();
-                let regions: Vec<&[u8]> = guarded.iter().map(|g| unsafe { core::slice::from_raw_parts(g.base.add(g.start), g.len) }).collect();
+                let regions: Vec<&[u8]> = guarded.iter().map(Guarded::as_bytes).collect();
                 let in_blocks: Vec<(&[Block], usize)> =
                     regions.iter().zip(&lens).map(|(r, &l)| (Block::from_bytes(r).expect("a page-end region of whole blocks starts aligned"), l)).collect();
                 let want: Vec<[u8; 32]> = regions.iter().zip(&lens).map(|(r, &l)| *crate::convenience::hash(&r[..l]).as_bytes()).collect();
-                let (_page, got) = digests(count, at_end);
+                let mut out_page = digests(count, at_end);
+                let got = out_page.digests();
                 throughput::hash_each_multithreaded(Mode::Plain, &in_blocks, got);
                 assert_eq!(got, &want[..], "hash_each_multithreaded, {count} x {len} B, at end {at_end}");
             }
@@ -149,11 +151,10 @@ fn test_every_multithreaded_call_inside_guard_pages() {
                 // The message's whole blocks flush against the page.
                 let mut region = filled(len.div_ceil(64).max(1) * 64, at_end);
                 region.bytes()[..len].copy_from_slice(&message);
-                let blocks = Block::from_bytes(unsafe { core::slice::from_raw_parts(region.base.add(region.start), region.len) })
-                    .expect("a page-end region of whole blocks starts aligned");
+                let blocks = Block::from_bytes(region.as_bytes()).expect("a page-end region of whole blocks starts aligned");
                 assert_eq!(*throughput::hash_multithreaded(mode, blocks, len).as_bytes(), want, "hash_multithreaded, {what}");
                 let mut hasher = Hasher::new(mode, None);
-                throughput::update_multithreaded(&mut hasher, flush.bytes());
+                throughput::update_multithreaded(&mut hasher, flush.as_bytes());
                 assert_eq!(*hasher.finalize().as_bytes(), want, "update_multithreaded, {what}");
                 // A stream: the message where it is, the message written into
                 // its rooms, and a batch of three, every digest into places
@@ -166,9 +167,8 @@ fn test_every_multithreaded_call_inside_guard_pages() {
                     m[..len].copy_from_slice(&message);
                     m[len..].fill(0);
                 }
-                let batch_blocks =
-                    Block::from_bytes(unsafe { core::slice::from_raw_parts(batch.base.add(batch.start), batch.len) }).expect("a page-end batch starts aligned");
-                let input: &[u8] = unsafe { core::slice::from_raw_parts(flush.base.add(flush.start), flush.len) };
+                let batch_blocks = Block::from_bytes(batch.as_bytes()).expect("a page-end batch starts aligned");
+                let input: &[u8] = flush.as_bytes();
                 let _ = batch_blocks;
                 let mut owned_batch = Batch::new(len, count);
                 for i in 0..count {

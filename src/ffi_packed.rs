@@ -10,9 +10,9 @@ use crate::{CHUNK_END, CHUNK_START, CVWords, OUT_LEN, ROOT, platform::Platform};
 
 /// Hash full SIMD groups of `len`-byte packed messages (`len` in
 /// `{16, 32, 48}`) on `platform`, writing one 32-byte digest per message to
-/// `outputs` and returning the number of messages hashed. On Linux `std`
-/// AVX-512, a `10..=15`-message remainder after full 16-lane groups is left
-/// for `one_block_groups` so it finishes in one padded `output16` call.
+/// `outputs` and returning the number of messages hashed. On x86-64 AVX-512,
+/// a `10..=15`-message remainder after full 16-lane groups is left for
+/// `one_block_groups` so it finishes in one padded `output16` call.
 ///
 /// Requires `input.len() == len * outputs.len()`.
 pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) -> usize {
@@ -140,7 +140,7 @@ fn fill_self_test_input(buf: &mut [u8], len: usize) {
 
 /// Folds of `43` keyed packed digests (`16`, `32`, `48` B) from official BLAKE3 1.8.7.
 /// `43 = 2*16 + 11 = 5*8 + 3 = 3*11 + 10`, exercising multi-group pipelining and
-/// remainder dispatch across SME2, AVX-512, AVX2, and NEON `8+3` (on Linux `std`
+/// remainder dispatch across SME2, AVX-512, AVX2, and NEON `8+3` (on x86-64
 /// AVX-512, `self_test` additionally checks an 8-message batch on `avx2_packed`).
 const SELF_TEST_EXPECTED: [u64; 3] = [0x13f1c329fc53200f, 0x1e4294615a858573, 0x93901e850f4221b8];
 
@@ -163,8 +163,8 @@ pub(crate) fn self_test(platform: Platform) -> usize {
                 got,
             ));
         }
-        // On AVX-512 Linux std, 43 = 2*16 + 11 dispatches the 11-message tail
-        // through padded `output16` instead of `avx2_packed`; also exercise an
+        // On AVX-512, 43 = 2*16 + 11 dispatches the 11-message tail through
+        // padded `output16` instead of `avx2_packed`; also exercise an
         // 8-message packed batch so `avx2_packed{16,32,48}` is verified at startup.
         #[cfg(target_arch = "x86_64")]
         if matches!(platform, Platform::AVX512) {
@@ -403,8 +403,10 @@ mod tests {
     #[should_panic(expected = "packed messages are 16, 32, or 48 bytes")]
     fn hash_packed_groups_rejects_invalid_len() {
         crate::initialize();
-        let input = [0u8; 24 * 16];
-        let mut out = [[0u8; OUT_LEN]; 16];
+        // Use 1 output (below every packed SIMD group width of 4/8/16) so even
+        // if validation were stripped, no SIMD kernel would run on this fixture.
+        let input = [0u8; 24];
+        let mut out = [[0u8; OUT_LEN]; 1];
         let _ = hash_packed_groups(&input, 24, &crate::IV, 0, &mut out, Platform::detect());
     }
 
@@ -412,8 +414,17 @@ mod tests {
     #[should_panic(expected = "packed input length must equal len * outputs.len()")]
     fn hash_packed_groups_rejects_short_input() {
         crate::initialize();
-        let input = [0u8; 16 * 16 - 1];
-        let mut out = [[0u8; OUT_LEN]; 16];
+        let input = [0u8; 15];
+        let mut out = [[0u8; OUT_LEN]; 1];
+        let _ = hash_packed_groups(&input, 16, &crate::IV, 0, &mut out, Platform::detect());
+    }
+
+    #[test]
+    #[should_panic(expected = "packed input length must equal len * outputs.len()")]
+    fn hash_packed_groups_rejects_excess_input() {
+        crate::initialize();
+        let input = [0u8; 17];
+        let mut out = [[0u8; OUT_LEN]; 1];
         let _ = hash_packed_groups(&input, 16, &crate::IV, 0, &mut out, Platform::detect());
     }
 }

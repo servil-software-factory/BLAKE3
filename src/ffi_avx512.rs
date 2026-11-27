@@ -30,9 +30,8 @@ pub unsafe fn hash_many<const N: usize>(
     const { assert!(N > 0 && N % BLOCK_LEN == 0, "hash_many inputs are whole blocks") };
     // Sound: caller verified AVX-512F+VL support; `inputs` holds valid `N`-byte pointers and `out` is checked below to hold `inputs.len() * OUT_LEN` bytes.
     unsafe {
-        // The Rust hash_many implementations do bounds checking on the `out`
-        // array, but the assembly implementations don't. Even though this is
-        // an unsafe function, assert the bounds without multiplying `inputs.len()`.
+        // Check `out` capacity before calling assembly without multiplying
+        // `inputs.len()`.
         assert!(inputs.len() <= out.len() / OUT_LEN);
         // Linux, on a CPU where they pay (platform::wide_avx512): groups of
         // 32 whole chunks take the 32-input kernel, and groups of 16 parent

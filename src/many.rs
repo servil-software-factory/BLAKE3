@@ -38,15 +38,14 @@ pub fn slot_len(len: usize) -> usize {
 /// messages of `len` bytes (checked in every build: the kernels read
 /// them), each slot's bytes past its message zero (checked in debug
 /// builds: a Batch keeps them so). A slot is whole blocks ([`slot_len`]),
-/// or the message itself, packed (`packed`: 16 or 32 bytes).
+/// or the message itself, packed (`packed`: 16, 32, or 48 bytes).
 #[inline]
 pub fn assert_slots(input: &[u8], len: usize, slot: usize, count: usize) {
-    // In every build, both: the kernels take a slot's size from `len` and
-    // read `slot * count` bytes from `input`. A slot of another size, or
-    // an input of another length, would be read past its end, or leave
-    // the kernels' table of slots unwritten (BLAKE3 #419: a 2-byte input
-    // called a 64-byte message crashed 0.9.0). AGENTS: a check of a
-    // mistake that would mismanage memory, at the cost of a comparison.
+    // Checked in every build: the kernels take a slot's size from `len` and
+    // read `slot * count` bytes from `input`. A slot of another size, or an
+    // input of another length, would read past its end or leave the kernels'
+    // table of slots unwritten (BLAKE3 #419: a 2-byte input called a 64-byte
+    // message crashed 0.9.0).
     assert!(slot == slot_len(len) || packed(len, slot), "a slot is whole blocks or a packed message");
     assert_eq!(Some(input.len()), slot.checked_mul(count), "input holds one slot per output");
     // Every caller's slots come from a Batch (throughput's calls, the
@@ -265,8 +264,8 @@ fn hash_two_chunks(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: 
         let mut pairs = [[0u8; BLOCK_LEN]; GROUP];
         // Sound: `firsts` and `seconds` hold exactly `count` initialized
         // entries; each second-chunk pointer reaches `second_blocks` whole
-        // blocks inside its slot, zero past the message; NEON is mandatory on
-        // every AArch64 CPU.
+        // blocks inside its slot, zero past the message; all supported AArch64
+        // targets assume NEON (`build.rs` refuses non-NEON AArch64 targets).
         unsafe {
             crate::neon_hybrid::hash_many_last_len(
                 &firsts,
@@ -735,7 +734,7 @@ fn hash_blocks(messages: &[u8], blocks: usize, key: &CVWords, flags: u8, outputs
     let (groups, rest) = outputs.split_at_mut(on_sme2);
     if !rest.is_empty() {
         let rest_lanes = &table[on_sme2..count];
-        // Sound: every AArch64 CPU has NEON; `fill_ptrs` verified `messages` holds `count` slots of `blocks * BLOCK_LEN` bytes.
+        // Sound: all supported AArch64 targets assume NEON; `fill_ptrs` verified `messages` holds `count` slots of `blocks * BLOCK_LEN` bytes.
         unsafe { crate::neon_hybrid::hash_many_raw(rest_lanes, blocks, key, flags, CHUNK_START, CHUNK_END | ROOT, last_len, rest.as_flattened_mut()) };
     }
     if on_sme2 > 0 {
@@ -895,6 +894,14 @@ mod test {
                 "64 B unrounded on {platform:?}"
             );
 
+            let want_entry: usize = if is_512 {
+                crate::avx512::ffi::blake3_servil_hash_many_avx512 as *const () as usize
+            } else if is_2 {
+                crate::avx2::ffi::blake3_servil_hash_many_avx2 as *const () as usize
+            } else {
+                crate::sse41::ffi::blake3_servil_hash_many_sse41 as *const () as usize
+            };
+
             // 2. 128 B (2 blocks) via `hash_many_on` (the public batch dispatcher):
             // `n = 3` uses inline 4-lane scratch (with 0 single-block `CompressInPlace`
             // scalar fallbacks on SSE4.1), `5..=7 -> 8`, `9..=10` stay unrounded on
@@ -905,13 +912,6 @@ mod test {
                 crate::COUNTED.with(|c| c[crate::Counted::CompressInPlace as usize].set(0));
                 crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
                 let got = calls(&mut || hash_many_on(&m128[..count * 2 * BLOCK_LEN], 2 * BLOCK_LEN, 2 * BLOCK_LEN, crate::IV, 0, &mut out, platform));
-                let want_entry: usize = if is_512 {
-                    crate::avx512::ffi::blake3_servil_hash_many_avx512 as *const () as usize
-                } else if is_2 {
-                    crate::avx2::ffi::blake3_servil_hash_many_avx2 as *const () as usize
-                } else {
-                    crate::sse41::ffi::blake3_servil_hash_many_sse41 as *const () as usize
-                };
                 let ran_entries: std::collections::BTreeSet<usize> = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
                 assert_eq!(
                     ran_entries,
@@ -963,7 +963,14 @@ mod test {
             let m192 = messages(3 * BLOCK_LEN, 10);
             for count in [9usize, 10] {
                 let mut out = vec![[0u8; OUT_LEN]; count];
+                crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
                 let got = calls(&mut || hash_many_on(&m192[..count * 3 * BLOCK_LEN], 3 * BLOCK_LEN, 3 * BLOCK_LEN, crate::IV, 0, &mut out, platform));
+                let ran_entries: std::collections::BTreeSet<usize> = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                assert_eq!(
+                    ran_entries,
+                    std::collections::BTreeSet::from([want_entry]),
+                    "192 B count={count} on {platform:?} must call only its own ISA hash_many assembly"
+                );
                 assert_eq!(got, vec![(3, count)], "192 B count={count} stays unrounded on {platform:?}");
                 for (i, o) in out.iter().enumerate() {
                     assert_eq!(*o, *blake3::hash(&m192[i * 3 * BLOCK_LEN..][..3 * BLOCK_LEN]).as_bytes(), "192 B count={count} msg {i}");
@@ -974,7 +981,14 @@ mod test {
             let m256 = messages(4 * BLOCK_LEN, 31);
             for count in [3usize, 5, 9, 10, 15, 16, 19, 31] {
                 let mut out = vec![[0u8; OUT_LEN]; count];
+                crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
                 let got = calls(&mut || hash_many_on(&m256[..count * 4 * BLOCK_LEN], 4 * BLOCK_LEN, 4 * BLOCK_LEN, crate::IV, 0, &mut out, platform));
+                let ran_entries: std::collections::BTreeSet<usize> = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                assert_eq!(
+                    ran_entries,
+                    std::collections::BTreeSet::from([want_entry]),
+                    "256 B count={count} on {platform:?} must call only its own ISA hash_many assembly"
+                );
                 let want: Vec<(usize, usize)> = if is_512 {
                     match count {
                         3 => vec![(4, 4)],

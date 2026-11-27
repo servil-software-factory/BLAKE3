@@ -126,10 +126,10 @@ pub(crate) mod guard {
     /// `len` bytes with an inaccessible page before and after them, the
     /// bytes flush against the page after (`at_end`) or before.
     pub(crate) struct Guarded {
-        pub(crate) base: *mut u8,
-        pub(crate) total: usize,
-        pub(crate) start: usize,
-        pub(crate) len: usize,
+        base: *mut u8,
+        total: usize,
+        start: usize,
+        len: usize,
     }
 
     impl Guarded {
@@ -148,11 +148,22 @@ pub(crate) mod guard {
             Guarded { base, total, start, len }
         }
 
+        pub(crate) fn as_bytes(&self) -> &[u8] {
+            unsafe { core::slice::from_raw_parts(self.base.add(self.start), self.len) }
+        }
+
         pub(crate) fn bytes(&mut self) -> &mut [u8] {
             unsafe { core::slice::from_raw_parts_mut(self.base.add(self.start), self.len) }
         }
 
-        /// Build shared views first; after this call the body is read-only.
+        /// Borrow the guarded body as `len / OUT_LEN` digest slots, tied to
+        /// `&mut self` so the reference cannot outlive the mapping.
+        pub(crate) fn digests(&mut self) -> &mut [[u8; crate::OUT_LEN]] {
+            assert_eq!(self.len % crate::OUT_LEN, 0, "guarded digest buffer must be a multiple of OUT_LEN");
+            self.bytes().as_chunks_mut::<{ crate::OUT_LEN }>().0
+        }
+
+        /// Build shared views via `as_bytes()` after this call; the body is read-only.
         pub(crate) fn read_only(&mut self) {
             let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
             assert_eq!(unsafe { libc::mprotect(self.base.add(page).cast(), self.total - 2 * page, libc::PROT_READ) }, 0);
@@ -171,20 +182,9 @@ pub(crate) mod guard {
         g
     }
 
-    /// `count` digests' places flush against a guard page (after them, or
-    /// before): a call writes no byte outside its outputs.
-    pub(crate) fn places(count: usize, at_end: bool) -> (Guarded, &'static mut [crate::Hash]) {
-        let mut g = Guarded::new(count * crate::OUT_LEN, at_end);
-        // Sound: Hash is repr(transparent) over [u8; 32], align 1, and the
-        // pages live until the Guarded drops, after every use here.
-        let out = unsafe { core::slice::from_raw_parts_mut(g.bytes().as_mut_ptr() as *mut crate::Hash, count) };
-        (g, out)
-    }
-
-    /// The same places as digests' bytes, for the calls that write those.
-    pub(crate) fn digests(count: usize, at_end: bool) -> (Guarded, &'static mut [[u8; crate::OUT_LEN]]) {
-        let mut g = Guarded::new(count * crate::OUT_LEN, at_end);
-        let out = unsafe { core::slice::from_raw_parts_mut(g.bytes().as_mut_ptr() as *mut [u8; crate::OUT_LEN], count) };
-        (g, out)
+    /// Guarded storage for `count` 32-byte digests flush against a guard page;
+    /// call `.digests()` on the returned owner to borrow `&mut [[u8; OUT_LEN]]`.
+    pub(crate) fn digests(count: usize, at_end: bool) -> Guarded {
+        Guarded::new(count * crate::OUT_LEN, at_end)
     }
 }

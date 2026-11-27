@@ -1383,7 +1383,7 @@ pub(crate) mod guard_pages {
                     // a throughput call may read to their end, no further.
                     let lens: Vec<usize> = (0..count).map(|i| len + (i % 3)).collect();
                     let guarded: Vec<Guarded> = lens.iter().map(|&l| filled(l.div_ceil(64).max(1) * 64, at_end)).collect();
-                    let regions: Vec<&[u8]> = guarded.iter().map(|g| unsafe { core::slice::from_raw_parts(g.base.add(g.start), g.len) }).collect();
+                    let regions: Vec<&[u8]> = guarded.iter().map(Guarded::as_bytes).collect();
                     let items: Vec<&[u8]> = regions.iter().zip(&lens).map(|(r, &l)| &r[..l]).collect();
                     let in_blocks: Vec<(&[crate::throughput::Block], usize)> = regions
                         .iter()
@@ -1392,7 +1392,8 @@ pub(crate) mod guard_pages {
                         .collect();
                     let want: Vec<[u8; 32]> = items.iter().map(|m| *crate::convenience::hash(m).as_bytes()).collect();
                     golden.add(want.as_flattened(), || items.iter().flat_map(|m| crate::test::official::hash(Mode::Plain, m)).collect());
-                    let (_page, got) = digests(count, !at_end);
+                    let mut out_page = digests(count, !at_end);
+                    let got = out_page.digests();
                     crate::throughput::hash_each(Mode::Plain, &in_blocks, got);
                     assert_eq!(got, &want[..], "hash_each_with, {count} x {len} B, at end {at_end}");
                     let mut hashers: Vec<crate::Hasher> = (0..count).map(|_| crate::Hasher::new(crate::Mode::Plain, None)).collect();
@@ -1478,13 +1479,13 @@ pub(crate) mod guard_pages {
                     // The message's whole blocks flush against the page.
                     let mut region = filled(len.div_ceil(64).max(1) * 64, at_end);
                     region.bytes()[..len].copy_from_slice(&message);
-                    let blocks = crate::throughput::Block::from_bytes(unsafe { core::slice::from_raw_parts(region.base.add(region.start), region.len) })
-                        .expect("a page-end region of whole blocks starts aligned");
+                    let blocks = crate::throughput::Block::from_bytes(region.as_bytes()).expect("a page-end region of whole blocks starts aligned");
                     assert_eq!(*crate::throughput::hash(mode, blocks, len).as_bytes(), want, "throughput::hash, {what}");
                     let mut hasher = crate::Hasher::new(mode, None);
                     hasher.update(flush.bytes());
                     assert_eq!(*hasher.clone().finalize().as_bytes(), want, "update, {what}");
-                    let (_out_page, out) = digests(1, !at_end);
+                    let mut out_page = digests(1, !at_end);
+                    let out = out_page.digests();
                     crate::throughput::finalize_each(core::slice::from_mut(&mut hasher), &[0], out);
                     assert_eq!(out[0], want, "finalize_each, {what}");
                 }

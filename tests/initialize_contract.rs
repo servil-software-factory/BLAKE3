@@ -30,12 +30,19 @@ fn every_platform_constructor_before_initialize_panics() {
     assert_panic_contains("empty hash_counter_range (invalid template)", "fit in one block", || {
         blake3_servil_core::throughput::hash_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 65], 0, 0, &mut []);
     });
+    assert_panic_contains("empty hash_counter_range (invalid word)", "out of bounds", || {
+        blake3_servil_core::throughput::hash_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 4], 1, 0, &mut []);
+    });
     assert_panic_contains("empty hash_counter_range (valid)", "initialize()", || {
         blake3_servil_core::throughput::hash_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 4], 0, 0, &mut []);
     });
     assert_panic_contains("empty TreeHasher::hash_counter_range (invalid template)", "fit in one block", || {
         let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
         tree.hash_counter_range(&[0u8; 65], 0, 0, &mut []);
+    });
+    assert_panic_contains("empty TreeHasher::hash_counter_range (invalid word)", "out of bounds", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        tree.hash_counter_range(&[0u8; 4], 1, 0, &mut []);
     });
     assert_panic_contains("empty TreeHasher::hash_counter_range (valid)", "initialize()", || {
         let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);

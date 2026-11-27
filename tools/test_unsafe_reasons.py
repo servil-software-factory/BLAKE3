@@ -143,6 +143,66 @@ class Reasons(unittest.TestCase):
             "fn shipped() { debug_assert!(true); }\n"
         )
         self.assertEqual([n for n, _ in ur.debug_assert_without_reason(cfg_attr)], [2])
+        # Test-only last function parameter must stop at `)` and never mask the body.
+        last_param = (
+            "fn prod(x: usize, #[cfg(test)] _trace: bool) -> u8 {\n"
+            "    debug_assert!(x < 256);\n"
+            "    let _ = unsafe { 1 };\n"
+            "    x.to_le_bytes()[0]\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(last_param)], [2])
+        self.assertEqual([n for n, _ in ur.without_reason(last_param)], [3])
+        # Test-only `pub` struct field must terminate at `,`, not swallow the next field/fn.
+        pub_field = (
+            "struct S {\n"
+            "    #[cfg(test)]\n"
+            "    pub counter: usize,\n"
+            "    pub real: usize,\n"
+            "}\n"
+            "fn prod() { debug_assert!(true); }\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(pub_field)], [6])
+        # Whitespace inside `#[cfg (test)]` and `#[allow(...)]` stacked BEFORE `#[cfg(test)]`.
+        stacked = (
+            "#[allow(clippy::cast_possible_truncation)]\n"
+            "#[cfg (test)]\n"
+            "fn helper() { debug_assert!(true); }\n"
+        )
+        self.assertEqual(ur.debug_assert_without_reason(stacked), [])
+        self.assertNotIn("cast_possible_truncation", ur.masked_code(stacked)[0])
+        # Comments inside a preceding statement or `#[cfg(test)]` block cannot
+        # satisfy a following shipped `debug_assert!`.
+        prev_stmt = (
+            "fn f(x: u32) {\n"
+            "    if x == 0 { /* Debug-only: zero case. */ debug_assert_eq!(x, 0); }\n"
+            "    debug_assert_ne!(x, 1);\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(prev_stmt)], [3])
+        masked_comm = (
+            "fn f() {\n"
+            "    #[cfg(test)]\n"
+            "    {\n"
+            "        // Debug-only: test block comment.\n"
+            "    }\n"
+            "    debug_assert!(true);\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(masked_comm)], [6])
+        # Valid multiline block rationales pass for both Sound: and Debug-only:.
+        multiline = (
+            "fn f() {\n"
+            "    /* Sound: No raw pointers here.\n"
+            "       Detailed explanation. */\n"
+            "    unsafe { () };\n"
+            "    /* Debug-only: expensive invariant.\n"
+            "       Second line. */\n"
+            "    debug_assert!(true);\n"
+            "}\n"
+        )
+        self.assertEqual(ur.without_reason(multiline), [])
+        self.assertEqual(ur.debug_assert_without_reason(multiline), [])
 
     def test_cfg_test_fn_items_are_excluded(self):
         src = (

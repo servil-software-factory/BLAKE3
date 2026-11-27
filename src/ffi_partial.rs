@@ -182,6 +182,15 @@ pub(crate) fn try_hash_chunks_with_partial(
     true
 }
 
+/// Record and invoke the same partial-chunk assembly kernel pointer so
+/// `ran_kernel` cannot drift from the symbol actually executed.
+#[inline(always)]
+unsafe fn invoke_partial<const W: usize>(kernel: unsafe extern "C" fn(*mut Params<W>), p: &mut Params<W>) {
+    crate::ran_kernel(kernel as *const ());
+    // Sound: caller guarantees CPU support for `kernel` and initialized `p`.
+    unsafe { kernel(p) };
+}
+
 /// [`hash_chunks_with_partial`] on four lanes: 1 to 3 whole chunks.
 /// Unsafe: the CPU must have SSE4.1.
 #[inline(never)]
@@ -189,10 +198,7 @@ pub unsafe fn hash_chunks_with_partial_sse41(whole: &[&[u8; CHUNK_LEN]], partial
     hash_chunks_with_partial::<4>(
         |p| {
             // Sound: caller guarantees SSE4.1 support; `hash_chunks_with_partial` initialized all lane pointers.
-            unsafe {
-                crate::ran_kernel(blake3_servil_partial_sse41 as *const ());
-                blake3_servil_partial_sse41(p);
-            }
+            unsafe { invoke_partial(blake3_servil_partial_sse41, p) }
         },
         whole,
         partial,
@@ -210,10 +216,7 @@ pub unsafe fn hash_chunks_with_partial_avx2(whole: &[&[u8; CHUNK_LEN]], partial:
     hash_chunks_with_partial::<8>(
         |p| {
             // Sound: caller guarantees AVX2 support; `hash_chunks_with_partial` initialized all lane pointers.
-            unsafe {
-                crate::ran_kernel(blake3_servil_partial_avx2 as *const ());
-                blake3_servil_partial_avx2(p);
-            }
+            unsafe { invoke_partial(blake3_servil_partial_avx2, p) }
         },
         whole,
         partial,
@@ -231,10 +234,7 @@ pub unsafe fn hash_chunks_with_partial_avx512_4(whole: &[&[u8; CHUNK_LEN]], part
     hash_chunks_with_partial::<4>(
         |p| {
             // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
-            unsafe {
-                crate::ran_kernel(blake3_servil_partial_avx512_4 as *const ());
-                blake3_servil_partial_avx512_4(p);
-            }
+            unsafe { invoke_partial(blake3_servil_partial_avx512_4, p) }
         },
         whole,
         partial,
@@ -252,10 +252,7 @@ pub unsafe fn hash_chunks_with_partial_avx512_8(whole: &[&[u8; CHUNK_LEN]], part
     hash_chunks_with_partial::<8>(
         |p| {
             // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
-            unsafe {
-                crate::ran_kernel(blake3_servil_partial_avx512_8 as *const ());
-                blake3_servil_partial_avx512_8(p);
-            }
+            unsafe { invoke_partial(blake3_servil_partial_avx512_8, p) }
         },
         whole,
         partial,
@@ -273,10 +270,7 @@ pub unsafe fn hash_chunks_with_partial_avx512_16(whole: &[&[u8; CHUNK_LEN]], par
     hash_chunks_with_partial::<16>(
         |p| {
             // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
-            unsafe {
-                crate::ran_kernel(blake3_servil_partial_avx512_16 as *const ());
-                blake3_servil_partial_avx512_16(p);
-            }
+            unsafe { invoke_partial(blake3_servil_partial_avx512_16, p) }
         },
         whole,
         partial,

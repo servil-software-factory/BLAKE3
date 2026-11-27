@@ -20,13 +20,13 @@
 //! | 7      | k7            | p7             |
 //! | 8      | k8            | p8             |
 //! | 9      | k9            | p9             |
-//! | 10     | k10           | p7 + p3        |
-//! | 11     | k8 + k3       | p9 + p2        |
-//! | 12     | k9 + k3       | p9 + p3        |
-//! | 13     | k10 + k3      | p9 + p4        |
-//! | 14     | k10 + k4      | p9 + p5        |
-//! | 15     | k10 + k5      | p8 + p7        |
-//! | 16     | k10 + k6      | p8 + p8        |
+//! | 10     | k10           | pn10            |
+//! | 11     | k8 + k3       | p9 + p2         |
+//! | 12     | k9 + k3       | pn10 + p2       |
+//! | 13     | k10 + k3      | pn10 + p3       |
+//! | 14     | k10 + k4      | pn10 + p4       |
+//! | 15     | k10 + k5      | pn10 + p5       |
+//! | 16     | k10 + k6      | pn10 + p3 + p3  |
 //!
 //! Longer input lists are hashed sixteen at a time. k10 is the fastest
 //! kernel per chunk (two scalar chunks beside eight NEON ones: 0.21 ns/B
@@ -105,9 +105,7 @@ mod asm {
     }
     // l<n>: p<n> with each lane's last block read from `lasts[i]` and
     // recording `lens[i]` bytes (0..=64), in place of its input's last
-    // block and the packed length (#247). The only production caller of
-    // `hash_last_lanes` is the std-only `each` module; its direct lane
-    // test also requires `std`.
+    // block and the packed length (#247).
     unsafe extern "C" {
         pub fn blake3_servil_hybrid_l2(
             inputs: *const *const u8,
@@ -1001,7 +999,7 @@ unsafe fn hash_many_in<const N: usize>(
     out: &mut [u8],
 ) {
     const { assert!(N > 0 && N % BLOCK_LEN == 0 && N <= CHUNK_LEN, "1 to 16 whole blocks") };
-    // Sound: `&[&[u8; N]]` is a table of valid `N`-byte pointers matching `blocks = N / BLOCK_LEN`; caller verified NEON.
+    // Sound: `&[&[u8; N]]` is a table of valid `N`-byte pointers disjoint from `out` matching `blocks = N / BLOCK_LEN`; caller verified CPU support for `family`.
     unsafe {
         hash_many_in_raw(
             family,

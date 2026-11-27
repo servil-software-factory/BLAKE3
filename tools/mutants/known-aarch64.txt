@@ -142,11 +142,11 @@ src/many.rs	replace + with - in hash_across	1	same code: every test binary hashe
 src/many.rs	replace + with - in hash_group_across_with_cvs	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with - in hash_long_or_single	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with - in subtree_across	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace - with + in hash_blocks	1	another machine: SME2 branch only (caught on Apple Silicon SME2)
+src/many.rs	replace - with + in hash_blocks	1	[cpu lacks sme2] another machine: SME2 branch only (caught on Apple Silicon SME2)
 src/many.rs	replace - with + in hash_chunked	1	speed: moves a threshold between equally correct paths
 src/many.rs	replace - with + in hash_group_across_with_cvs	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace - with + in subtree_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace - with / in hash_blocks	1	another machine: SME2 branch only (caught on Apple Silicon SME2)
+src/many.rs	replace - with / in hash_blocks	1	[cpu lacks sme2] another machine: SME2 branch only (caught on Apple Silicon SME2)
 src/many.rs	replace - with / in hash_chunked	1	speed: moves a threshold between equally correct paths
 src/many.rs	replace - with / in hash_group_across_with_cvs	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace - with / in subtree_across	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -325,11 +325,11 @@ src/self_test.rs	replace * with + in chain	1	equivalent: the case has one messag
 src/self_test.rs	replace * with /	5	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace + with *	7	x86 only: compiled out on AArch64 (CI's x86 tests reach it) (the x86 cases' lengths)
 src/self_test.rs	replace + with -	6	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace += with *= in run	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace += with -= in run	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/self_test.rs	replace += with *= in run_checks	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/self_test.rs	replace += with -= in run_checks	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace << with >> in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/self_test.rs	replace == with != in compiled_features_present	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/self_test.rs	replace ^= with &= in run	1	test-only: the planted wrong digest's flip; as &= 1 the byte still changes wherever it is above 1, as every planted case's last byte is, so the digest is still wrong and the test still sees it
+src/self_test.rs	replace ^= with &= in run_checks	1	test-only: the planted wrong digest's flip; as &= 1 the byte still changes wherever it is above 1, as every planted case's last byte is, so the digest is still wrong and the test still sees it
 src/self_test.rs	replace compiled_features_present with ()	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace < with <= in last_max	1	equivalent: `whole` is a multiple of 1024 and `room` (2^64 - 1 less a multiple of 1024) never is, so the two are never equal and either branch gives the smaller

@@ -1,4 +1,4 @@
-//! FFI for wide AVX-512 kernels (including the private p16 experiment). Arithmetic, transposition,
+//! FFI for wide AVX-512 kernels (`k32`, `p32`, `p16`). Arithmetic, transposition,
 //! counter setup and output stores are all in generated assembly.
 //! The ABI matches the AArch64 kernel family; see the generator's contract.
 use crate::{BLOCK_LEN, CVWords, IncrementCounter, OUT_LEN};
@@ -35,9 +35,8 @@ pub(crate) unsafe fn hash32<const N: usize>(
     unsafe { kernel(inputs.as_ptr().cast(), (N / BLOCK_LEN) as u64, key.as_ptr(), counter, packed, out.as_mut_ptr()) };
 }
 
-/// Experimental fixed-counter entry. Same bounds and raw ABI as hash32,
-/// but exactly sixteen inputs. Production experimentation is parents only.
-/// Caller detected AVX-512F. Startup uses the same chained control as
+/// Fixed-counter 16-input parent-node entry with the same bounds and raw ABI as
+/// `hash32`. Caller detected AVX-512F. Startup uses the same chained control as
 /// the other wide entries, with a sixteen-output final case.
 pub(crate) unsafe fn hash16<const N: usize>(inputs: &[&[u8; N]], key: &CVWords, counter: u64, flags: u8, start: u8, end: u8, out: &mut [u8]) {
     const {

@@ -9,7 +9,7 @@
 Call `initialize()` once at startup before hashing. Hashing functions live in two modules:
 
 - `convenience` takes ordinary `&[u8]` slices and is tuned for occasional calls amid other work.
-- `throughput` takes 64-byte-aligned `Block`s and batches, writes into caller-supplied buffers, and is tuned for sustained back-to-back calls.
+- `throughput` is tuned for sustained back-to-back calls, writing into caller-supplied buffers and taking 64-byte-aligned `Block`s / `Batch`es (as well as plain `&[u8]` slices on `TreeHasher::hash`, `update_each`, `hash_counter_range`, and `&[[u8; N]]` helpers).
 
 Requires `std` (neither `blake3-servil-core` nor `blake3-servil` defines a `std` Cargo feature or a `no_std` mode; for `no_std`, use official BLAKE3). The crate does not wipe what it held from memory.
 

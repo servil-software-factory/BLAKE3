@@ -20,9 +20,10 @@ fn fast_path_initialize_publishes_platform_to_preexisting_worker() {
     let id = Arc::clone(&init_done);
     let handle = std::thread::spawn(move || {
         wr.store(true, Ordering::Release);
-        // Relaxed spin intentionally supplies no synchronization of its own:
-        // the worker relies solely on `initialize()`'s Acquire load on
-        // `DETECTED` to synchronize with `Platform::record()`'s Release store.
+        // Spin on a Relaxed flag and then call `initialize()` on a preexisting
+        // worker thread, verifying it observes the published platform without
+        // panicking (actual Release/Acquire ordering is required by the
+        // `DETECTED` contract in `platform.rs` rather than proved by x86 TSO).
         while !id.load(Ordering::Relaxed) {
             core::hint::spin_loop();
         }

@@ -4478,7 +4478,8 @@ mod test {
     }
 
     /// Members of one length side by side, against fixed values (official
-    /// BLAKE3's digests): every platform this machine runs, the three modes,
+    /// BLAKE3's digests): the machine's detected and own-core platforms (narrower
+    /// x86 ISAs are exercised by the cross-CPU/SDE CI jobs), the three modes,
     /// equal and mixed lengths, unaligned inputs; the slots beside the
     /// outputs untouched.
     /// Keep: it detects, by hanging, mutants the clock then stops

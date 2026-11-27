@@ -14,8 +14,8 @@ edition = "2024"
 # at resolve time rather than colliding at link time.
 links = "blake3_servil_core"
 # What a build from crates.io needs: the library, its assembly and build
-# script, the pages users read, the licences, and the file the tests include.
-include = ["/src", "/c", "/build.rs", "/README.md", "/CHANGELOG.md", "/QUALITY.md", "/LICENSE-*", "/tools/require_nextest.rs"]
+# script, the pages users read, the licences, and the files the unit tests include.
+include = ["/src", "/c", "/build.rs", "/README.md", "/CHANGELOG.md", "/QUALITY.md", "/LICENSE-*", "/tools/require_nextest.rs", "/tests/common/golden.rs"]
 
 [dependencies]
 # BUILD_VERSION, in a crate of its own: its build script reruns on every

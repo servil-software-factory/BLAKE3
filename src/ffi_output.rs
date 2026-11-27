@@ -57,7 +57,8 @@ pub(crate) const X86_PAD8_MIN: usize = 4;
 /// full and padded output groups, calling `run(start, len, lane_width)` for
 /// each group (`lane_width` in `{8, 16}`, `1 <= len <= lane_width`) and
 /// returning the total number of items dispatched (leaving `0..4` trailing
-/// items for the caller's serial tail).
+/// items for the caller's serial tail when `width > 0`, or `count` when
+/// `width == 0`).
 #[inline]
 pub(crate) fn for_each_output_group(count: usize, width: usize, mut run: impl FnMut(usize, usize, usize)) -> usize {
     if width == 0 {
@@ -67,22 +68,14 @@ pub(crate) fn for_each_output_group(count: usize, width: usize, mut run: impl Fn
     for g in 0..groups {
         run(g * width, width, width);
     }
-    let mut done = groups * width;
+    let done = groups * width;
     let rem = count - done;
-    if width == 16 && rem >= X86_PAD16_MIN {
-        run(done, rem, 16);
-        return count;
+    if rem < X86_PAD8_MIN {
+        return done;
     }
-    if rem >= 8 {
-        run(done, 8, 8);
-        done += 8;
-    }
-    let rem = count - done;
-    if rem >= X86_PAD8_MIN {
-        run(done, rem, 8);
-        return count;
-    }
-    done
+    // `rem >= 9` is reachable only when `width == 16` (`rem < width`).
+    run(done, rem, if rem >= X86_PAD16_MIN { 16 } else { 8 });
+    count
 }
 
 /// Compress `1..=W` independent descriptors on the `W`-lane (`8` or `16`)
@@ -160,8 +153,9 @@ pub(crate) fn prefix_padded_count(count: usize, width: usize) -> usize {
 }
 
 /// One `4..=TILE` (`TILE` in `{8, 16}`) tile of multi-block short-last messages:
-/// keeps the stack workspace small (`512 B` for `TILE = 8`, `1 KiB` for
-/// `TILE = 16`) so small batches never evict the caller's L1d working set.
+/// sizes the intermediate CV arrays (`cv_bytes` + `cvs`: `512 B` for `TILE = 8`,
+/// `1 KiB` for `TILE = 16`) to the active tile width rather than the full 128-lane
+/// table.
 #[inline(never)]
 fn multi_block_short_last_tile<const TILE: usize>(
     messages: &[u8],
@@ -728,6 +722,23 @@ mod tests {
         ] {
             assert_eq!(prefix_padded_count(count, w), want, "prefix_padded_count({count}, {w})");
         }
+        // Pin the pure `for_each_output_group` schedule across widths 0/8/16 on
+        // every x86 CPU regardless of AVX-512 availability.
+        let schedule = |count: usize, width: usize| -> (usize, std::vec::Vec<(usize, usize, usize)>) {
+            let mut got = std::vec::Vec::new();
+            let done = for_each_output_group(count, width, |s, l, w| got.push((s, l, w)));
+            (done, got)
+        };
+        assert_eq!(schedule(16, 0), (0, std::vec![]));
+        assert_eq!(schedule(3, 8), (0, std::vec![]));
+        assert_eq!(schedule(4, 8), (4, std::vec![(0, 4, 8)]));
+        assert_eq!(schedule(11, 8), (8, std::vec![(0, 8, 8)]));
+        assert_eq!(schedule(12, 8), (12, std::vec![(0, 8, 8), (8, 4, 8)]));
+        assert_eq!(schedule(3, 16), (0, std::vec![]));
+        assert_eq!(schedule(8, 16), (8, std::vec![(0, 8, 8)]));
+        assert_eq!(schedule(9, 16), (9, std::vec![(0, 9, 16)]));
+        assert_eq!(schedule(24, 16), (24, std::vec![(0, 16, 16), (16, 8, 8)]));
+        assert_eq!(schedule(25, 16), (25, std::vec![(0, 16, 16), (16, 9, 16)]));
     }
 
     #[test]

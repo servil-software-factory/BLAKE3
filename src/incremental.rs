@@ -10,8 +10,8 @@ use crate::throughput::{Cv, TreeHasher};
 /// of any lengths; the hash is the same as [`hash`](convenience::hash) of them all at once.
 /// Every call runs on the calling thread and returns with its input
 /// incorporated. For other cores, the crate `blake3-servil` has
-/// `throughput::update_multithreaded`;
-/// for many messages at once, `throughput::update_each` (requires `std`).
+/// `throughput::update_multithreaded`; for many messages at once,
+/// `throughput::update_each`.
 ///
 /// A `Hasher` is 26 KiB (it holds short pieces until it has 16 KiB to
 /// hash at once, and rows of chaining values, so that parents are hashed
@@ -569,8 +569,8 @@ impl Hasher {
     /// program knows one (a file's size, a protocol's length field), or
     /// `None`: a scheduling hint, never part of the hash, so the digest is
     /// the same whatever it says and however many bytes then arrive. The
-    /// Hasher does not use it today; it is here so that one that does
-    /// changes no caller (AGENTS, "Our APIs freeze at 1.0").
+    /// Hasher does not use it today; keeping it in the constructor avoids a
+    /// breaking signature change when scheduling uses it later.
     pub fn new(mode: Mode, length_hint: Option<u64>) -> Self {
         let _ = length_hint;
         Self::from_core(HasherCore::new_internal(Domain::from_mode(mode)))

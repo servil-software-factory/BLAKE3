@@ -825,10 +825,8 @@ impl fmt::Display for HexError {
 
 impl std::error::Error for HexError {}
 
-// IMPLEMENTATION NOTE
-// ===================
-/// Undocumented and unstable, for benchmarks only.
-#[doc(hidden)]
+/// Whether `hash_many` increments the chunk counter across inputs (`Yes` for
+/// chunks, `No` for parent nodes and root blocks).
 #[derive(Clone, Copy)]
 pub(crate) enum IncrementCounter {
     Yes,
@@ -856,12 +854,12 @@ impl IncrementCounter {
 /// its width first, then the rest rounded.
 ///
 /// On x86-64, every power of two from 4 through the platform's widest kernel
-/// is present in `lane_widths` (so powers of two never pad and larger powers
-/// of two divide evenly by the widest kernel). Taking `platform.hash_many`
-/// directly on powers of two keeps the 1 KiB scratch buffer and extra dispatch
-/// copies out of hot callers' stack frames and cold instruction cache lines
-/// (`#376`). Non-x86 architectures have no rounding tables and call
-/// `platform.hash_many` directly with no extra branch.
+/// is a native lane width (so powers of two never pad and larger powers of two
+/// divide evenly by the widest kernel). Taking `platform.hash_many` directly on
+/// powers of two keeps the 1 KiB scratch buffer and extra dispatch copies out
+/// of hot callers' stack frames and cold instruction cache lines (`#376`).
+/// Non-x86 architectures have no rounding tables and call `platform.hash_many`
+/// directly with no extra branch.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hash_many_rounded<const N: usize>(
@@ -1211,9 +1209,8 @@ pub(crate) fn hash_serial(input: &[u8], key: &CVWords, flags: u8) -> Hash {
     hash_serial_from(Platform::detect(), input, key, flags, false)
 }
 
-/// [`hash_serial`] for a call now and then (`convenience`'s): its kernels'
-/// code prefetched first, where that helps a call whose code has left the
-/// caches (AGENTS, "Cold calls and warm calls, by their API").
+/// [`hash_serial`] for occasional cold calls (`convenience`): prefetches the
+/// kernel code first where that helps a call whose code has left the caches.
 #[inline]
 fn hash_serial_cold(input: &[u8], key: &CVWords, flags: u8) -> Hash {
     hash_serial_from(Platform::detect(), input, key, flags, true)

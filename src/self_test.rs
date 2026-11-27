@@ -135,8 +135,7 @@ pub(crate) const CASES: &[(Case, &str)] = &[
     (Many { offset: 0, len: 128, count: 7 }, "seven two-block messages: p7"),
 ];
 
-/// The cases elsewhere (x86-64 and portable builds), each kernel
-/// and each of the Rust paths around them once, on a small input: x86's
+/// The x86-64 cases: each kernel and each of the Rust paths around them once, on a small input: x86's
 /// assembly has one-block, extended-output, and many-input kernels
 /// (compress_in_place, compress_xof, hash_many, and on AVX-512 xof_many),
 /// which these reach on every x86 platform (AVX2: all 3 of its entries,
@@ -413,9 +412,10 @@ fn chunk_values(platform: Platform, input: &[u8], key: &[u8; 32], out: &mut [u8]
 }
 
 /// Run every case for the detected platform and stop on the first that differs
-/// from the reference; records the tested platform once on first initialization
-/// and returns how many cases ran (`CASES` and `platform`'s extra entries).
-fn run() -> usize {
+/// from the reference, returning `(platform, checked)` without publishing.
+/// Separating verification from `platform.record()` guarantees every kernel
+/// self-test completes before publication.
+fn run_checks() -> (Platform, usize) {
     // A kernel's panic, as a test plants it: the guard in ensure_slow
     // stops the process for it.
     #[cfg(test)]
@@ -468,6 +468,12 @@ fn run() -> usize {
     checked += crate::ffi_packed::self_test(platform);
     checked += crate::ffi_counter::self_test(platform);
     let _ = previous;
+    (platform, checked)
+}
+
+/// Run every startup self-test case and publish the verified platform once.
+fn run() -> usize {
+    let (platform, checked) = run_checks();
     #[cfg(test)]
     if HOLD_RUN.load(core::sync::atomic::Ordering::Relaxed) {
         IN_RUN.store(true, core::sync::atomic::Ordering::Release);
@@ -759,6 +765,12 @@ mod test {
         assert!(crate::platform::is_initialized_word(0xff01));
         const CHILD: &str = "BLAKE3_SERVIL_TEST_WAITERS";
         if std::env::var_os(CHILD).is_some() {
+            // Seed a nonzero high-byte bit (matching e.g. an Arm family-cache
+            // write occurring before `platform.record()`) so the real
+            // `is_initialized()` fast path is tested against nonzero high bits
+            // with low byte zero, and verified to preserve high bits on record.
+            crate::platform::DETECTED.store(0x0200, Release);
+            assert!(!crate::platform::is_initialized(), "high bits alone must not mark platform initialized");
             HOLD_RUN.store(true, Release);
             let winner = std::thread::spawn(crate::initialize);
             while !IN_RUN.load(Acquire) {
@@ -766,7 +778,7 @@ mod test {
             }
             // Winner has completed every kernel self-test and is held just
             // before `platform.record()`: publication must NOT have happened
-            // yet, even though high bits of `DETECTED` may already be set.
+            // yet, even with nonzero high bits in `DETECTED`.
             assert!(!crate::platform::is_initialized(), "platform must not be published before kernel self-tests finish");
             let started = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
             let done = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
@@ -793,6 +805,7 @@ mod test {
             }
             assert_eq!(done.load(Acquire), 3);
             assert!(crate::platform::is_initialized());
+            assert_ne!(crate::platform::DETECTED.load(Acquire) & 0x0200, 0, "platform.record() must preserve high-byte cache bits");
             std::process::exit(0);
         }
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
