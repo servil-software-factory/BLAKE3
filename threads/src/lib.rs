@@ -682,7 +682,7 @@ pub mod throughput {
         if small_bytes < crate::lanes::MIN_SPLIT_LEN {
             crate::lanes::hash_each_small(&tree, items, out);
         } else {
-            crate::lanes::hash_each(&tree, items, out);
+            crate::lanes::hash_each(&tree, items, small_bytes, out);
         }
         for (item, out) in items.iter().zip(out.iter_mut()) {
             if alone(item.1) {

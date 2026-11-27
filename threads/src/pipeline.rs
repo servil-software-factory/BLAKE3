@@ -382,14 +382,9 @@ impl Rooms {
     }
 }
 
-#[derive(Clone, Copy)]
-struct GroupMemberMeta {
-    room: u32,
-}
-
 struct MemberGroup {
     task: UnsafeCell<Task>,
-    metas: UnsafeCell<[GroupMemberMeta; MEMBERS]>,
+    rooms: UnsafeCell<[u32; MEMBERS]>,
     epoch: UnsafeCell<u64>,
 }
 
@@ -491,7 +486,7 @@ impl PipeSlot {
         #[cfg(any(test, shuttle))]
         PIPE_SLOTS_MADE.fetch_add(1, Ordering::Relaxed);
         let raw = Box::into_raw(Box::new(PipeSlot {
-            source: Source::with_actions(cap),
+            source: Source::with_actions(cap, PipeStorage::run_action),
             waker: WakerSlot::new(),
             group_completed: (0..max_groups).map(|_| OwnLine(AtomicU64::new(0))).collect(),
             loan_completed: (0..max_slots).map(|_| OwnLine(AtomicU64::new(0))).collect(),
@@ -575,7 +570,6 @@ impl PipeStorage {
     }
 
     fn alloc(slot: &'static PipeSlot, tree: TreeHasher, messages: usize, rooms: usize, pieces: usize, groups: usize) -> *mut PipeStorage {
-        let dummy = GroupMemberMeta { room: NONE };
         #[cfg(any(test, shuttle))]
         LIVE_STORAGES.fetch_add(1, Ordering::Relaxed);
         let raw = Box::into_raw(Box::new(PipeStorage {
@@ -584,7 +578,7 @@ impl PipeStorage {
             tree,
             rooms: Rooms::new(rooms),
             groups: (0..groups)
-                .map(|_| MemberGroup { task: UnsafeCell::new(Task::members(None)), metas: UnsafeCell::new([dummy; MEMBERS]), epoch: UnsafeCell::new(0) })
+                .map(|_| MemberGroup { task: UnsafeCell::new(Task::members(None)), rooms: UnsafeCell::new([NONE; MEMBERS]), epoch: UnsafeCell::new(0) })
                 .collect(),
             hashes: (0..messages).map(|_| UnsafeCell::new([0u8; OUT_LEN])).collect(),
             cvs: (0..messages).map(|_| UnsafeCell::new(PieceValues { whole: [Cv::unset(); MAX_SLOT_PIECES], last: None })).collect(),
@@ -878,21 +872,21 @@ impl PipeStorage {
         // before dispatch and keeps them valid until `completed_epoch` reaches `epoch`.
         let epoch = unsafe { *group.epoch.get() };
         unsafe { task.run_members(tree, platform) };
-        // Sound: `metas` was written before dispatch and stays read-only until `group_completed` publishes.
-        let metas = unsafe { &*group.metas.get() };
+        // Sound: `rooms` was written before dispatch and stays read-only until `group_completed` publishes.
+        let rooms = unsafe { &*group.rooms.get() };
 
         // Coalesce consecutive members sharing a Room into a single atomic subtraction.
         let mut cur_room = NONE;
         let mut cur_n = 0usize;
-        for meta in &metas[..count] {
-            if meta.room != NONE {
-                if meta.room == cur_room {
+        for &room in &rooms[..count] {
+            if room != NONE {
+                if room == cur_room {
                     cur_n += 1;
                 } else {
                     if cur_room != NONE {
                         self.rooms.release_n(cur_room, cur_n);
                     }
-                    cur_room = meta.room;
+                    cur_room = room;
                     cur_n = 1;
                 }
             }
@@ -1624,7 +1618,9 @@ impl<T, B, P> Pipeline<T, B, P> {
         // waited for ever. Unregistered, every action runs where it is
         // dispatched, as when no slot is free.
         let source_slot = if crate::lanes::pool_has_workers() { pipe_slot.source.register() } else { None };
-        crate::lanes::sources::opened();
+        if source_slot.is_some() {
+            crate::lanes::sources::opened();
+        }
 
         Pipeline {
             id,
@@ -1677,7 +1673,7 @@ impl<T, B, P> Pipeline<T, B, P> {
     #[inline(always)]
     pub fn message(&mut self, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + '_ {
         let _ = length_hint;
-        MessageFut { pipe: self, tag: Some(tag), registered: false }
+        MessageOpenFut { pipe: self, tag: Some(tag), mode_override: None, registered: false }
     }
 
     /// Wait for a free message slot and open a [`Message`] hashed in `mode`,
@@ -1699,14 +1695,19 @@ impl<T, B, P> Pipeline<T, B, P> {
     #[inline(always)]
     pub fn message_with<'p>(&'p mut self, mode: Mode<'_>, tag: T, length_hint: Option<u64>) -> impl Future<Output = Message> + use<'p, T, B, P> {
         let _ = length_hint;
-        let is_plain = matches!(mode, Mode::Plain);
-        MessageWithFut { pipe: self, tag: Some(tag), tree: Some(TreeHasher::new(mode)), is_plain, registered: false }
+        let slot_mode = if matches!(mode, Mode::Plain) { SlotMode::Plain } else { SlotMode::Custom };
+        MessageOpenFut { pipe: self, tag: Some(tag), mode_override: Some((TreeHasher::new(mode), slot_mode)), registered: false }
     }
 
+    #[cfg(test)]
     fn poll_message(&mut self, cx: &mut Context<'_>) -> Poll<u32> {
         if let Some(slot) = self.free_slots.pop_front() {
             return Poll::Ready(slot);
         }
+        self.poll_message_slow(cx)
+    }
+
+    fn poll_message_slow(&mut self, cx: &mut Context<'_>) -> Poll<u32> {
         self.reap();
         if let Some(slot) = self.free_slots.pop_front() {
             return Poll::Ready(slot);
@@ -2305,13 +2306,10 @@ impl<T, B, P> Pipeline<T, B, P> {
         unsafe {
             let task = &mut *group.task.get();
             task.batch = self.local_batch;
-            task.len = self.local_bytes;
             task.members = count;
             task.member[..count].copy_from_slice(&self.bufs.local_members[..count]);
-            let metas = &mut *group.metas.get();
-            for i in 0..count {
-                metas[i] = GroupMemberMeta { room: self.bufs.local_rooms[i] };
-            }
+            let rooms = &mut *group.rooms.get();
+            rooms[..count].copy_from_slice(&self.bufs.local_rooms[..count]);
             *group.epoch.get() = epoch;
         }
         self.assigned_group_epoch[group_idx as usize] = epoch;
@@ -2324,9 +2322,9 @@ impl<T, B, P> Pipeline<T, B, P> {
         let ctx = self.storage as *const PipeStorage as *const ();
         match self.source_slot {
             // Sound: this Pipeline exclusively publishes to its `PipeSlot`'s
-            // source, and `*self.storage` stays live until this action
-            // publishes completion.
-            Some(_) => unsafe { self.pipe_slot.source.publish_actions(PipeStorage::run_action, ctx, core::slice::from_ref(&arg), false) },
+            // source (whose runner is `PipeStorage::run_action`), and
+            // `*self.storage` stays live until this action publishes completion.
+            Some(_) => unsafe { self.pipe_slot.source.publish_actions(ctx, core::slice::from_ref(&arg), false) },
             // Sound: `ctx` is this Pipeline's `PipeStorage`, as run_action requires.
             None => unsafe { PipeStorage::run_action(ctx, arg, pool_platform()) },
         }
@@ -2336,7 +2334,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         let ctx = self.storage as *const PipeStorage as *const ();
         match self.source_slot {
             // Sound: as dispatch_one's.
-            Some(_) => unsafe { self.pipe_slot.source.publish_actions(PipeStorage::run_action, ctx, &self.bufs.action_buf[..count], near) },
+            Some(_) => unsafe { self.pipe_slot.source.publish_actions(ctx, &self.bufs.action_buf[..count], near) },
             None => {
                 for i in 0..count {
                     let arg = self.bufs.action_buf[i];
@@ -2565,8 +2563,8 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
         }
         if let Some(slot) = self.source_slot {
             Source::unregister(slot);
+            crate::lanes::sources::closed();
         }
-        crate::lanes::sources::closed();
         let storage_ptr = self.storage;
         let storage = self.storage();
         let pipe_slot = self.pipe_slot;
@@ -2639,15 +2637,16 @@ impl<T, B, P> Drop for Pipeline<T, B, P> {
     }
 }
 
-struct MessageFut<'a, T, B, P> {
+struct MessageOpenFut<'a, T, B, P> {
     pipe: &'a mut Pipeline<T, B, P>,
     tag: Option<T>,
+    mode_override: Option<(TreeHasher, SlotMode)>,
     registered: bool,
 }
 
-impl<T, B, P> Unpin for MessageFut<'_, T, B, P> {}
+impl<T, B, P> Unpin for MessageOpenFut<'_, T, B, P> {}
 
-impl<T, B, P> Drop for MessageFut<'_, T, B, P> {
+impl<T, B, P> Drop for MessageOpenFut<'_, T, B, P> {
     fn drop(&mut self) {
         if self.registered {
             self.pipe.pipe_slot.waker.clear();
@@ -2655,7 +2654,7 @@ impl<T, B, P> Drop for MessageFut<'_, T, B, P> {
     }
 }
 
-impl<T, B, P> Future for MessageFut<'_, T, B, P> {
+impl<T, B, P> Future for MessageOpenFut<'_, T, B, P> {
     type Output = Message;
 
     #[inline(always)]
@@ -2664,7 +2663,7 @@ impl<T, B, P> Future for MessageFut<'_, T, B, P> {
         assert!(this.tag.is_some(), "Pipeline::message future polled after completion");
         let slot = match this.pipe.free_slots.pop_front() {
             Some(s) => s,
-            None => match this.pipe.poll_message(cx) {
+            None => match this.pipe.poll_message_slow(cx) {
                 Poll::Ready(s) => s,
                 Poll::Pending => {
                     this.registered = true;
@@ -2673,56 +2672,15 @@ impl<T, B, P> Future for MessageFut<'_, T, B, P> {
             },
         };
         this.registered = false;
-        let sm = &mut this.pipe.slots[slot as usize];
-        sm.tag = this.tag.take();
-        sm.kind = SlotKind::OpenEmpty;
-        sm.mode = SlotMode::Default;
-        this.pipe.open_messages += 1;
-        Poll::Ready(Message { pipeline_id: this.pipe.id, slot })
-    }
-}
-
-struct MessageWithFut<'a, T, B, P> {
-    pipe: &'a mut Pipeline<T, B, P>,
-    tag: Option<T>,
-    tree: Option<TreeHasher>,
-    is_plain: bool,
-    registered: bool,
-}
-
-impl<T, B, P> Unpin for MessageWithFut<'_, T, B, P> {}
-
-impl<T, B, P> Drop for MessageWithFut<'_, T, B, P> {
-    fn drop(&mut self) {
-        if self.registered {
-            self.pipe.pipe_slot.waker.clear();
-        }
-    }
-}
-
-impl<T, B, P> Future for MessageWithFut<'_, T, B, P> {
-    type Output = Message;
-
-    #[inline(always)]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Message> {
-        let this = &mut *self;
-        assert!(this.tag.is_some(), "Pipeline::message_with future polled after completion");
-        let slot = match this.pipe.free_slots.pop_front() {
-            Some(s) => s,
-            None => match this.pipe.poll_message(cx) {
-                Poll::Ready(s) => s,
-                Poll::Pending => {
-                    this.registered = true;
-                    return Poll::Pending;
-                }
-            },
+        let mode = match this.mode_override.take() {
+            Some((tree, slot_mode)) => {
+                // Sound: `slot` just came off `free_slots`, so no worker task reads
+                // `slot_trees[slot]` until work is dispatched for `slot`.
+                unsafe { *this.pipe.storage().slot_trees[slot as usize].get() = tree };
+                slot_mode
+            }
+            None => SlotMode::Default,
         };
-        this.registered = false;
-        let tree = this.tree.take().expect("message_with tree present before completion");
-        let mode = if this.is_plain { SlotMode::Plain } else { SlotMode::Custom };
-        // Sound: `slot` just came off `free_slots`, so no worker task reads
-        // `slot_trees[slot]` until work is dispatched for `slot`.
-        unsafe { *this.pipe.storage().slot_trees[slot as usize].get() = tree };
         let sm = &mut this.pipe.slots[slot as usize];
         sm.tag = this.tag.take();
         sm.kind = SlotKind::OpenEmpty;

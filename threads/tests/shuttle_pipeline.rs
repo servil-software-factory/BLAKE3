@@ -354,7 +354,6 @@ mod lanes {
     const NO_MEMBER: Member = Member { input: core::ptr::null(), len: 0, out: core::ptr::null_mut() };
 
     pub(crate) struct Task {
-        pub(crate) len: usize,
         pub(crate) batch: Option<(usize, usize)>,
         pub(crate) members: usize,
         pub(crate) member: [Member; MEMBERS],
@@ -363,7 +362,7 @@ mod lanes {
 
     impl Task {
         pub(crate) fn members(batch: Option<(usize, usize)>) -> Task {
-            Task { len: 0, batch, members: 0, member: [NO_MEMBER; MEMBERS] }
+            Task { batch, members: 0, member: [NO_MEMBER; MEMBERS] }
         }
 
         /// As the pool's, each member alone.
@@ -431,12 +430,13 @@ mod lanes {
 
         pub(crate) const ACTION_SME2: u64 = 1 << 63;
 
-        type Action = (unsafe fn(*const (), u64, Platform), usize, u64);
+        type Action = (usize, u64);
 
         /// A Pipeline's actions waiting for a thread.
         pub(crate) struct Source {
             waiting: Mutex<VecDeque<Action>>,
             actions: usize,
+            run: unsafe fn(*const (), u64, Platform),
         }
 
         shuttle::lazy_static! {
@@ -449,8 +449,8 @@ mod lanes {
         }
 
         impl Source {
-            pub(crate) fn with_actions(actions: usize) -> Source {
-                Source { waiting: Mutex::new(VecDeque::new()), actions }
+            pub(crate) fn with_actions(actions: usize, run: unsafe fn(*const (), u64, Platform)) -> Source {
+                Source { waiting: Mutex::new(VecDeque::new()), actions, run }
             }
             pub(crate) fn actions_len(&self) -> usize {
                 self.actions
@@ -468,17 +468,17 @@ mod lanes {
             pub(crate) fn unregister(slot: usize) {
                 REGISTERED.lock().unwrap().retain(|&at| at != slot);
             }
-            pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64], _near: bool) {
+            pub(crate) unsafe fn publish_actions(&self, context: *const (), args: &[u64], _near: bool) {
                 let mut waiting = self.waiting.lock().unwrap();
                 assert!(waiting.len() + args.len() <= self.actions, "more actions than the Source was made for");
-                waiting.extend(args.iter().map(|&arg| (run, context as usize, arg)));
+                waiting.extend(args.iter().map(|&arg| (context as usize, arg)));
                 PUBLISHED_ACTIONS.fetch_add(args.len(), std::sync::atomic::Ordering::Relaxed);
                 drop(waiting);
                 news();
             }
             pub(crate) fn run_waiting_action(&self) -> bool {
-                let Some((run, context, arg)) = self.waiting.lock().unwrap().pop_front() else { return false };
-                unsafe { run(context as *const (), arg & !ACTION_SME2, pool_platform()) };
+                let Some((context, arg)) = self.waiting.lock().unwrap().pop_front() else { return false };
+                unsafe { (self.run)(context as *const (), arg & !ACTION_SME2, pool_platform()) };
                 true
             }
             pub(crate) fn wake_for_waiting(&self) {
@@ -516,9 +516,9 @@ mod lanes {
             let all: Vec<usize> = REGISTERED.lock().unwrap().clone();
             for at in all {
                 let source = unsafe { &*(at as *const Source) };
-                let Some((run, context, arg)) = source.waiting.lock().unwrap().pop_front() else { continue };
+                let Some((context, arg)) = source.waiting.lock().unwrap().pop_front() else { continue };
                 hold_back();
-                unsafe { run(context as *const (), arg & !ACTION_SME2, pool_platform()) };
+                unsafe { (source.run)(context as *const (), arg & !ACTION_SME2, pool_platform()) };
                 BY_WORKERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return true;
             }

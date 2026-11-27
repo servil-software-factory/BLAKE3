@@ -365,15 +365,14 @@ pub(crate) fn prepare_thread() {
 }
 
 /// `cut` fills this thread's scratch with a job's pieces; `job` runs with
-/// what `cut` returned, the pieces, and as many chaining values, unset.
-fn with_scratch<C, T>(cut: impl FnOnce(&mut Vec<Piece>) -> C, job: impl FnOnce(C, &[Piece], &mut [ChainingValue]) -> T) -> T {
+/// what `cut` returned, the pieces, and this thread's reusable chaining-value
+/// vector (left untouched for non-tree jobs that do not need CVs).
+fn with_scratch<C, T>(cut: impl FnOnce(&mut Vec<Piece>) -> C, job: impl FnOnce(C, &[Piece], &mut Vec<ChainingValue>) -> T) -> T {
     SCRATCH.with(|s| {
         let mut s = s.try_borrow_mut().expect("one pool call at a time on a thread");
         let Scratch { pieces, cvs } = &mut *s;
         pieces.clear();
         let c = cut(pieces);
-        cvs.clear();
-        cvs.resize(pieces.len(), ChainingValue::unset());
         job(c, pieces, cvs)
     })
 }
@@ -392,6 +391,8 @@ fn tree_cvs<T>(pool: &Pool, input: &[u8], tree: &TreeHasher, counter: u64, merge
     with_scratch(
         |pieces| cut_with_prefix(pieces, input.len(), threads, prefix),
         |own, pieces, cvs| {
+            cvs.clear();
+            cvs.resize(pieces.len(), ChainingValue::unset());
             let own_core = tree.clone().on_this_core();
             let mut last = None;
             let work = Work::Tree { input, pieces, cvs: cvs.as_mut_ptr(), last: &mut last, tree: own_core.clone(), counter, own_platform: turn.platform() };
@@ -441,15 +442,15 @@ pub(crate) fn hash_many_over_pool(tree: &TreeHasher, batch: crate::throughput::P
 }
 
 /// [`crate::throughput::hash_each_multithreaded`]'s pool job: the items under
-/// MIN_SPLIT_LEN, cut into ranges of about [`next_piece_len`] of the
-/// bytes that remain, each range hashed by one thread. An item of
-/// MIN_SPLIT_LEN or more is set aside here (its digest zero, a stand-in)
-/// and hashed by the caller over the whole pool after.
-pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block], usize)], out: &mut [[u8; crate::OUT_LEN]]) {
+/// MIN_SPLIT_LEN (totaling `small_bytes`), cut into ranges of about
+/// [`next_piece_len`] of the bytes that remain, each range hashed by one
+/// thread. An item of MIN_SPLIT_LEN or more is set aside here (its digest
+/// zero, a stand-in) and hashed by the caller over the whole pool after.
+pub(crate) fn hash_each(tree: &TreeHasher, items: &[(&[crate::throughput::Block], usize)], small_bytes: usize, out: &mut [[u8; crate::OUT_LEN]]) {
     let Some((pool, _caller)) = spare_pool() else {
         return hash_each_small(tree, items, out);
     };
-    let plan = pool.plan(places::Kind::Each, items.iter().fold(0usize, |acc, i| acc.saturating_add(i.1)));
+    let plan = pool.plan(places::Kind::Each, small_bytes);
     with_scratch(
         |pieces| {
             cut_items(pieces, items, plan.threads, |item| {
@@ -3011,7 +3012,7 @@ extern "C" fn mark_forked() {
 fn forked() -> ! {
     panic!(
         "blake3-servil: this process was forked after initialize_multithreaded started its threads, and a forked child has none: \
-         initialize the pool in the process that hashes, after any fork (single-threaded calls work anywhere)"
+         fork before starting threads, or exec in the child and initialize in the new process"
     )
 }
 
@@ -3255,7 +3256,6 @@ pub(crate) mod sources {
     /// hint so mixed publications in one queue never overwrite earlier items'
     /// wake policy.
     struct Action {
-        run: AtomicPtr<()>,
         context: AtomicPtr<()>,
         arg: AtomicU64,
         near: core::sync::atomic::AtomicBool,
@@ -3267,6 +3267,8 @@ pub(crate) mod sources {
         /// A pipeline's actions (`with_actions`), publication `p`'s at
         /// `p % len`; empty for a caller's jobs.
         actions: Box<[Action]>,
+        /// Typed runner bound once for action sources (`None` for job sources).
+        action_run: Option<unsafe fn(*const (), u64, Platform)>,
         /// A caller's current job and its first number; the job stays the
         /// claimed numbers' until `finish.finished` passes them.
         job: AtomicPtr<Job<'static>>,
@@ -3281,7 +3283,7 @@ pub(crate) mod sources {
     }
 
     // `Send` and `Sync` are derived automatically by the compiler because every
-    // field of `Source` is atomic or `Finish` (which is `Send + Sync`).
+    // field of `Source` is atomic, a function pointer, or `Finish` (`Send + Sync`).
     #[cfg(test)]
     const _: fn() = || {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -3291,28 +3293,37 @@ pub(crate) mod sources {
     /// What a claim takes: a stream's task, a pipeline's action, or a run
     /// of a job's pieces (`n` from `index`, consecutive).
     pub(crate) enum Item {
-        Action { run: *mut (), context: *mut (), arg: u64 },
+        Action { run: unsafe fn(*const (), u64, Platform), context: *const (), arg: u64 },
         Pieces(*const Job<'static>, usize, usize),
     }
 
     impl Source {
         /// A source for a calling thread's one-shot jobs.
         pub(crate) fn new() -> Source {
-            Self::with_actions(0)
+            Source {
+                claimed: OwnLine(AtomicUsize::new(0)),
+                actions: Box::new([]),
+                action_run: None,
+                job: AtomicPtr::new(core::ptr::null_mut()),
+                base: AtomicUsize::new(0),
+                near: core::sync::atomic::AtomicBool::new(false),
+                finish: crate::finish::Finish::new(),
+            }
         }
 
-        /// A source with `actions` slots for a pipeline's items.
-        pub(crate) fn with_actions(actions: usize) -> Source {
+        /// A source with `actions` slots and a fixed `run` handler for a pipeline's items.
+        pub(crate) fn with_actions(actions: usize, run: unsafe fn(*const (), u64, Platform)) -> Source {
+            assert!(actions > 0, "an action source has at least one slot");
             Source {
                 claimed: OwnLine(AtomicUsize::new(0)),
                 actions: (0..actions)
                     .map(|_| Action {
-                        run: AtomicPtr::new(core::ptr::null_mut()),
                         context: AtomicPtr::new(core::ptr::null_mut()),
                         arg: AtomicU64::new(0),
                         near: core::sync::atomic::AtomicBool::new(false),
                     })
                     .collect(),
+                action_run: Some(run),
                 job: AtomicPtr::new(core::ptr::null_mut()),
                 base: AtomicUsize::new(0),
                 near: core::sync::atomic::AtomicBool::new(false),
@@ -3348,9 +3359,9 @@ pub(crate) mod sources {
         /// # Safety
         ///
         /// This source must be an action source with a single publisher at a
-        /// time, and every `(run, context, arg)` tuple published must be safe
-        /// for a worker (or caller) to invoke once with the assigned `Platform`.
-        pub(crate) unsafe fn publish_actions(&self, run: unsafe fn(*const (), u64, Platform), context: *const (), args: &[u64], near: bool) {
+        /// time, and every `(context, arg)` pair published must be safe for the
+        /// source's bound runner to invoke once with the assigned `Platform`.
+        pub(crate) unsafe fn publish_actions(&self, context: *const (), args: &[u64], near: bool) {
             // Debug-only: internal pool entry; callers only publish non-empty job slices.
             debug_assert!(!args.is_empty());
             let p = self.finish.published.load(Ordering::Relaxed);
@@ -3359,7 +3370,6 @@ pub(crate) mod sources {
             let cap = self.actions.len();
             for (k, &arg) in args.iter().enumerate() {
                 let slot = &self.actions[(p + k) % cap];
-                slot.run.store(run as *mut (), Ordering::Relaxed);
                 slot.context.store(context as *mut (), Ordering::Relaxed);
                 slot.arg.store(arg, Ordering::Relaxed);
                 slot.near.store(near, Ordering::Relaxed);
@@ -3403,9 +3413,8 @@ pub(crate) mod sources {
         pub(crate) fn run_waiting_action(&self) -> bool {
             match self.take() {
                 Some(Item::Action { run, context, arg }) => {
-                    // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
-                    let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
-                    unsafe { f(context as *const (), arg & !ACTION_SME2, pool_platform()) };
+                    // Sound: `publish_actions` published live `(context, arg)` valid until completion for `self.action_run`.
+                    unsafe { run(context, arg & !ACTION_SME2, pool_platform()) };
                     true
                 }
                 Some(_) => unreachable!("an action source carries actions"),
@@ -3451,10 +3460,9 @@ pub(crate) mod sources {
                 if c >= p {
                     return None;
                 }
-                if !self.actions.is_empty() {
+                if let Some(run) = self.action_run {
                     let slot = &self.actions[c % self.actions.len()];
-                    let run = slot.run.load(Ordering::Relaxed);
-                    let context = slot.context.load(Ordering::Relaxed);
+                    let context = slot.context.load(Ordering::Relaxed) as *const ();
                     let arg = slot.arg.load(Ordering::Relaxed);
                     match self.claimed.compare_exchange_weak(c, c + 1, Ordering::AcqRel, Ordering::Acquire) {
                         Ok(_) => return Some(Item::Action { run, context, arg }),
@@ -3720,9 +3728,8 @@ pub(crate) mod sources {
         }
         match item {
             Item::Action { run, context, arg } => {
-                // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
-                let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
-                unsafe { f(context as *const (), arg & !ACTION_SME2, pool_platform()) };
+                // Sound: `publish_actions` published live `(context, arg)` valid until completion for this source's runner.
+                unsafe { run(context, arg & !ACTION_SME2, pool_platform()) };
             }
             Item::Pieces(job, index, n) => {
                 // Sound: the job lives until its pieces are finished,
@@ -3770,9 +3777,9 @@ pub(crate) mod sources {
         fn test_take_stream_item_claims_from_registered_action_source() {
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
             unsafe fn noop(_: *const (), _: u64, _: Platform) {}
-            let source: &'static Source = &*Box::leak(Box::new(Source::with_actions(4)));
+            let source: &'static Source = &*Box::leak(Box::new(Source::with_actions(4, noop)));
             let slot = source.register().expect("a free slot");
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[77], false) };
+            unsafe { source.publish_actions(core::ptr::null(), &[77], false) };
             let item = take_stream_item();
             Source::unregister(slot);
             assert!(matches!(item, Some(Item::Action { arg: 77, .. })));
@@ -3788,8 +3795,9 @@ pub(crate) mod sources {
             // Made-up items (no job, an unwritten ring): safe only because
             // nothing here starts the pool, so no worker takes one (see
             // test_a_worker_serves_the_lowest_source_until_it_is_empty).
+            unsafe fn noop(_: *const (), _: u64, _: Platform) {}
             let job: &'static Source = &*Box::leak(Box::new(Source::new()));
-            let stream: &'static Source = &*Box::leak(Box::new(Source::with_actions(4)));
+            let stream: &'static Source = &*Box::leak(Box::new(Source::with_actions(4, noop)));
             let slots = [job.register().expect("a free slot"), stream.register().expect("a free slot")];
             assert!(!visible(false) && !visible(true), "nothing published: nothing visible");
             assert!(!stays(true) && !stays(false), "no work, and no places settled (no pool here): a worker parks");
@@ -3824,10 +3832,10 @@ pub(crate) mod sources {
         fn a_publication_past_actions_capacity_is_stopped() {
             unsafe fn noop(_: *const (), _: u64, _: Platform) {}
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
-            let source = Source::with_actions(2);
+            let source = Source::with_actions(2, noop);
             unsafe {
-                source.publish_actions(noop, core::ptr::null(), &[1, 2], false);
-                source.publish_actions(noop, core::ptr::null(), &[3], false);
+                source.publish_actions(core::ptr::null(), &[1, 2], false);
+                source.publish_actions(core::ptr::null(), &[3], false);
             }
         }
 
@@ -3836,14 +3844,14 @@ pub(crate) mod sources {
         fn action_near_hint_is_per_ticket_across_mixed_publications() {
             unsafe fn noop(_: *const (), _: u64, _: Platform) {}
             let _ = pool();
-            let source = Source::with_actions(8);
+            let source = Source::with_actions(8, noop);
             assert!(!source.front_action_near(), "empty source has no front action");
 
             // Near batch followed by a far room/group action: earlier near
             // items keep near=true until all of them are claimed, then the
             // trailing far item observes near=false.
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[101, 102, 103], true) };
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[200], false) };
+            unsafe { source.publish_actions(core::ptr::null(), &[101, 102, 103], true) };
+            unsafe { source.publish_actions(core::ptr::null(), &[200], false) };
             assert!(source.front_action_near(), "head 101 stays near after trailing far publish");
             assert!(source.take().is_some());
             assert!(source.front_action_near(), "head 102 stays near");
@@ -3856,8 +3864,8 @@ pub(crate) mod sources {
 
             // Far large batch followed by a near batch: earlier far items keep
             // near=false until drained, then the trailing near item sees true.
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[301, 302], false) };
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[400], true) };
+            unsafe { source.publish_actions(core::ptr::null(), &[301, 302], false) };
+            unsafe { source.publish_actions(core::ptr::null(), &[400], true) };
             assert!(!source.front_action_near(), "head 301 stays far after trailing near publish");
             assert!(source.take().is_some());
             assert!(!source.front_action_near(), "head 302 stays far");
@@ -3869,7 +3877,7 @@ pub(crate) mod sources {
             // Fill a full ring of near=true items and drain all of them so
             // slot `claimed % len` still holds `near == true` from the prior
             // lap: an empty source (`c == p`) must still return false.
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[1, 2, 3, 4, 5, 6, 7, 8], true) };
+            unsafe { source.publish_actions(core::ptr::null(), &[1, 2, 3, 4, 5, 6, 7, 8], true) };
             for _ in 0..8 {
                 assert!(source.front_action_near());
                 assert!(source.take().is_some());
@@ -3893,8 +3901,8 @@ pub(crate) mod sources {
                 || PLACE_HERE.with(|p| p.get()),
             );
             PLACE_HERE.with(|p| p.set(0));
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[1, 2], true) };
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[3], false) };
+            unsafe { source.publish_actions(core::ptr::null(), &[1, 2], true) };
+            unsafe { source.publish_actions(core::ptr::null(), &[3], false) };
             assert_eq!(park.parked_count(), 2);
             wake_speculative(&park, source.front_action_near());
             assert_eq!(park.parked_count(), 2, "speculative near wake keeps remote workers parked");
@@ -3917,7 +3925,7 @@ pub(crate) mod sources {
             std::thread_local! {
                 static PLACE_HERE: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
             }
-            let source = Source::with_actions(4);
+            let source = Source::with_actions(4, noop);
             let park = crate::park::test::park_with(4, 4, &[2, 3]);
             // Place 0 = {0, 1} (awake), Place 1 = {2, 3} (both parked).
             park.set_places(
@@ -3932,14 +3940,14 @@ pub(crate) mod sources {
 
             // One waiting: wakes exactly one local worker in asleep place 1,
             // and leaves the second local worker parked on re-check.
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[1], false) };
+            unsafe { source.publish_actions(core::ptr::null(), &[1], false) };
             wake_on_publish(&park, &source);
             assert_eq!(park.parked_count(), 1, "one waiting wakes one local worker in an asleep place");
             wake_on_publish(&park, &source);
             assert_eq!(park.parked_count(), 1, "once a local worker is awake, one waiting wakes nobody");
 
             // Two waiting with far hint: wakes the remaining worker via wake_speculative.
-            unsafe { source.publish_actions(noop, core::ptr::null(), &[2], false) };
+            unsafe { source.publish_actions(core::ptr::null(), &[2], false) };
             wake_on_publish(&park, &source);
             assert_eq!(park.parked_count(), 0, "two waiting triggers speculative wake");
             assert!(source.take().is_some() && source.take().is_some());
@@ -3951,11 +3959,11 @@ pub(crate) mod sources {
                 unsafe { (*(ctx as *const AtomicU64)).store(arg, Ordering::SeqCst) };
             }
             let _ = pool();
-            let source = Source::with_actions(3);
+            let source = Source::with_actions(3, set_val);
             assert_eq!(source.actions_len(), 3);
             assert!(!source.run_waiting_action());
             let flag = AtomicU64::new(0);
-            unsafe { source.publish_actions(set_val, (&flag as *const AtomicU64).cast(), &[42 | ACTION_SME2], false) };
+            unsafe { source.publish_actions((&flag as *const AtomicU64).cast(), &[42 | ACTION_SME2], false) };
             assert!(source.run_waiting_action());
             assert_eq!(flag.load(Ordering::SeqCst), 42, "ACTION_SME2 bit stripped before running");
             assert!(!source.run_waiting_action());
@@ -4075,7 +4083,7 @@ pub(crate) mod sources {
                 if !st.stop.load(Ordering::Acquire) {
                     // Sound: serialized by `publish_lock`; `low` has capacity 4
                     // with at most 3 circulating tickets (1..=3 unclaimed).
-                    unsafe { st.low.publish_actions(run_low, ctx, &[1], false) };
+                    unsafe { st.low.publish_actions(ctx, &[1], false) };
                 }
             }
             unsafe fn run_high(ctx: *const (), _arg: u64, _platform: Platform) {
@@ -4090,8 +4098,8 @@ pub(crate) mod sources {
             // while `low` stays continuously nonempty only `Pool::serve`'s
             // persistent `Turn` lets the ordinary worker rotate to `high`.
             crate::initialize_multithreaded(core::num::NonZeroUsize::new(2));
-            let low: &'static Source = Box::leak(Box::new(Source::with_actions(4)));
-            let high: &'static Source = Box::leak(Box::new(Source::with_actions(2)));
+            let low: &'static Source = Box::leak(Box::new(Source::with_actions(4, run_low)));
+            let high: &'static Source = Box::leak(Box::new(Source::with_actions(2, run_high)));
             let state: &'static State = Box::leak(Box::new(State {
                 low,
                 publish_lock: std::sync::Mutex::new(()),
@@ -4110,8 +4118,8 @@ pub(crate) mod sources {
             // `blake3-sme2` both hold a callback concurrently.
             // Sound: `run_low` / `run_high` match the action ABI and `ctx` is `'static`.
             unsafe {
-                low.publish_actions(run_low, ctx, &[1, 2, 3], false);
-                high.publish_actions(run_high, ctx, &[9], false);
+                low.publish_actions(ctx, &[1, 2, 3], false);
+                high.publish_actions(ctx, &[9], false);
             }
             let low_slot = low.register().expect("low slot");
             let high_slot = high.register().expect("high slot");
@@ -4219,7 +4227,6 @@ pub(crate) const TASK_LEN: usize = 64 * CHUNK_LEN;
 /// A gathered group of up to [`MEMBERS`] short messages (or small batches of
 /// one message length), hashed side by side via [`Task::run_members`].
 pub(crate) struct Task {
-    pub(crate) len: usize,
     pub(crate) batch: Option<(usize, usize)>,
     pub(crate) members: usize,
     pub(crate) member: [Member; MEMBERS],
@@ -4244,7 +4251,7 @@ unsafe impl Send for Task {}
 impl Task {
     /// An empty task of short messages, or batches of one `(message_len, slot)` shape.
     pub(crate) fn members(batch: Option<(usize, usize)>) -> Task {
-        Task { len: 0, batch, members: 0, member: [NO_MEMBER; MEMBERS] }
+        Task { batch, members: 0, member: [NO_MEMBER; MEMBERS] }
     }
 }
 
@@ -4323,13 +4330,12 @@ fn sme2_serve() -> ! {
         if let Some(item) = sources::take_stream_item() {
             match item {
                 sources::Item::Action { run, context, arg } => {
-                    // Sound: `publish_actions` stored an `unsafe fn(*const (), u64, Platform)` function pointer and live `context` valid until completion.
-                    let f: unsafe fn(*const (), u64, Platform) = unsafe { core::mem::transmute(run) };
+                    // Sound: `publish_actions` published live `(context, arg)` valid until completion for this source's runner.
                     if arg & sources::ACTION_SME2 == 0 {
-                        unsafe { f(context as *const (), arg, pool_platform()) };
+                        unsafe { run(context, arg, pool_platform()) };
                     } else {
                         let turn = Sme2Turn::take(Platform::detect(), true);
-                        unsafe { f(context as *const (), arg & !sources::ACTION_SME2, turn.platform()) };
+                        unsafe { run(context, arg & !sources::ACTION_SME2, turn.platform()) };
                         drop(turn);
                     }
                 }
@@ -4885,8 +4891,8 @@ mod test {
     fn test_a_wake_is_tried_for_the_second_task_waiting() {
         let _ = pool();
         unsafe fn noop(_: *const (), _: u64, _: Platform) {}
-        let source: &'static sources::Source = Box::leak(Box::new(sources::Source::with_actions(8)));
-        let pub1 = || unsafe { source.publish_actions(noop, core::ptr::null(), &[0], false) };
+        let source: &'static sources::Source = Box::leak(Box::new(sources::Source::with_actions(8, noop)));
+        let pub1 = || unsafe { source.publish_actions(core::ptr::null(), &[0], false) };
         counts();
         pub1();
         assert_eq!(counts()[Noted::WakeTry as usize], 0, "one task waiting: the caller's");
@@ -4953,6 +4959,39 @@ mod test {
         assert!(!spin_for_work());
         assert_eq!(counts()[Noted::Poll as usize], 32, "4 us, then 8: two looks");
         sources::closed();
+        TEST_CLOCK.with(|c| c.set(None));
+    }
+
+    #[test]
+    fn test_non_tree_scratch_cut_does_not_resize_cvs() {
+        let cap_before = SCRATCH.with(|s| {
+            let mut s = s.borrow_mut();
+            s.cvs.clear();
+            s.cvs.capacity()
+        });
+        let want_pieces = cap_before.max(PREPARED_PIECES) + 64;
+        with_scratch(
+            |pieces| {
+                for i in 0..want_pieces {
+                    pieces.push(Piece { offset: i, len: 1 });
+                }
+            },
+            |(), pieces, cvs| {
+                assert_eq!(pieces.len(), want_pieces);
+                assert_eq!(cvs.len(), 0, "non-tree scratch cuts must not populate cvs");
+                assert_eq!(cvs.capacity(), cap_before, "non-tree scratch cuts must not grow cvs capacity");
+            },
+        );
+    }
+
+    #[test]
+    fn test_unregistered_pipeline_does_not_enable_worker_spin() {
+        crate::initialize_multithreaded(core::num::NonZeroUsize::new(1));
+        let _pipe = crate::throughput::Pipeline::<(), ()>::new(crate::Mode::Plain, crate::throughput::Limits { messages: 2, rooms: 1 });
+        counts();
+        clock(1000, 1);
+        assert!(!spin_for_work());
+        assert_eq!(counts()[Noted::Poll as usize], 16, "unregistered synchronous Pipeline must not keep workers spinning");
         TEST_CLOCK.with(|c| c.set(None));
     }
 
