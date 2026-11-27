@@ -1413,38 +1413,24 @@ mod tree_test {
         drop(held);
 
         // With the turn free, 32 children (16 pairs) and 16 two-chunk messages
-        // DO enter SME2.
-        let mut ran = None;
-        for _ in 0..10_000 {
-            crate::RAN.with(|r| r.set(0));
-            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
-            tree.parent_cvs(&children, &mut got_parents);
-            tree.hash_each(&items, &mut got_each);
-            if crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32 == 0 {
-                ran = Some(crate::RAN_ENTRIES.with(|r| r.borrow().clone()));
-                break;
-            }
-            std::thread::yield_now();
-        }
-        let ran = ran.expect("failed to observe an uncontended SME2 turn within bounded retries");
+        // DO enter SME2 (isolated nextest process has no competing SME2 user).
+        crate::RAN.with(|r| r.set(0));
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        tree.parent_cvs(&children, &mut got_parents);
+        tree.hash_each(&items, &mut got_each);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "SME2 turn must be free after dropping held guard");
+        let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
         assert!(ran.contains(&parents_fn), "16 parent pairs should enter SME2 when turn is free");
         assert!(ran.contains(&messages_fn), "16 two-chunk messages should enter SME2 when turn is free");
         assert_eq!(got_parents, expected_parents);
         assert_eq!(got_each, expected_each);
 
         // And with the turn free, 3 x 15 KiB (21 first-round parent pairs) enters SME2 parents.
-        let mut ran_3x15k = None;
-        for _ in 0..10_000 {
-            crate::RAN.with(|r| r.set(0));
-            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
-            tree.hash_each(&items_3x15k, &mut got_3);
-            if crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32 == 0 {
-                ran_3x15k = Some(crate::RAN_ENTRIES.with(|r| r.borrow().clone()));
-                break;
-            }
-            std::thread::yield_now();
-        }
-        let ran_3x15k = ran_3x15k.expect("failed to observe uncontended SME2 turn for 3 x 15 KiB");
+        crate::RAN.with(|r| r.set(0));
+        crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        tree.hash_each(&items_3x15k, &mut got_3);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "SME2 turn must be free for 3 x 15 KiB");
+        let ran_3x15k = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
         assert!(ran_3x15k.contains(&parents_fn), "3 x 15 KiB (21 parent pairs) should enter SME2 parents when turn is free");
         assert_eq!(got_3, expected_3x15k);
     }

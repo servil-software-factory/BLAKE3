@@ -134,9 +134,10 @@ pub(crate) mod guard {
 
     impl Guarded {
         pub(crate) fn new(len: usize, at_end: bool) -> Self {
-            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
-            let body = len.div_ceil(page).max(1) * page;
-            let total = body + 2 * page;
+            let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).expect("positive page size");
+            assert!(page > 0, "positive page size");
+            let body = len.div_ceil(page).max(1).checked_mul(page).expect("guarded body size overflow");
+            let total = body.checked_add(page.checked_mul(2).expect("guard pages overflow")).expect("guarded mapping size overflow");
             let base = unsafe { libc::mmap(core::ptr::null_mut(), total, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) };
             assert_ne!(base, libc::MAP_FAILED, "mmap");
             let base = base as *mut u8;
@@ -163,10 +164,22 @@ pub(crate) mod guard {
             self.bytes().as_chunks_mut::<{ crate::OUT_LEN }>().0
         }
 
-        /// Build shared views via `as_bytes()` after this call; the body is read-only.
-        pub(crate) fn read_only(&mut self) {
-            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        /// Freeze the guarded body as `PROT_READ` and consume the writable
+        /// owner so no mutable slice can ever be obtained from read-only pages.
+        pub(crate) fn read_only(self) -> ReadOnlyGuarded {
+            let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).expect("positive page size");
             assert_eq!(unsafe { libc::mprotect(self.base.add(page).cast(), self.total - 2 * page, libc::PROT_READ) }, 0);
+            ReadOnlyGuarded(self)
+        }
+    }
+
+    /// A [`Guarded`] mapping whose body has been frozen to `PROT_READ`.
+    /// Only shared views (`as_bytes`) are available.
+    pub(crate) struct ReadOnlyGuarded(Guarded);
+
+    impl ReadOnlyGuarded {
+        pub(crate) fn as_bytes(&self) -> &[u8] {
+            self.0.as_bytes()
         }
     }
 

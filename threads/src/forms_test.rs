@@ -168,8 +168,10 @@ fn test_every_multithreaded_call_inside_guard_pages() {
                     m[len..].fill(0);
                 }
                 let batch_blocks = Block::from_bytes(batch.as_bytes()).expect("a page-end batch starts aligned");
+                let mut guarded_batch_out = digests(count, at_end);
+                throughput::hash_many_multithreaded(mode, &Batch::in_place(batch_blocks, len), guarded_batch_out.digests());
+                assert!(guarded_batch_out.digests().iter().all(|h| *h == want), "hash_many_multithreaded guarded batch, {what}");
                 let input: &[u8] = flush.as_bytes();
-                let _ = batch_blocks;
                 let mut owned_batch = Batch::new(len, count);
                 for i in 0..count {
                     owned_batch.set(i, &message);

@@ -573,45 +573,45 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
     }
 }
 
+/// Compile-time check that `Params<W>` matches `gen_x86.py`'s exact field
+/// offsets and alignment for all three instantiated widths (4, 8, 16) so
+/// layout drift fails every build before any assembly kernel can run.
+macro_rules! assert_params_layout {
+    ($w:expr) => {{
+        const W: usize = $w;
+        const V: usize = 4 * W;
+        assert!(core::mem::align_of::<Params<W>>() == 64);
+        assert!(core::mem::offset_of!(Params<W>, msg) == 0);
+        assert!(core::mem::offset_of!(Params<W>, key) == 8 * W);
+        assert!(core::mem::offset_of!(Params<W>, iv) == 8 * W + 8 * V);
+        assert!(core::mem::offset_of!(Params<W>, rot16) == 8 * W + 12 * V);
+        assert!(core::mem::offset_of!(Params<W>, rot8) == 8 * W + 13 * V);
+        assert!(core::mem::offset_of!(Params<W>, ctr) == 8 * W + 14 * V);
+        assert!(core::mem::offset_of!(Params<W>, lens) == 8 * W + 16 * V);
+        assert!(core::mem::offset_of!(Params<W>, flags) == 8 * W + 32 * V);
+        assert!(core::mem::offset_of!(Params<W>, last) == 8 * W + 48 * V);
+        assert!(core::mem::offset_of!(Params<W>, h) == 8 * W + 48 * V + 64);
+        assert!(core::mem::offset_of!(Params<W>, snap) == 8 * W + 56 * V + 64);
+    }};
+}
+
+const _: () = {
+    assert_params_layout!(4);
+    assert_params_layout!(8);
+    assert_params_layout!(16);
+};
+
 #[cfg(test)]
 mod test {
     use super::*;
 
-    /// The parameter block's offsets are the generator's (gen_x86.py's
-    /// `layout`: each field in turn, no padding but the struct's own).
+    /// The compile-time `assert_params_layout!` checks above enforce
+    /// `Params<4/8/16>` at every build; keep a unit test exercising them too.
     #[test]
     fn test_params_layout_is_the_generators() {
-        fn check<const W: usize>() {
-            let v = 4 * W;
-            let want = [
-                8 * W,
-                8 * W + 8 * v,
-                8 * W + 12 * v,
-                8 * W + 13 * v,
-                8 * W + 14 * v,
-                8 * W + 16 * v,
-                8 * W + 32 * v,
-                8 * W + 48 * v,
-                8 * W + 48 * v + 64,
-                8 * W + 56 * v + 64,
-            ];
-            let got = [
-                core::mem::offset_of!(Params<W>, key),
-                core::mem::offset_of!(Params<W>, iv),
-                core::mem::offset_of!(Params<W>, rot16),
-                core::mem::offset_of!(Params<W>, rot8),
-                core::mem::offset_of!(Params<W>, ctr),
-                core::mem::offset_of!(Params<W>, lens),
-                core::mem::offset_of!(Params<W>, flags),
-                core::mem::offset_of!(Params<W>, last),
-                core::mem::offset_of!(Params<W>, h),
-                core::mem::offset_of!(Params<W>, snap),
-            ];
-            assert_eq!(got, want, "{W} lanes");
-        }
-        check::<4>();
-        check::<8>();
-        check::<16>();
+        assert_params_layout!(4);
+        assert_params_layout!(8);
+        assert_params_layout!(16);
     }
 
     /// Every count of whole chunks each kernel takes, with partial chunks

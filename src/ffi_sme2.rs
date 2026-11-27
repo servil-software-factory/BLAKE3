@@ -1135,8 +1135,10 @@ mod test {
     /// On SME2 hardware (such as Apple M4/M6), verify the AAPCS64 private-ZA
     /// lazy-save contract on real silicon:
     /// 1. `svl_lanes()` leaves `TPIDR2_EL0` and live ZA untouched.
-    /// 2. Nonzero AAPCS64 reserved bytes `[10..15]` cause every working kernel
-    ///    to decline (returning 0) with `TPIDR2_EL0` and live ZA untouched.
+    /// 2. Nonzero AAPCS64 reserved bytes `[10..15]` cause representative
+    ///    working kernels (chunks and x2 here; packed/counter/keyed-chunks have
+    ///    dedicated controls in their modules) to decline (returning 0) with
+    ///    `TPIDR2_EL0` and live ZA untouched.
     /// 3. Every SME2 assembly entry point commits all 64 distinct slices of
     ///    dormant caller ZA into `za_save_buffer` bit-for-bit, clears
     ///    `TPIDR2_EL0`, and computes exact BLAKE3 digests.

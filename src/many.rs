@@ -264,8 +264,8 @@ fn hash_two_chunks(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: 
         let mut pairs = [[0u8; BLOCK_LEN]; GROUP];
         // Sound: `firsts` and `seconds` hold exactly `count` initialized
         // entries; each second-chunk pointer reaches `second_blocks` whole
-        // blocks inside its slot, zero past the message; all supported AArch64
-        // targets assume NEON (`build.rs` refuses non-NEON AArch64 targets).
+        // blocks inside its slot, zero past the message; NEON is mandatory on
+        // AArch64 (checked by `Platform::detect` / `build.rs` target gate).
         unsafe {
             crate::neon_hybrid::hash_many_last_len(
                 &firsts,
@@ -1505,9 +1505,9 @@ mod test {
         }
     }
 
-    /// Batches of 1 to 17 messages of up to a block after a pause (the pair
-    /// kernel's path for 2 to 8, prefetched plans beyond), every mode: each
-    /// digest is hash_with's.
+    /// Batches of 1 to 17 messages of up to a block (the pair kernel's path
+    /// for 2 to 8, prefetched plans beyond), every mode: each digest matches
+    /// `hash_with`.
     #[test]
     fn test_small_batches_after_a_pause() {
         let key = [7u8; 32];
@@ -1521,7 +1521,6 @@ mod test {
                             *b = (k * 31 + j) as u8;
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_micros(300));
                     let mut out = vec![[0u8; OUT_LEN]; count];
                     crate::throughput::hash_many(mode, &crate::throughput::Batch::in_place(&crate::test::blocks(&input), len), &mut out);
                     for (k, digest) in out.iter().enumerate() {

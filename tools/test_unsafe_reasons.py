@@ -171,6 +171,37 @@ class Reasons(unittest.TestCase):
         )
         self.assertEqual(ur.debug_assert_without_reason(stacked), [])
         self.assertNotIn("cast_possible_truncation", ur.masked_code(stacked)[0])
+        # Test-only generic parameter must stop at `>` and never mask the shipped function.
+        generic_param = (
+            "pub fn only<#[cfg(test)] T: Clone>(p: &u32) -> u32 {\n"
+            "    debug_assert!(*p < 10);\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(generic_param)], [2])
+        self.assertEqual([n for n, _ in ur.without_reason(generic_param)], [3])
+        # Nested empty block-comment rationale `/* old /* Debug-only: */ */` must fail.
+        nested_empty = (
+            "fn f(x: u32) {\n"
+            "    /* old note /* Debug-only: */ */\n"
+            "    debug_assert!(x < 10);\n"
+            "    /* old note /* Sound: */ */\n"
+            "    let _ = unsafe { x };\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(nested_empty)], [3])
+        self.assertEqual([n for n, _ in ur.without_reason(nested_empty)], [5])
+        # A comment attached to a masked `#[cfg(test)]` assertion cannot bleed
+        # across the masked statement onto a shipped assertion below it.
+        donated = (
+            "fn f(x: u32) {\n"
+            "    // Debug-only: mock-only check.\n"
+            "    #[cfg(test)]\n"
+            "    debug_assert!(x != 8);\n"
+            "    debug_assert!(x > 5);\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(donated)], [5])
         # Comments inside a preceding statement or `#[cfg(test)]` block cannot
         # satisfy a following shipped `debug_assert!`.
         prev_stmt = (

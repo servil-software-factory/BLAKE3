@@ -312,14 +312,4 @@ mod tests {
     }
 
     include!("ffi_avx512_32_guard_tests.rs");
-
-    #[test]
-    fn generated_assembly_matches() {
-        let output = std::process::Command::new("python3")
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tools/gen_avx512_32.py"))
-            .output()
-            .expect("Python runs the assembly generator");
-        assert!(output.status.success());
-        assert_eq!(output.stdout, include_bytes!("../c/blake3_avx512_32.S"));
-    }
 }

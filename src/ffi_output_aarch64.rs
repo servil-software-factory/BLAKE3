@@ -366,24 +366,31 @@ mod tests {
         crate::initialize();
         for at_end in [false, true] {
             let answer = self_test_shape(|inputs, out| {
-                let mut blocks: Vec<_> = (0..16).map(|_| Guarded::new(64, at_end)).collect();
-                let mut cvs: Vec<_> = (0..16).map(|_| Guarded::new(32, at_end)).collect();
+                let blocks: Vec<_> = (0..16)
+                    .map(|i| {
+                        let mut g = Guarded::new(64, at_end);
+                        g.bytes().copy_from_slice(inputs[i].block);
+                        g.read_only()
+                    })
+                    .collect();
+                let cvs: Vec<_> = (0..16)
+                    .map(|i| {
+                        let mut g = Guarded::new(32, at_end);
+                        g.bytes().copy_from_slice(&hasher::le_bytes(inputs[i].cv));
+                        g.read_only()
+                    })
+                    .collect();
                 let mut table = Guarded::new(core::mem::size_of_val(inputs), at_end);
                 let table_ptr = table.bytes().as_mut_ptr().cast::<Input<'_>>();
                 for i in 0..16 {
-                    blocks[i].bytes().copy_from_slice(inputs[i].block);
-                    cvs[i].bytes().copy_from_slice(&hasher::le_bytes(inputs[i].cv));
-                    let block = unsafe { &*blocks[i].bytes().as_ptr().cast::<[u8; 64]>() };
-                    let cv = unsafe { &*cvs[i].bytes().as_ptr().cast::<[u32; 8]>() };
+                    let block: &[u8; 64] = blocks[i].as_bytes().try_into().unwrap();
+                    let cv = unsafe { &*cvs[i].as_bytes().as_ptr().cast::<[u32; 8]>() };
                     unsafe { table_ptr.add(i).write(Input { block, cv, len: inputs[i].len, flags: inputs[i].flags }) };
                 }
-                for page in blocks.iter_mut().chain(cvs.iter_mut()) {
-                    page.read_only();
-                }
-                table.read_only();
-                let descriptors = unsafe { &*table_ptr.cast::<[Input<'_>; 16]>() };
+                let table = table.read_only();
+                let descriptors = unsafe { &*table.as_bytes().as_ptr().cast::<[Input<'_>; 16]>() };
                 let mut output = Guarded::new(16 * OUT_LEN, at_end);
-                let guarded_out = output.bytes().as_chunks_mut::<OUT_LEN>().0;
+                let guarded_out = output.digests();
                 assert_eq!(hash_groups_arm(descriptors, guarded_out), 16);
                 out.copy_from_slice(guarded_out);
             });
@@ -432,6 +439,7 @@ mod tests {
         if matches!(Platform::detect_unchecked(), Platform::SME2) {
             cases.push(("sme2", "SME2 keyed chunks"));
         }
+        use std::os::unix::process::ExitStatusExt as _;
         for (case, want_msg) in cases {
             let out = std::process::Command::new(&exe)
                 .arg("--exact")
@@ -440,8 +448,8 @@ mod tests {
                 .env(ENV, case)
                 .output()
                 .expect("spawn fail-stop child");
-            assert!(!out.status.success(), "case {case} must fail-stop, got {:?}", out.status);
             let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.signal(), Some(libc::SIGABRT), "case {case} must abort with SIGABRT, got {:?}\n{stderr}", out.status);
             assert!(stderr.contains(want_msg), "case {case} stderr missing {want_msg:?}: {stderr}");
         }
     }
@@ -569,23 +577,41 @@ mod tests {
 
     /// Small keyed turns (`<= 4` stages) use `HeldWorkspace<4>` (3 KiB) so
     /// worker threads with compact stacks succeed without overflow (#336).
+    /// Each hasher starts half-staged off-stack so completing all `n` stages in
+    /// one `update_each` turn genuinely enters `held_groups_in::<4, 32>` rather
+    /// than bypassing staging via the zero-boundary whole-stage shortcut.
     #[test]
     fn small_stack_handles_three_and_four_keyed_stages() {
         crate::initialize();
+        let half = crate::STAGE_LEN / 2;
         for n in [3usize, 4] {
+            let keys: Vec<[u8; 32]> = (0..n).map(|i| [i as u8 + 1; 32]).collect();
+            let payload = vec![0x3Cu8; crate::STAGE_LEN];
+            let mut hashers: Vec<_> = keys
+                .iter()
+                .map(|k| {
+                    let mut h = Hasher::new(crate::Mode::Keyed(k), None);
+                    h.update(&payload[..half]);
+                    h
+                })
+                .collect();
+            let expected: Vec<[u8; OUT_LEN]> = keys.iter().map(|k| crate::test::official::hash(crate::Mode::Keyed(k), &payload)).collect();
+            let second_half = payload[half..].to_vec();
             let handle = std::thread::Builder::new()
                 .stack_size(24 * 1024)
                 .spawn(move || {
-                    let keys: Vec<[u8; 32]> = (0..n).map(|i| [i as u8 + 1; 32]).collect();
-                    let mut hashers: Vec<_> = keys.iter().map(|k| Hasher::new(crate::Mode::Keyed(k), None)).collect();
-                    let payload = vec![0x3Cu8; crate::STAGE_LEN];
-                    let pieces: Vec<(usize, &[u8])> = (0..n).map(|i| (i, payload.as_slice())).collect();
+                    crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                    let pieces: Vec<(usize, &[u8])> = (0..n).map(|i| (i, second_half.as_slice())).collect();
                     crate::each::update_each(&mut hashers, &pieces);
+                    assert!(
+                        crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry() as usize))),
+                        "n={n} half-staged keyed turn must reach held_groups_in::<4, 32> and invoke the independent output kernel"
+                    );
                     let which: Vec<usize> = (0..n).collect();
                     let mut out = vec![[0u8; OUT_LEN]; n];
                     crate::each::finalize_each(&mut hashers, &which, &mut out);
                     for i in 0..n {
-                        assert_eq!(out[i], crate::test::official::hash(crate::Mode::Keyed(&keys[i]), &payload));
+                        assert_eq!(out[i], expected[i]);
                     }
                 })
                 .expect("spawn 24 KiB stack thread");

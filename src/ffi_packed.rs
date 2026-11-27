@@ -31,7 +31,6 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
                 48 => ffi_sme2::blake3_servil_sme2_packed48,
                 _ => unreachable!("asserted len in {{16, 32, 48}}"),
             };
-            crate::ran_kernel(kernel as *const ());
             // Sound: `Platform::SME2` verified SME2 support; `input` holds at
             // least `16 * groups * len` bytes and `outputs` holds at least
             // `16 * groups` 32-byte slots. The kernel checks SVL == 16 via
@@ -39,6 +38,7 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
             // SVL; only when it returns 16 were the outputs written.
             let svl = unsafe { kernel(input.as_ptr(), key.as_ptr(), root_flags, outputs.as_mut_ptr().cast(), groups as u64) };
             if svl == 16 {
+                crate::ran_kernel(kernel as *const ());
                 done += groups * 16;
             }
         }

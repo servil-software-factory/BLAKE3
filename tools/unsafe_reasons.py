@@ -50,8 +50,8 @@ TEST_ONLY_FILES = frozenset({
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
 DEBUG_ASSERT = re.compile(r"\bdebug_assert(?:_eq|_ne)?\s*!")
-SOUND_RE = re.compile(r"Sound:\s*\S")
-DEBUG_ONLY_RE = re.compile(r"Debug-only:\s*\S")
+SOUND_RE = re.compile(r"Sound:(?:(?!/\*|\*/)[^A-Za-z0-9])*[A-Za-z0-9]")
+DEBUG_ONLY_RE = re.compile(r"Debug-only:(?:(?!/\*|\*/)[^A-Za-z0-9])*[A-Za-z0-9]")
 _OUTER_CFG_RE = re.compile(r"^#\[\s*cfg\s*\(")
 _CFG_CALL_RE = re.compile(r"\bcfg\s*\(")
 _PUB_PREFIX_RE = re.compile(r"pub(?:\s*\([^)]*\))?\s+")
@@ -417,10 +417,12 @@ def _test_item_spans(code):
         # Consume the annotated item/statement: track balanced delimiters and
         # only mark `seen_top_brace` for a `{` at outer level (`paren == 0`
         # and `bracket == 0`), so closures inside `FOO.with(|x| { ... });`
-        # still terminate at `;`. Never cross an enclosing `)`, `]`, or `}`.
+        # still terminate at `;`. Never cross an enclosing `)`, `]`, `}`, or
+        # (for non-keyword generic params like `<#[cfg(test)] T>`) `>`.
         brace = 0
         paren = 0
         bracket = 0
+        angle = 0
         seen_top_brace = False
         end = n
         while j < n:
@@ -439,6 +441,15 @@ def _test_item_spans(code):
                     end = j
                     break
                 bracket -= 1
+            elif ch == "<" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
+                angle += 1
+            elif ch == ">" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
+                prev = code[j - 1] if j > 0 else ""
+                if prev not in ("-", "="):
+                    if angle == 0:
+                        end = j
+                        break
+                    angle -= 1
             elif ch == "{":
                 if brace == 0 and paren == 0 and bracket == 0:
                     seen_top_brace = True
@@ -461,7 +472,7 @@ def _test_item_spans(code):
             elif ch == ";" and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
                 end = j + 1
                 break
-            elif ch == "," and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
+            elif ch == "," and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0 and angle == 0:
                 end = j + 1
                 break
             j += 1
@@ -489,14 +500,31 @@ def mask_test_items(code):
     return _blank_spans(code, _test_item_spans(code))
 
 
+def _masked_code_and_spans(text):
+    code_text, comm_text = split_code_and_comments(text)
+    spans = _test_item_spans(code_text)
+    return _blank_spans(code_text, spans), _blank_spans(comm_text, spans), spans
+
+
+def _span_lines(spans, starts):
+    lines = set()
+    for s, e in spans:
+        if e <= s:
+            continue
+        s_ln = bisect.bisect_right(starts, s) - 1
+        e_ln = bisect.bisect_right(starts, e - 1) - 1
+        for ln in range(s_ln, e_ln + 1):
+            lines.add(ln)
+    return lines
+
+
 def masked_code(text):
     """Return `(masked_code_text, masked_comment_text)` with comments/strings
     stripped from `masked_code_text` and all `#[cfg(...)]` test-only spans
     blanked out in BOTH code and comments (preserving every `\\n`) so comments
     inside `#[cfg(test)]` blocks can never satisfy shipped-code rationales."""
-    code_text, comm_text = split_code_and_comments(text)
-    spans = _test_item_spans(code_text)
-    return _blank_spans(code_text, spans), _blank_spans(comm_text, spans)
+    masked, comm_text, _spans = _masked_code_and_spans(text)
+    return masked, comm_text
 
 
 def non_test_lines(text):
@@ -567,9 +595,10 @@ def debug_assert_without_reason(text):
     `debug_assert*!` statements share one directly attached comment above;
     any other code or branch boundary breaks attachment."""
     raw_lines = text.split("\n")
-    masked, comm_text = masked_code(text)
+    masked, comm_text, test_spans = _masked_code_and_spans(text)
     masked_lines = masked.split("\n")
     starts = _line_starts(masked)
+    masked_test_lines = _span_lines(test_spans, starts)
     debug_lines = _lines_with_reason(comm_text, starts, DEBUG_ONLY_RE)
     matches = list(DEBUG_ASSERT.finditer(masked))
     # Track lines occupied by standalone `debug_assert*!` statements so
@@ -616,6 +645,8 @@ def debug_assert_without_reason(text):
         if not has_reason and masked[line_start:m.start()].strip() == "":
             k = s_idx - 1
             while k >= 0:
+                if k in masked_test_lines:
+                    break
                 c_strip = masked_lines[k].strip()
                 if c_strip and k not in da_stmt_lines:
                     break

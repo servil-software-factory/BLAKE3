@@ -1718,8 +1718,7 @@ mod dispatch {
     use crate::{CHUNK_LEN, RAN, RAN_ENTRIES, Ran};
     use std::collections::BTreeSet;
 
-    /// The names of the entry points one call ran (again when another
-    /// test held the SME2 turn or the call went after a pause).
+    /// The names of the entry points one call ran in this isolated test process.
     fn ran(call: &dyn Fn()) -> BTreeSet<String> {
         let names: Vec<(String, usize)> = crate::neon_hybrid::entries()
             .into_iter()
@@ -1728,15 +1727,12 @@ mod dispatch {
             .collect();
         // The startup self-test runs every kernel: before the record.
         crate::initialize();
-        loop {
-            RAN.with(|r| r.set(0));
-            RAN_ENTRIES.with(|r| r.borrow_mut().clear());
-            call();
-            if RAN.with(|r| r.get()) & Ran::TurnTaken as u32 == 0 {
-                let ran = RAN_ENTRIES.with(|r| r.borrow().clone());
-                return names.iter().filter(|(_, e)| ran.contains(e)).map(|(n, _)| n.clone()).collect();
-            }
-        }
+        RAN.with(|r| r.set(0));
+        RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        call();
+        assert_eq!(RAN.with(|r| r.get()) & Ran::TurnTaken as u32, 0, "unexpected SME2 turn contention in isolated test process");
+        let ran = RAN_ENTRIES.with(|r| r.borrow().clone());
+        names.iter().filter(|(_, e)| ran.contains(e)).map(|(n, _)| n.clone()).collect()
     }
 
     /// A call on NEON runs no SME2 kernel, however long its input: the
@@ -1805,17 +1801,14 @@ mod dispatch {
         // must have run.
         let gathered = |call: &dyn Fn()| {
             crate::initialize();
-            loop {
-                RAN.with(|r| r.set(0));
-                RAN_ENTRIES.with(|r| r.borrow_mut().clear());
-                call();
-                let ran = RAN.with(|r| r.get());
-                if ran & Ran::TurnTaken as u32 == 0 {
-                    let parents = crate::sme2::ffi::blake3_servil_sme2_hash16_parents_512 as *const () as usize;
-                    assert!(RAN_ENTRIES.with(|r| r.borrow().contains(&parents)), "the call ran SME2's parent kernel");
-                    return ran & Ran::Gathered as u32 != 0;
-                }
-            }
+            RAN.with(|r| r.set(0));
+            RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            call();
+            let ran = RAN.with(|r| r.get());
+            assert_eq!(ran & Ran::TurnTaken as u32, 0, "unexpected SME2 turn contention in isolated test process");
+            let parents = crate::sme2::ffi::blake3_servil_sme2_hash16_parents_512 as *const () as usize;
+            assert!(RAN_ENTRIES.with(|r| r.borrow().contains(&parents)), "the call ran SME2's parent kernel");
+            ran & Ran::Gathered as u32 != 0
         };
         let mut bytes = vec![0u8; 48 * BLOCK_LEN];
         crate::test::paint_test_input(&mut bytes);

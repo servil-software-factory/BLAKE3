@@ -131,7 +131,7 @@ pub(crate) const CASES: &[(Case, &str)] = &[
     (Incremental { len: 2 * KIB, piece: 63 }, "a Hasher fed less than a block at a time"),
     (Xof { len: 100, skip: 37, out: 300 }, "extended output of several blocks, from an unaligned position"),
     (Xof { len: 1500, skip: 64, out: 1600 }, "extended output of twenty-five blocks: SME2's sixteen, then x8 and x1"),
-    (Many { offset: 0, len: 128, count: 6 }, "six two-block messages: pn6"),
+    (Many { offset: 0, len: 128, count: 6 }, "six two-block messages (plain: pn6; SHA-3: p3 + p3)"),
     (Many { offset: 0, len: 128, count: 7 }, "seven two-block messages: p7"),
 ];
 
@@ -466,6 +466,13 @@ fn run_checks() -> (Platform, usize) {
         checked += crate::ffi_partial::self_test(platform);
     }
     checked += crate::ffi_packed::self_test(platform);
+    #[cfg(test)]
+    if HOLD_RUN.load(core::sync::atomic::Ordering::Relaxed) {
+        IN_RUN.store(true, core::sync::atomic::Ordering::Release);
+        while HOLD_RUN.load(core::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
     checked += crate::ffi_counter::self_test(platform);
     let _ = previous;
     (platform, checked)
@@ -474,13 +481,6 @@ fn run_checks() -> (Platform, usize) {
 /// Run every startup self-test case and publish the verified platform once.
 fn run() -> usize {
     let (platform, checked) = run_checks();
-    #[cfg(test)]
-    if HOLD_RUN.load(core::sync::atomic::Ordering::Relaxed) {
-        IN_RUN.store(true, core::sync::atomic::Ordering::Release);
-        while HOLD_RUN.load(core::sync::atomic::Ordering::Acquire) {
-            std::thread::yield_now();
-        }
-    }
     platform.record();
     checked
 }
@@ -573,7 +573,10 @@ fn stop(why: core::fmt::Arguments) -> ! {
     // `pfd.revents == POLLOUT` skips already-full pipes and broken/closed
     // pipes (avoiding SIGPIPE in C hosts and b3sum). Arming `alarm(1)`
     // before `write` bounds the rare TOCTOU race where another writer
-    // fills a blocking stderr pipe after `poll` (under default SIGALRM).
+    // fills a blocking stderr pipe after `poll` when SIGALRM is default
+    // and unblocked (a hostile caller that both blocks SIGALRM and jams
+    // fd 2 mid-write can delay `abort`, trading that corner case for a
+    // readable failure reason in normal hosts).
     let mut buf = StackBuf { bytes: [0; 320], len: 0 };
     let _ = buf.write_fmt(why);
     let _ = buf.write_str("\n");
@@ -776,9 +779,9 @@ mod test {
             while !IN_RUN.load(Acquire) {
                 std::thread::yield_now();
             }
-            // Winner has completed every kernel self-test and is held just
-            // before `platform.record()`: publication must NOT have happened
-            // yet, even with nonzero high bits in `DETECTED`.
+            // Winner is held inside `run_checks()` before the final kernel
+            // self-test runs: publication must NOT have happened yet, even
+            // with nonzero high bits in `DETECTED`.
             assert!(!crate::platform::is_initialized(), "platform must not be published before kernel self-tests finish");
             let started = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
             let done = std::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
@@ -848,14 +851,11 @@ mod test {
             want.extend(crate::ffi_counter::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_output::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
         }
-        let ran = loop {
-            RAN.with(|r| r.set(0));
-            RAN_ENTRIES.with(|r| r.borrow_mut().clear());
-            run();
-            if RAN.with(|r| r.get()) & Ran::TurnTaken as u32 == 0 {
-                break RAN_ENTRIES.with(|r| r.borrow().clone());
-            }
-        };
+        RAN.with(|r| r.set(0));
+        RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+        run();
+        assert_eq!(RAN.with(|r| r.get()) & Ran::TurnTaken as u32, 0, "unexpected SME2 turn contention in isolated self-test process");
+        let ran = RAN_ENTRIES.with(|r| r.borrow().clone());
         let missing: std::vec::Vec<&str> = want.iter().filter(|(_, e)| !ran.contains(&(*e as usize))).map(|(n, _)| n.as_str()).collect();
         assert!(missing.is_empty(), "the self-test leaves out {missing:?}");
     }

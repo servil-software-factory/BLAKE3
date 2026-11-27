@@ -531,26 +531,33 @@ mod tests {
         }
         for at_end in [false, true] {
             let answer = self_test_shape(|inputs, out| {
-                let mut blocks: Vec<_> = (0..16).map(|_| Guarded::new(64, at_end)).collect();
-                let mut cvs: Vec<_> = (0..16).map(|_| Guarded::new(32, at_end)).collect();
+                let blocks: Vec<_> = (0..16)
+                    .map(|i| {
+                        let mut g = Guarded::new(64, at_end);
+                        g.bytes().copy_from_slice(inputs[i].block);
+                        g.read_only()
+                    })
+                    .collect();
+                let cvs: Vec<_> = (0..16)
+                    .map(|i| {
+                        let mut g = Guarded::new(32, at_end);
+                        g.bytes().copy_from_slice(&hasher::le_bytes(inputs[i].cv));
+                        g.read_only()
+                    })
+                    .collect();
                 let mut table = Guarded::new(core::mem::size_of_val(inputs), at_end);
                 let table_ptr = table.bytes().as_mut_ptr().cast::<Input<'_>>();
                 for i in 0..16 {
-                    blocks[i].bytes().copy_from_slice(inputs[i].block);
-                    cvs[i].bytes().copy_from_slice(&hasher::le_bytes(inputs[i].cv));
                     // Page placement aligns CVs to u32 and descriptors to
-                    // Input. The guarded mappings outlive every borrowed view.
-                    let block = unsafe { &*blocks[i].bytes().as_ptr().cast::<[u8; 64]>() };
-                    let cv = unsafe { &*cvs[i].bytes().as_ptr().cast::<[u32; 8]>() };
+                    // Input. The read-only guarded mappings outlive every view.
+                    let block: &[u8; 64] = blocks[i].as_bytes().try_into().unwrap();
+                    let cv = unsafe { &*cvs[i].as_bytes().as_ptr().cast::<[u32; 8]>() };
                     unsafe { table_ptr.add(i).write(Input { block, cv, len: inputs[i].len, flags: inputs[i].flags }) };
                 }
-                for page in blocks.iter_mut().chain(cvs.iter_mut()) {
-                    page.read_only();
-                }
-                table.read_only();
-                let descriptors = unsafe { &*table_ptr.cast::<[Input<'_>; 16]>() };
+                let table = table.read_only();
+                let descriptors = unsafe { &*table.as_bytes().as_ptr().cast::<[Input<'_>; 16]>() };
                 let mut output = Guarded::new(16 * OUT_LEN, at_end);
-                let guarded_out = output.bytes().as_chunks_mut::<OUT_LEN>().0;
+                let guarded_out = output.digests();
                 unsafe { hash_on_platform(Platform::detect(), descriptors, guarded_out) };
                 let expected = crate::self_test::fold(guarded_out.as_flattened());
                 if crate::platform::avx2_detected() {
@@ -722,8 +729,12 @@ mod tests {
         ] {
             assert_eq!(prefix_padded_count(count, w), want, "prefix_padded_count({count}, {w})");
         }
-        // Pin the pure `for_each_output_group` schedule across widths 0/8/16 on
-        // every x86 CPU regardless of AVX-512 availability.
+    }
+
+    /// Pin the pure `for_each_output_group` schedule across widths 0/8/16 on
+    /// every x86 CPU (including SSE4.1-only hosts where `lanes(detect) == 0`).
+    #[test]
+    fn for_each_output_group_schedule_all_widths() {
         let schedule = |count: usize, width: usize| -> (usize, std::vec::Vec<(usize, usize, usize)>) {
             let mut got = std::vec::Vec::new();
             let done = for_each_output_group(count, width, |s, l, w| got.push((s, l, w)));

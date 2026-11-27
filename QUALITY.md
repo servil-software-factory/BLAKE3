@@ -1,9 +1,12 @@
 # How BLAKE3-Servil protects your results
 
 BLAKE3-Servil computes official BLAKE3 hashes and stays within your buffers.
-When a call breaks a rule, the call panics before returning a wrong hash (and
-startup self-test failure or early drop of an active `Pipeline` loan aborts
-the process).
+When a call breaks a checkable rule (such as bad shape, unaligned or short
+buffers, or out-of-range tree coordinates), the call panics before returning a
+wrong hash (and startup self-test failure or early drop of an active `Pipeline`
+loan aborts the process); properties the library cannot inspect, such as
+supplying `Cv`s produced under a mismatched key to `TreeHasher`, remain the
+caller's responsibility as documented on `TreeHasher`.
 
 The [quality manual](docs/quality-manual.md) holds BLAKE3-Servil's full
 verification contracts and reproduction commands. Organization-wide

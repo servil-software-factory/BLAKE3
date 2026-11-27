@@ -64,7 +64,6 @@ fn hash_counter_groups(
         let groups = out.len() / 16;
         if groups > 0 {
             let kernel: unsafe extern "C" fn(*const u32, *const u32, u64, u64, *mut u8, u64) -> u64 = ffi_sme2::blake3_servil_sme2_counter;
-            crate::ran_kernel(kernel as *const ());
             // Sound: `Platform::SME2` verified SME2 support; `tmpl_words` holds
             // 16 readable `u32` words, `key` holds 8 readable `u32` words,
             // `counter_word < 16`, and `out` holds at least `16 * groups`
@@ -74,6 +73,7 @@ fn hash_counter_groups(
             let svl =
                 unsafe { kernel(tmpl_words.as_ptr(), key.as_ptr(), base_and_word(start, counter_word), flags_and_len, out.as_mut_ptr().cast(), groups as u64) };
             if svl == 16 {
+                crate::ran_kernel(kernel as *const ());
                 done += groups * 16;
             }
         }
