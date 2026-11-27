@@ -157,7 +157,7 @@ The throughput API, for power users.
 
 ```rust
 fn new(count: usize) -> Self
-fn as_blocks(&self) -> &[Block]
+fn as_blocks(&self) -> &[Block]  // Packed<32>
 ```
 
 Implements: `Deref`, `DerefMut`, `Prepared`.
@@ -208,6 +208,10 @@ Implements: `Clone`, `Copy`, `Prepared`.
 ### `trait Prepared`
 
 The batch calls' input.
+
+```rust
+fn part(&self, messages: Range<usize>) -> Part<'_>
+```
 
 
 ### `struct Cv`

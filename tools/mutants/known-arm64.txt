@@ -17,7 +17,7 @@
 # code, as each says, and they are not all that such a Mac would show. Its
 # first whole run settles them.
 # A line: file <TAB> mutant (function and change) <TAB> places <TAB> reason.
-files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_output_aarch64.rs src/ffi_sme2.rs src/hasher.rs src/incremental.rs src/io.rs src/lib.rs src/many.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/pair.rs src/stack_vec.rs src/ffi_counter.rs src/output_common.rs
+files: src/block.rs src/convenience.rs src/each.rs src/ffi_neon_hybrid.rs src/ffi_output_aarch64.rs src/ffi_sme2.rs src/hasher.rs src/incremental.rs src/io.rs src/lib.rs src/many.rs src/throughput.rs src/platform.rs src/self_test.rs src/tree.rs src/stack_vec.rs src/ffi_counter.rs src/output_common.rs
 src/each.rs	delete ! in independent_lanes	1	x86-64 only: independent_lanes is compiled for x86-64 Linux alone (its cfg), so here the mutant builds the code the unmutated source builds; the x86-64 machines catch it (BLAKE3 #344)
 src/each.rs	replace * with + in by_blocks_at_once	6	[cpu has FEAT_SHA3] equivalent here: changes only the SHA-3-free prefix/scalar path; this CPU hashes the whole group through the last-lane kernels instead. Cortex-A72 CI exercises the prefix/scalar path
 src/each.rs	replace * with / in by_blocks_at_once	6	[cpu has FEAT_SHA3] equivalent here: changes only the SHA-3-free prefix/scalar path; this CPU hashes the whole group through the last-lane kernels instead. Cortex-A72 CI exercises the prefix/scalar path
@@ -155,11 +155,9 @@ src/many.rs	replace * with / in hash_across	2	as on aarch64: survives (known-aar
 src/many.rs	replace * with / in hash_group_across_with_cvs	5	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with / in hash_long_or_single	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace * with / in hash_run_short	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace + with * in hash_across	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with * in hash_group_across_with_cvs	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with * in hash_long_or_single	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with * in subtree_across	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/many.rs	replace + with - in hash_across	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with - in hash_group_across_with_cvs	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with - in hash_long_or_single	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/many.rs	replace + with - in subtree_across	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
@@ -225,26 +223,6 @@ src/many.rs	replace | with ^ in hash_two_chunks	1	as on aarch64: survives (known
 src/many.rs	replace | with ^ in subtree_across	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py); on x86_64: survives (known-x86_64.txt): equivalent: | and ^ agree on flag bits that never overlap
 src/many.rs	replace | with ^ in whole_messages	4	equivalent: mode flags use bits 4 through 6; CHUNK_START, CHUNK_END and ROOT use bits 0, 1 and 3. Each combination uses disjoint bits.
 src/many.rs	replace || with && in across_from	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	delete match arm Platform::AVX2 in takes_platform	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/pair.rs	delete match arm Platform::AVX512 in takes_platform	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/pair.rs	replace * with + in parent	3	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace * with + in takes	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace * with / in parent	3	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace * with / in takes	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace + with * in parent	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace + with * in takes	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace + with - in parent	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace + with - in takes	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace - with + in parent	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace - with / in parent	2	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace / with % in parent	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace / with * in parent	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace parent -> [u8; BLOCK_LEN] with [0; BLOCK_LEN]	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/pair.rs	replace parent -> [u8; BLOCK_LEN] with [1; BLOCK_LEN]	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/pair.rs	replace takes -> bool with false	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace takes_platform -> bool with false	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/pair.rs	replace | with & in parent	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/pair.rs	replace | with ^ in parent	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py); on x86_64: survives (known-x86_64.txt): equivalent: | and ^ agree on flag bits that never overlap
 src/platform.rs	delete ! in read_cpu_words	1	x86-64 only: cfg(target_arch = "x86_64") excludes this code on macOS arm64; caught on x86-64
 src/platform.rs	delete ! in sme2_detect_uncached	1	as on aarch64: survives (known-aarch64.txt): detection, on a machine with SME2: a wrong no runs NEON (equally correct), a wrong yes is this machine's answer (a machine without SME2 would stop on it); on x86_64: survives (known-x86_64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/platform.rs	delete field leaf1_eax from struct CpuWords expression in read_cpu_words	1	as on aarch64: survives (known-aarch64.txt): same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

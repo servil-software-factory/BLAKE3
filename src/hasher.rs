@@ -801,8 +801,7 @@ mod test {
         }
         fn children(&self, input: &[u8], ahead: usize, counter: u64) -> [Cv; 2] {
             self.seen.borrow_mut().push(counter);
-            let node = crate::compress_subtree_to_parent_node(input, ahead, crate::IV, counter, 0, self.platform);
-            [node[..32].try_into().unwrap(), node[32..].try_into().unwrap()]
+            crate::compress_subtree_to_parent_node(input, ahead, crate::IV, counter, 0, self.platform)
         }
         fn cuts(&self, _len: usize) -> bool {
             false
@@ -857,8 +856,7 @@ mod test {
         }
         fn children(&self, input: &[u8], ahead: usize, counter: u64) -> [Cv; 2] {
             self.children.borrow_mut().push(input.len());
-            let node = crate::compress_subtree_to_parent_node(input, ahead, crate::IV, counter, 0, self.platform);
-            [node[..32].try_into().unwrap(), node[32..].try_into().unwrap()]
+            crate::compress_subtree_to_parent_node(input, ahead, crate::IV, counter, 0, self.platform)
         }
         fn cuts(&self, len: usize) -> bool {
             (self.width)(len) >= 4 && len >= 16 * CHUNK_LEN
@@ -877,8 +875,8 @@ mod test {
                     state.update(bytes);
                     state.output().chaining_value()
                 } else {
-                    let node = crate::compress_subtree_to_parent_node(bytes, ahead + input.len() - (i + 1) * part, crate::IV, at, 0, self.platform);
-                    parent_output(node[..32].try_into().unwrap(), node[32..].try_into().unwrap(), crate::IV, 0, self.platform).chaining_value()
+                    let [left, right] = crate::compress_subtree_to_parent_node(bytes, ahead + input.len() - (i + 1) * part, crate::IV, at, 0, self.platform);
+                    parent_output(&left, &right, crate::IV, 0, self.platform).chaining_value()
                 };
             }
             want

@@ -288,15 +288,14 @@ impl hasher::Hooks for HasherHooks<'_> {
             let halves = (pool.halves)(&TreeHasher::of_domain(*self.domain), level, index, input);
             return Cv::halves_bytes(halves, level, index);
         }
-        let pair = if self.pooled.is_some() {
+        if self.pooled.is_some() {
             // Pooled, the subtrees below take the lock one at a time, and
             // the pool's own never use SME2.
             let own = platform::Sme2Turn::take(self.chunk_platform, input.len() >= SME2_SIZED_LEN);
             compress_subtree_to_parent_node(input, ahead, self.domain.key(), counter, self.domain.flags(), own.platform())
         } else {
             compress_subtree_to_parent_node(input, ahead, self.domain.key(), counter, self.domain.flags(), self.platform)
-        };
-        [pair[..OUT_LEN].try_into().unwrap(), pair[OUT_LEN..].try_into().unwrap()]
+        }
     }
 
     /// A whole group or more is cut, on the caller's own kernels: not

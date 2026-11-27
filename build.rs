@@ -231,13 +231,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `--keep-going` if Cargo stops early on `E0463`), and reject arm64e
     // (pointer-auth ABI, untested here) explicitly.
     let target_env = var("CARGO_CFG_TARGET_ENV");
-    let supported_linux_env = matches!(target_env.as_str(), "gnu" | "musl");
+    let target_abi = var("CARGO_CFG_TARGET_ABI");
+    let supported_linux_env = matches!(target_env.as_str(), "gnu" | "musl") && target_abi.is_empty();
     let supported = var("CARGO_CFG_TARGET_ENDIAN") == "little"
         && var("CARGO_CFG_TARGET_POINTER_WIDTH") == "64"
         && !target.starts_with("arm64e-")
         && match arch.as_str() {
             "x86_64" => os == "linux" && supported_linux_env,
-            "aarch64" => (os == "linux" && supported_linux_env) || os == "macos",
+            "aarch64" => (os == "linux" && supported_linux_env) || (os == "macos" && target_abi.is_empty()),
             _ => false,
         };
     assert!(

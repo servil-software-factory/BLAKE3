@@ -23,7 +23,7 @@ pub(crate) fn chunk_root(platform: Platform, input: &[u8], key: &CVWords, flags:
     // buffer, whose dynamic realignment (and the spills around it) would
     // put stack traffic back on this path (John, #141).
     let last: &[u8; BLOCK_LEN] = input[(blocks - 1) * BLOCK_LEN..].try_into().expect("last whole block");
-    call(platform, input, key, last, flags as u64 + ((BLOCK_LEN as u64) << 8) + (((blocks - 1) as u64) << 16))
+    call(platform, input, blocks - 1, key, last, u8::try_from(BLOCK_LEN).unwrap(), flags)
 }
 
 /// An input that ends in a partial block, or is empty: the final block
@@ -40,7 +40,7 @@ fn chunk_root_partial(platform: Platform, input: &[u8], key: &CVWords, flags: u8
     pad_block(&mut padded.0, tail);
     // Sound: `pad_block` initialized all 64 bytes of `padded.0`.
     let last: &[u8; BLOCK_LEN] = unsafe { &*(padded.0.as_ptr().cast::<[u8; BLOCK_LEN]>()) };
-    call(platform, input, key, last, flags as u64 + ((tail.len() as u64) << 8) + ((blocks as u64) << 16))
+    call(platform, input, blocks, key, last, u8::try_from(tail.len()).expect("tail < BLOCK_LEN"), flags)
 }
 
 /// `src` (at most 64 bytes) as a zero-padded block in `dst`, written in four
@@ -85,7 +85,7 @@ pub(crate) fn block_root(platform: Platform, block: &[u8; BLOCK_LEN], n: u8, key
     // Debug-only: O(64) scan verifying the caller's zero-padded block invariant
     // on every <= 64 B finalize hot path; `n: u8` makes bit-16 carry unwriteable.
     debug_assert!(usize::from(n) <= BLOCK_LEN && block[usize::from(n)..].iter().all(|&b| b == 0), "a block zero-padded past its {n} bytes");
-    call(platform, &[], key, block, flags as u64 + ((n as u64) << 8))
+    call(platform, &[], 0, key, block, n, flags)
 }
 
 /// The `n` bytes at `p` (1 to 15) as a little-endian 128-bit value, its low
@@ -110,13 +110,18 @@ unsafe fn load_under_16(p: *const u8, n: usize) -> (u64, u64) {
     }
 }
 
-/// One kernel call: `packed` is flags | last_len << 8 | whole << 16.
+/// One kernel call: verifies `whole_blocks` fit inside `input`, packs
+/// `flags + (last_len << 8) + (whole_blocks << 16)`, and invokes the assembly
+/// entry point selected by `platform`.
 #[inline(always)]
-fn call(platform: Platform, input: &[u8], key: &CVWords, last: &[u8; BLOCK_LEN], packed: u64) -> [u8; OUT_LEN] {
+fn call(platform: Platform, input: &[u8], whole_blocks: usize, key: &CVWords, last: &[u8; BLOCK_LEN], last_len: u8, flags: u8) -> [u8; OUT_LEN] {
+    assert!(whole_blocks <= CHUNK_LEN / BLOCK_LEN && whole_blocks * BLOCK_LEN <= input.len(), "whole blocks fit in input");
+    assert!(usize::from(last_len) <= BLOCK_LEN, "last block length <= 64");
+    let packed = u64::from(flags) + (u64::from(last_len) << 8) + ((whole_blocks as u64) << 16);
     let mut out = MaybeUninit::<[u8; OUT_LEN]>::uninit();
     // Sound: `platform` verified SSE4.1 (and AVX-512F+VL for `Platform::AVX512`);
-    // `input` holds the `whole` preceding blocks, `last` holds 64 readable bytes,
-    // and `out` has 32 writable bytes.
+    // `input` was asserted to hold `whole_blocks * BLOCK_LEN` readable bytes,
+    // `last` holds 64 readable bytes, and `out` has 32 writable bytes.
     unsafe {
         if matches!(platform, Platform::AVX512) {
             crate::ran_kernel(ffi::blake3_servil_avx512_chunk_root as *const ());

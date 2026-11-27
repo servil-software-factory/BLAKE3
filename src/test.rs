@@ -677,11 +677,11 @@ fn test_xof_partial_block_cache_seeks_and_clones() {
     }
 }
 
-/// `pair::hash_many_blocks` on every platform this build has: AVX-512, AVX2,
-/// and SSE4.1 assembly on x86-64, and the per-input compression loop on
-/// non-x86 platforms. Block counts of 1, 2, 3 and 16 (a whole chunk), one to
-/// five inputs, counters incremented or not, the chunk flags at start and end.
+/// `pair::hash_many_blocks` on every x86-64 platform this build has: AVX-512,
+/// AVX2, and SSE4.1 assembly. Block counts of 1, 2, 3 and 16 (a whole chunk),
+/// one to five inputs, counters incremented or not, the chunk flags at start and end.
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn test_pair_hash_many_blocks_every_platform() {
     use crate::{CHUNK_END, CHUNK_START, IV};
     fn case<const N: usize>(golden: &mut Golden, input: &[u8]) {

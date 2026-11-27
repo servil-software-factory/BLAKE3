@@ -224,6 +224,15 @@ def show_type(it, path):
                 lines.append(v["name"] + "(" + ", ".join(ty(ix[str(f)]["inner"]["struct_field"]) for f in vk["tuple"] if f is not None) + ")")
             else:
                 lines.append(v["name"])
+    if kind == "trait":
+        for mid in inner.get("items", []):
+            m = ix[str(mid)]
+            if hidden(m):
+                continue
+            mk = next(iter(m["inner"]))
+            if mk == "function":
+                lines.append(fn(m))
+                methods.append(m["name"])
     for iid in inner.get("impls", []) if isinstance(inner, dict) else []:
         i = ix[str(iid)]["inner"]["impl"]
         if i.get("is_synthetic") or i.get("blanket_impl"):
@@ -237,16 +246,21 @@ def show_type(it, path):
             if trait != "StructuralPartialEq":
                 traits.append(trait)
         else:
+            # Note concrete specializations (e.g. `impl Packed<32>`) when an
+            # inherent impl binds fewer type/const parameters than the type itself.
+            type_params = [p for p in inner.get("generics", {}).get("params", []) if "lifetime" not in p["kind"]]
+            impl_params = [p for p in i.get("generics", {}).get("params", []) if "lifetime" not in p["kind"]]
+            spec_note = f"  // {ty(i['for'])}" if type_params and len(impl_params) < len(type_params) else ""
             for mid in i["items"]:
                 m = ix[str(mid)]
                 if m["visibility"] != "public" or hidden(m):
                     continue
                 mk = next(iter(m["inner"]))
                 if mk == "function":
-                    lines.append(fn(m))
+                    lines.append(fn(m) + spec_note)
                     methods.append(m["name"])
                 elif mk in ("assoc_const", "constant"):
-                    lines.append("const " + m["name"])
+                    lines.append("const " + m["name"] + spec_note)
     if checking:
         name = it["name"]
         check_traits(name, set(traits), it.get("docs"))

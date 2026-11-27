@@ -673,7 +673,7 @@ impl TreeHasher {
     ///
     /// Requires one output a message.
     pub fn hash_many<P: Prepared + ?Sized>(&self, batch: &P, out: &mut [[u8; OUT_LEN]]) {
-        let turn = self.turn_if(crate::many::sme2_sized(batch.message_len(), out.len()));
+        let turn = self.turn_if(crate::many::sme2_sized(batch.message_len(), batch.slot(), out.len()));
         self.hash_many_on(turn.platform(), batch, out);
     }
 

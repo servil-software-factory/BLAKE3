@@ -51,9 +51,11 @@ pub(crate) const fn left_chunks(n: usize) -> usize {
 }
 
 /// The bytes of the left subtree of an input of `len` > CHUNK_LEN bytes:
-/// the largest power of two chunks below its chunk count.
+/// the largest power of two chunks below its chunk count (shared with
+/// [`crate::throughput::left_len`]).
+#[inline]
 pub fn left_len(len: usize) -> usize {
-    left_chunks(len.div_ceil(CHUNK_LEN)) * CHUNK_LEN
+    usize::try_from(crate::throughput::left_len(len as u64)).expect("left subtree fits in usize")
 }
 
 /// The chaining values of a cut through the subtree over `input` (at least

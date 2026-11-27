@@ -179,7 +179,7 @@ fn test_every_multithreaded_call_inside_guard_pages() {
                 let input: &[u8] = flush.as_bytes();
                 let mut owned_batch = Batch::new(len, count);
                 for i in 0..count {
-                    owned_batch.set(i, &message);
+                    owned_batch.set(i, &batch.as_bytes()[i * slot..][..len]);
                 }
                 let mut pipe = throughput::Pipeline::new(mode, throughput::Limits { messages: 4, rooms: 2 });
                 throughput::block_on(async {
@@ -205,7 +205,7 @@ fn test_every_multithreaded_call_inside_guard_pages() {
                                 throughput::Event::Hashed { tag: 0, hash, .. } => assert_eq!(*hash.as_bytes(), want, "pipeline lent, {what}"),
                                 throughput::Event::Hashed { tag: 1, hash, .. } => assert_eq!(*hash.as_bytes(), want, "pipeline rooms, {what}"),
                                 throughput::Event::Batch { tag: 2, digests, .. } => {
-                                    assert!(digests.iter().all(|h| *h == want), "pipeline batch, {what}");
+                                    assert_eq!(digests.as_ref(), batch_wants.as_slice(), "pipeline batch, {what}");
                                 }
                                 _ => unreachable!(),
                             }

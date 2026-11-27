@@ -267,6 +267,7 @@ mod sse41;
 mod io;
 mod many;
 mod output_common;
+#[cfg(target_arch = "x86_64")]
 mod pair;
 mod self_test;
 mod stack_vec;
@@ -910,6 +911,7 @@ fn compress_chunks_parallel(input: &[u8], key: &CVWords, chunk_counter: u64, fla
     }
     // A whole chunk and a partial one, on AVX2 or AVX-512: their first
     // blocks side by side (pair.rs).
+    #[cfg(target_arch = "x86_64")]
     if pair::takes(platform, input.len()) {
         out[..2 * OUT_LEN].copy_from_slice(&pair::parent(input, key, chunk_counter, flags, platform));
         return 2;
@@ -958,28 +960,27 @@ pub(crate) fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWo
     let num_children = child_chaining_values.len() / OUT_LEN;
     assert!((2..=2 * MAX_SIMD_DEGREE).contains(&num_children), "compress_parents_parallel expects 2..=2*MAX_SIMD_DEGREE children");
 
-    let mut parents_exact = child_chaining_values.chunks_exact(BLOCK_LEN);
-    let mut parents_array = StackVec::<&[u8; BLOCK_LEN], MAX_SIMD_DEGREE>::new();
-    for parent in &mut parents_exact {
-        parents_array.push(parent.try_into().unwrap());
-    }
+    let (parent_blocks, remainder) = child_chaining_values.as_chunks::<BLOCK_LEN>();
+    let parents_so_far = parent_blocks.len();
     let flags = flags | PARENT;
     #[cfg(target_arch = "aarch64")]
     let on_sme2 = matches!(platform, Platform::SME2);
     #[cfg(not(target_arch = "aarch64"))]
     let on_sme2 = false;
     if on_sme2 {
-        // SME2's parent kernel reads a group of sixteen blocks through
-        // one pointer: the parents go to it as the run of memory they
-        // are, not as the table of borrows made above (which the other
-        // platforms take, and of which only the count is used here).
+        // SME2's parent kernel reads a contiguous run of 64-byte parent blocks
+        // directly, without constructing a pointer table.
         #[cfg(target_arch = "aarch64")]
         // Sound: the platform is SME2 only where detection found SME2
         // with 512-bit streaming vectors.
         unsafe {
-            sme2::hash_block_run(child_chaining_values.as_chunks::<BLOCK_LEN>().0.as_flattened(), key, flags, out)
+            sme2::hash_block_run(parent_blocks.as_flattened(), key, flags, out)
         };
     } else {
+        let mut parents_array = StackVec::<&[u8; BLOCK_LEN], MAX_SIMD_DEGREE>::new();
+        for parent in parent_blocks {
+            parents_array.push(parent);
+        }
         hash_many_rounded(
             platform,
             &parents_array,
@@ -994,35 +995,23 @@ pub(crate) fn compress_parents_parallel(child_chaining_values: &[u8], key: &CVWo
     }
 
     // If there's an odd child left over, it becomes an output.
-    let parents_so_far = parents_array.len();
-    if !parents_exact.remainder().is_empty() {
-        out[parents_so_far * OUT_LEN..][..OUT_LEN].copy_from_slice(parents_exact.remainder());
+    if !remainder.is_empty() {
+        out[parents_so_far * OUT_LEN..][..OUT_LEN].copy_from_slice(remainder);
         parents_so_far + 1
     } else {
         parents_so_far
     }
 }
 
-// Hash a subtree with the walk (src/tree.rs, `children`), condensing its
-// chaining values down to a single parent node. Don't compress that
-// last parent node, however. Instead, return its message bytes (the
-// concatenated chaining values of its children). This is necessary when the
-// first call to update() supplies a complete subtree, because the topmost
-// parent node of that subtree could end up being the root. It's also necessary
-// for extended output in the general case.
-//
-// This function is not used on inputs of 1 chunk or less. That's a
-// different codepath. Its arrays live in tree::root_children, out of line.
+// Hash a subtree with the walk (src/tree.rs, `children`), returning its two
+// child chaining values directly without flattening and splitting a 64-byte
+// block. This function is not used on inputs of 1 chunk or less.
 #[inline]
 #[doc(hidden)]
-pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8, platform: Platform) -> [u8; BLOCK_LEN] {
+pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u64, flags: u8, platform: Platform) -> [CVBytes; 2] {
     assert!(input.len() > CHUNK_LEN, "compress_subtree_wide requires more than one chunk");
     let kernels = tree::PlatformKernels { key, flags, platform };
-    let [left, right] = tree::root_children(&kernels, input, ahead, chunk_counter);
-    let mut block = [0u8; BLOCK_LEN];
-    block[..OUT_LEN].copy_from_slice(&left);
-    block[OUT_LEN..].copy_from_slice(&right);
-    block
+    tree::root_children(&kernels, input, ahead, chunk_counter)
 }
 
 // The root hash of an input of one chunk or less, in one kernel call. The
@@ -1350,7 +1339,7 @@ pub(crate) fn hash_many_serial(input: &[u8], message_len: usize, slot: usize, ke
 /// [`hash_serial_from`]).
 #[inline]
 fn hash_many_serial_from(platform: Platform, input: &[u8], message_len: usize, slot: usize, key: &CVWords, flags: u8, out: &mut [[u8; OUT_LEN]]) {
-    let turn = platform::Sme2Turn::take(platform, many::sme2_sized(message_len, out.len()));
+    let turn = platform::Sme2Turn::take(platform, many::sme2_sized(message_len, slot, out.len()));
     many::hash_many_on(input, message_len, slot, key, flags, out, turn.platform());
 }
 

@@ -94,13 +94,15 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
     // Empty messages: the NEON plans take a last block of 1 to 64 bytes
     // (hash_many_in's contract), so without this arm a batch of them stops
     // there (#251: CI's Cortex-A72, and every NEON machine since the pair
-    // kernels left).
+    // kernels left). Skip hashing altogether when no outputs are requested.
     if len == 0 {
-        outputs.fill(*crate::hash_serial_on(&[], key, flags, platform).as_bytes());
+        if !outputs.is_empty() {
+            outputs.fill(*crate::hash_serial_on(&[], key, flags, platform).as_bytes());
+        }
         return;
     }
     #[cfg(target_arch = "aarch64")]
-    if chunked(len) && platform_is_sme2(platform) && (outputs.len() >= 16 || outputs.len() >= sme2_chunked_min(len)) {
+    if chunked(len) && platform_is_sme2(platform) && outputs.len() >= sme2_chunked_min(len) {
         return hash_chunked(input, len, key, flags, outputs, platform);
     }
     #[cfg(target_arch = "aarch64")]
@@ -189,6 +191,13 @@ pub(crate) const SME2_TAIL_MIN_AFTER_GROUPS: usize = 5;
 /// 11.6; Mac P-core (jobs 268-271) about the same or lower. Each entry is
 /// the next count up.
 const SME2_CHUNKED_MIN: [usize; 16] = [0, 0, 7, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12];
+const _: () = {
+    let mut i = 2;
+    while i < SME2_CHUNKED_MIN.len() {
+        assert!(SME2_CHUNKED_MIN[i] > 0 && SME2_CHUNKED_MIN[i] <= 16);
+        i += 1;
+    }
+};
 
 pub(crate) fn sme2_chunked_min(len: usize) -> usize {
     SME2_CHUNKED_MIN[len.div_ceil(CHUNK_LEN)]
@@ -372,10 +381,8 @@ pub(crate) fn across_from(len: usize, platform: Platform) -> Option<usize> {
 #[inline(never)]
 fn hash_across(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     let slot = slot_len(len);
-    for (group, digests) in outputs.chunks_mut(ACROSS_GROUP).enumerate() {
-        let messages: crate::stack_vec::StackVec<&[u8], ACROSS_GROUP> =
-            (0..digests.len()).map(|m| &input[(group * ACROSS_GROUP + m) * slot..][..len]).collect();
-        hash_group_across(&messages, len, key, flags, digests, platform);
+    for (messages, digests) in input.chunks(slot * ACROSS_GROUP).zip(outputs.chunks_mut(ACROSS_GROUP)) {
+        hash_group_across(messages, len, slot, key, flags, digests, platform);
     }
 }
 
@@ -383,36 +390,45 @@ fn hash_across(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut
 #[cfg(any(target_arch = "x86_64", test))]
 pub(crate) const ACROSS_GROUP: usize = 16;
 
-/// [`hash_across`] for up to ACROSS_GROUP messages of `len` bytes each,
-/// wherever each lies (a batch's slots, or a queue's members).
+/// [`hash_across`] for up to `ACROSS_GROUP` contiguous `slot`-byte message
+/// slots of `len` bytes each.
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn hash_group_across(messages: &[&[u8]], len: usize, key: &CVWords, flags: u8, digests: &mut [[u8; OUT_LEN]], platform: Platform) {
+pub(crate) fn hash_group_across(messages: &[u8], len: usize, slot: usize, key: &CVWords, flags: u8, digests: &mut [[u8; OUT_LEN]], platform: Platform) {
     let chunks = len.div_ceil(CHUNK_LEN);
     // Size the stack CV table to the tree's chunk count (2 KiB for <= 4
     // chunks, 4 KiB for <= 8, 8 KiB for 9..15) so stack-backed batches of
     // shorter messages do not reserve 8 KiB on tight worker stacks.
     if chunks <= 4 {
-        hash_group_across_tier::<4>(messages, len, key, flags, digests, platform);
+        hash_group_across_tier::<4>(messages, len, slot, key, flags, digests, platform);
     } else if chunks <= 8 {
-        hash_group_across_tier::<8>(messages, len, key, flags, digests, platform);
+        hash_group_across_tier::<8>(messages, len, slot, key, flags, digests, platform);
     } else {
-        hash_group_across_tier::<ACROSS_CHUNKS>(messages, len, key, flags, digests, platform);
+        hash_group_across_tier::<ACROSS_CHUNKS>(messages, len, slot, key, flags, digests, platform);
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
-fn hash_group_across_tier<const CHUNKS: usize>(messages: &[&[u8]], len: usize, key: &CVWords, flags: u8, digests: &mut [[u8; OUT_LEN]], platform: Platform) {
+fn hash_group_across_tier<const CHUNKS: usize>(
+    messages: &[u8],
+    len: usize,
+    slot: usize,
+    key: &CVWords,
+    flags: u8,
+    digests: &mut [[u8; OUT_LEN]],
+    platform: Platform,
+) {
     let mut cvs = [[[0u8; OUT_LEN]; ACROSS_GROUP]; CHUNKS];
-    hash_group_across_with_cvs(&mut cvs, messages, len, key, flags, digests, platform);
+    hash_group_across_with_cvs(&mut cvs, messages, len, slot, key, flags, digests, platform);
 }
 
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn hash_group_across_with_cvs(
     cvs: &mut [[[u8; OUT_LEN]; ACROSS_GROUP]],
-    messages: &[&[u8]],
+    messages: &[u8],
     len: usize,
+    slot: usize,
     key: &CVWords,
     flags: u8,
     digests: &mut [[u8; OUT_LEN]],
@@ -420,14 +436,14 @@ fn hash_group_across_with_cvs(
 ) {
     const GROUP: usize = ACROSS_GROUP;
     let (full, chunks) = (len / CHUNK_LEN, len.div_ceil(CHUNK_LEN));
+    let count = digests.len();
     assert!(full >= 1 && chunks >= 2 && chunks < ACROSS_CHUNKS, "messages of 2 chunks to under ACROSS_CHUNKS");
     assert!(
-        messages.len() <= GROUP && messages.len() == digests.len() && messages.iter().all(|m| m.len() == len),
-        "up to ACROSS_GROUP messages of len bytes, a digest each"
+        count <= GROUP && slot >= len && messages.len() == count.checked_mul(slot).expect("across group byte length overflow"),
+        "up to ACROSS_GROUP contiguous slots of len bytes, a digest each"
     );
     {
-        let count = digests.len();
-        let message = |m: usize| messages[m];
+        let message = |m: usize| &messages[m * slot..][..len];
         for k in 0..full {
             let refs: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], GROUP> =
                 (0..count).map(|m| message(m)[k * CHUNK_LEN..][..CHUNK_LEN].try_into().unwrap()).collect();
@@ -493,17 +509,24 @@ fn subtree_across(cvs: &mut [[[u8; OUT_LEN]; 16]], first: usize, n: usize, count
     platform.hash_many(&lanes, key, 0, IncrementCounter::No, parent_flags, 0, 0, cvs[first][..count].as_flattened_mut());
 }
 
-/// Whether a batch of `count` messages of `len` bytes runs SME2 kernels
-/// (so takes the SME2 turn): sixteen messages or more; one-block messages
-/// from ONE_BLOCK_PAD_MIN; messages of up to a chunk from SME2_TAIL_MIN;
-/// messages of 2 to 15 chunks from sme2_chunked_min; and any message long
-/// enough for hash() to take the turn itself.
-pub(crate) fn sme2_sized(len: usize, count: usize) -> bool {
+/// Whether a batch of `count` messages of `len` bytes at stride `slot` runs
+/// SME2 kernels (so takes the SME2 turn): never for empty messages or zero
+/// outputs; packed `16/32/48`-byte batches only from 16 messages (fewer run
+/// NEON `8+3` + serial tail); padded one-block messages from `ONE_BLOCK_PAD_MIN`;
+/// multi-block single-chunk messages from `SME2_TAIL_MIN`; 2 to 15 chunks from
+/// `sme2_chunked_min`; and any message long enough for `hash()` to take SME2.
+pub(crate) fn sme2_sized(len: usize, slot: usize, count: usize) -> bool {
+    if len == 0 || count == 0 {
+        return false;
+    }
+    if packed(len, slot) {
+        return count >= crate::SME2_SIZED_BATCH;
+    }
     count >= crate::SME2_SIZED_BATCH
-        || (len > 0 && len <= BLOCK_LEN && count >= ONE_BLOCK_PAD_MIN)
+        || (len <= BLOCK_LEN && count >= ONE_BLOCK_PAD_MIN)
         || (len > BLOCK_LEN && len <= CHUNK_LEN && count >= SME2_TAIL_MIN)
         || (chunked(len) && count >= sme2_chunked_min(len))
-        || (len >= crate::SME2_SIZED_LEN && count >= 1)
+        || len >= crate::SME2_SIZED_LEN
 }
 
 /// Up to TABLE one-block messages (N = BLOCK_LEN, whole blocks) in
@@ -677,17 +700,15 @@ pub(crate) const ONE_BLOCK_PAD_AFTER_GROUPS: usize = 5;
 fn fill_ptrs<'s>(slots: &'s mut crate::stack_vec::StackVec<*const u8, TABLE>, messages: &[u8], stride: usize, count: usize, lanes: usize) -> &'s [*const u8] {
     const { assert!(TABLE % 16 == 0, "TABLE must be a multiple of the 16-lane SME2 group width") };
     assert!(
-        stride > 0 && 0 < count && count <= lanes && lanes <= TABLE && count <= messages.chunks_exact(stride).len(),
-        "a table of 1 to TABLE lanes over the messages"
+        slots.is_empty() && stride > 0 && 0 < count && count <= lanes && lanes <= TABLE && count <= messages.chunks_exact(stride).len(),
+        "an empty table of 1 to TABLE lanes over the messages"
     );
     let mut last = messages.as_ptr();
     for message in messages.chunks_exact(stride).take(count) {
         last = message.as_ptr();
         slots.push(last);
     }
-    for _ in count..lanes {
-        slots.push(last);
-    }
+    slots.extend(core::iter::repeat_n(last, lanes - count));
     slots.as_slice()
 }
 
@@ -819,20 +840,23 @@ mod test {
     /// or more of SME2_SIZED_LEN (16 chunks) or longer.
     #[test]
     fn test_sme2_sized_exactly() {
-        assert!(sme2_sized(0, 16) && !sme2_sized(0, 15), "sixteen messages of any length, empty ones too; fewer empty ones never");
-        assert!(sme2_sized(BLOCK_LEN, 11) && !sme2_sized(BLOCK_LEN, 10), "one-block messages from eleven");
-        assert!(sme2_sized(1, 11) && !sme2_sized(1, 10), "a byte is a one-block message");
-        assert!(!sme2_sized(0, 11), "an empty message is no block");
-        assert!(sme2_sized(BLOCK_LEN + 1, 10) && !sme2_sized(BLOCK_LEN + 1, 9), "over a block, up to a chunk, from ten");
-        assert!(sme2_sized(CHUNK_LEN, 10) && !sme2_sized(CHUNK_LEN, 9));
-        assert!(!sme2_sized(BLOCK_LEN, 10) && sme2_sized(BLOCK_LEN, 16), "a block at ten: neither rule; sixteen: the batch rule");
-        // 2 to 15 chunks: the chunked rule on an SME2 build; elsewhere only
-        // the batch rule (sixteen) reaches them.
+        assert!(!sme2_sized(0, BLOCK_LEN, 16) && !sme2_sized(0, BLOCK_LEN, 15), "empty messages replicate one digest and never take SME2");
+        assert!(!sme2_sized(32, 32, 15) && sme2_sized(32, 32, 16), "packed 16/32/48-byte batches take SME2 only from 16");
+        assert!(!sme2_sized(16, 16, 11) && sme2_sized(16, 16, 16));
+        assert!(!sme2_sized(48, 48, 15) && sme2_sized(48, 48, 16));
+        assert!(sme2_sized(BLOCK_LEN, BLOCK_LEN, 11) && !sme2_sized(BLOCK_LEN, BLOCK_LEN, 10), "one-block messages from eleven");
+        assert!(sme2_sized(1, BLOCK_LEN, 11) && !sme2_sized(1, BLOCK_LEN, 10), "a byte is a one-block message");
+        assert!(sme2_sized(BLOCK_LEN + 1, 2 * BLOCK_LEN, 10) && !sme2_sized(BLOCK_LEN + 1, 2 * BLOCK_LEN, 9), "over a block, up to a chunk, from ten");
+        assert!(sme2_sized(CHUNK_LEN, CHUNK_LEN, 10) && !sme2_sized(CHUNK_LEN, CHUNK_LEN, 9));
+        assert!(!sme2_sized(BLOCK_LEN, BLOCK_LEN, 10) && sme2_sized(BLOCK_LEN, BLOCK_LEN, 16), "a block at ten: neither rule; sixteen: the batch rule");
         let two_chunks_min = if cfg!(target_arch = "aarch64") { sme2_chunked_min(2 * CHUNK_LEN) } else { 16 };
-        assert!(sme2_sized(2 * CHUNK_LEN, two_chunks_min) && !sme2_sized(2 * CHUNK_LEN, two_chunks_min - 1));
-        assert!(!sme2_sized(15 * CHUNK_LEN, 1) && !sme2_sized(CHUNK_LEN + 1, 1));
-        assert!(sme2_sized(16 * CHUNK_LEN, 1) && !sme2_sized(16 * CHUNK_LEN - 1, 1), "sixteen chunks, one message: long enough alone");
-        assert!(sme2_sized(1 << 20, 1) && !sme2_sized(1 << 20, 0), "a long message, none of them: nothing");
+        assert!(sme2_sized(2 * CHUNK_LEN, 2 * CHUNK_LEN, two_chunks_min) && !sme2_sized(2 * CHUNK_LEN, 2 * CHUNK_LEN, two_chunks_min - 1));
+        assert!(!sme2_sized(15 * CHUNK_LEN, 15 * CHUNK_LEN, 1) && !sme2_sized(CHUNK_LEN + 1, 2 * CHUNK_LEN, 1));
+        assert!(
+            sme2_sized(16 * CHUNK_LEN, 16 * CHUNK_LEN, 1) && !sme2_sized(16 * CHUNK_LEN - 1, 16 * CHUNK_LEN, 1),
+            "sixteen chunks, one message: long enough alone"
+        );
+        assert!(sme2_sized(1 << 20, 1 << 20, 1) && !sme2_sized(1 << 20, 1 << 20, 0), "a long message, none of them: nothing");
     }
 
     /// Actual kernel widths dispatched on x86-64 (recorded at `Platform::hash_many`

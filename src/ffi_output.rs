@@ -138,11 +138,15 @@ pub(crate) fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len:
     })
 }
 
-/// Padded lane count for a single `<= TILE` tile of multi-block prefix
-/// `hash_many_blocks`: round `9..15` lanes up to 16 on AVX-512 (`width == 16`)
-/// and `5..7` lanes up to 8 on both AVX-512 and AVX2 so prefix hashing avoids
-/// scalar tails.
+/// Padded lane count for a `<= 16`-item multi-block prefix `hash_many_blocks`
+/// call (shared by `multi_block_short_last_tile` and `each::by_blocks_at_once`):
+/// returns `count` unchanged when `width == 0`, rounds `9..15` up to 16 on
+/// AVX-512 (`width == 16`), and rounds `5..7` up to 8 (and `13..15` up to 16)
+/// on both AVX-512 and AVX2 so prefix hashing avoids scalar tails.
 pub(crate) fn prefix_padded_count(count: usize, width: usize) -> usize {
+    if width == 0 {
+        return count;
+    }
     if width == 16 && count % 16 >= X86_PAD16_MIN {
         count.next_multiple_of(16)
     } else if count % 8 >= 5 {
@@ -225,26 +229,11 @@ pub(crate) fn multi_block_short_last(
     }
 }
 
-/// Padded lane count for a `<= 16`-item prefix bucket in `each::by_blocks_at_once`:
-/// rounds `9..=15 -> 16` on AVX-512, `5..=7 -> 8` on AVX2/AVX-512, and
-/// `13..=15 -> 16` on AVX2 (avoiding a 5..7-lane scalar tail after 8 lanes).
-pub(crate) fn by_blocks_prefix_padded(n: usize, width: usize) -> usize {
-    if width == 16 && n >= X86_PAD16_MIN {
-        16
-    } else if width != 0 && (5..8).contains(&n) {
-        8
-    } else if width == 8 && (13..16).contains(&n) {
-        16
-    } else {
-        n
-    }
-}
-
 /// Pad `inputs` in place for a `<= 16`-item prefix bucket in
 /// `each::by_blocks_at_once`, returning the padded lane count.
 pub(crate) fn pad_by_blocks_inputs<const GROUP: usize>(inputs: &mut crate::stack_vec::StackVec<*const u8, GROUP>, platform: Platform) -> usize {
     let n = inputs.len();
-    let target = by_blocks_prefix_padded(n, lanes(platform));
+    let target = prefix_padded_count(n, lanes(platform));
     let last = *inputs.last().unwrap();
     inputs.extend(core::iter::repeat_n(last, target - n));
     target

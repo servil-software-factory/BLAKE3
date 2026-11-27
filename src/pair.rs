@@ -29,13 +29,7 @@ pub(crate) fn takes(platform: Platform, len: usize) -> bool {
 /// assembly directly on x86-64.)
 #[inline]
 pub(crate) fn takes_platform(platform: Platform) -> bool {
-    match platform {
-        #[cfg(target_arch = "x86_64")]
-        Platform::AVX2 => true,
-        #[cfg(target_arch = "x86_64")]
-        Platform::AVX512 => true,
-        _ => false,
-    }
+    matches!(platform, Platform::AVX2 | Platform::AVX512)
 }
 
 /// The chaining values of `input`'s two chunks, at `chunk_counter` and the
@@ -45,31 +39,31 @@ pub(crate) fn parent(input: &[u8], key: &CVWords, chunk_counter: u64, flags: u8,
     let (whole, partial) = input.split_at(CHUNK_LEN);
     let paired = partial.len().div_ceil(BLOCK_LEN) - 1;
     let mut out = [0u8; BLOCK_LEN];
-    // Sound: each pointer reaches `blocks` whole blocks (the whole chunk's
-    // 16; the partial chunk's `paired`, all but its last), `out` has room
-    // for the values, and `takes` admitted only a platform the CPU has.
+    // The first `paired` blocks of both chunks, side by side.
+    let mut halfway = [0u8; 2 * OUT_LEN];
+    // Sound: each pointer reaches `paired` whole blocks, `halfway` holds 2 CVs, and `takes` verified AVX2/AVX-512.
     unsafe {
-        // The first `paired` blocks of both chunks, side by side.
-        let mut halfway = [0u8; 2 * OUT_LEN];
         hash_many_blocks(platform, &[whole.as_ptr(), partial.as_ptr()], paired, key, chunk_counter, true, flags, CHUNK_START, 0, &mut halfway);
-        // The whole chunk's other blocks, from its chaining value so far.
-        let cv = words_from_le_bytes_32(halfway[..OUT_LEN].try_into().unwrap());
-        let rest = whole[paired * BLOCK_LEN..].as_ptr();
-        hash_many_blocks(platform, &[rest], CHUNK_LEN / BLOCK_LEN - paired, &cv, chunk_counter, false, flags, 0, CHUNK_END, &mut out[..OUT_LEN]);
-        // The partial chunk's last block, zero-padded.
-        let mut cv = words_from_le_bytes_32(halfway[OUT_LEN..].try_into().unwrap());
-        let last = &partial[paired * BLOCK_LEN..];
-        let mut block = [0u8; BLOCK_LEN];
-        block[..last.len()].copy_from_slice(last);
-        platform.compress_in_place(&mut cv, &block, u8::try_from(last.len()).expect("last block <= 64"), chunk_counter + 1, flags | CHUNK_END);
-        out[OUT_LEN..].copy_from_slice(&crate::hasher::le_bytes(&cv));
     }
+    // The whole chunk's other blocks, from its chaining value so far.
+    let cv = words_from_le_bytes_32(halfway[..OUT_LEN].try_into().unwrap());
+    let rest = whole[paired * BLOCK_LEN..].as_ptr();
+    // Sound: `rest` reaches `16 - paired` whole blocks inside `whole`, `out[..OUT_LEN]` holds 1 CV, and `takes` verified AVX2/AVX-512.
+    unsafe {
+        hash_many_blocks(platform, &[rest], CHUNK_LEN / BLOCK_LEN - paired, &cv, chunk_counter, false, flags, 0, CHUNK_END, &mut out[..OUT_LEN]);
+    }
+    // The partial chunk's last block, zero-padded.
+    let mut cv = words_from_le_bytes_32(halfway[OUT_LEN..].try_into().unwrap());
+    let last = &partial[paired * BLOCK_LEN..];
+    let mut block = [0u8; BLOCK_LEN];
+    block[..last.len()].copy_from_slice(last);
+    platform.compress_in_place(&mut cv, &block, u8::try_from(last.len()).expect("last block <= 64"), chunk_counter + 1, flags | CHUNK_END);
+    out[OUT_LEN..].copy_from_slice(&crate::hasher::le_bytes(&cv));
     out
 }
 
-/// The platform's assembly `hash_many`, with the block count at run time
-/// (AVX-512, AVX2, and SSE4.1 assembly on x86-64; per-input compression on
-/// non-x86 test paths).
+/// The platform's x86-64 assembly `hash_many` (AVX-512, AVX2, and SSE4.1) with
+/// the block count at run time.
 ///
 /// # Safety
 ///
@@ -98,40 +92,19 @@ pub(crate) unsafe fn hash_many_blocks(
     #[cfg(test)]
     let _ = BLOCKS_CALLS.try_with(|c| c.borrow_mut().push((blocks, inputs.len())));
     let (n, input, key_ptr, out_ptr) = (inputs.len(), inputs.as_ptr(), key.as_ptr(), out.as_mut_ptr());
-    #[cfg(target_arch = "x86_64")]
-    {
-        type HashManyFn = unsafe extern "C" fn(*const *const u8, usize, usize, *const u32, u64, bool, u8, u8, u8, *mut u8);
-        // Select the assembly entry point once so the test kernel-identity
-        // record and the actual FFI call cannot diverge (#570).
-        let entry: HashManyFn = match platform {
-            Platform::AVX512 => crate::avx512::ffi::blake3_servil_hash_many_avx512,
-            Platform::AVX2 => crate::avx2::ffi::blake3_servil_hash_many_avx2,
-            Platform::SSE41 => crate::sse41::ffi::blake3_servil_hash_many_sse41,
-        };
-        #[cfg(test)]
-        crate::record_hash_many_call(blocks, n);
-        crate::ran_kernel(entry as *const ());
-        // Sound: `platform` proves ISA support for `entry`; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
-        unsafe { entry(input, n, blocks, key_ptr, counter, increment, flags, flags_start, flags_end, out_ptr) }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = (n, input, key_ptr, out_ptr);
-        // Elsewhere one input after another on the platform's compression
-        // (for tests of hash_many's batches on non-x86 platforms). Does not
-        // record into `KERNEL_HASH_MANY_CALLS` so SIMD dispatch tests catch
-        // accidental scalar fallbacks.
-        for (i, &p) in inputs.iter().enumerate() {
-            let mut cv = *key;
-            for b in 0..blocks {
-                // Sound: `p` reaches `blocks` blocks.
-                let block: &[u8; BLOCK_LEN] = unsafe { &*(p.add(b * BLOCK_LEN) as *const [u8; BLOCK_LEN]) };
-                let f = flags | if b == 0 { flags_start } else { 0 } | if b + 1 == blocks { flags_end } else { 0 };
-                platform.compress_in_place(&mut cv, block, u8::try_from(BLOCK_LEN).unwrap(), counter + if increment { i as u64 } else { 0 }, f);
-            }
-            out[i * OUT_LEN..][..OUT_LEN].copy_from_slice(&crate::hasher::le_bytes(&cv));
-        }
-    }
+    type HashManyFn = unsafe extern "C" fn(*const *const u8, usize, usize, *const u32, u64, bool, u8, u8, u8, *mut u8);
+    // Select the assembly entry point once so the test kernel-identity
+    // record and the actual FFI call cannot diverge (#570).
+    let entry: HashManyFn = match platform {
+        Platform::AVX512 => crate::avx512::ffi::blake3_servil_hash_many_avx512,
+        Platform::AVX2 => crate::avx2::ffi::blake3_servil_hash_many_avx2,
+        Platform::SSE41 => crate::sse41::ffi::blake3_servil_hash_many_sse41,
+    };
+    #[cfg(test)]
+    crate::record_hash_many_call(blocks, n);
+    crate::ran_kernel(entry as *const ());
+    // Sound: `platform` proves ISA support for `entry`; `inputs` holds valid `blocks`-block pointers and `out` was asserted to hold `n * OUT_LEN` bytes.
+    unsafe { entry(input, n, blocks, key_ptr, counter, increment, flags, flags_start, flags_end, out_ptr) }
 }
 
 #[cfg(test)]

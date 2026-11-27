@@ -234,6 +234,35 @@ class Reasons(unittest.TestCase):
             "}\n"
         )
         self.assertEqual([n for n, _ in ur.debug_assert_without_reason(same_line_donated)], [3, 4])
+        # Nested generics (`Vec<Vec<u8>>`) in a test-only struct field must
+        # close both `<` levels on `>>` and stop at `,`, never masking the next field.
+        nested_generic_field = (
+            "pub struct S {\n"
+            "    #[cfg(test)] scratch: Vec<Vec<u8>>,\n"
+            "    pub shipped: [u8; { debug_assert!(true); unsafe { 1 } }],\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(nested_generic_field)], [3])
+        self.assertEqual([n for n, _ in ur.without_reason(nested_generic_field)], [3])
+        # Trailing comment after a same-line masked `#[cfg(test)]` assertion
+        # cannot satisfy an earlier shipped assertion on the same line.
+        trailing_donated = (
+            "fn f(x: u32) {\n"
+            "    debug_assert!(x > 0); #[cfg(test)] debug_assert!(x < 10); // Debug-only: test upper bound.\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(trailing_donated)], [2])
+        # Underscores alone are punctuation, not a stated rationale.
+        underscores = (
+            "fn f(p: &u8) -> u8 {\n"
+            "    // Debug-only: ___\n"
+            "    debug_assert!(*p < 10);\n"
+            "    // Sound: ___\n"
+            "    unsafe { *p }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.debug_assert_without_reason(underscores)], [3])
+        self.assertEqual([n for n, _ in ur.without_reason(underscores)], [5])
         # Non-ASCII Unicode rationales must still be accepted.
         unicode_ok = (
             "fn f(p: &u8) -> u8 {\n"

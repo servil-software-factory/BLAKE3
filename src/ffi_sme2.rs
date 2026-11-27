@@ -169,7 +169,7 @@ pub unsafe fn hash_many<const N: usize>(
             }
             done = group * GROUP;
         } else if (2..=16).contains(&blocks) && !increment_counter.yes() {
-            // Separate messages of 2 to 16 whole blocks, every one at counter zero.
+            // Separate messages of 2 to 16 whole blocks sharing `counter`.
             // Sound: caller verified SME2 support; `inputs` holds `full_groups * GROUP` valid `N`-byte pointers and `out` was asserted large enough above.
             let lanes = unsafe {
                 ffi::blake3_servil_sme2_hash16_messages_512(

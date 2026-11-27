@@ -50,8 +50,8 @@ TEST_ONLY_FILES = frozenset({
 REACH = 8
 UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
 DEBUG_ASSERT = re.compile(r"\bdebug_assert(?:_eq|_ne)?\s*!")
-SOUND_RE = re.compile(r"Sound:(?:(?!/\*|\*/)[^\w])*\w")
-DEBUG_ONLY_RE = re.compile(r"Debug-only:(?:(?!/\*|\*/)[^\w])*\w")
+SOUND_RE = re.compile(r"Sound:(?:(?!/\*|\*/)[\W_])*[^\W_]")
+DEBUG_ONLY_RE = re.compile(r"Debug-only:(?:(?!/\*|\*/)[\W_])*[^\W_]")
 _OUTER_CFG_RE = re.compile(r"^#\[\s*cfg\s*\(")
 _CFG_CALL_RE = re.compile(r"\bcfg\s*\(")
 _PUB_PREFIX_RE = re.compile(r"pub(?:\s*\([^)]*\))?\s+")
@@ -449,11 +449,14 @@ def _test_item_spans(code):
             elif ch == ">" and not starts_item_kw and not seen_top_brace and brace == 0 and paren == 0 and bracket == 0:
                 prev = code[j - 1] if j > 0 else ""
                 nxt = code[j + 1] if j + 1 < n else ""
-                if prev not in ("-", "=", ">") and nxt not in (">", "="):
-                    if angle == 0:
-                        end = j
-                        break
-                    angle -= 1
+                if angle > 0:
+                    # Inside `<...>` generics, every `>` (including `>>` in
+                    # `Vec<Vec<u8>>`) closes one nesting level unless `->`/`=>`.
+                    if prev not in ("-", "="):
+                        angle -= 1
+                elif prev not in ("-", "=", ">") and nxt not in (">", "="):
+                    end = j
+                    break
             elif ch == "{":
                 if brace == 0 and paren == 0 and bracket == 0:
                     seen_top_brace = True
@@ -641,9 +644,12 @@ def debug_assert_without_reason(text):
                     left_bound = max(left_bound, ts_end)
         right_bound = call_end
         if not masked[call_end:line_end].strip():
-            # Nothing follows this invocation on `e_idx`, so a trailing comment
-            # on `e_idx` belongs to it.
+            # Nothing follows this invocation on `e_idx`, unless a masked
+            # `#[cfg(test)]` statement sits between `call_end` and `line_end`.
             right_bound = line_end
+            for ts_start, ts_end in test_spans:
+                if ts_start >= call_end and ts_start < line_end and ts_end > ts_start:
+                    right_bound = min(right_bound, ts_start)
         has_reason = _comment_has_reason(comm_text[left_bound:right_bound], DEBUG_ONLY_RE)
 
         # 2. Check directly attached comment lines above ONLY if no other code

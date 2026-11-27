@@ -141,7 +141,7 @@ impl Drop for Sme2Turn {
 /// What this process has detected. The low byte: the platform `initialize`
 /// detected, as its discriminant (1 and up), or 0 before it has run. Bits 8
 /// and 9: whether the cores are Apple's, and whether that has been asked
-/// (`apple_cores_cached`: AArch64's kernel plans differ by it, the self-test's
+/// (`neon_hybrid::apple_cores`: AArch64's kernel plans differ by it, the self-test's
 /// too, which runs before the platform is recorded). One word, private to this
 /// module so no other module can corrupt the low byte that licenses unsafe
 /// instructions, while keeping both answers on one cache line (#395).
@@ -277,36 +277,28 @@ impl Platform {
 
     /// [`Platform::detect`] without the startup self-test: an assembly
     /// platform on every supported machine, or the process stops.
-    #[allow(unreachable_code)]
     pub(crate) fn detect_unchecked() -> Self {
-        // Every x86-64 build assembles every kernel (build.rs), so a CPU
-        // runs the widest it has; one without SSE4.1 is not supported, and
-        // the process stops here, in the startup self-test, as a build for
-        // an unsupported target stops (official BLAKE3 runs there).
         #[cfg(target_arch = "x86_64")]
-        match x86_platform(avx512_detected(), avx2_detected(), sse41_detected()) {
-            Some(platform) => return platform,
-            None => crate::self_test::unsupported(format_args!(
-                "blake3-servil runs on x86-64 CPUs with SSSE3 and SSE4.1 (Intel since 2008, AMD since 2011); this CPU lacks them: use official BLAKE3 (https://github.com/BLAKE3-team/BLAKE3)"
-            )),
-        }
-        // SME2 is detected at runtime; the kernels also require a 512-bit
-        // streaming vector length, which sme2_detected() checks. Without
-        // SME2 the NEON backend (integer + vector hybrid kernels) is the
-        // selection, and it is a real result in its own right; a benchmark
-        // that cares which one ran reads it back from detect().
-        #[cfg(target_arch = "aarch64")]
         {
-            if sme2_detected() {
-                return Platform::SME2;
+            // Every x86-64 build assembles every kernel (build.rs), so a CPU
+            // runs the widest it has; one without SSE4.1 is not supported, and
+            // the process stops here, in the startup self-test, as a build for
+            // an unsupported target stops (official BLAKE3 runs there).
+            match x86_platform(avx512_detected(), avx2_detected(), sse41_detected()) {
+                Some(platform) => platform,
+                None => crate::self_test::unsupported(format_args!(
+                    "blake3-servil runs on x86-64 CPUs with SSSE3 and SSE4.1 (Intel since 2008, AMD since 2011); this CPU lacks them: use official BLAKE3 (https://github.com/BLAKE3-team/BLAKE3)"
+                )),
             }
         }
-        // NEON is mandatory on AArch64.
         #[cfg(target_arch = "aarch64")]
         {
-            return Platform::NEON;
+            // SME2 is detected at runtime; the kernels also require a 512-bit
+            // streaming vector length, which sme2_detected() checks. Without
+            // SME2 the NEON backend (integer + vector hybrid kernels) is the
+            // selection (NEON is mandatory on AArch64).
+            if sme2_detected() { Platform::SME2 } else { Platform::NEON }
         }
-        unreachable!("build.rs builds for x86-64 and AArch64 alone")
     }
 
     /// The selection's name, for reports.
@@ -373,9 +365,7 @@ impl Platform {
             // The scalar kernel k1 keeps the state in registers; it runs on
             // every AArch64 core, so the NEON and SME2 platforms share it.
             #[cfg(target_arch = "aarch64")]
-            Platform::NEON => crate::neon_hybrid::compress_in_place(cv, block, block_len, counter, flags),
-            #[cfg(target_arch = "aarch64")]
-            Platform::SME2 => crate::neon_hybrid::compress_in_place(cv, block, block_len, counter, flags),
+            Platform::NEON | Platform::SME2 => crate::neon_hybrid::compress_in_place(cv, block, block_len, counter, flags),
         }
     }
 
@@ -391,16 +381,15 @@ impl Platform {
         crate::counted(crate::Counted::CompressBlocks);
         assert!((1..=16).contains(&count));
         assert!(blocks.len() >= count * BLOCK_LEN);
-        // The integer-only kernel runs on every AArch64 core.
         #[cfg(target_arch = "aarch64")]
         {
+            // The integer-only kernel runs on every AArch64 core.
             // Sound: `count` is asserted in `1..=16` and `blocks` holds at least `count * BLOCK_LEN` readable bytes.
             unsafe {
                 crate::neon_hybrid::compress_blocks(cv, blocks.as_ptr(), count, counter, flags, flags_start);
             }
-            return;
         }
-        #[allow(unreachable_code)]
+        #[cfg(target_arch = "x86_64")]
         {
             let mut block_flags = flags | flags_start;
             for block in blocks[..count * BLOCK_LEN].chunks_exact(BLOCK_LEN) {
@@ -420,9 +409,7 @@ impl Platform {
             Platform::AVX512 => unsafe { crate::avx512::compress_xof(cv, block, block_len, counter, flags) },
             // The one-block extended-output kernel (neon_hybrid::xof_block).
             #[cfg(target_arch = "aarch64")]
-            Platform::NEON => crate::neon_hybrid::xof_block(cv, block, block_len, counter, flags),
-            #[cfg(target_arch = "aarch64")]
-            Platform::SME2 => crate::neon_hybrid::xof_block(cv, block, block_len, counter, flags),
+            Platform::NEON | Platform::SME2 => crate::neon_hybrid::xof_block(cv, block, block_len, counter, flags),
         }
     }
 

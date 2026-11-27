@@ -1183,7 +1183,7 @@ mod test {
             assert!(out.iter().all(|digest| *digest == expected));
             assert!(hashers.iter().all(|h| h.count() == 0));
         }
-        // Pin by_blocks_prefix_padded boundaries and observe real (blocks, padded)
+        // Pin prefix_padded_count boundaries and observe real (blocks, padded)
         // calls at pair::hash_many_blocks plus exact output16/output8 call counts
         // across every platform (including count=2, 2+ groups, and AVX2 13..=15 -> 16).
         for (n, w, want) in [
@@ -1204,7 +1204,7 @@ mod test {
             (15, 16, 16),
             (16, 16, 16),
         ] {
-            assert_eq!(crate::ffi_output::by_blocks_prefix_padded(n, w), want, "by_blocks_prefix_padded({n}, {w})");
+            assert_eq!(crate::ffi_output::prefix_padded_count(n, w), want, "prefix_padded_count({n}, {w})");
         }
         let lens = [0usize, 1, 24, 48, 63, 64, 65, 96, 128, 192, 255, 384, 512, 768, 1000, 1024];
         for plat in crate::test::every_platform() {
@@ -1217,7 +1217,7 @@ mod test {
                 crate::pair::BLOCKS_CALLS.with(|c| c.borrow_mut().clear());
                 hash_by_blocks(&slices, crate::IV, 0, &mut out, plat);
                 let calls = crate::pair::BLOCKS_CALLS.with(|c| c.borrow().clone());
-                assert_eq!(calls, vec![(3, crate::ffi_output::by_blocks_prefix_padded(n, pw))], "prefix padding {plat:?} n={n}");
+                assert_eq!(calls, vec![(3, crate::ffi_output::prefix_padded_count(n, pw))], "prefix padding {plat:?} n={n}");
                 for (i, buf) in bufs.iter().enumerate() {
                     assert_eq!(out[i], *blake3::hash(buf).as_bytes(), "prefix {plat:?} n={n} item {i}");
                 }
