@@ -717,7 +717,9 @@ impl Hasher {
     ///
     /// The internal buffer size this method uses may change at any time, and it may be different
     /// for different targets. The only guarantee is that it will be large enough for all of this
-    /// crate's SIMD implementations on the current platform.
+    /// crate's SIMD implementations on the current platform. On the current implementation the
+    /// initial read allocates and zero-initializes a 64 KiB stack buffer before promoting to 1 MiB
+    /// on the heap if the stream fills it, so very small readers pay that fixed stack-zeroing cost.
     ///
     /// The most common implementer of
     /// [`std::io::Read`](https://doc.rust-lang.org/std/io/trait.Read.html) might be

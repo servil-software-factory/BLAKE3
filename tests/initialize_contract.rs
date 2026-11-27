@@ -20,4 +20,10 @@ fn every_platform_constructor_before_initialize_panics() {
     };
     assert_panics("Platform::detect", Platform::detect);
     assert_panics("Platform::own_core", Platform::own_core);
+    // Even an empty counter range must enforce initialize() (after validating
+    // template/word bounds) before returning.
+    let err = std::panic::catch_unwind(|| {
+        blake3_servil_core::throughput::hash_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 4], 0, 0, &mut []);
+    });
+    assert!(err.is_err(), "empty hash_counter_range must panic before initialize()");
 }
