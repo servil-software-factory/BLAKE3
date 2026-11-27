@@ -1,11 +1,13 @@
 //! Multithreaded hashing over every CPU, with concurrent callers served
-//! round-robin.
+//! across shared sources (lowest-source-first with periodic fair turns).
 //!
 //! This module is crate-internal. The public entry points are
-//! [`crate::hash_multithreaded`], [`crate::hash_with`], and their batch
-//! forms, whose contracts speak of
-//! threads alone; pieces and the pool are how those contracts
-//! are met, and this file is where they are explained.
+//! [`crate::throughput::hash_multithreaded`],
+//! [`crate::throughput::hash_many_multithreaded`],
+//! [`crate::throughput::hash_each_multithreaded`], and
+//! [`crate::throughput::Pipeline`], whose contracts speak of threads alone;
+//! pieces and the pool are how those contracts are met, and this file is
+//! where they are explained.
 //!
 //! # Pieces
 //!
@@ -2485,11 +2487,12 @@ pub(crate) mod places {
                 assert!(now() - started < std::time::Duration::from_secs(5), "the workers kept to each place: {:?} of {:?}", kept_to(), places.count);
                 std::thread::yield_now();
             }
+            let place0_cpus = bits(&places.cpus[0]).len();
             for me in 0..workers {
                 assert_eq!(
                     places.of_worker[me] as usize,
-                    usize::from(me + 1 >= cpus.len().div_ceil(2) && me + 1 < cpus.len()),
-                    "worker {me}: the starter's place first, then the other, then around"
+                    usize::from(me + 1 >= place0_cpus && me + 1 < cpus.len()),
+                    "worker {me}: the starter's place ({place0_cpus} CPUs) first, then the other, then around"
                 );
             }
             // At rest and settled: a worker in its place parks, and one
@@ -3135,7 +3138,7 @@ impl Pool {
 
     /// Wake workers for `wanted` pieces of new work (crate::park).
     pub(crate) fn wake_for(&self, wanted: usize) {
-        self.park.wake_for(wanted, self.workers());
+        self.park.wake_for(wanted);
     }
 
     /// The pool's workers: every thread but the calling one.
@@ -3277,13 +3280,13 @@ pub(crate) mod sources {
         finish: crate::finish::Finish,
     }
 
-    // Sound: every slot is written by one publisher after the previous claimer
-    // copied its fields out (across Release/Acquire on `published` / `claimed`);
-    // action words are atomics, `Finish::owner` is synchronized by its mutex,
-    // and the remaining fields are atomic.
-    unsafe impl Sync for Source {}
-    // Sound: `Source` holds only atomics, `Finish` (mutex-synchronized), and self-synchronized raw action slots.
-    unsafe impl Send for Source {}
+    // `Send` and `Sync` are derived automatically by the compiler because every
+    // field of `Source` is atomic or `Finish` (which is `Send + Sync`).
+    #[cfg(test)]
+    const _: fn() = || {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Source>();
+    };
 
     /// What a claim takes: a stream's task, a pipeline's action, or a run
     /// of a job's pieces (`n` from `index`, consecutive).

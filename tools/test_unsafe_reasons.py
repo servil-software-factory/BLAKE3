@@ -52,7 +52,6 @@ class Reasons(unittest.TestCase):
             "capi/src/lib.rs",
             "version/src/lib.rs",
             "build.rs",
-            "threads/build.rs",
             "version/build.rs",
             "version/build_version.rs",
         ):

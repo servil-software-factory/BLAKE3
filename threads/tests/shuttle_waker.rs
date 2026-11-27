@@ -142,3 +142,61 @@ fn overwrite_and_clear_drop_wakers_and_prevent_spurious_wakes() {
         3,
     );
 }
+
+#[test]
+fn register_overwrite_wakes_replacement_and_clear_suppresses_wake() {
+    use core::sync::atomic::AtomicUsize;
+    struct CountWake(AtomicUsize);
+    fn make_count_waker(state: &Arc<CountWake>) -> Waker {
+        unsafe fn clone_fn(ptr: *const ()) -> RawWaker {
+            let arc = unsafe { Arc::from_raw(ptr as *const CountWake) };
+            let cloned = Arc::clone(&arc);
+            core::mem::forget(arc);
+            RawWaker::new(Arc::into_raw(cloned) as *const (), &VTABLE)
+        }
+        unsafe fn wake_fn(ptr: *const ()) {
+            let arc = unsafe { Arc::from_raw(ptr as *const CountWake) };
+            arc.0.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe fn wake_by_ref_fn(ptr: *const ()) {
+            let arc = unsafe { Arc::from_raw(ptr as *const CountWake) };
+            arc.0.fetch_add(1, Ordering::SeqCst);
+            core::mem::forget(arc);
+        }
+        unsafe fn drop_fn(ptr: *const ()) {
+            drop(unsafe { Arc::from_raw(ptr as *const CountWake) });
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
+        let raw = RawWaker::new(Arc::into_raw(Arc::clone(state)) as *const (), &VTABLE);
+        unsafe { Waker::from_raw(raw) }
+    }
+
+    shuttle::check_dfs(
+        || {
+            let slot = WakerSlot::new();
+            let a = Arc::new(CountWake(AtomicUsize::new(0)));
+            let b = Arc::new(CountWake(AtomicUsize::new(0)));
+            let wa = make_count_waker(&a);
+            let wb = make_count_waker(&b);
+
+            // Replacing A with distinct B must deliver a subsequent wake to B only.
+            slot.register(&Context::from_waker(&wa));
+            slot.register(&Context::from_waker(&wb));
+            slot.notify_after_seqcst();
+            assert_eq!(a.0.load(Ordering::SeqCst), 0, "replaced waker must not be woken");
+            assert_eq!(b.0.load(Ordering::SeqCst), 1, "replacement waker must be woken once");
+
+            // Clearing a registered waker must prevent any subsequent wake.
+            slot.register(&Context::from_waker(&wa));
+            slot.clear();
+            slot.notify_after_seqcst();
+            assert_eq!(a.0.load(Ordering::SeqCst), 0, "cleared waker must not be woken");
+            assert_eq!(b.0.load(Ordering::SeqCst), 1, "previous replacement must stay at 1");
+
+            drop((wa, wb));
+            assert_eq!(Arc::strong_count(&a), 1);
+            assert_eq!(Arc::strong_count(&b), 1);
+        },
+        None,
+    );
+}

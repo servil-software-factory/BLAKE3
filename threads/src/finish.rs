@@ -150,19 +150,77 @@ mod tests {
         thread::park();
     }
 
+    /// Strip `//` line comments and double-quoted string literals from one Rust
+    /// source line so only code tokens remain.
+    fn strip_comments_and_strings(line: &str) -> std::string::String {
+        let mut out = std::string::String::with_capacity(line.len());
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        let mut in_str = false;
+        while i < bytes.len() {
+            if in_str {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    in_str = false;
+                }
+                i += 1;
+            } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                break;
+            } else if bytes[i] == b'"' {
+                in_str = true;
+                i += 1;
+            } else {
+                let ch = line[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+        out
+    }
+
+    /// Return `(1-based line, trimmed line)` for every line in `text` whose
+    /// code (outside `//` comments and string literals) names a non-`SeqCst`
+    /// `Ordering::...` token, inspecting every `Ordering::` occurrence on a
+    /// line so mixed CAS lines (`Ordering::SeqCst, Ordering::Relaxed`) and
+    /// trailing-comment spoofs (`Ordering::Relaxed // Ordering::SeqCst`) fail.
+    fn non_seqcst_ordering_lines(text: &str) -> std::vec::Vec<(usize, std::string::String)> {
+        let mut bad = std::vec::Vec::new();
+        for (n, line) in text.lines().enumerate() {
+            let code = strip_comments_and_strings(line);
+            let mut rest = code.as_str();
+            while let Some(pos) = rest.find("Ordering::") {
+                let after = &rest[pos + "Ordering::".len()..];
+                let end = after.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(after.len());
+                let variant = &after[..end];
+                if variant != "SeqCst" {
+                    bad.push((n + 1, line.trim().to_string()));
+                    break;
+                }
+                rest = &after[end..];
+            }
+        }
+        bad
+    }
+
     /// The handshake files use one ordering, SeqCst, the one the model
     /// checker assumes; this fires on any other, with the reason above.
     #[test]
     fn every_atomic_in_the_handshake_files_is_seqcst() {
+        // Negative controls proving mixed CAS operands and trailing comments
+        // cannot slip past the checker.
+        assert!(non_seqcst_ordering_lines("a.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);").is_empty());
+        assert_eq!(non_seqcst_ordering_lines("a.compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed);").len(), 1);
+        assert_eq!(non_seqcst_ordering_lines("a.load(Ordering::Acquire); // Ordering::SeqCst").len(), 1);
         // Read at run time, not embedded (include_str!), so the test binary
         // holds none of the files' text: an embedded copy changed with every
         // mutant of them, and code_hash.py found none same code (#219).
         for name in ["finish.rs", "park.rs", "waker.rs"] {
             let text = std::fs::read_to_string(std::format!("{}/src/{name}", env!("CARGO_MANIFEST_DIR"))).expect("the file, beside the crate's manifest");
-            for (n, line) in text.lines().enumerate() {
-                if line.contains("Ordering::") && !line.contains("Ordering::SeqCst") && !line.trim_start().starts_with("//") {
-                    panic!("{name}:{}: {} (every atomic here is SeqCst: see finish.rs's head)", n + 1, line.trim());
-                }
+            if let Some((line_no, line)) = non_seqcst_ordering_lines(&text).into_iter().next() {
+                panic!("{name}:{line_no}: {line} (every atomic here is SeqCst: see finish.rs's head)");
             }
         }
     }

@@ -185,16 +185,16 @@ impl Park {
         false
     }
 
-    /// Wake workers for `wanted` pieces of new work, given `workers`
-    /// workers in all: up to `fanout` now, the rest owed, which the woken
+    /// Wake workers for `wanted` pieces of new work, using this `Park`'s
+    /// total worker count: up to `fanout` now, the rest owed, which the woken
     /// workers pay, `fanout` each, before they work. How many it woke. A
     /// publisher's read of `parked` follows its publication (a SeqCst store
     /// or a fence), as a parking worker's re-check follows its bit: one of
     /// the two sees the other.
-    pub(crate) fn wake_for(&self, wanted: usize, workers: usize) -> usize {
+    pub(crate) fn wake_for(&self, wanted: usize) -> usize {
         let parked = self.parked_count();
         // Nobody parked, or enough awake: nothing to wake.
-        let (now, later) = split(wanted.saturating_sub(workers - parked).min(parked), self.fanout);
+        let (now, later) = split(wanted.saturating_sub(self.handles.len() - parked).min(parked), self.fanout);
         if later > 0 {
             let add = later.min(u32::MAX as usize) as u64;
             loop {
@@ -437,11 +437,11 @@ pub(crate) mod test {
     fn wakes_made_and_owed_exactly() {
         let all: Vec<usize> = (0..12).collect();
         let park = park_with(12, 4, &all);
-        assert_eq!(park.wake_for(1, 12), 1, "one wanted, twelve parked: one wake");
+        assert_eq!(park.wake_for(1), 1, "one wanted, twelve parked: one wake");
         assert_eq!((park.parked_count(), park.owed_count()), (11, 0));
         // Ten wanted, one worker awake already: nine to wake, four now
         // and five owed.
-        assert_eq!(park.wake_for(10, 12), 4);
+        assert_eq!(park.wake_for(10), 4);
         assert_eq!((park.parked_count(), park.owed_count()), (7, 5));
         // A woken worker pays four of the five, then another the last.
         assert_eq!(park.pay_owed(), 4);
@@ -450,10 +450,10 @@ pub(crate) mod test {
         assert_eq!((park.parked_count(), park.owed_count()), (2, 0));
         assert_eq!(park.pay_owed(), 0, "nothing owed: nothing paid");
         // Five wanted with ten awake: they cover it.
-        assert_eq!(park.wake_for(5, 12), 0);
+        assert_eq!(park.wake_for(5), 0);
         assert_eq!((park.parked_count(), park.owed_count()), (2, 0));
         // A hundred wanted, two parked: those two, nothing owed.
-        assert_eq!(park.wake_for(100, 12), 2);
+        assert_eq!(park.wake_for(100), 2);
         assert_eq!((park.parked_count(), park.owed_count()), (0, 0));
         // Owed wakes with no one parked are dropped, preserving generation.
         let before_gen = park.owed.load(Ordering::SeqCst) >> 32;
@@ -465,19 +465,19 @@ pub(crate) mod test {
         // carrying an older generation with the same numeric count cannot ABA-clear it.
         let park = park_with(8, 2, &[0, 1, 2, 3, 4, 5, 6, 7]);
         let gen0 = park.owed.load(Ordering::SeqCst) >> 32;
-        assert_eq!(park.wake_for(5, 8), 2);
+        assert_eq!(park.wake_for(5), 2);
         assert_eq!(park.owed_count(), 3);
         let gen1 = park.owed.load(Ordering::SeqCst) >> 32;
         assert_eq!(gen1, gen0.wrapping_add(1));
         // A second publisher addition on the same Park bumps gen1 -> gen2
         // (proving high-32 generation bits are read with `>> 32`, not `<< 32`).
-        assert_eq!(park.wake_for(8, 8), 2);
+        assert_eq!(park.wake_for(8), 2);
         assert_eq!(park.owed_count(), 7);
         let gen2 = park.owed.load(Ordering::SeqCst) >> 32;
         assert_eq!(gen2, gen1.wrapping_add(1));
         // Exactly the fan-out wanted of as many parked: all now, none owed.
         let park = park_with(4, 4, &[0, 1, 2, 3]);
-        assert_eq!(park.wake_for(4, 4), 4);
+        assert_eq!(park.wake_for(4), 4);
         assert_eq!((park.parked_count(), park.owed_count()), (0, 0));
     }
 

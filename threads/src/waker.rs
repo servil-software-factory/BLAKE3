@@ -40,9 +40,14 @@ pub(crate) struct WakerSlot {
 // WRITING (`register`, `clear`) or to WAKING (`wake_slow`). That is one
 // thread at a time, and it leaves the state by its own store when it has
 // done with the cell. The `Waker` in it is `Send` and `Sync` itself.
-unsafe impl Send for WakerSlot {}
-// Sound: as above. Every method takes `&self` and goes through `state`.
+// (`Send` is derived automatically by the compiler because `UnsafeCell<Option<Waker>>: Send`.)
 unsafe impl Sync for WakerSlot {}
+
+#[cfg(test)]
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<WakerSlot>();
+};
 
 impl WakerSlot {
     pub(crate) fn new() -> Self {
