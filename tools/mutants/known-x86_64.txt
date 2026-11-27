@@ -43,6 +43,7 @@ src/ffi_output.rs	replace - with / in held_groups_in	1	[cpu lacks avx512f avx512
 src/ffi_output.rs	replace == with != in held_groups_in	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
 src/ffi_output.rs	replace >= with < in held_groups_in	1	[cpu lacks avx512f avx512vl] code for another machine: the sixteen-lane arm of the full groups and the eight-lane remainder after them run only where the platform is AVX-512 (width 16); on this CPU (AVX2) every group is eight wide and nothing remains after the full groups. AVX-512 machines catch it (test_held_key_groups_take_one_partition_pass; an EPYC 9255 and an Ice Lake Xeon, November 10, 2026)
 src/ffi_output.rs	replace | with ^ in final_block	2	equivalent: domain flags (0, KEYED_HASH=16, DERIVE_KEY_MATERIAL=64) are disjoint from CHUNK_END (2) and ROOT (8), so | and ^ compute the same byte
+src/ffi_output.rs	replace | with ^ in finish_last_blocks_simd	2	equivalent: domain flags (0, KEYED_HASH=16, DERIVE_KEY_MATERIAL=64), CHUNK_START (1), and flags_end (CHUNK_END=2, ROOT=8) occupy disjoint bits
 src/ffi_output.rs	replace | with ^ in held_groups_in	1	equivalent: mode flags (0, 16, 32, 64) and PARENT (4) occupy disjoint bits
 src/ffi_output.rs	replace | with ^ in packed	3	equivalent: | and ^ agree on flag bits that never overlap: the mode's flags hold none of CHUNK_START, CHUNK_END and ROOT
 src/ffi_partial.rs	replace % with + in rotation	1	equivalent: k % 4 becomes k + 4, which adds 16 to each shuffle index; pshufb reads an index's low four bits (and bit 7, clear: the largest is 47), so the shuffle is the same
@@ -274,14 +275,13 @@ src/self_test.rs	replace | with ^ in chunk_values	2	same code: every test binary
 src/throughput.rs	replace < with <= in last_max	1	equivalent: `whole` is a multiple of 1024 and `room` (2^64 - 1 less a multiple of 1024) never is, so the two are never equal and either branch gives the smaller
 src/throughput.rs	replace >= with < in TreeHasher::hash_counter_range	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/throughput.rs	replace >= with < in TreeHasher::turn	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
-src/throughput.rs	replace >= with < in hash_counter_range	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace && with || in <impl Kernels for PlatformKernels<'_>>::children	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace && with || in <impl Kernels for PlatformKernels<'_>>::subtree	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/tree.rs	replace + with * in wide	1	SME2 only: the argument is `ahead`, consumed by the SME2 subtree path; on x86 subtree() returns None and serial calls pass 0
 src/tree.rs	replace + with - in wide	1	SME2 only: the argument is `ahead`, consumed by the SME2 subtree path; on x86 subtree() returns None and serial calls pass 0
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::children -> Option<[Cv; 2]> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
 src/tree.rs	replace <impl Kernels for PlatformKernels<'_>>::subtree -> Option<usize> with None	1	same code: every test binary of a release build, the mutant's line count kept, hashes as the unmutated build's here (tools/mutants/release_same.py)
-src/each.rs	replace >= with < in finalize_each	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
+src/each.rs	replace >= with < in finalize_each_aarch64	2	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)
 src/each.rs	replace | with ^ in hash_by_blocks	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/ffi_partial.rs	replace | with ^ in finalize_each	1	equivalent: CHUNK_END (0x02) and ROOT (0x08) are disjoint flag bits
 src/platform.rs	replace == with != in sme2_svl_ok	1	same code: every test binary hashes as the unmutated build's here (tools/mutants/code_hash.py)

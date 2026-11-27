@@ -51,10 +51,11 @@ fn rotation<const W: usize>(r: u32) -> [u32; W] {
 /// The chaining values of `whole.len()` whole chunks and one partial chunk
 /// after them (1 to CHUNK_LEN - 1 bytes), at `counter` and the counters
 /// after it, into `out`, `(whole.len() + 1) * OUT_LEN` bytes. Requires 1 to
-/// `W - 1` whole chunks.
-/// Unsafe: the CPU must support `kernel`'s instruction set.
-unsafe fn hash_chunks_with_partial<const W: usize>(
-    kernel: unsafe extern "C" fn(*mut Params<W>),
+/// `W - 1` whole chunks. Kept safe (using a non-generic function pointer `run`
+/// so only `W` in `{4, 8, 16}` is monomorphized while `cargo-mutants` covers
+/// all parameter/flag/output logic).
+fn hash_chunks_with_partial<const W: usize>(
+    run: fn(&mut Params<W>),
     whole: &[&[u8; CHUNK_LEN]],
     partial: &[u8],
     key: &CVWords,
@@ -102,12 +103,7 @@ unsafe fn hash_chunks_with_partial<const W: usize>(
     for (lane, chunk) in whole.iter().enumerate() {
         p.msg[lane] = chunk.as_ptr();
     }
-    // Sound: every lane's pointer reaches 16 blocks (a whole chunk, or the
-    // padded copy), and the caller's CPU has the kernel's instructions.
-    unsafe {
-        crate::ran_kernel(kernel as *const ());
-        kernel(&mut p);
-    }
+    run(&mut p);
     for lane in 0..=n {
         let words = if lane < n { &p.h } else { &p.snap };
         for (i, word) in words.iter().enumerate() {
@@ -190,40 +186,105 @@ pub(crate) fn try_hash_chunks_with_partial(
 /// Unsafe: the CPU must have SSE4.1.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_sse41(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees SSE4.1 support.
-    unsafe { hash_chunks_with_partial::<4>(blake3_servil_partial_sse41, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<4>(
+        |p| {
+            // Sound: caller guarantees SSE4.1 support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_sse41 as *const ());
+                blake3_servil_partial_sse41(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on eight lanes: 1 to 7 whole chunks.
 /// Unsafe: the CPU must have AVX2.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx2(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX2 support.
-    unsafe { hash_chunks_with_partial::<8>(blake3_servil_partial_avx2, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<8>(
+        |p| {
+            // Sound: caller guarantees AVX2 support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx2 as *const ());
+                blake3_servil_partial_avx2(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on four EVEX AVX-512VL lanes: 1 to 3 whole chunks.
 /// Unsafe: the CPU must have AVX-512F and AVX-512VL.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx512_4(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX-512F+VL support.
-    unsafe { hash_chunks_with_partial::<4>(blake3_servil_partial_avx512_4, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<4>(
+        |p| {
+            // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx512_4 as *const ());
+                blake3_servil_partial_avx512_4(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on eight EVEX AVX-512VL lanes: 1 to 7 whole chunks.
 /// Unsafe: the CPU must have AVX-512F and AVX-512VL.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx512_8(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX-512F+VL support.
-    unsafe { hash_chunks_with_partial::<8>(blake3_servil_partial_avx512_8, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<8>(
+        |p| {
+            // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx512_8 as *const ());
+                blake3_servil_partial_avx512_8(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on sixteen EVEX AVX-512F lanes: 1 to 15 whole chunks.
 /// Unsafe: the CPU must have AVX-512F and AVX-512VL.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx512_16(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX-512F+VL support.
-    unsafe { hash_chunks_with_partial::<16>(blake3_servil_partial_avx512_16, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<16>(
+        |p| {
+            // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx512_16 as *const ());
+                blake3_servil_partial_avx512_16(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 const SELF_TEST_WHOLE: usize = 9;
@@ -420,9 +481,11 @@ pub(crate) fn first_chunk_to_core(stage_empty: bool, hold: bool, is_plain: bool,
 /// prefix blocks with scalar final blocks when `>= 4` or `>= 2` with a message
 /// `> 128 B`; SSE4.1 finishes staged `< 1 KiB` messages individually), and
 /// remaining hashers (`<= 64 B` plain, keyed/derived, or multi-chunk; Linux
-/// AVX-512 packs eligible `ffi_output::input` descriptors independently and
-/// runs 16-lane `output16` on every complete 16-pack). Key values never select
-/// grouping or dispatch (#404).
+/// AVX-512/AVX2 packs eligible `ffi_output::input` descriptors independently
+/// and runs `output16`/`output8` on every 4+ group). Key values never select
+/// grouping or dispatch (#404). Kept out of line in this x86-64 module so
+/// empty/singleton `each::finalize_each` keeps a small stack frame.
+#[inline(never)]
 pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
     const FINALIZE_BATCH: usize = 128;
     const FULL_CHUNK_BATCH: usize = 32;
@@ -480,10 +543,7 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                 }
             }
         } else {
-            for &k in full_chunks.as_slice() {
-                let k = usize::from(k);
-                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
-            }
+            crate::each::finalize_indices_serial(hashers, w_chunk, full_chunks.as_slice(), o_chunk);
         }
         // Two 1-prefix-block messages (`65..=128 B`) cost less scalar than
         // sorting/scattering through `hash_by_blocks`; 4+ or any >= 2-block
@@ -499,31 +559,20 @@ pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out:
                 }
             }
         } else {
-            for &k in short_plain.as_slice() {
-                let k = usize::from(k);
-                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
+            crate::each::finalize_indices_serial(hashers, w_chunk, short_plain.as_slice(), o_chunk);
+        }
+        let done = if output_slots.len() >= crate::ffi_output::X86_PAD8_MIN {
+            #[cfg(test)]
+            if !counted_output_turn {
+                crate::counted(crate::Counted::OutputGroupTurn);
+                counted_output_turn = true;
             }
-        }
-        {
-            let done = if output_slots.len() >= 4 {
-                #[cfg(test)]
-                if !counted_output_turn {
-                    crate::counted(crate::Counted::OutputGroupTurn);
-                    counted_output_turn = true;
-                }
-                crate::ffi_output::finalize_output_slots(hashers, w_chunk, output_slots.as_slice(), o_chunk, output_width)
-            } else {
-                0
-            };
-            for &k in &output_slots.as_slice()[done..] {
-                let ku = usize::from(k);
-                o_chunk[ku] = *hashers[w_chunk[ku]].take_root_hash().as_bytes();
-            }
-        }
-        for &k in rest.as_slice() {
-            let ku = usize::from(k);
-            o_chunk[ku] = *hashers[w_chunk[ku]].take_root_hash().as_bytes();
-        }
+            crate::ffi_output::finalize_output_slots(hashers, w_chunk, output_slots.as_slice(), o_chunk, platform)
+        } else {
+            0
+        };
+        crate::each::finalize_indices_serial(hashers, w_chunk, &output_slots.as_slice()[done..], o_chunk);
+        crate::each::finalize_indices_serial(hashers, w_chunk, rest.as_slice(), o_chunk);
         for &i in w_chunk {
             hashers[i].reset();
         }

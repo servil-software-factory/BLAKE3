@@ -6,7 +6,7 @@
 use crate::hasher;
 pub(crate) use crate::output_common::{Input, input};
 use crate::output_common::{check_self_test, self_test_shape};
-use crate::{BLOCK_LEN, CHUNK_END, CHUNK_LEN, CHUNK_START, Hasher, OUT_LEN, platform::Platform};
+use crate::{BLOCK_LEN, CHUNK_LEN, Hasher, OUT_LEN, platform::Platform};
 
 unsafe extern "C" {
     fn blake3_servil_neon_output8(inputs: *const Input<'_>, out: *mut u8, groups: u64);
@@ -115,22 +115,7 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
         }
     };
     if !leaves_done {
-        for (k, &i) in held.iter().enumerate() {
-            let h = &hashers[i];
-            let (counter, bytes) = h.held_group().expect("a held group");
-            let refs: [&[u8; CHUNK_LEN]; PER] = core::array::from_fn(|j| bytes[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap());
-            let domain = h.domain();
-            Platform::NEON.hash_many(
-                &refs,
-                domain.key(),
-                counter,
-                crate::IncrementCounter::Yes,
-                domain.flags(),
-                CHUNK_START,
-                CHUNK_END,
-                level[k * PER..(k + 1) * PER].as_flattened_mut(),
-            );
-        }
+        crate::each::hash_held_leaves_serial(hashers, held, Platform::NEON, level);
     }
 
     // 2. Four parent levels across all `n` stages (<= 128 parents per level) on NEON output8.
@@ -145,7 +130,7 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
                 block: level.as_flattened()[j * BLOCK_LEN..(j + 1) * BLOCK_LEN].try_into().unwrap(),
                 cv: domain.key(),
                 len: u8::try_from(BLOCK_LEN).unwrap(),
-                flags: domain.flags() + crate::PARENT,
+                flags: domain.flags() | crate::PARENT,
             });
         }
         let done = hash_groups_arm(inputs.as_slice(), &mut next[..count]);
@@ -158,17 +143,7 @@ fn held_groups_in<const S: usize, const MAX_PARENTS: usize>(hashers: &mut [Hashe
         core::mem::swap(&mut level, &mut next);
     }
 
-    for (k, &i) in held.iter().enumerate() {
-        let (counter, _) = hashers[i].held_group().unwrap();
-        let mut result = [0u8; BLOCK_LEN];
-        if counter == 0 {
-            // Four swaps leave each final parent's two children in next.
-            result.copy_from_slice(next[2 * k..2 * k + 2].as_flattened());
-        } else {
-            result[..OUT_LEN].copy_from_slice(&level[k]);
-        }
-        hashers[i].take_held(&result);
-    }
+    crate::each::commit_held_groups(hashers, held, level, next);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -276,7 +251,7 @@ pub(crate) unsafe fn call_sme2_chunks_keyed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output_common::SELF_TEST_EXPECTED;
+    use crate::{CHUNK_END, CHUNK_START, output_common::SELF_TEST_EXPECTED};
 
     #[test]
     fn startup_answers_match_independent_compression() {
