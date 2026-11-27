@@ -57,12 +57,8 @@ const ROOM_CLOSING_BIT: usize = 1usize << (usize::BITS - 1);
 
 const NONE: u32 = u32::MAX;
 
-const KIND_GROUP: u64 = 0;
-const KIND_ROOM_PIECE: u64 = 1;
-const KIND_MULTI: u64 = 2;
-
-/// High bit of `KIND_MULTI`'s 32-bit `b` payload: selects `Shared::slot_trees[slot]`
-/// instead of `Shared::tree` without a worker-visible per-slot mode table.
+/// High bit of `ActionArg::Multi`'s 32-bit `b` payload: selects `PipeStorage::slot_trees[slot]`
+/// instead of `PipeStorage::tree` without a worker-visible per-slot mode table.
 const MULTI_CUSTOM_BIT: u32 = 1u32 << 31;
 
 /// Compact fixed-capacity FIFO ring of `u32` indices over `Box<[u32]>`
@@ -197,21 +193,51 @@ impl<T> Drop for RawSlots<T> {
     }
 }
 
-#[inline(always)]
-fn pack_arg(kind: u64, a: u32, b: u32, sme2: bool) -> u64 {
-    // Debug-only: hot job-argument packer; callers pass 2-bit `kind` and slot/piece indices `< 2^29`.
-    debug_assert!(kind < 4 && a < (1 << 29));
-    let raw = (kind << 61) | ((a as u64) << 32) | (b as u64);
-    if sme2 { raw | ACTION_SME2 } else { raw }
+/// Typed representation of a 64-bit action ticket payload carried through
+/// `Source::publish_actions`. Makes invalid kind tags unwriteable and enforces
+/// bitfield bounds in every build (release included).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionArg {
+    Group { group: u32, custom_slot: u32 },
+    RoomPiece { pnode: u32, custom: bool, sme2: bool },
+    Multi { slot: u32, piece: u32, custom: bool, sme2: bool },
 }
 
-#[inline(always)]
-fn unpack_arg(arg: u64) -> (u64, usize, usize) {
-    let clean = arg & !ACTION_SME2;
-    let kind = clean >> 61;
-    let a = usize::try_from((clean >> 32) & 0x1fff_ffff).expect("29-bit field fits usize");
-    let b = u32::from_le_bytes(clean.to_le_bytes()[..4].try_into().unwrap()) as usize;
-    (kind, a, b)
+impl ActionArg {
+    const MAX_A: u32 = (1 << 29) - 1;
+
+    #[inline(always)]
+    fn encode(self) -> u64 {
+        let (kind, a, b, sme2): (u64, u32, u32, bool) = match self {
+            ActionArg::Group { group, custom_slot } => (0, group, custom_slot, false),
+            ActionArg::RoomPiece { pnode, custom, sme2 } => (1, pnode, u32::from(custom), sme2),
+            ActionArg::Multi { slot, piece, custom, sme2 } => {
+                assert!(piece < MULTI_CUSTOM_BIT, "multi piece index overlaps custom flag");
+                let custom_bit = if custom { MULTI_CUSTOM_BIT } else { 0 };
+                (2, slot, custom_bit + piece, sme2)
+            }
+        };
+        assert!(a <= Self::MAX_A, "action index exceeds 29-bit field");
+        // Put the SME2 flag bit (bit 63) first so every `+` has a distinct
+        // non-zero right operand (avoiding `x + (1<<63) == x - (1<<63)`).
+        let sme2_bit = if sme2 { ACTION_SME2 } else { 0 };
+        sme2_bit + ((kind << 61) + ((a as u64) << 32) + (b as u64))
+    }
+
+    #[inline(always)]
+    fn decode(arg: u64) -> Self {
+        let sme2 = (arg & ACTION_SME2) != 0;
+        let clean = arg & !ACTION_SME2;
+        let kind = clean >> 61;
+        let a = u32::try_from((clean >> 32) & u64::from(Self::MAX_A)).expect("29-bit field fits u32");
+        let b = u32::from_le_bytes(clean.to_le_bytes()[..4].try_into().unwrap());
+        match kind {
+            0 => ActionArg::Group { group: a, custom_slot: b },
+            1 => ActionArg::RoomPiece { pnode: a, custom: b != 0, sme2 },
+            2 => ActionArg::Multi { slot: a, piece: b & !MULTI_CUSTOM_BIT, custom: (b & MULTI_CUSTOM_BIT) != 0, sme2 },
+            _ => unreachable!("invalid ActionArg kind tag"),
+        }
+    }
 }
 
 /// Fixed memory bounds for a [`Pipeline`].
@@ -813,48 +839,45 @@ impl PipeStorage {
         // so `Pipeline::drop` may immediately free `*st` once the final
         // completion store executes.
         let st = ctx as *const PipeStorage;
-        let (kind, a, b) = unpack_arg(arg);
-        match kind {
-            KIND_GROUP => {
-                // Sound: `*st` stays live until `group_completed[a].swap(SeqCst)` below.
-                let (waker, completed, epoch) = unsafe { &*st }.run_group(a, u32::try_from(b).expect("group slot fits u32"), platform);
+        match ActionArg::decode(arg) {
+            ActionArg::Group { group, custom_slot } => {
+                // Sound: `*st` stays live until `group_completed[group].swap(SeqCst)` below.
+                let (waker, completed, epoch) = unsafe { &*st }.run_group(group as usize, custom_slot, platform);
                 finished(waker, || {
                     completed.swap(epoch, Ordering::SeqCst);
                 });
             }
-            KIND_ROOM_PIECE => {
+            ActionArg::RoomPiece { pnode, custom, .. } => {
                 // Sound: `*st` stays live until `pnode.done.swap(SeqCst)` below.
-                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(a, b != 0, platform);
+                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(pnode as usize, custom, platform);
                 finished(waker, || {
-                    // Sound: `done_ptr` points to `pieces[a].done` inside `*st`,
+                    // Sound: `done_ptr` points to `pieces[pnode].done` inside `*st`,
                     // live until this `SeqCst` swap completes.
                     unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };
                 });
             }
-            KIND_MULTI => {
-                let b32 = u32::try_from(b).expect("multi arg fits u32");
-                let custom = (b32 & MULTI_CUSTOM_BIT) != 0;
+            ActionArg::Multi { slot, piece, custom, .. } => {
+                let slot = slot as usize;
                 // Sound: `*st` stays live until `tasks_left.fetch_sub(AcqRel)` below.
-                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(a, (b32 & !MULTI_CUSTOM_BIT) as usize, custom, platform);
+                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(slot, piece as usize, custom, platform);
                 // `&*st` borrow has ended; non-last pieces touch nothing in `*st`
                 // during or after this decrement.
-                // Sound: `tasks_left_ptr` points to `tasks_left[a]` inside `*st`,
+                // Sound: `tasks_left_ptr` points to `tasks_left[slot]` inside `*st`,
                 // live until this `AcqRel` decrement completes.
                 if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 1 {
                     // Sound: returning 1 means this worker is the last piece of
-                    // slot `a`, so `*st` remains live until `slot_done.swap(SeqCst)` below.
-                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(a, is_batch, custom);
+                    // `slot`, so `*st` remains live until `slot_done.swap(SeqCst)` below.
+                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(slot, is_batch, custom);
                     if let Some((loan_completed, epoch)) = loan_mark {
                         loan_completed.store(epoch, Ordering::Release);
                     }
                     finished(waker, || {
-                        // Sound: `done_ptr` points to `slot_done[a]` inside `*st`,
+                        // Sound: `done_ptr` points to `slot_done[slot]` inside `*st`,
                         // live until this `SeqCst` swap completes.
                         unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };
                     });
                 }
             }
-            _ => unreachable!(),
         }
     }
 
@@ -1510,12 +1533,12 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
                 }
             };
             let s32 = u32::try_from(s).expect("slot fits u32");
-            let custom_bit = if self.slots[s].mode != SlotMode::Default { MULTI_CUSTOM_BIT } else { 0 };
+            let custom = self.slots[s].mode != SlotMode::Default;
             for p in 0..pieces {
                 let first = p.saturating_mul(per_part);
                 let piece_n = (count - first).min(per_part);
                 let sme2 = piece_n.saturating_mul(work_slot) >= SME2_MIN_LEN;
-                self.bufs.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32") | custom_bit, sme2);
+                self.bufs.action_buf[p] = ActionArg::Multi { slot: s32, piece: u32::try_from(p).expect("piece fits u32"), custom, sme2 }.encode();
             }
             let near = if self.source_slot.is_some() {
                 let plan = Plan::new(PlaceKind::PipelineBatch, work_bytes, 1);
@@ -1553,6 +1576,20 @@ fn pipeline_capacities(limits: Limits) -> (usize, usize, usize) {
     (p_cap, g_cap, actions_cap)
 }
 
+/// Non-generic initialization of caller-side `IndexRing`s so every
+/// `Pipeline<T, B, P>::create` monomorphization shares one compiled helper.
+#[inline(never)]
+fn init_pipeline_rings(m: usize, rooms: usize, p_cap: usize) -> (IndexRing, IndexRing, IndexRing, IndexRing) {
+    let filled = |cap: usize| {
+        let mut ring = IndexRing::new(cap);
+        for i in 0..cap {
+            ring.push_back(u32::try_from(i).expect("ring index fits u32"));
+        }
+        ring
+    };
+    (filled(rooms), filled(m), filled(p_cap), IndexRing::new(m))
+}
+
 impl<T, B, P> Pipeline<T, B, P> {
     #[inline(always)]
     fn storage(&self) -> &PipeStorage {
@@ -1582,24 +1619,12 @@ impl<T, B, P> Pipeline<T, B, P> {
         // BEFORE taking a PipeSlot lease, allocating PipeStorage, registering
         // the source, or bumping `sources::opened()`, so a layout panic in
         // caller-side construction cannot leak process resources.
-        let mut local_free_rooms = IndexRing::new(limits.rooms);
-        for i in 0..limits.rooms {
-            local_free_rooms.push_back(u32::try_from(i).expect("room index fits u32"));
-        }
-        let mut free_slots = IndexRing::new(m);
-        for i in 0..m {
-            free_slots.push_back(u32::try_from(i).expect("slot index fits u32"));
-        }
-        let mut free_pieces = IndexRing::new(p_cap);
-        for i in 0..p_cap {
-            free_pieces.push_back(u32::try_from(i).expect("piece index fits u32"));
-        }
+        let (local_free_rooms, free_slots, free_pieces, end_queue) = init_pipeline_rings(m, limits.rooms, p_cap);
         let slots: Box<[SlotMeta<T>]> = (0..m).map(|_| SlotMeta { tag: None, kind: SlotKind::Free, mode: SlotMode::Default }).collect();
         let room_streams = vec![RoomStream::EMPTY; m].into_boxed_slice();
         let owners = RawSlots::new(m);
         let batches = RawSlots::new(m);
         let batch_plans = vec![None; m].into_boxed_slice();
-        let end_queue = IndexRing::new(m);
         let events = EventRing::new(m);
         let piece_slots = Vec::with_capacity(if limits.rooms == 0 { 0 } else { m });
         let assigned_group_epoch = vec![0u64; g_cap].into_boxed_slice();
@@ -1931,7 +1956,7 @@ impl<T, B, P> Pipeline<T, B, P> {
         }
         rs.tail_piece = pnode;
 
-        let arg = pack_arg(KIND_ROOM_PIECE, pnode, u32::from(self.slots[s].mode != SlotMode::Default), written >= SME2_MIN_LEN);
+        let arg = ActionArg::RoomPiece { pnode, custom: self.slots[s].mode != SlotMode::Default, sme2: written >= SME2_MIN_LEN }.encode();
         self.dispatch_one(arg);
     }
 
@@ -2196,9 +2221,9 @@ impl<T, B, P> Pipeline<T, B, P> {
         };
         self.slots[s].kind = SlotKind::WaitMulti { has_owner };
         let s32 = u32::try_from(s).expect("slot fits u32");
-        let custom_bit = if self.slots[s].mode != SlotMode::Default { MULTI_CUSTOM_BIT } else { 0 };
+        let custom = self.slots[s].mode != SlotMode::Default;
         for p in 0..pieces {
-            self.bufs.action_buf[p] = pack_arg(KIND_MULTI, s32, u32::try_from(p).expect("piece fits u32") | custom_bit, true);
+            self.bufs.action_buf[p] = ActionArg::Multi { slot: s32, piece: u32::try_from(p).expect("piece fits u32"), custom, sme2: true }.encode();
         }
         self.dispatch_many(pieces, false);
     }
@@ -2313,7 +2338,7 @@ impl<T, B, P> Pipeline<T, B, P> {
             *group.epoch.get() = epoch;
         }
         self.assigned_group_epoch[group_idx as usize] = epoch;
-        let arg = pack_arg(KIND_GROUP, group_idx, custom_slot, false);
+        let arg = ActionArg::Group { group: group_idx, custom_slot }.encode();
         self.dispatch_one(arg);
     }
 
@@ -2807,18 +2832,12 @@ impl std::task::Wake for ThreadPark {
 crate::pipeline_sync::thread_local! {
     static BLOCK_ON_PARK: Arc<ThreadPark> = Arc::new(ThreadPark { thread: thread::current(), woken: AtomicBool::new(false) });
     static BLOCK_ON_WAKER: Waker = BLOCK_ON_PARK.with(|park| Waker::from(Arc::clone(park)));
-    static BLOCK_ON_STATE: core::cell::Cell<u8> = const { core::cell::Cell::new(0) };
+    static IN_BLOCK_ON: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
 #[inline(always)]
 fn in_block_on() -> bool {
-    BLOCK_ON_STATE.try_with(core::cell::Cell::get).unwrap_or(0) != 0
-}
-
-#[cfg(all(test, not(shuttle)))]
-#[inline(always)]
-fn block_on_spinning() -> bool {
-    BLOCK_ON_STATE.with(core::cell::Cell::get) == 1
+    IN_BLOCK_ON.try_with(core::cell::Cell::get).unwrap_or(false)
 }
 
 fn prepare_thread() {
@@ -2992,13 +3011,12 @@ fn prepare_thread() {
 /// }
 /// ```
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    /// The state of the `block_on` this one runs inside (0: none), and
-    /// whether this one took a wake.
-    struct Guard(u8, bool);
+    /// Whether this `block_on` runs inside another, and whether it took a wake.
+    struct Guard(bool, bool);
     impl Drop for Guard {
         fn drop(&mut self) {
-            BLOCK_ON_STATE.with(|f| f.set(self.0));
-            if self.0 != 0 && self.1 {
+            IN_BLOCK_ON.with(|f| f.set(self.0));
+            if self.0 && self.1 {
                 // This `block_on` ran inside a poll of another, on the one
                 // waker the two share: a wake it took may have been the
                 // other's, which polls once more before it sleeps. Only
@@ -3008,14 +3026,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             }
         }
     }
-    // Spinning, unless this `block_on` runs inside a poll of one that
-    // sleeps between its polls: that one sleeps on whatever its poll left
-    // registered, so a wait under this one keeps its waker from the first
-    // poll. (An inner `block_on` whose future polled a wait once and gave
-    // the `Poll` back as its value "spun", the wait kept no waker for it,
-    // and the outer one slept through the Room being given back.)
-    let prev = BLOCK_ON_STATE.with(core::cell::Cell::get);
-    BLOCK_ON_STATE.with(|f| f.set(if prev == 2 { 2 } else { 1 }));
+    let prev = IN_BLOCK_ON.with(|f| f.replace(true));
     let mut guard = Guard(prev, false);
     let mut future = core::pin::pin!(future);
     BLOCK_ON_PARK.with(|park| {
@@ -3029,7 +3040,6 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             loop {
                 crate::lanes::poll_pause(&mut yielded);
                 if crate::lanes::now() - started >= crate::lanes::SPIN_BEFORE_SLEEP {
-                    BLOCK_ON_STATE.with(|f| f.set(2));
                     if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                         return output;
                     }
@@ -3092,9 +3102,9 @@ mod test {
             panic!("bounded step failed: {what}");
         };
 
-        assert!(!in_block_on() && !block_on_spinning());
+        assert!(!in_block_on());
         block_on(core::future::poll_fn(|_| {
-            assert!(in_block_on() && block_on_spinning());
+            assert!(in_block_on());
             Poll::Ready(())
         }));
         let _ = std::panic::catch_unwind(|| {
@@ -3103,7 +3113,7 @@ mod test {
                 panic!("unwind guard test");
             });
         });
-        assert!(!in_block_on() && !block_on_spinning());
+        assert!(!in_block_on());
 
         // Exact power-of-two boundary for actions_cap = m*64 + (rooms+m+1) + g_cap:
         // (248, 15) -> 15872 + 264 + 248 = 16384; (248, 16) -> 16385 -> 32768.
@@ -4179,7 +4189,7 @@ mod test {
         let mut room = Some(block_on(p.room()));
         let s = message_in_flight(&mut p);
         block_on(core::future::poll_fn(|own| {
-            assert!(block_on_spinning());
+            assert!(in_block_on());
             // Even while block_on spins, every Pending poll registers its
             // waker so composed outer futures that gate child polls never lose
             // a wake.
@@ -4205,11 +4215,6 @@ mod test {
             // A Room's drop is the notice a wait for a Room has.
             drop(room.take());
             assert_eq!(wakes.0.load(Ordering::SeqCst), 3, "room() kept no waker");
-            // Once block_on sleeps between polls, its own waker is kept.
-            BLOCK_ON_STATE.with(|state| state.set(2));
-            assert!(p.poll_ready(own).is_pending());
-            notify(&p);
-            assert!(own_woken(), "a wait kept no waker though block_on sleeps between polls");
             Poll::Ready(())
         }));
         // The hashing ends, and the Pipeline is as any other.
@@ -4255,13 +4260,30 @@ mod test {
 
     #[test]
     fn pack_unpack_arg_roundtrips_every_field() {
-        for sme2 in [false, true] {
-            for (kind, a, b) in [(0u64, 0u32, 0u32), (1, 7, 13), (2, 12345, 67890), (3, (1 << 29) - 1, u32::MAX)] {
-                let arg = pack_arg(kind, a, b, sme2);
-                assert_eq!((arg & ACTION_SME2 != 0), sme2);
-                assert_eq!(unpack_arg(arg), (kind, usize::try_from(a).unwrap(), usize::try_from(b).unwrap()));
-            }
+        let cases = [
+            ActionArg::Group { group: 0, custom_slot: 0 },
+            ActionArg::Group { group: ActionArg::MAX_A, custom_slot: u32::MAX },
+            ActionArg::RoomPiece { pnode: 7, custom: false, sme2: false },
+            ActionArg::RoomPiece { pnode: ActionArg::MAX_A, custom: true, sme2: true },
+            ActionArg::Multi { slot: 12345, piece: 67890, custom: false, sme2: false },
+            ActionArg::Multi { slot: ActionArg::MAX_A, piece: MULTI_CUSTOM_BIT - 1, custom: true, sme2: true },
+        ];
+        for arg in cases {
+            let encoded = arg.encode();
+            assert_eq!(ActionArg::decode(encoded), arg);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "action index exceeds 29-bit field")]
+    fn action_arg_rejects_oversized_index() {
+        let _ = ActionArg::Group { group: ActionArg::MAX_A + 1, custom_slot: 0 }.encode();
+    }
+
+    #[test]
+    #[should_panic(expected = "multi piece index overlaps custom flag")]
+    fn action_arg_rejects_piece_overlapping_custom_bit() {
+        let _ = ActionArg::Multi { slot: 0, piece: MULTI_CUSTOM_BIT, custom: false, sme2: false }.encode();
     }
 
     /// Dropping a cancelled `room()`, `message()`, or `ready()` future must
@@ -4398,12 +4420,19 @@ mod test {
 
     #[test]
     fn a_wake_is_kept_though_another_wait_takes_the_park_token() {
+        let mut armed = false;
         let mut polls = 0;
         block_on(core::future::poll_fn(|cx| {
-            if block_on_spinning() {
+            if !armed {
+                armed = true;
+                cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            // From here block_on sleeps between polls.
+            if polls == 0 && BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)) {
+                return Poll::Pending;
+            }
+            // From here block_on has consumed the arming wake in its sleep
+            // loop and now sleeps between polls.
             polls += 1;
             if polls == 1 {
                 cx.waker().wake_by_ref();
@@ -4419,9 +4448,15 @@ mod test {
 
     #[test]
     fn a_block_on_inside_a_poll_leaves_the_outer_one_its_wake() {
+        let mut armed = false;
         let mut polls = 0;
         block_on(core::future::poll_fn(|cx| {
-            if block_on_spinning() {
+            if !armed {
+                armed = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if polls == 0 && BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)) {
                 return Poll::Pending;
             }
             polls += 1;
@@ -4437,7 +4472,7 @@ mod test {
                 let woken = || BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst));
                 assert!(woken());
                 block_on(core::future::poll_fn(|_| if woken() { Poll::Pending } else { Poll::Ready(()) }));
-                assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+                assert!(in_block_on(), "the outer block_on is still active");
                 assert!(BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)), "the inner block_on took the wake and left none");
                 return Poll::Pending;
             }
@@ -4450,17 +4485,21 @@ mod test {
     /// keeps a wait's waker from its first poll: the outer one sleeps on
     /// it. Here the inner one's future polls the wait for a Room once and
     /// gives the `Poll` back as its value, with the only Room out; the
-    /// notice a Room's return sends then wakes the thread. (The inner
-    /// `block_on` spun, the wait kept no waker for a `block_on` that
-    /// spins, and the outer one slept on with the Room free.)
+    /// notice a Room's return sends then wakes the thread.
     #[test]
     fn a_wait_polled_once_by_a_block_on_inside_a_sleeping_one_keeps_its_waker() {
         let own_woken = || BLOCK_ON_PARK.with(|park| park.woken.swap(false, Ordering::SeqCst));
         let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 1 });
         let room = block_on(p.room());
+        let mut armed = false;
         let mut polls = 0;
-        block_on(core::future::poll_fn(|_| {
-            if block_on_spinning() {
+        block_on(core::future::poll_fn(|cx| {
+            if !armed {
+                armed = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if polls == 0 && BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)) {
                 return Poll::Pending;
             }
             // From here the outer block_on sleeps between polls.
@@ -4468,7 +4507,7 @@ mod test {
             own_woken();
             let pending = block_on(core::future::poll_fn(|cx| Poll::Ready(p.poll_room(cx).is_pending())));
             assert!(pending, "the only Room is out");
-            assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+            assert!(in_block_on(), "the outer block_on is still active");
             p.storage().slot.get().waker.notify_after_seqcst();
             assert!(own_woken(), "the wait kept no waker, and the outer block_on would sleep on");
             Poll::Ready(())
@@ -4506,14 +4545,20 @@ mod test {
         // took no wake, and notes none. (It noted one whenever it ended
         // inside another, and an outer future that runs a block_on in
         // each poll was then polled without end and never slept.)
+        let mut armed = false;
         let mut polls = 0;
         block_on(core::future::poll_fn(|cx| {
-            if block_on_spinning() {
+            if !armed {
+                armed = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if polls == 0 && BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)) {
                 return Poll::Pending;
             }
             polls += 1;
             block_on(async {});
-            assert!(in_block_on() && !block_on_spinning(), "the outer block_on still sleeps between polls");
+            assert!(in_block_on(), "the outer block_on is still active");
             if polls == 1 {
                 assert!(!BLOCK_ON_PARK.with(|park| park.woken.load(Ordering::SeqCst)), "a block_on that took no wake noted one");
                 // This future's one wake: its next poll is its last.
@@ -4796,12 +4841,15 @@ mod test {
         }
         assert_eq!(Arc::strong_count(&arc), 1, "EventRing::drop must drop remaining elements");
 
-        for kind in [KIND_GROUP, KIND_ROOM_PIECE, KIND_MULTI] {
-            for sme2 in [false, true] {
-                let raw = pack_arg(kind, 0x1234_5678, 0x9abc_def0, sme2);
-                assert_eq!((raw & ACTION_SME2) != 0, sme2);
-                assert_eq!(unpack_arg(raw), (kind, 0x1234_5678, 0x9abc_def0));
-            }
+        for arg in [
+            ActionArg::Group { group: 0x1234_5678, custom_slot: 0x9abc_def0 },
+            ActionArg::RoomPiece { pnode: 0x1234_5678, custom: true, sme2: false },
+            ActionArg::RoomPiece { pnode: 0x1234_5678, custom: false, sme2: true },
+            ActionArg::Multi { slot: 0x1234_5678, piece: 0x1abc_def0, custom: true, sme2: true },
+            ActionArg::Multi { slot: 0x1234_5678, piece: 0x1abc_def0, custom: false, sme2: false },
+        ] {
+            let raw = arg.encode();
+            assert_eq!(ActionArg::decode(raw), arg);
         }
 
         let rooms = Rooms::new(2);

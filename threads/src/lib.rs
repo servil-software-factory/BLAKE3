@@ -269,6 +269,13 @@ pub(crate) mod block {
     pub use blake3_servil_core::throughput::{Batch, Block};
 }
 
+/// The primitives src/action_ring.rs runs on: the standard library's here, and
+/// Shuttle's in tests/shuttle_source_ring.rs, which compiles that file beside
+/// its own `action_ring_sync`.
+mod action_ring_sync {
+    pub use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+}
+mod action_ring;
 /// The primitives src/finish.rs runs on: the standard library's here, and
 /// Shuttle's in tests/shuttle_finish.rs, which compiles that file beside its own
 /// `finish_sync`.
@@ -493,14 +500,20 @@ pub(crate) fn ran(kind: Ran) {
 /// [`Lent`](throughput::Lent) guard for such work, stops the child (a child
 /// that leaves by `_exit` or `exec` drops neither).
 ///
-/// Each thread that makes multithreaded calls keeps a little storage for
-/// them (its piece cut, its job record, and — for tree calls — its chaining-value
-/// scratch, 56 KiB together for up to 1,024 pieces), grown on its first call of
-/// that kind and on the first call that outgrows it, and otherwise untouched: a
-/// tree call that needs no more pieces than an earlier tree call (or than
-/// `prepare_thread` preallocated) allocates nothing, and batch/collection calls
-/// do not grow the chaining-value vector. This call prepares the calling thread's;
-/// a call from another thread prepares that thread's the first time.
+/// Each thread that makes multithreaded calls keeps a little pool storage for
+/// them (its piece cut, its job record, and — for pooled tree calls — its
+/// chaining-value scratch; the two 1,024-piece vectors take 56 KiB together,
+/// plus the job record), grown on its first pooled call of that kind and on
+/// the first call that outgrows it, and otherwise untouched: a pooled call
+/// whose pieces fit in its thread's existing piece cut (and, for pooled tree
+/// calls including large items in [`hash_each_multithreaded`](throughput::hash_each_multithreaded),
+/// its existing chaining-value scratch) does not grow the pool's scratch.
+/// Batch jobs and the small-item pass of `hash_each_multithreaded` do not grow
+/// the pool's chaining-value vector (note that small-item / single-thread
+/// `hash_each_multithreaded` also uses `blake3-servil-core`'s own per-thread
+/// collection scratch, pre-sized to 144 middle messages / 288 chunk CVs). This
+/// call prepares the calling thread's pool storage for up to 1,024 pieces; a
+/// call from another thread prepares that thread's on first use.
 ///
 /// ```
 /// blake3_servil::initialize_multithreaded(None);

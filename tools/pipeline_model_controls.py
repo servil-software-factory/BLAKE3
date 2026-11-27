@@ -94,13 +94,13 @@ FAULTS = [
     ),
     (
         "a loan's event comes before the loan is marked complete",
-        "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(a, is_batch, custom);\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }\n                    finished(waker, || {\n                        // Sound: `done_ptr` points to `slot_done[a]` inside `*st`,\n                        // live until this `SeqCst` swap completes.\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });",
-        "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(a, is_batch, custom);\n                    finished(waker, || {\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }",
+        "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(slot, is_batch, custom);\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }\n                    finished(waker, || {\n                        // Sound: `done_ptr` points to `slot_done[slot]` inside `*st`,\n                        // live until this `SeqCst` swap completes.\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });",
+        "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(slot, is_batch, custom);\n                    finished(waker, || {\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }",
     ),
     (
         "a batch's tasks are published done before the last has hashed",
-        "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(a, (b32 & !MULTI_CUSTOM_BIT) as usize, custom, platform);",
-        "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(a, (b32 & !MULTI_CUSTOM_BIT) as usize, custom, platform);\n                if is_batch && unsafe { (&*(&*st).multi[a].get()).pieces } >= 2 {\n                    if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 2 {\n                        let (waker, done_ptr, _) = unsafe { &*st }.finish_multi_slot(a, true, custom);\n                        finished(waker, || { unsafe { (*done_ptr).swap(true, Ordering::SeqCst) }; });\n                    }\n                    return;\n                }",
+        "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(slot, piece as usize, custom, platform);",
+        "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(slot, piece as usize, custom, platform);\n                if is_batch && unsafe { (&*(&*st).multi[slot].get()).pieces } >= 2 {\n                    if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 2 {\n                        let (waker, done_ptr, _) = unsafe { &*st }.finish_multi_slot(slot, true, custom);\n                        finished(waker, || { unsafe { (*done_ptr).swap(true, Ordering::SeqCst) }; });\n                    }\n                    return;\n                }",
     ),
     (
         "a storage retirement is omitted when its last holder drops",
@@ -109,13 +109,13 @@ FAULTS = [
     ),
     (
         "a worker reads PipeSlot from storage after publishing completion",
-        "                let (waker, completed, epoch) = unsafe { &*st }.run_group(a, u32::try_from(b).expect(\"group slot fits u32\"), platform);\n                finished(waker, || {\n                    completed.swap(epoch, Ordering::SeqCst);\n                });",
-        "                let (_, completed, epoch) = unsafe { &*st }.run_group(a, u32::try_from(b).expect(\"group slot fits u32\"), platform);\n                completed.swap(epoch, Ordering::SeqCst);\n                unsafe { &*st }.slot.get().waker.notify_after_seqcst();",
+        "                let (waker, completed, epoch) = unsafe { &*st }.run_group(group as usize, custom_slot, platform);\n                finished(waker, || {\n                    completed.swap(epoch, Ordering::SeqCst);\n                });",
+        "                let (_, completed, epoch) = unsafe { &*st }.run_group(group as usize, custom_slot, platform);\n                completed.swap(epoch, Ordering::SeqCst);\n                unsafe { &*st }.slot.get().waker.notify_after_seqcst();",
     ),
     (
         "a worker loads a storage atomic after publishing completion",
-        "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(a, b != 0, platform);\n                finished(waker, || {\n                    // Sound: `done_ptr` points to `pieces[a].done` inside `*st`,\n                    // live until this `SeqCst` swap completes.\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                });",
-        "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(a, b != 0, platform);\n                finished(waker, || {\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    let _ = unsafe { (*done_ptr).load(Ordering::Acquire) };\n                });",
+        "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(pnode as usize, custom, platform);\n                finished(waker, || {\n                    // Sound: `done_ptr` points to `pieces[pnode].done` inside `*st`,\n                    // live until this `SeqCst` swap completes.\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                });",
+        "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(pnode as usize, custom, platform);\n                finished(waker, || {\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    let _ = unsafe { (*done_ptr).load(Ordering::Acquire) };\n                });",
     ),
     (
         "Room::drop reads storage after releasing its credits",
@@ -134,8 +134,8 @@ FAULTS = [
     ),
     (
         "a non-last multi-piece worker reads storage after tasks_left decrement",
-        "                }\n            }\n            _ => unreachable!(),",
-        "                } else {\n                    let _ = unsafe { (*tasks_left_ptr).load(Ordering::Acquire) };\n                }\n            }\n            _ => unreachable!(),",
+        "                    });\n                }\n            }\n        }\n    }",
+        "                    });\n                } else {\n                    let _ = unsafe { (*tasks_left_ptr).load(Ordering::Acquire) };\n                }\n            }\n        }\n    }",
     ),
 ]
 
