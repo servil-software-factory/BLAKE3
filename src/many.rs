@@ -122,7 +122,7 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
     crate::ran(crate::Ran::ShortRun);
     let last_len = len - (slot - BLOCK_LEN);
     #[cfg(target_arch = "x86_64")]
-    if slot > BLOCK_LEN && last_len < BLOCK_LEN && outputs.len() >= X86_PAD8_MIN {
+    if slot > BLOCK_LEN && last_len < BLOCK_LEN && outputs.len() >= crate::ffi_output::X86_PAD8_MIN {
         let width = crate::ffi_output::lanes(platform);
         if width != 0 {
             multi_block_short_last(input, slot, key, flags, last_len, outputs, platform, width);
@@ -136,7 +136,7 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
             continue;
         }
         #[cfg(target_arch = "x86_64")]
-        crate::sse41::hash_blocks_x86(messages, blocks, key, flags, digests, platform, last_len);
+        hash_blocks_x86(messages, blocks, key, flags, digests, platform, last_len);
         #[cfg(target_arch = "aarch64")]
         hash_blocks(messages, blocks, key, flags, digests, platform, last_len);
     }
@@ -166,16 +166,6 @@ fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut
     }
 }
 
-/// Minimum remaining one-block or short-last-block messages to pad a 16-lane
-/// AVX-512 `output16` call instead of `output8` + scalar.
-#[cfg(target_arch = "x86_64")]
-const X86_PAD16_MIN: usize = 9;
-/// Minimum remaining one-block or short-last-block messages to pad an 8-lane
-/// AVX2 `output8` call instead of running serial `hash_serial_on` (4 wins on
-/// every tested x86 CPU including Xeon 6330, where 3 read +12% slower).
-#[cfg(target_arch = "x86_64")]
-const X86_PAD8_MIN: usize = 4;
-
 /// The whole and padded groups of `digests.len()` one-block messages (each
 /// `len` bytes of a 64-byte slot in `bytes`, zero past them: a batch's
 /// padding, or the remainder buffer `hash_packed` writes) that run on the
@@ -188,74 +178,22 @@ fn one_block_groups(bytes: &[u8], digests: &mut [[u8; OUT_LEN]], len: usize, key
     // any lanes. Both short batches and expanded Packed remainders come here.
     assert!(len <= BLOCK_LEN, "an independent short message fits in one block");
     let len = u8::try_from(len).expect("len <= BLOCK_LEN");
-    let lanes = crate::ffi_output::lanes(platform);
-    if lanes == 0 {
-        return 0;
-    }
-    let groups = digests.len() / lanes;
-    for g in 0..groups {
-        let (at, out) = (g * lanes, &mut digests[g * lanes..][..lanes]);
-        let group = &bytes[at * BLOCK_LEN..];
-        // Sound: `lanes()` matches the platform's verified AVX2/AVX-512 width.
-        unsafe {
-            if lanes == 16 {
-                assert!(matches!(platform, Platform::AVX512), "16-lane output requires AVX-512");
-                packed_group::<16>(group, out, len, key, flags);
-            } else {
-                assert_eq!(lanes, 8, "unexpected output width {lanes}");
-                packed_group::<8>(group, out, len, key, flags);
-            }
+    let width = crate::ffi_output::lanes(platform);
+    crate::ffi_output::for_each_output_group(digests.len(), width, |start, count, lane_width| {
+        let group = &bytes[start * BLOCK_LEN..];
+        let out = &mut digests[start..start + count];
+        let make = |i: usize| {
+            let block: &[u8; BLOCK_LEN] = group[i * BLOCK_LEN..][..BLOCK_LEN].try_into().unwrap();
+            crate::ffi_output::packed(block, key, len, flags)
+        };
+        if lane_width == 16 {
+            // Sound: `lane_width == 16` only when `width == 16` (`Platform::AVX512`).
+            unsafe { crate::ffi_output::hash_padded_group::<16>(count, make, out) };
+        } else {
+            // Sound: both `Platform::AVX512` and `Platform::AVX2` support AVX2 `output8`.
+            unsafe { crate::ffi_output::hash_padded_group::<8>(count, make, out) };
         }
-    }
-    let mut done = groups * lanes;
-    let rem = digests.len() - done;
-    let tail = &bytes[done * BLOCK_LEN..];
-    if lanes == 16 && rem >= X86_PAD16_MIN {
-        // Sound: Platform::AVX512 supports output16; every lane reads a valid
-        // 64-byte slot in `tail`, repeating the last message for spare lanes.
-        unsafe { packed_tail::<16>(tail, &mut digests[done..], len, key, flags) };
-        done += rem;
-    } else if rem == 8 {
-        // Sound: both Platform::AVX512 and Platform::AVX2 support AVX2 output8.
-        unsafe { packed_group::<8>(tail, &mut digests[done..done + 8], len, key, flags) };
-        done += 8;
-    } else if rem >= X86_PAD8_MIN {
-        // Sound: both Platform::AVX512 and Platform::AVX2 support AVX2 output8.
-        unsafe { packed_tail::<8>(tail, &mut digests[done..], len, key, flags) };
-        done += rem;
-    }
-    done
-}
-
-/// `W` one-block messages, each `len` bytes zero-padded to a block at the
-/// start of `blocks`, on the `W`-lane independent-compression kernel.
-/// Requires the CPU to run that kernel (`ffi_output::lanes`).
-#[cfg(target_arch = "x86_64")]
-unsafe fn packed_group<const W: usize>(blocks: &[u8], out: &mut [[u8; OUT_LEN]], len: u8, key: &CVWords, flags: u8) {
-    let block = |i: usize| -> &[u8; BLOCK_LEN] { blocks[i * BLOCK_LEN..][..BLOCK_LEN].try_into().unwrap() };
-    let inputs: [crate::ffi_output::Input<'_>; W] = core::array::from_fn(|i| crate::ffi_output::packed(block(i), key, len, flags));
-    // Sound: the caller's CPU runs the W-lane kernel; every block is 64
-    // readable bytes.
-    unsafe { crate::ffi_output::hash_group::<W>(&inputs, out) };
-}
-
-/// `1..W` one-block messages padded to `W` lanes by repeating the last block
-/// into spare lanes, writing into a stack scratch buffer and copying back
-/// `out.len()` digests.
-#[cfg(target_arch = "x86_64")]
-unsafe fn packed_tail<const W: usize>(blocks: &[u8], out: &mut [[u8; OUT_LEN]], len: u8, key: &CVWords, flags: u8) {
-    let count = out.len();
-    assert!(count > 0 && count < W, "padded tail holds 1..W messages");
-    let block = |i: usize| -> &[u8; BLOCK_LEN] {
-        let idx = i.min(count - 1);
-        blocks[idx * BLOCK_LEN..][..BLOCK_LEN].try_into().unwrap()
-    };
-    let inputs: [crate::ffi_output::Input<'_>; W] = core::array::from_fn(|i| crate::ffi_output::packed(block(i), key, len, flags));
-    let mut scratch = [[0u8; OUT_LEN]; W];
-    // Sound: the caller's CPU runs the W-lane kernel; every lane reads a valid
-    // 64-byte slot and `scratch` holds all W outputs.
-    unsafe { crate::ffi_output::hash_group::<W>(&inputs, &mut scratch) };
-    out.copy_from_slice(&scratch[..count]);
+    })
 }
 
 /// Padded lane count for a single `<= TILE` tile of multi-block prefix
@@ -264,7 +202,7 @@ unsafe fn packed_tail<const W: usize>(blocks: &[u8], out: &mut [[u8; OUT_LEN]], 
 /// scalar tails.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn prefix_padded_count(count: usize, width: usize) -> usize {
-    if width == 16 && count % 16 >= X86_PAD16_MIN {
+    if width == 16 && count % 16 >= crate::ffi_output::X86_PAD16_MIN {
         count.next_multiple_of(16)
     } else if count % 8 >= 5 {
         count.next_multiple_of(8)
@@ -288,7 +226,7 @@ fn multi_block_short_last_tile<const TILE: usize>(
     platform: Platform,
 ) {
     let count = outputs.len();
-    assert!((X86_PAD8_MIN..=TILE).contains(&count), "tile holds 4..=TILE messages");
+    assert!((crate::ffi_output::X86_PAD8_MIN..=TILE).contains(&count), "tile holds 4..=TILE messages");
     let prefix_len = slot - BLOCK_LEN;
     let prefix_blocks = prefix_len / BLOCK_LEN;
     let padded_count = prefix_padded_count(count, TILE);
@@ -309,18 +247,125 @@ fn multi_block_short_last_tile<const TILE: usize>(
         cvs[i] = core::array::from_fn(|w| u32::from_le_bytes(cv_bytes[i][4 * w..4 * w + 4].try_into().unwrap()));
     }
     let last_block = |i: usize| -> &[u8; BLOCK_LEN] { messages[i * slot + prefix_len..][..BLOCK_LEN].try_into().unwrap() };
-    let inputs: [crate::ffi_output::Input<'_>; TILE] = core::array::from_fn(|j| {
-        let idx = j.min(count - 1);
-        crate::ffi_output::final_block(last_block(idx), &cvs[idx], last_len_u8, flags)
-    });
-    if count == TILE {
-        // Sound: `TILE` matches AVX-512 (16) or AVX2/AVX-512 (8); all inputs are valid.
-        unsafe { crate::ffi_output::hash_group::<TILE>(&inputs, outputs) };
-    } else {
-        let mut scratch = [[0u8; OUT_LEN]; TILE];
-        // Sound: `TILE` matches AVX-512 (16) or AVX2/AVX-512 (8); all inputs are valid.
-        unsafe { crate::ffi_output::hash_group::<TILE>(&inputs, &mut scratch) };
-        outputs.copy_from_slice(&scratch[..count]);
+    // Sound: `TILE` matches AVX-512 (16) or AVX2/AVX-512 (8); all inputs are valid.
+    unsafe {
+        crate::ffi_output::hash_padded_group::<TILE>(count, |idx| crate::ffi_output::final_block(last_block(idx), &cvs[idx], last_len_u8, flags), outputs);
+    }
+}
+
+/// Single non-generic x86-64 dispatcher for `2..=16`-block slot widths
+/// (`128..=1024 B`): short-last batches (`last_len < BLOCK_LEN`, when not
+/// already taken by AVX `multi_block_short_last`) run serially over their
+/// logical length, whole-chunk (`16`-block) runs delegate to
+/// `hash_many_rounded`, and whole-block `2..=15`-block runs dispatch through
+/// `pair::hash_many_blocks`.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+fn hash_blocks_x86(messages: &[u8], blocks: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform, last_len: usize) {
+    let count = outputs.len();
+    assert!((2..=16).contains(&blocks) && (1..=BLOCK_LEN).contains(&last_len), "x86 multi-block shape out of range");
+    let slot = blocks * BLOCK_LEN;
+    assert_eq!(messages.len(), count.checked_mul(slot).expect("slot byte count fits"), "exact slot bytes for count outputs");
+    if count == 0 {
+        return;
+    }
+    if last_len != BLOCK_LEN {
+        let len = slot - BLOCK_LEN + last_len;
+        for (output, message) in outputs.iter_mut().zip(messages.chunks_exact(slot)) {
+            *output = *crate::hash_serial_on(&message[..len], key, flags, platform).as_bytes();
+        }
+        return;
+    }
+    let flags_end = CHUNK_END | ROOT;
+    if blocks == 16 {
+        // Whole-chunk batches delegate to `hash_many_rounded` (preserving
+        // Zen 5 `hash32` for 17..=31).
+        let mut lanes = crate::stack_vec::StackVec::<&[u8; CHUNK_LEN], TABLE>::new();
+        lanes.extend(messages.chunks_exact(CHUNK_LEN).map(|m| m.try_into().expect("CHUNK_LEN chunk")));
+        crate::hash_many_rounded(platform, &lanes, key, 0, IncrementCounter::No, flags, CHUNK_START, flags_end, outputs.as_flattened_mut());
+        return;
+    }
+    let mut ptrs = crate::stack_vec::StackVec::<*const u8, TABLE>::new();
+    ptrs.extend(messages.chunks_exact(slot).map(|m| m.as_ptr()));
+    assert_eq!(ptrs.len(), count, "one message per output");
+    let (full, target) = round_x86_blocks(platform, blocks, count);
+    if target == 0 {
+        // Sound: every pointer in `ptrs` reaches `blocks` whole blocks inside `messages`, and `platform` is a detected x86-64 ISA.
+        unsafe {
+            crate::pair::hash_many_blocks(platform, &ptrs, blocks, key, 0, false, flags, CHUNK_START, flags_end, outputs.as_flattened_mut());
+        }
+        return;
+    }
+    // Sound: every pointer in `ptrs` reaches `blocks` whole blocks inside `messages`, and `platform` is a detected x86-64 ISA.
+    unsafe { hash_blocks_rounded_x86(&ptrs, blocks, full, target, key, flags, flags_end, outputs, platform) };
+}
+
+/// Compute `(full_prefix_lanes, rounded_tail_width)` once for x86-64 multi-block
+/// (`2..=15` blocks) batches across AVX-512, AVX2, and SSE4.1. Returns `(0, 0)`
+/// when no tail rounding applies (exact widths, `1..=2` remainders, or
+/// `128..192 B` `n = 9..=10` remainders on AVX-512 where `8 + 1/2` avoids
+/// wide-kernel setup overhead).
+#[cfg(target_arch = "x86_64")]
+fn round_x86_blocks(platform: Platform, blocks: usize, count: usize) -> (usize, usize) {
+    let widest = match platform {
+        Platform::AVX512 => 16,
+        Platform::AVX2 => 8,
+        Platform::SSE41 => 4,
+    };
+    let rem = count % widest;
+    let target = match rem {
+        3 => 4,
+        5..=7 => 8,
+        9..=10 if blocks >= 4 => 16,
+        11..=15 => 16,
+        _ => 0,
+    };
+    if target == 0 { (0, 0) } else { (count - rem, target) }
+}
+
+/// Out-of-line x86-64 rounded-tail batch helper (`2..=15` blocks, `target > 0`)
+/// built over `pair::hash_many_blocks` with width-sized stack scratch (`4/8/16`),
+/// entered only when rounding a tail so unrounded calls stay inline in
+/// `hash_blocks_x86`.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn hash_blocks_rounded_x86(
+    ptrs: &[*const u8],
+    blocks: usize,
+    full: usize,
+    target: usize,
+    key: &CVWords,
+    flags: u8,
+    flags_end: u8,
+    outputs: &mut [[u8; OUT_LEN]],
+    platform: Platform,
+) {
+    if full != 0 {
+        // Sound: same pointer/platform guarantees on the leading `full` lanes.
+        unsafe {
+            crate::pair::hash_many_blocks(platform, &ptrs[..full], blocks, key, 0, false, flags, CHUNK_START, flags_end, outputs[..full].as_flattened_mut());
+        }
+    }
+    let tail = &ptrs[full..];
+    let tail_out = &mut outputs[full..];
+    let last = *tail.last().expect("rounded tail has 3 or more lanes");
+    let mut padded = crate::stack_vec::StackVec::<*const u8, 16>::new();
+    padded.extend_from_slice(tail);
+    padded.extend(core::iter::repeat_n(last, target - tail.len()));
+    crate::ran(crate::Ran::RoundedUp);
+    let mut run = |scratch: &mut [u8]| {
+        // Sound: `padded` holds `target` valid `blocks`-block pointers and `scratch` holds `target` CVs.
+        unsafe {
+            crate::pair::hash_many_blocks(platform, &padded, blocks, key, 0, false, flags, CHUNK_START, flags_end, scratch);
+        }
+        tail_out.as_flattened_mut().copy_from_slice(&scratch[..tail.len() * OUT_LEN]);
+    };
+    match target {
+        4 => run(&mut [0u8; 4 * OUT_LEN]),
+        8 => run(&mut [0u8; 8 * OUT_LEN]),
+        16 => run(&mut [0u8; 16 * OUT_LEN]),
+        _ => unreachable!("x86 multi-block target width is 4, 8, or 16"),
     }
 }
 
@@ -344,17 +389,17 @@ fn multi_block_short_last(
     assert!(last_len > 0 && last_len < BLOCK_LEN, "short final block");
     let prefix_len = slot - BLOCK_LEN;
     let last_len_u8 = u8::try_from(last_len).expect("last block <= 64");
-    for (messages, digests) in input.chunks(slot * width).zip(outputs.chunks_mut(width)) {
-        let count = digests.len();
-        if count < X86_PAD8_MIN {
-            for (i, output) in digests.iter_mut().enumerate() {
-                *output = *crate::hash_serial_on(&messages[i * slot..][..prefix_len + last_len], key, flags, platform).as_bytes();
-            }
-        } else if count <= 8 {
-            multi_block_short_last_tile::<8>(messages, slot, key, flags, last_len_u8, digests, platform);
-        } else {
+    let done = crate::ffi_output::for_each_output_group(outputs.len(), width, |start, count, lane_width| {
+        let messages = &input[start * slot..(start + count) * slot];
+        let digests = &mut outputs[start..start + count];
+        if lane_width == 16 {
             multi_block_short_last_tile::<16>(messages, slot, key, flags, last_len_u8, digests, platform);
+        } else {
+            multi_block_short_last_tile::<8>(messages, slot, key, flags, last_len_u8, digests, platform);
         }
+    });
+    for (i, output) in outputs[done..].iter_mut().enumerate() {
+        *output = *crate::hash_serial_on(&input[(done + i) * slot..][..prefix_len + last_len], key, flags, platform).as_bytes();
     }
 }
 
@@ -1262,8 +1307,8 @@ mod test {
         // SSE4.1 rounds remainder-3 tails to 4 lanes through `round_x86_blocks`.
         #[cfg(target_arch = "x86_64")]
         {
-            assert_eq!(crate::sse41::round_x86_blocks(Platform::SSE41, 4, 7), (4, 4));
-            assert_eq!(crate::sse41::round_x86_blocks(Platform::SSE41, 4, 6), (0, 0));
+            assert_eq!(round_x86_blocks(Platform::SSE41, 4, 7), (4, 4));
+            assert_eq!(round_x86_blocks(Platform::SSE41, 4, 6), (0, 0));
         }
     }
 
@@ -1638,7 +1683,7 @@ mod test {
             for &platform in &platforms {
                 let mut out = vec![[0xAAu8; OUT_LEN]; count + 16];
                 #[cfg(target_arch = "x86_64")]
-                crate::sse41::hash_blocks_x86(&input, 4, crate::IV, 0, &mut out[..count], platform, BLOCK_LEN);
+                hash_blocks_x86(&input, 4, crate::IV, 0, &mut out[..count], platform, BLOCK_LEN);
                 #[cfg(target_arch = "aarch64")]
                 hash_blocks(&input, 4, crate::IV, 0, &mut out[..count], platform, BLOCK_LEN);
                 assert!(out[count..].iter().all(|d| *d == [0xAA; OUT_LEN]), "{platform:?}, {count}: a store past the last output");

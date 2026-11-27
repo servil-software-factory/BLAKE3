@@ -335,6 +335,17 @@ fn kernels_on<'a>(domain: &'a Domain, chunk_state: &ChunkState, platform: Platfo
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+/// Whether a fresh hasher in `update_each` (`hold`) on x86-64 should stream its
+/// first chunk straight into `ChunkState`: keyed/derived hashers do so that
+/// `finalize_each` finishes their final block side by side via `output16`/`output8`;
+/// plain hashers stage instead so `finalize_each` batches 1 KiB chunks via
+/// `hash_many_rounded` and `65..=1023 B` prefixes via `hash_by_blocks` (#404).
+#[inline(always)]
+fn first_chunk_to_core(stage_empty: bool, hold: bool, is_plain: bool, core_count: u64, input_len: usize) -> bool {
+    stage_empty && hold && !is_plain && core_count + input_len as u64 <= CHUNK_LEN as u64
+}
+
 impl Hasher {
     #[inline(always)]
     pub(crate) fn from_core(core: HasherCore) -> Self {
@@ -445,7 +456,7 @@ impl Hasher {
             // group boundaries (#404). Non-consuming mid-chunk `finalize()` on a
             // staged plain first chunk rehashes that prefix fresh.
             #[cfg(target_arch = "x86_64")]
-            if crate::ffi_partial::first_chunk_to_core(self.stage.is_empty(), hold, self.core.domain.is_plain(), self.core.count(), input.len()) {
+            if first_chunk_to_core(self.stage.is_empty(), hold, self.core.domain.is_plain(), self.core.count(), input.len()) {
                 self.core.update_pooled(input, pooled);
                 return &[];
             }

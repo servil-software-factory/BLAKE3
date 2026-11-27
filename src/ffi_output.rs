@@ -45,11 +45,73 @@ pub(crate) fn item_last<'a>(block: &'a [u8; BLOCK_LEN], cv: &'a [u32; 8], len: u
     Input { block, cv, len, flags }
 }
 
+/// Minimum remaining one-block or short-last-block messages to pad a 16-lane
+/// AVX-512 `output16` call instead of `output8` + scalar.
+pub(crate) const X86_PAD16_MIN: usize = 9;
+/// Minimum remaining one-block or short-last-block messages to pad an 8-lane
+/// AVX2 `output8` call instead of running serial compression (4 wins on every
+/// tested x86 CPU including Xeon 6330, where 3 read +12% slower).
+pub(crate) const X86_PAD8_MIN: usize = 4;
+
+/// Partition `count` items across `width`-lane (`16` on AVX-512, `8` on AVX2)
+/// full and padded output groups, calling `run(start, len, lane_width)` for
+/// each group (`lane_width` in `{8, 16}`, `1 <= len <= lane_width`) and
+/// returning the total number of items dispatched (leaving `0..4` trailing
+/// items for the caller's serial tail).
+#[inline]
+pub(crate) fn for_each_output_group(count: usize, width: usize, mut run: impl FnMut(usize, usize, usize)) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    let groups = count / width;
+    for g in 0..groups {
+        run(g * width, width, width);
+    }
+    let mut done = groups * width;
+    let rem = count - done;
+    if width == 16 && rem >= X86_PAD16_MIN {
+        run(done, rem, 16);
+        return count;
+    }
+    if rem >= 8 {
+        run(done, 8, 8);
+        done += 8;
+    }
+    let rem = count - done;
+    if rem >= X86_PAD8_MIN {
+        run(done, rem, 8);
+        return count;
+    }
+    done
+}
+
+/// Compress `1..=W` independent descriptors on the `W`-lane (`8` or `16`)
+/// output kernel, padding spare lanes by repeating the last descriptor when
+/// `count < W` and writing `count` digests directly into `out` when `count == W`
+/// or through a `W`-digest stack buffer otherwise.
+///
+/// # Safety
+/// Caller must have verified CPU support for the `W`-lane output kernel.
+#[inline]
+pub(crate) unsafe fn hash_padded_group<'a, const W: usize>(count: usize, make: impl Fn(usize) -> Input<'a>, out: &mut [[u8; OUT_LEN]]) {
+    assert!(count > 0 && count <= W && out.len() >= count, "padded output group holds 1..=W messages");
+    let inputs: [Input<'_>; W] = core::array::from_fn(|j| make(j.min(count - 1)));
+    if count == W {
+        // Sound: caller verified W-lane kernel support; `out` holds at least W digests.
+        unsafe { hash_group::<W>(&inputs, &mut out[..W]) };
+    } else {
+        let mut scratch = [[0u8; OUT_LEN]; W];
+        // Sound: caller verified W-lane kernel support; `scratch` holds all W digests.
+        unsafe { hash_group::<W>(&inputs, &mut scratch) };
+        out[..count].copy_from_slice(&scratch[..count]);
+    }
+}
+
 /// Padded lane count for a `<= 16`-item prefix bucket in `each::by_blocks_at_once`:
 /// rounds `9..=15 -> 16` on AVX-512, `5..=7 -> 8` on AVX2/AVX-512, and
 /// `13..=15 -> 16` on AVX2 (avoiding a 5..7-lane scalar tail after 8 lanes).
 pub(crate) fn by_blocks_prefix_padded(n: usize, width: usize) -> usize {
-    if width == 16 && n >= 9 {
+    if width == 16 && n >= X86_PAD16_MIN {
         16
     } else if width != 0 && (5..8).contains(&n) {
         8
@@ -87,38 +149,30 @@ pub(crate) fn finish_last_blocks_order(
     if counter != 0 || width == 0 {
         return 0;
     }
-    let chunks = order.chunks_exact(width);
-    let rem = chunks.remainder();
-    for chunk in chunks {
-        if width == 16 {
-            // Sound: `width == 16` only when `platform` is `Platform::AVX512`.
-            unsafe { finish_last_blocks_simd::<16>(chunk, items, cvs, flags, flags_end, out) };
+    for_each_output_group(order.len(), width, |start, len, lane_width| {
+        let chunk = &order[start..start + len];
+        if lane_width == 16 {
+            finish_last_blocks_simd::<16>(platform, chunk, items, cvs, flags, flags_end, out);
         } else {
-            // Sound: `width == 8` only when `platform` is `Platform::AVX2`.
-            unsafe { finish_last_blocks_simd::<8>(chunk, items, cvs, flags, flags_end, out) };
+            finish_last_blocks_simd::<8>(platform, chunk, items, cvs, flags, flags_end, out);
         }
-    }
-    if rem.len() < 4 {
-        return order.len() - rem.len();
-    }
-    if rem.len() <= 8 {
-        // Sound: both `Platform::AVX512` and `Platform::AVX2` support AVX2 `output8`.
-        unsafe { finish_last_blocks_simd::<8>(rem, items, cvs, flags, flags_end, out) };
-    } else {
-        // Sound: `rem.len() > 8` only when `width == 16` (`Platform::AVX512`).
-        unsafe { finish_last_blocks_simd::<16>(rem, items, cvs, flags, flags_end, out) };
-    }
-    order.len()
+    })
 }
 
 /// Compress `4..=W` (`W` in `{8, 16}`) counter-zero final blocks for
 /// `each::by_blocks_at_once` in a single `output8`/`output16` call, padding
 /// spare lanes by repeating the last item in `chunk`.
-///
-/// # Safety
-/// Caller must have verified CPU support for the `W`-lane output kernel.
 #[inline(never)]
-unsafe fn finish_last_blocks_simd<const W: usize>(chunk: &[u8], items: &[&[u8]], cvs: &[crate::CVWords], flags: u8, flags_end: u8, out: &mut [[u8; OUT_LEN]]) {
+fn finish_last_blocks_simd<const W: usize>(
+    platform: Platform,
+    chunk: &[u8],
+    items: &[&[u8]],
+    cvs: &[crate::CVWords],
+    flags: u8,
+    flags_end: u8,
+    out: &mut [[u8; OUT_LEN]],
+) {
+    assert!((W == 8 && lanes(platform) >= 8) || (W == 16 && lanes(platform) == 16), "platform does not support {W}-lane output kernel");
     let count = chunk.len();
     let mut blocks = [[0u8; BLOCK_LEN]; W];
     let mut lens = [0u8; W];
@@ -132,77 +186,42 @@ unsafe fn finish_last_blocks_simd<const W: usize>(chunk: &[u8], items: &[&[u8]],
         let start = if k == 0 { CHUNK_START } else { 0 };
         item_flags[j] = flags | start | flags_end;
     }
-    let inputs: [Input<'_>; W] = core::array::from_fn(|j| {
-        let idx = j.min(count - 1);
-        item_last(&blocks[idx], &cvs[usize::from(chunk[idx])], lens[idx], item_flags[idx])
-    });
     let mut scratch = [[0u8; OUT_LEN]; W];
-    // Sound: caller verified platform supports W-lane output16/output8;
+    // Sound: asserted above that `platform` supports `W`-lane `output16`/`output8`;
     // every block/CV reference stays live across the call.
-    unsafe { hash_group::<W>(&inputs, &mut scratch) };
+    unsafe {
+        hash_padded_group::<W>(count, |idx| item_last(&blocks[idx], &cvs[usize::from(chunk[idx])], lens[idx], item_flags[idx]), &mut scratch);
+    }
     for (j, &i) in chunk.iter().enumerate() {
         out[usize::from(i)] = scratch[j];
     }
 }
 
-/// Finish packed counter-zero eligible `slots` from `ffi_partial::finalize_each`
+/// Finish packed counter-zero eligible `slots` from `each::finalize_each`
 /// using 16-lane `output16` (full 16s and padded 9..=15 tails on AVX-512) and
 /// 8-lane `output8` (full 8s and padded 4..=7 tails on both AVX-512 and AVX2),
 /// returning how many leading entries of `slots` were written into `o_chunk`.
-pub(crate) fn finalize_output_slots(hashers: &[Hasher], w_chunk: &[usize], slots: &[u8], o_chunk: &mut [[u8; OUT_LEN]], width: usize) -> usize {
-    if width == 0 {
-        return 0;
-    }
-    let mut rest = slots;
-    if width == 16 {
-        let chunks = rest.chunks_exact(16);
-        rest = chunks.remainder();
-        for part in chunks {
-            let inputs: [Input<'_>; 16] = core::array::from_fn(|j| input(&hashers[w_chunk[usize::from(part[j])]]).unwrap());
+pub(crate) fn finalize_output_slots(hashers: &[Hasher], w_chunk: &[usize], slots: &[u8], o_chunk: &mut [[u8; OUT_LEN]], platform: Platform) -> usize {
+    let width = lanes(platform);
+    for_each_output_group(slots.len(), width, |start, len, lane_width| {
+        let part = &slots[start..start + len];
+        let make = |j: usize| input(&hashers[w_chunk[usize::from(part[j])]]).unwrap();
+        if lane_width == 16 {
             let mut digests = [[0u8; OUT_LEN]; 16];
-            // Sound: caller verified Platform::AVX512; every descriptor borrows
-            // a live Hasher in `hashers` and `digests` holds 16 slots.
-            unsafe { hash_group::<16>(&inputs, &mut digests) };
-            for (&k, digest) in part.iter().zip(&digests) {
+            // Sound: `lane_width == 16` only when `width == 16` (`Platform::AVX512`).
+            unsafe { hash_padded_group::<16>(len, make, &mut digests) };
+            for (&k, digest) in part.iter().zip(&digests[..len]) {
+                o_chunk[usize::from(k)] = *digest;
+            }
+        } else {
+            let mut digests = [[0u8; OUT_LEN]; 8];
+            // Sound: both `Platform::AVX512` and `Platform::AVX2` support AVX2 `output8`.
+            unsafe { hash_padded_group::<8>(len, make, &mut digests) };
+            for (&k, digest) in part.iter().zip(&digests[..len]) {
                 o_chunk[usize::from(k)] = *digest;
             }
         }
-        if rest.len() >= 9 {
-            let inputs: [Input<'_>; 16] = core::array::from_fn(|j| input(&hashers[w_chunk[usize::from(rest[j.min(rest.len() - 1)])]]).unwrap());
-            let mut digests = [[0u8; OUT_LEN]; 16];
-            // Sound: caller verified Platform::AVX512; spare lanes repeat the
-            // last eligible descriptor and their outputs are discarded.
-            unsafe { hash_group::<16>(&inputs, &mut digests) };
-            for (&k, digest) in rest.iter().zip(&digests) {
-                o_chunk[usize::from(k)] = *digest;
-            }
-            return slots.len();
-        }
-    }
-    let chunks = rest.chunks_exact(8);
-    rest = chunks.remainder();
-    for part in chunks {
-        let inputs: [Input<'_>; 8] = core::array::from_fn(|j| input(&hashers[w_chunk[usize::from(part[j])]]).unwrap());
-        let mut digests = [[0u8; OUT_LEN]; 8];
-        // Sound: both Platform::AVX512 and Platform::AVX2 support AVX2
-        // `output8`; every descriptor borrows a live Hasher in `hashers`.
-        unsafe { hash_group::<8>(&inputs, &mut digests) };
-        for (&k, digest) in part.iter().zip(&digests) {
-            o_chunk[usize::from(k)] = *digest;
-        }
-    }
-    if rest.len() >= 4 {
-        let inputs: [Input<'_>; 8] = core::array::from_fn(|j| input(&hashers[w_chunk[usize::from(rest[j.min(rest.len() - 1)])]]).unwrap());
-        let mut digests = [[0u8; OUT_LEN]; 8];
-        // Sound: both Platform::AVX512 and Platform::AVX2 support AVX2
-        // `output8`; spare lanes repeat the last eligible descriptor.
-        unsafe { hash_group::<8>(&inputs, &mut digests) };
-        for (&k, digest) in rest.iter().zip(&digests) {
-            o_chunk[usize::from(k)] = *digest;
-        }
-        return slots.len();
-    }
-    slots.len() - rest.len()
+    })
 }
 
 pub(crate) fn lanes(platform: Platform) -> usize {
@@ -269,22 +288,7 @@ fn held_groups_in(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
     let n = held.len();
     let mut work = crate::each::HeldWorkspace::<HELD_TILE>::new();
     let (mut level, mut next) = work.buffers(n);
-    for (k, &i) in held.iter().enumerate() {
-        let h = &hashers[i];
-        let (counter, bytes) = h.held_group().expect("a held group");
-        let refs: [&[u8; CHUNK_LEN]; PER] = core::array::from_fn(|j| bytes[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap());
-        let domain = h.domain();
-        platform.hash_many(
-            &refs,
-            domain.key(),
-            counter,
-            crate::IncrementCounter::Yes,
-            domain.flags(),
-            CHUNK_START,
-            CHUNK_END,
-            level[k * PER..(k + 1) * PER].as_flattened_mut(),
-        );
-    }
+    crate::each::hash_held_leaves_serial(hashers, held, platform, level);
     for depth in 0..4 {
         let per_message = PER >> (depth + 1);
         let count = n * per_message;
@@ -325,17 +329,7 @@ fn held_groups_in(hashers: &mut [Hasher], held: &[usize], platform: Platform) {
         }
         core::mem::swap(&mut level, &mut next);
     }
-    for (k, &i) in held.iter().enumerate() {
-        let (counter, _) = hashers[i].held_group().unwrap();
-        let mut result = [0u8; BLOCK_LEN];
-        if counter == 0 {
-            // Four swaps leave each final parent's two children in next.
-            result.copy_from_slice(next[2 * k..2 * k + 2].as_flattened());
-        } else {
-            result[..OUT_LEN].copy_from_slice(&level[k]);
-        }
-        hashers[i].take_held(&result);
-    }
+    crate::each::commit_held_groups(hashers, held, level, next);
 }
 
 unsafe fn hash_eight_groups(inputs: &[Input<'_>; 16], out: &mut [[u8; OUT_LEN]]) {

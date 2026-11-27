@@ -137,23 +137,102 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
         marked.active = false;
         return;
     }
+    // Partition each 128-hasher window into architecture-specific fast classes,
+    // finish any remaining indices via `take_root_hash`, and reset every hasher.
+    // Key values never select grouping or dispatch (#404, #336).
+    const FINALIZE_BATCH: usize = 128;
+    const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
+    let platform = Platform::detect();
     #[cfg(target_arch = "x86_64")]
-    {
-        crate::ffi_partial::finalize_each(hashers, which, out);
-        marked.active = false;
-        return;
-    }
-    // AArch64: partition each 128-hasher slice in a single pass into plain
-    // staged first chunks (`hash_by_blocks` when >= 2), remaining counter-zero
-    // single-chunk hashers (keyed/derived/mixed `<= 64 B` staged or ChunkState-
-    // resident -> NEON `output8` when >= 8, #336), and general hashers. Key
-    // values never select grouping or dispatch.
-    #[cfg(target_arch = "aarch64")]
-    {
-        const FINALIZE_BATCH: usize = 128;
-        const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
-        let platform = Platform::detect();
-        for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
+    let block_lanes = crate::pair::takes_platform(platform);
+    #[cfg(target_arch = "x86_64")]
+    let output_width = crate::ffi_output::lanes(platform);
+    #[cfg(all(test, target_arch = "x86_64"))]
+    let mut counted_output_turn = false;
+    for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            const FULL_CHUNK_BATCH: usize = 32;
+            const SHORT_PAIR_MIN_LEN: usize = 2 * crate::BLOCK_LEN;
+            let mut full_chunks = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+            let mut short_plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+            let mut short_plain_max_len = 0usize;
+            let mut output_slots = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+            let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
+            for (k, &i) in w_chunk.iter().enumerate() {
+                let k = u8::try_from(k).expect("window index < TABLE (128)");
+                if hashers[i].is_plain_single_chunk_staged() {
+                    let len = hashers[i].staged_bytes().len();
+                    if len == CHUNK_LEN {
+                        full_chunks.push(k);
+                        continue;
+                    }
+                    if block_lanes && len > crate::BLOCK_LEN {
+                        short_plain.push(k);
+                        short_plain_max_len = short_plain_max_len.max(len);
+                        continue;
+                    }
+                }
+                if output_width != 0 && crate::ffi_output::input(&hashers[i]).is_some() {
+                    output_slots.push(k);
+                    continue;
+                }
+                rest.push(k);
+            }
+            if full_chunks.len() >= 2 {
+                for part in full_chunks.as_slice().chunks(FULL_CHUNK_BATCH) {
+                    let refs: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], FULL_CHUNK_BATCH> =
+                        part.iter().map(|&k| hashers[w_chunk[usize::from(k)]].staged_bytes().try_into().unwrap()).collect();
+                    let mut digests = [[0u8; OUT_LEN]; FULL_CHUNK_BATCH];
+                    crate::hash_many_rounded(
+                        platform,
+                        &refs,
+                        crate::IV,
+                        0,
+                        crate::IncrementCounter::No,
+                        0,
+                        CHUNK_START,
+                        CHUNK_END | crate::ROOT,
+                        digests[..part.len()].as_flattened_mut(),
+                    );
+                    for (&k, digest) in part.iter().zip(&digests) {
+                        o_chunk[usize::from(k)] = *digest;
+                    }
+                }
+            } else {
+                finalize_indices_serial(hashers, w_chunk, full_chunks.as_slice(), o_chunk);
+            }
+            // Two 1-prefix-block messages (`65..=128 B`) cost less scalar than
+            // sorting/scattering through `hash_by_blocks`; 4+ or any >= 2-block
+            // prefix (`> 128 B`) pays for SIMD prefix batching.
+            if short_plain.len() >= 4 || (short_plain.len() >= 2 && short_plain_max_len > SHORT_PAIR_MIN_LEN) {
+                for part in short_plain.as_slice().chunks(BY_BLOCKS_AT_ONCE) {
+                    let bytes: crate::stack_vec::StackVec<&[u8], BY_BLOCKS_AT_ONCE> =
+                        part.iter().map(|&k| hashers[w_chunk[usize::from(k)]].staged_bytes()).collect();
+                    let mut digests = [[0u8; OUT_LEN]; BY_BLOCKS_AT_ONCE];
+                    hash_by_blocks(&bytes, crate::IV, 0, &mut digests[..part.len()], platform);
+                    for (&k, digest) in part.iter().zip(&digests) {
+                        o_chunk[usize::from(k)] = *digest;
+                    }
+                }
+            } else {
+                finalize_indices_serial(hashers, w_chunk, short_plain.as_slice(), o_chunk);
+            }
+            let done = if output_slots.len() >= crate::ffi_output::X86_PAD8_MIN {
+                #[cfg(test)]
+                if !counted_output_turn {
+                    crate::counted(crate::Counted::OutputGroupTurn);
+                    counted_output_turn = true;
+                }
+                crate::ffi_output::finalize_output_slots(hashers, w_chunk, output_slots.as_slice(), o_chunk, platform)
+            } else {
+                0
+            };
+            finalize_indices_serial(hashers, w_chunk, &output_slots.as_slice()[done..], o_chunk);
+            finalize_indices_serial(hashers, w_chunk, rest.as_slice(), o_chunk);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
             let mut plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
             let mut keyed = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
             let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
@@ -178,10 +257,7 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
                     }
                 }
             } else {
-                for &k in plain.as_slice() {
-                    let k = usize::from(k);
-                    o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
-                }
+                finalize_indices_serial(hashers, w_chunk, plain.as_slice(), o_chunk);
             }
             let done = if keyed.len() >= 8 {
                 let mut inputs = crate::stack_vec::StackVec::<crate::ffi_output::Input<'_>, FINALIZE_BATCH>::new();
@@ -197,19 +273,59 @@ pub fn finalize_each(hashers: &mut [Hasher], which: &[usize], out: &mut [[u8; OU
             } else {
                 0
             };
-            for &k in &keyed.as_slice()[done..] {
-                let k = usize::from(k);
-                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
-            }
-            for &k in rest.as_slice() {
-                let k = usize::from(k);
-                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
-            }
-            for &i in w_chunk {
-                hashers[i].reset();
-            }
+            finalize_indices_serial(hashers, w_chunk, &keyed.as_slice()[done..], o_chunk);
+            finalize_indices_serial(hashers, w_chunk, rest.as_slice(), o_chunk);
         }
-        marked.active = false;
+        for &i in w_chunk {
+            hashers[i].reset();
+        }
+    }
+    marked.active = false;
+}
+
+#[inline]
+fn finalize_indices_serial(hashers: &mut [Hasher], w_chunk: &[usize], slots: &[u8], o_chunk: &mut [[u8; OUT_LEN]]) {
+    for &k in slots {
+        let k = usize::from(k);
+        o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
+    }
+}
+
+/// Hash each held stage's 16 leaf chunks serially per stage on `platform` into
+/// `level`, using each hasher's own domain key and flags.
+pub(crate) fn hash_held_leaves_serial(hashers: &[Hasher], held: &[usize], platform: Platform, level: &mut [[u8; OUT_LEN]]) {
+    const PER: usize = crate::STAGE_LEN / CHUNK_LEN;
+    for (k, &i) in held.iter().enumerate() {
+        let h = &hashers[i];
+        let (counter, bytes) = h.held_group().expect("a held group");
+        let refs: [&[u8; CHUNK_LEN]; PER] = core::array::from_fn(|j| bytes[j * CHUNK_LEN..(j + 1) * CHUNK_LEN].try_into().unwrap());
+        let domain = h.domain();
+        platform.hash_many(
+            &refs,
+            domain.key(),
+            counter,
+            IncrementCounter::Yes,
+            domain.flags(),
+            CHUNK_START,
+            CHUNK_END,
+            level[k * PER..(k + 1) * PER].as_flattened_mut(),
+        );
+    }
+}
+
+/// Commit the four-level held-group reduction back into each `Hasher`: when
+/// `counter == 0`, four swaps leave the final root parent's two child CVs in
+/// `next[2 * k..2 * k + 2]`; otherwise the subtree CV is in `level[k]`.
+pub(crate) fn commit_held_groups(hashers: &mut [Hasher], held: &[usize], level: &[[u8; OUT_LEN]], next: &[[u8; OUT_LEN]]) {
+    for (k, &i) in held.iter().enumerate() {
+        let (counter, _) = hashers[i].held_group().unwrap();
+        let mut result = [0u8; crate::BLOCK_LEN];
+        if counter == 0 {
+            result.copy_from_slice(next[2 * k..2 * k + 2].as_flattened());
+        } else {
+            result[..OUT_LEN].copy_from_slice(&level[k]);
+        }
+        hashers[i].take_held(&result);
     }
 }
 
@@ -527,16 +643,7 @@ fn hash_cohort_on<const N: usize>(hashers: &mut [Hasher], alike: &[usize], platf
         core::mem::swap(&mut level, &mut next);
         per /= 2;
     }
-    for (k, &i) in alike.iter().enumerate() {
-        let (counter, _) = hashers[i].held_group().unwrap();
-        let mut result = [0u8; BLOCK_LEN];
-        if counter == 0 {
-            result.copy_from_slice(next[2 * k..2 * k + 2].as_flattened());
-        } else {
-            result[..OUT_LEN].copy_from_slice(&level[k]);
-        }
-        hashers[i].take_held(&result);
-    }
+    commit_held_groups(hashers, alike, level, next);
 }
 
 /// Messages of this many chunks or more fill the lanes alone.
@@ -948,7 +1055,7 @@ fn hash_each_middle<I: Item>(
     // (`messages.len() >= 16`) or the first non-root parent round
     // (`first_parent_pairs >= 16`) can reach an SME2 group of 16 lanes.
     #[cfg(target_arch = "aarch64")]
-    let turn = crate::sme2::turn_for_each_middle(platform, items, messages);
+    let turn = turn_for_each_middle(platform, items, messages);
     #[cfg(target_arch = "aarch64")]
     let round_platform = turn.platform();
     #[cfg(not(target_arch = "aarch64"))]
@@ -1107,7 +1214,7 @@ pub fn prepare_thread() {
 /// The root of a message of two or more chunks, from its chunk values: the
 /// left subtree takes the largest power of two of chunks below the count.
 fn root(cvs: &[CVBytes], key: &CVWords, flags: u8, platform: Platform) -> Hash {
-    let split = left_len(cvs.len());
+    let split = crate::tree::left_chunks(cvs.len());
     let left = subtree(&cvs[..split], key, flags, platform);
     let right = subtree(&cvs[split..], key, flags, platform);
     crate::hasher::parent_output(&left, &right, key, flags, platform).root_hash()
@@ -1118,16 +1225,27 @@ fn subtree(cvs: &[CVBytes], key: &CVWords, flags: u8, platform: Platform) -> CVB
     if cvs.len() == 1 {
         return cvs[0];
     }
-    let split = left_len(cvs.len());
+    let split = crate::tree::left_chunks(cvs.len());
     let left = subtree(&cvs[..split], key, flags, platform);
     let right = subtree(&cvs[split..], key, flags, platform);
     crate::hasher::parent_output(&left, &right, key, flags, platform).chaining_value()
 }
 
-/// The largest power of two below `n` (n of 2 or more).
-fn left_len(n: usize) -> usize {
-    assert!(n >= 2, "left_len requires at least 2 leaves");
-    1 << (usize::BITS - 1 - (n - 1).leading_zeros())
+/// Acquire a best-effort `Sme2Turn` for `hash_each_middle` whenever either the
+/// chunk/root rounds (`messages.len() >= 16`) or the first non-root parent
+/// round (`sum_{chunks > 2} (chunks / 2) >= 16`) can reach an SME2 group.
+/// Subsequent parent rounds strictly shrink pair counts, so no later round can
+/// enter SME2 without first consulting the turn.
+#[cfg(target_arch = "aarch64")]
+fn turn_for_each_middle<I: Item>(platform: Platform, items: &[I], messages: &[(usize, usize)]) -> crate::platform::Sme2Turn {
+    let mut first_parent_pairs = 0usize;
+    for &(i, _) in messages {
+        let chunks = items[i].bytes().len().div_ceil(CHUNK_LEN);
+        if chunks > 2 {
+            first_parent_pairs += chunks / 2;
+        }
+    }
+    crate::platform::Sme2Turn::take(platform, messages.len() >= 16 || first_parent_pairs >= 16)
 }
 
 #[cfg(test)]
@@ -1294,16 +1412,20 @@ mod test {
             assert!(crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow().is_empty()), "counter != 0 skips output16/output8");
         }
 
-        // Exercise finalize_output_slots directly across every supported width
-        // (including width=8 on AVX-512 hosts) and exact call counts.
-        let mut widths = vec![0usize];
-        if width >= 8 {
-            widths.push(8);
+        // Exercise finalize_output_slots directly across every supported platform
+        // (including SSE4.1 -> width 0 and AVX2 -> width 8 on AVX-512 hosts).
+        let mut platforms = Vec::new();
+        if let Some(p) = Platform::sse41() {
+            platforms.push(p);
         }
-        if width == 16 {
-            widths.push(16);
+        if let Some(p) = Platform::avx2() {
+            platforms.push(p);
         }
-        for &w in &widths {
+        if let Some(p) = Platform::avx512() {
+            platforms.push(p);
+        }
+        for p in platforms {
+            let w = crate::ffi_output::lanes(p);
             for n in [2usize, 3, 4, 7, 8, 9, 15, 16, 19, 20, 24, 25, 32] {
                 let mut hashers: Vec<_> = (0..n)
                     .map(|i| {
@@ -1316,7 +1438,7 @@ mod test {
                 let slots: Vec<u8> = (0..n).map(|i| i as u8).collect();
                 let mut out = vec![[0u8; OUT_LEN]; n];
                 crate::ffi_output::OUTPUT_CALLS.with(|c| c.borrow_mut().clear());
-                let done = crate::ffi_output::finalize_output_slots(&hashers, &which, &slots, &mut out, w);
+                let done = crate::ffi_output::finalize_output_slots(&hashers, &which, &slots, &mut out, p);
                 for &k in &slots[done..] {
                     let ku = usize::from(k);
                     out[ku] = *hashers[ku].take_root_hash().as_bytes();

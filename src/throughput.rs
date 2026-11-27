@@ -140,15 +140,7 @@ pub fn hash_many<P: Prepared + ?Sized>(mode: Mode, batch: &P, out: &mut [[u8; OU
 /// ```
 #[inline(always)]
 pub fn hash_counter_range(mode: Mode, template: &[u8], counter_word: usize, start: u32, out: &mut [[u8; OUT_LEN]]) {
-    crate::ffi_counter::validate_counter_range(template, counter_word);
-    let platform = crate::platform::Platform::detect();
-    if out.is_empty() {
-        return;
-    }
-    let mut room = core::mem::MaybeUninit::uninit();
-    let (key, flags) = mode.key(&mut room);
-    let turn = crate::platform::Sme2Turn::take(platform, out.len() >= 16);
-    crate::ffi_counter::hash_counter_range_on(template, counter_word, start, key, flags, out, turn.platform());
+    TreeHasher::new(mode).hash_counter_range(template, counter_word, start, out);
 }
 
 /// Hash a key-derivation context string and return a [`ContextKey`].
@@ -547,10 +539,10 @@ impl TreeHasher {
         Self { domain, on_this_core: false }
     }
 
-    /// The kernels of this `TreeHasher`'s parents: a core's own, or the
-    /// detected platform's.
+    /// The kernels for this `TreeHasher`: the calling core's own when
+    /// `on_this_core` is set, otherwise the detected platform's.
     #[inline]
-    fn parents_platform(&self) -> crate::platform::Platform {
+    fn platform(&self) -> crate::platform::Platform {
         if self.on_this_core { crate::platform::Platform::own_core() } else { crate::platform::Platform::detect() }
     }
 
@@ -610,20 +602,14 @@ impl TreeHasher {
     /// with the shared accelerator's turn where the call may take it.
     #[inline]
     fn turn(&self, len: usize) -> crate::platform::Sme2Turn {
-        if self.on_this_core {
-            return crate::platform::Sme2Turn::take(crate::platform::Platform::own_core(), false);
-        }
-        crate::platform::Sme2Turn::take(crate::platform::Platform::detect(), len >= crate::SME2_SIZED_LEN)
+        self.turn_if(len >= crate::SME2_SIZED_LEN)
     }
 
     /// The kernels for a call that may take the shared accelerator's turn
     /// when `sme2_sized` says its work is the accelerator's size.
     #[inline]
     fn turn_if(&self, sme2_sized: bool) -> crate::platform::Sme2Turn {
-        if self.on_this_core {
-            return crate::platform::Sme2Turn::take(crate::platform::Platform::own_core(), false);
-        }
-        crate::platform::Sme2Turn::take(crate::platform::Platform::detect(), sme2_sized)
+        crate::platform::Sme2Turn::take(self.platform(), !self.on_this_core && sme2_sized)
     }
 
     /// The hash of the whole message `input`: what
@@ -677,10 +663,11 @@ impl TreeHasher {
     /// when `out` is empty).
     pub fn hash_counter_range(&self, template: &[u8], counter_word: usize, start: u32, out: &mut [[u8; OUT_LEN]]) {
         crate::ffi_counter::validate_counter_range(template, counter_word);
-        let turn = self.turn_if(out.len() >= 16);
+        let platform = self.platform();
         if out.is_empty() {
             return;
         }
+        let turn = crate::platform::Sme2Turn::take(platform, !self.on_this_core && out.len() >= 16);
         crate::ffi_counter::hash_counter_range_on(template, counter_word, start, self.domain.key(), self.domain.flags(), out, turn.platform());
     }
 
@@ -712,13 +699,12 @@ impl TreeHasher {
     /// Requires `out.len() == items.len()`.
     pub fn hash_each(&self, items: &[(&[Block], usize)], out: &mut [[u8; OUT_LEN]]) {
         assert_eq!(items.len(), out.len(), "one digest per item");
-        let platform = if self.on_this_core { crate::platform::Platform::own_core() } else { crate::platform::Platform::detect() };
-        crate::each::hash_each_on(self.domain.key(), self.domain.flags(), items, out, platform, |item| self.hash(item));
+        crate::each::hash_each_on(self.domain.key(), self.domain.flags(), items, out, self.platform(), |item| self.hash(item));
     }
 
     /// The chaining value of the parent of two subtrees.
     fn bare_parent_cv(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> crate::CVBytes {
-        crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.parents_platform()).chaining_value()
+        crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.platform()).chaining_value()
     }
 
     /// A layer of parents on `platform`: `out[i]` is the parent of
@@ -743,13 +729,13 @@ impl TreeHasher {
     /// The hash of the message whose root has these two children: the
     /// tree's top, where the chaining values end.
     fn bare_root_hash(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> Hash {
-        crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.parents_platform()).root_hash()
+        crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.platform()).root_hash()
     }
 
     /// The extended output of the message whose root has these two
     /// children: its first 32 bytes are [`bare_root_hash`](TreeHasher::bare_root_hash)'s.
     fn bare_root_output(&self, left: &crate::CVBytes, right: &crate::CVBytes) -> crate::OutputReader {
-        crate::OutputReader::new(crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.parents_platform()))
+        crate::OutputReader::new(crate::hasher::parent_output(left, right, self.domain.key(), self.domain.flags(), self.platform()))
     }
     /// The chaining value of a whole subtree: the `index`-th of 2^`level`
     /// chunks.
@@ -1054,7 +1040,7 @@ mod tree_test {
             for pairs in (0..=40).chain([63, 64, 65, 127, 128, 129, 150]) {
                 let children = &cvs[..2 * pairs];
                 let mut out = std::vec![[0u8; 32]; pairs];
-                tree.bare_parent_cvs_on(tree.parents_platform(), children, &mut out);
+                tree.bare_parent_cvs_on(tree.platform(), children, &mut out);
                 for (i, got) in out.iter().enumerate() {
                     assert_eq!(*got, tree.bare_parent_cv(&children[2 * i], &children[2 * i + 1]), "pair {i} of {pairs}");
                 }
@@ -1148,7 +1134,7 @@ mod tree_test {
         crate::initialize();
         let cvs = [[1u8; 32]; 3];
         let tree = TreeHasher::new(Mode::Plain);
-        tree.bare_parent_cvs_on(tree.parents_platform(), &cvs, &mut [[0u8; 32]]);
+        tree.bare_parent_cvs_on(tree.platform(), &cvs, &mut [[0u8; 32]]);
     }
 
     #[test]
@@ -1157,7 +1143,7 @@ mod tree_test {
         crate::initialize();
         let cvs = [[1u8; 32]; 4];
         let tree = TreeHasher::new(Mode::Plain);
-        tree.bare_parent_cvs_on(tree.parents_platform(), &cvs, &mut [[0u8; 32]]);
+        tree.bare_parent_cvs_on(tree.platform(), &cvs, &mut [[0u8; 32]]);
     }
 
     /// The hash of a whole message, a batch and a collection in a prepared

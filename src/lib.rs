@@ -139,9 +139,11 @@
 //!   [`convenience::hash`], [`throughput::hash`], [`throughput::hash_many`],
 //!   [`Hasher::update`](convenience::Hasher::update) and
 //!   [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
-//!   `Hasher::update_reader` uses a 64 KiB stack buffer for the first read
-//!   (even on immediate EOF), and promotes to a 1 MiB heap buffer once
-//!   65,536 bytes or more are read before EOF, freed when it returns.
+//!   `Hasher::update_reader` zero-initializes a 64 KiB stack buffer for the
+//!   first read (even on immediate EOF, so each call carries a small fixed
+//!   stack-zeroing cost — pass in-memory bytes to `Hasher::update` directly),
+//!   and promotes to a 1 MiB heap buffer once 65,536 bytes or more are read
+//!   before EOF, freed when it returns.
 //!   `throughput::hash_each` keeps reusable per-thread `Vec` storage for
 //!   messages of 2 to 15 chunks (16 bytes per message and 32 bytes per chunk
 //!   of payload, plus `Vec` capacity): its first such collection and a larger
@@ -848,8 +850,34 @@ impl IncrementCounter {
 /// The widths the platform's many-lane kernels run at, in one pass each,
 /// rising: SSE4.1 four lanes; AVX2 eight (and four); AVX-512 sixteen (and
 /// eight, four), and thirty-two where the 32-input kernel runs
-/// (wide_avx512, Zen 5 on Linux). Below the smallest, one and two lanes
-/// have passes of their own as cheap as one.
+/// (`wide_avx512`, Zen 5 on Linux).
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn lane_widths(platform: Platform) -> &'static [usize] {
+    match platform {
+        Platform::SSE41 => &[4],
+        Platform::AVX2 => &[4, 8],
+        Platform::AVX512 => {
+            if crate::platform::wide_avx512() {
+                &[4, 8, 16, 32]
+            } else {
+                &[4, 8, 16]
+            }
+        }
+    }
+}
+
+/// The lanes `count` whole inputs run on when the x86 kernels' cascade would
+/// take two or more passes for them (3 -> 4, 5..=7 -> 8, 9..=15 -> 16,
+/// 17..=31 -> 32 on wide AVX-512). Every power of two from 4 through the
+/// platform's widest kernel is present in `lane_widths`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn rounded_lanes(platform: Platform, count: usize) -> Option<usize> {
+    if count <= 2 {
+        return None;
+    }
+    lane_widths(platform).iter().copied().find(|&w| w >= count).filter(|&w| w != count)
+}
+
 /// `platform.hash_many` over `inputs`, on `rounded_lanes` where a wider
 /// kernel takes the count in one pass: the spare lanes hash a copy of the
 /// last input, into scratch. Past the widest kernel, the whole groups of
@@ -876,13 +904,63 @@ pub(crate) fn hash_many_rounded<const N: usize>(
     out: &mut [u8],
 ) {
     #[cfg(target_arch = "x86_64")]
-    ffi_partial::hash_many_rounded(platform, inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    if inputs.len().is_power_of_two() {
+        platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    } else {
+        hash_many_rounded_slow(platform, inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    }
     #[cfg(not(target_arch = "x86_64"))]
     platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
-use ffi_partial::{lane_widths, rounded_lanes};
+#[cfg(target_arch = "x86_64")]
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn hash_many_rounded_slow<const N: usize>(
+    platform: Platform,
+    inputs: &[&[u8; N]],
+    key: &CVWords,
+    counter: u64,
+    increment_counter: IncrementCounter,
+    flags: u8,
+    flags_start: u8,
+    flags_end: u8,
+    out: &mut [u8],
+) {
+    let widest = *lane_widths(platform).last().expect("every x86-64 platform has non-empty lane widths");
+    let mut inputs = inputs;
+    let mut out = out;
+    let mut counter = counter;
+    if inputs.len() > widest && rounded_lanes(platform, inputs.len() % widest).is_some() {
+        while inputs.len() > widest {
+            let (head, rest) = inputs.split_at(widest);
+            let (head_out, rest_out) = out.split_at_mut(widest * OUT_LEN);
+            platform.hash_many(head, key, counter, increment_counter, flags, flags_start, flags_end, head_out);
+            if increment_counter.yes() {
+                counter += widest as u64;
+            }
+            inputs = rest;
+            out = rest_out;
+        }
+    }
+    if let Some(lanes) = rounded_lanes(platform, inputs.len()) {
+        crate::ran(crate::Ran::RoundedUp);
+        let last = *inputs.last().expect("a count that rounds up is 3 or more");
+        let mut padded = crate::stack_vec::StackVec::<&[u8; N], 32>::new();
+        padded.extend_from_slice(inputs);
+        while padded.len() < lanes {
+            padded.push(last);
+        }
+        #[cfg(test)]
+        crate::ROUNDED_WIDTH.with(|w| w.set(w.get() | padded.len()));
+        let mut scratch = [0u8; 32 * OUT_LEN];
+        platform.hash_many(&padded, key, counter, increment_counter, flags, flags_start, flags_end, &mut scratch[..lanes * OUT_LEN]);
+        out[..inputs.len() * OUT_LEN].copy_from_slice(&scratch[..inputs.len() * OUT_LEN]);
+    } else {
+        platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
+    }
+}
 
 /// Intentional low-byte extraction for self-test byte patterns (wrapping is
 /// the point, unlike length/count narrowing which uses `u8::try_from`).

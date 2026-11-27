@@ -51,10 +51,11 @@ fn rotation<const W: usize>(r: u32) -> [u32; W] {
 /// The chaining values of `whole.len()` whole chunks and one partial chunk
 /// after them (1 to CHUNK_LEN - 1 bytes), at `counter` and the counters
 /// after it, into `out`, `(whole.len() + 1) * OUT_LEN` bytes. Requires 1 to
-/// `W - 1` whole chunks.
-/// Unsafe: the CPU must support `kernel`'s instruction set.
-unsafe fn hash_chunks_with_partial<const W: usize>(
-    kernel: unsafe extern "C" fn(*mut Params<W>),
+/// `W - 1` whole chunks. Kept safe (using a non-generic function pointer `run`
+/// so only `W` in `{4, 8, 16}` is monomorphized while `cargo-mutants` covers
+/// all parameter/flag/output logic).
+fn hash_chunks_with_partial<const W: usize>(
+    run: fn(&mut Params<W>),
     whole: &[&[u8; CHUNK_LEN]],
     partial: &[u8],
     key: &CVWords,
@@ -102,12 +103,7 @@ unsafe fn hash_chunks_with_partial<const W: usize>(
     for (lane, chunk) in whole.iter().enumerate() {
         p.msg[lane] = chunk.as_ptr();
     }
-    // Sound: every lane's pointer reaches 16 blocks (a whole chunk, or the
-    // padded copy), and the caller's CPU has the kernel's instructions.
-    unsafe {
-        crate::ran_kernel(kernel as *const ());
-        kernel(&mut p);
-    }
+    run(&mut p);
     for lane in 0..=n {
         let words = if lane < n { &p.h } else { &p.snap };
         for (i, word) in words.iter().enumerate() {
@@ -190,40 +186,105 @@ pub(crate) fn try_hash_chunks_with_partial(
 /// Unsafe: the CPU must have SSE4.1.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_sse41(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees SSE4.1 support.
-    unsafe { hash_chunks_with_partial::<4>(blake3_servil_partial_sse41, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<4>(
+        |p| {
+            // Sound: caller guarantees SSE4.1 support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_sse41 as *const ());
+                blake3_servil_partial_sse41(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on eight lanes: 1 to 7 whole chunks.
 /// Unsafe: the CPU must have AVX2.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx2(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX2 support.
-    unsafe { hash_chunks_with_partial::<8>(blake3_servil_partial_avx2, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<8>(
+        |p| {
+            // Sound: caller guarantees AVX2 support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx2 as *const ());
+                blake3_servil_partial_avx2(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on four EVEX AVX-512VL lanes: 1 to 3 whole chunks.
 /// Unsafe: the CPU must have AVX-512F and AVX-512VL.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx512_4(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX-512F+VL support.
-    unsafe { hash_chunks_with_partial::<4>(blake3_servil_partial_avx512_4, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<4>(
+        |p| {
+            // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx512_4 as *const ());
+                blake3_servil_partial_avx512_4(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on eight EVEX AVX-512VL lanes: 1 to 7 whole chunks.
 /// Unsafe: the CPU must have AVX-512F and AVX-512VL.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx512_8(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX-512F+VL support.
-    unsafe { hash_chunks_with_partial::<8>(blake3_servil_partial_avx512_8, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<8>(
+        |p| {
+            // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx512_8 as *const ());
+                blake3_servil_partial_avx512_8(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 /// [`hash_chunks_with_partial`] on sixteen EVEX AVX-512F lanes: 1 to 15 whole chunks.
 /// Unsafe: the CPU must have AVX-512F and AVX-512VL.
 #[inline(never)]
 pub unsafe fn hash_chunks_with_partial_avx512_16(whole: &[&[u8; CHUNK_LEN]], partial: &[u8], key: &CVWords, counter: u64, flags: u8, out: &mut [u8]) {
-    // Sound: caller guarantees AVX-512F+VL support.
-    unsafe { hash_chunks_with_partial::<16>(blake3_servil_partial_avx512_16, whole, partial, key, counter, flags, out) }
+    hash_chunks_with_partial::<16>(
+        |p| {
+            // Sound: caller guarantees AVX-512F+VL support; `hash_chunks_with_partial` initialized all lane pointers.
+            unsafe {
+                crate::ran_kernel(blake3_servil_partial_avx512_16 as *const ());
+                blake3_servil_partial_avx512_16(p);
+            }
+        },
+        whole,
+        partial,
+        key,
+        counter,
+        flags,
+        out,
+    )
 }
 
 const SELF_TEST_WHOLE: usize = 9;
@@ -300,234 +361,6 @@ pub(crate) fn entries_avx512() -> [(&'static str, *const ()); 3] {
         ("partial_avx512_8", blake3_servil_partial_avx512_8 as *const ()),
         ("partial_avx512_16", blake3_servil_partial_avx512_16 as *const ()),
     ]
-}
-
-pub(crate) fn lane_widths(platform: crate::platform::Platform) -> &'static [usize] {
-    match platform {
-        crate::platform::Platform::SSE41 => &[4],
-        crate::platform::Platform::AVX2 => &[4, 8],
-        crate::platform::Platform::AVX512 => {
-            if crate::platform::wide_avx512() {
-                &[4, 8, 16, 32]
-            } else {
-                &[4, 8, 16]
-            }
-        }
-    }
-}
-
-/// The lanes `count` whole inputs run on when the x86 kernels' cascade would
-/// take two or more passes for them (3 -> 4, 5..=7 -> 8, 9..=15 -> 16,
-/// 17..=31 -> 32 on wide AVX-512). Every power of two from 4 through the
-/// platform's widest kernel is present in `lane_widths`.
-pub(crate) fn rounded_lanes(platform: crate::platform::Platform, count: usize) -> Option<usize> {
-    if count <= 2 {
-        return None;
-    }
-    lane_widths(platform).iter().copied().find(|&w| w >= count).filter(|&w| w != count)
-}
-
-/// Fast-path `platform.hash_many` on powers of two (every power of two from 4
-/// through the platform's widest kernel is present in `lane_widths`, so powers
-/// of two never pad and larger ones divide evenly by the widest kernel),
-/// keeping the 1 KiB rounding scratch and extra dispatch copies out of hot
-/// callers' stack frames and cold instruction cache lines (`#376`).
-#[inline]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn hash_many_rounded<const N: usize>(
-    platform: crate::platform::Platform,
-    inputs: &[&[u8; N]],
-    key: &CVWords,
-    counter: u64,
-    increment_counter: crate::IncrementCounter,
-    flags: u8,
-    flags_start: u8,
-    flags_end: u8,
-    out: &mut [u8],
-) {
-    if inputs.len().is_power_of_two() {
-        platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
-    } else {
-        hash_many_rounded_slow(platform, inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
-    }
-}
-
-#[cold]
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn hash_many_rounded_slow<const N: usize>(
-    platform: crate::platform::Platform,
-    inputs: &[&[u8; N]],
-    key: &CVWords,
-    counter: u64,
-    increment_counter: crate::IncrementCounter,
-    flags: u8,
-    flags_start: u8,
-    flags_end: u8,
-    out: &mut [u8],
-) {
-    let widest = *lane_widths(platform).last().expect("every x86-64 platform has non-empty lane widths");
-    let mut inputs = inputs;
-    let mut out = out;
-    let mut counter = counter;
-    if inputs.len() > widest && rounded_lanes(platform, inputs.len() % widest).is_some() {
-        while inputs.len() > widest {
-            let (head, rest) = inputs.split_at(widest);
-            let (head_out, rest_out) = out.split_at_mut(widest * OUT_LEN);
-            platform.hash_many(head, key, counter, increment_counter, flags, flags_start, flags_end, head_out);
-            if increment_counter.yes() {
-                counter += widest as u64;
-            }
-            inputs = rest;
-            out = rest_out;
-        }
-    }
-    if let Some(lanes) = rounded_lanes(platform, inputs.len()) {
-        crate::ran(crate::Ran::RoundedUp);
-        let last = *inputs.last().expect("a count that rounds up is 3 or more");
-        let mut padded = crate::stack_vec::StackVec::<&[u8; N], 32>::new();
-        padded.extend_from_slice(inputs);
-        while padded.len() < lanes {
-            padded.push(last);
-        }
-        #[cfg(test)]
-        crate::ROUNDED_WIDTH.with(|w| w.set(w.get() | padded.len()));
-        let mut scratch = [0u8; 32 * OUT_LEN];
-        platform.hash_many(&padded, key, counter, increment_counter, flags, flags_start, flags_end, &mut scratch[..lanes * OUT_LEN]);
-        out[..inputs.len() * OUT_LEN].copy_from_slice(&scratch[..inputs.len() * OUT_LEN]);
-    } else {
-        platform.hash_many(inputs, key, counter, increment_counter, flags, flags_start, flags_end, out);
-    }
-}
-
-/// Whether a fresh hasher in `update_each` (`hold`) on x86-64 should stream its
-/// first chunk straight into `ChunkState`: keyed/derived hashers do so that
-/// `finalize_each` finishes their final block side by side via 16-lane
-/// `output16` when 16 eligible descriptors pack together; plain hashers stage
-/// instead so `finalize_each` hashes 1 KiB chunks via `hash_many_rounded` and
-/// multi-block `65..=1023 B` prefixes on AVX2/AVX-512 via `hash_by_blocks`
-/// (#404). Non-consuming mid-chunk `finalize()` on a staged plain first chunk
-/// rehashes the staged prefix fresh.
-#[inline(always)]
-pub(crate) fn first_chunk_to_core(stage_empty: bool, hold: bool, is_plain: bool, core_count: u64, input_len: usize) -> bool {
-    stage_empty && hold && !is_plain && core_count + input_len as u64 <= CHUNK_LEN as u64
-}
-
-/// x86-64 `finalize_each` (called for `which.len() >= 2`): partition each
-/// 128-hasher window into staged plain whole chunks (`== 1024 B`, full-width
-/// `hash_many_rounded` when `>= 2`), staged plain multi-block short messages
-/// (`65..=1023 B`, on AVX2/AVX-512 batched via `hash_by_blocks` for equal
-/// prefix blocks with scalar final blocks when `>= 4` or `>= 2` with a message
-/// `> 128 B`; SSE4.1 finishes staged `< 1 KiB` messages individually), and
-/// remaining hashers (`<= 64 B` plain, keyed/derived, or multi-chunk; Linux
-/// AVX-512 packs eligible `ffi_output::input` descriptors independently and
-/// runs 16-lane `output16` on every complete 16-pack). Key values never select
-/// grouping or dispatch (#404).
-pub(crate) fn finalize_each(hashers: &mut [crate::Hasher], which: &[usize], out: &mut [[u8; OUT_LEN]]) {
-    const FINALIZE_BATCH: usize = 128;
-    const FULL_CHUNK_BATCH: usize = 32;
-    const SHORT_PAIR_MIN_LEN: usize = 2 * crate::BLOCK_LEN;
-    const { assert!(FINALIZE_BATCH <= u8::MAX as usize) };
-    let platform = crate::platform::Platform::detect();
-    let block_lanes = crate::pair::takes_platform(platform);
-    let output_width = crate::ffi_output::lanes(platform);
-    #[cfg(test)]
-    let mut counted_output_turn = false;
-    for (w_chunk, o_chunk) in which.chunks(FINALIZE_BATCH).zip(out.chunks_mut(FINALIZE_BATCH)) {
-        let mut full_chunks = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
-        let mut short_plain = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
-        let mut short_plain_max_len = 0usize;
-        let mut output_slots = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
-        let mut rest = crate::stack_vec::StackVec::<u8, FINALIZE_BATCH>::new();
-        for (k, &i) in w_chunk.iter().enumerate() {
-            let k = u8::try_from(k).expect("window index < TABLE (128)");
-            if hashers[i].is_plain_single_chunk_staged() {
-                let len = hashers[i].staged_bytes().len();
-                if len == CHUNK_LEN {
-                    full_chunks.push(k);
-                    continue;
-                }
-                if block_lanes && len > crate::BLOCK_LEN {
-                    short_plain.push(k);
-                    short_plain_max_len = short_plain_max_len.max(len);
-                    continue;
-                }
-            }
-            if output_width != 0 && crate::ffi_output::input(&hashers[i]).is_some() {
-                output_slots.push(k);
-                continue;
-            }
-            rest.push(k);
-        }
-        if full_chunks.len() >= 2 {
-            for part in full_chunks.as_slice().chunks(FULL_CHUNK_BATCH) {
-                let refs: crate::stack_vec::StackVec<&[u8; CHUNK_LEN], FULL_CHUNK_BATCH> =
-                    part.iter().map(|&k| hashers[w_chunk[usize::from(k)]].staged_bytes().try_into().unwrap()).collect();
-                let mut digests = [[0u8; OUT_LEN]; FULL_CHUNK_BATCH];
-                crate::hash_many_rounded(
-                    platform,
-                    &refs,
-                    crate::IV,
-                    0,
-                    crate::IncrementCounter::No,
-                    0,
-                    CHUNK_START,
-                    CHUNK_END | crate::ROOT,
-                    digests[..part.len()].as_flattened_mut(),
-                );
-                for (&k, digest) in part.iter().zip(&digests) {
-                    o_chunk[usize::from(k)] = *digest;
-                }
-            }
-        } else {
-            for &k in full_chunks.as_slice() {
-                let k = usize::from(k);
-                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
-            }
-        }
-        // Two 1-prefix-block messages (`65..=128 B`) cost less scalar than
-        // sorting/scattering through `hash_by_blocks`; 4+ or any >= 2-block
-        // prefix (`> 128 B`) pays for SIMD prefix batching.
-        if short_plain.len() >= 4 || (short_plain.len() >= 2 && short_plain_max_len > SHORT_PAIR_MIN_LEN) {
-            for part in short_plain.as_slice().chunks(crate::each::BY_BLOCKS_AT_ONCE) {
-                let bytes: crate::stack_vec::StackVec<&[u8], { crate::each::BY_BLOCKS_AT_ONCE }> =
-                    part.iter().map(|&k| hashers[w_chunk[usize::from(k)]].staged_bytes()).collect();
-                let mut digests = [[0u8; OUT_LEN]; crate::each::BY_BLOCKS_AT_ONCE];
-                crate::each::hash_by_blocks(&bytes, crate::IV, 0, &mut digests[..part.len()], platform);
-                for (&k, digest) in part.iter().zip(&digests) {
-                    o_chunk[usize::from(k)] = *digest;
-                }
-            }
-        } else {
-            for &k in short_plain.as_slice() {
-                let k = usize::from(k);
-                o_chunk[k] = *hashers[w_chunk[k]].take_root_hash().as_bytes();
-            }
-        }
-        {
-            let done = if output_slots.len() >= 4 {
-                #[cfg(test)]
-                if !counted_output_turn {
-                    crate::counted(crate::Counted::OutputGroupTurn);
-                    counted_output_turn = true;
-                }
-                crate::ffi_output::finalize_output_slots(hashers, w_chunk, output_slots.as_slice(), o_chunk, output_width)
-            } else {
-                0
-            };
-            for &k in &output_slots.as_slice()[done..] {
-                let ku = usize::from(k);
-                o_chunk[ku] = *hashers[w_chunk[ku]].take_root_hash().as_bytes();
-            }
-        }
-        for &k in rest.as_slice() {
-            let ku = usize::from(k);
-            o_chunk[ku] = *hashers[w_chunk[ku]].take_root_hash().as_bytes();
-        }
-        for &i in w_chunk {
-            hashers[i].reset();
-        }
-    }
 }
 
 #[cfg(test)]
