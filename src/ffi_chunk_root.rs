@@ -115,7 +115,7 @@ unsafe fn load_under_16(p: *const u8, n: usize) -> (u64, u64) {
 /// entry point selected by `platform`.
 #[inline(always)]
 fn call(platform: Platform, input: &[u8], whole_blocks: usize, key: &CVWords, last: &[u8; BLOCK_LEN], last_len: u8, flags: u8) -> [u8; OUT_LEN] {
-    assert!(whole_blocks <= CHUNK_LEN / BLOCK_LEN && whole_blocks * BLOCK_LEN <= input.len(), "whole blocks fit in input");
+    assert!(whole_blocks < CHUNK_LEN / BLOCK_LEN && whole_blocks * BLOCK_LEN <= input.len(), "whole blocks fit in input");
     assert!(usize::from(last_len) <= BLOCK_LEN, "last block length <= 64");
     let packed = u64::from(flags) + (u64::from(last_len) << 8) + ((whole_blocks as u64) << 16);
     let mut out = MaybeUninit::<[u8; OUT_LEN]>::uninit();
