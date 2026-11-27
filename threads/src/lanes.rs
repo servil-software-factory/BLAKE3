@@ -522,54 +522,70 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 }
 
 /// Say why, and end the process, from a thread the pool's callers may be
-/// waiting on. The words go straight to descriptor 2, and only if it
-/// says, asked for up to a tenth of a second, that it takes words:
-/// `std::io::stderr` takes a lock, and a caller that holds it while it
-/// waits for this thread would wait for ever; so would a write to a full
-/// pipe whose reader waits for that caller. A reader that is only behind
-/// has that tenth of a second to make room.
+/// waiting on. The diagnostic is written strictly non-blocking so a stalled
+/// or full descriptor 2 can NEVER delay or prevent `std::process::abort()`:
 ///
-/// The tenth of a second bounds the asking, not the writing. A
-/// descriptor that took words when asked may not when written to: another
-/// writer filled the pipe in between, a terminal's flow was stopped, a
-/// file's storage waits. The write then waits as any write does, and the
-/// end with it.
+/// - On Linux, opening `/proc/self/fd/2` with `O_WRONLY | O_NONBLOCK |
+///   O_NOCTTY | O_CLOEXEC` creates a private open file description for pipes,
+///   FIFOs, files, and terminals without mutating descriptor 2's shared flags;
+///   if that fails (e.g. a socket returns `ENXIO`), `send(..., MSG_DONTWAIT |
+///   MSG_NOSIGNAL)` attempts a non-blocking socket write, and any failure
+///   falls straight through to `abort()`.
+/// - On macOS, descriptor 2 is toggled to `O_NONBLOCK` only for the single
+///   non-blocking `write` and restored immediately before `abort()`.
 ///
 /// A panic is not this: it goes through the process's panic hook before
-/// anything here runs. The standard hook ordinarily writes its message
-/// to descriptor 2 without asking first (a write that can wait, as
-/// above; a test harness that captures output has it write there
-/// instead), and a hook of the program's does what it does, for as long
-/// as it takes. The stops that follow a panic on a pool thread
+/// anything here runs. The stops that follow a panic on a pool thread
 /// (`AbortOnUnwind`, a worker's own) say their words that way.
 pub(crate) fn stop(why: &str) -> ! {
-    #[repr(C)]
-    struct PollFd {
-        fd: i32,
-        events: i16,
-        revents: i16,
-    }
-    // The count's type in poll's declaration: Linux's nfds_t is an
-    // unsigned long, macOS's an unsigned int.
     #[cfg(target_os = "linux")]
-    type Count = core::ffi::c_ulong;
-    #[cfg(not(target_os = "linux"))]
-    type Count = core::ffi::c_uint;
-    const POLLOUT: i16 = 4;
-    unsafe extern "C" {
-        fn poll(fds: *mut PollFd, count: Count, timeout_ms: i32) -> i32;
-        fn write(fd: i32, bytes: *const core::ffi::c_void, len: usize) -> isize;
+    {
+        const O_WRONLY: core::ffi::c_int = 0o1;
+        const O_NOCTTY: core::ffi::c_int = 0o400;
+        const O_NONBLOCK: core::ffi::c_int = 0o4000;
+        const O_CLOEXEC: core::ffi::c_int = 0o2000000;
+        const MSG_DONTWAIT: core::ffi::c_int = 0x40;
+        const MSG_NOSIGNAL: core::ffi::c_int = 0x4000;
+        unsafe extern "C" {
+            fn open(path: *const core::ffi::c_char, oflag: core::ffi::c_int, ...) -> core::ffi::c_int;
+            fn write(fd: core::ffi::c_int, bytes: *const core::ffi::c_void, len: usize) -> isize;
+            fn close(fd: core::ffi::c_int) -> core::ffi::c_int;
+            fn send(fd: core::ffi::c_int, bytes: *const core::ffi::c_void, len: usize, flags: core::ffi::c_int) -> isize;
+        }
+        // Sound: NUL-terminated path string and `why` is `why.len()` readable
+        // bytes; every opened descriptor is closed before aborting.
+        unsafe {
+            let nb_fd = open(c"/proc/self/fd/2".as_ptr(), O_WRONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+            if nb_fd >= 0 {
+                let _ = write(nb_fd, why.as_ptr().cast(), why.len());
+                let _ = close(nb_fd);
+            } else {
+                let _ = send(2, why.as_ptr().cast(), why.len(), MSG_DONTWAIT | MSG_NOSIGNAL);
+            }
+        }
     }
-    let mut stderr = PollFd { fd: 2, events: POLLOUT, revents: 0 };
-    // Sound: one PollFd, written by poll, which is asked for 100 ms at most.
-    let ready = unsafe { poll(&mut stderr, 1, 100) };
-    // One descriptor ready, and for writing alone: a poll that failed or
-    // timed out says nothing of `revents`, and one that reports an error
-    // beside the room to write (a pipe nobody reads) has nobody to tell.
-    if (ready, stderr.revents) == (1, POLLOUT) {
-        // Sound: `why` is `len` readable bytes. Whether they were written
-        // changes nothing here.
-        let _ = unsafe { write(2, why.as_ptr().cast(), why.len()) };
+    #[cfg(target_os = "macos")]
+    {
+        const F_GETFL: core::ffi::c_int = 3;
+        const F_SETFL: core::ffi::c_int = 4;
+        const O_NONBLOCK: core::ffi::c_int = 4;
+        unsafe extern "C" {
+            fn fcntl(fd: core::ffi::c_int, cmd: core::ffi::c_int, ...) -> core::ffi::c_int;
+            fn write(fd: core::ffi::c_int, bytes: *const core::ffi::c_void, len: usize) -> isize;
+        }
+        // Sound: `fcntl` queries/toggles non-blocking flag on fd 2 and restores
+        // it before aborting; `why` is `why.len()` readable bytes.
+        unsafe {
+            let flags = fcntl(2, F_GETFL);
+            if flags >= 0 {
+                if (flags & O_NONBLOCK) != 0 {
+                    let _ = write(2, why.as_ptr().cast(), why.len());
+                } else if fcntl(2, F_SETFL, flags | O_NONBLOCK) == 0 {
+                    let _ = write(2, why.as_ptr().cast(), why.len());
+                    let _ = fcntl(2, F_SETFL, flags);
+                }
+            }
+        }
     }
     std::process::abort()
 }
@@ -577,6 +593,26 @@ pub(crate) fn stop(why: &str) -> ! {
 #[cfg(test)]
 pub(crate) fn fail_worker_start_for_test() {
     started::<()>(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)));
+}
+
+#[cfg(test)]
+#[test]
+fn stop_syscall_constants_match_libc() {
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(libc::O_WRONLY, 0o1);
+        assert_eq!(libc::O_NOCTTY, 0o400);
+        assert_eq!(libc::O_NONBLOCK, 0o4000);
+        assert_eq!(libc::O_CLOEXEC, 0o2000000);
+        assert_eq!(libc::MSG_DONTWAIT, 0x40);
+        assert_eq!(libc::MSG_NOSIGNAL, 0x4000);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(libc::F_GETFL, 3);
+        assert_eq!(libc::F_SETFL, 4);
+        assert_eq!(libc::O_NONBLOCK, 4);
+    }
 }
 
 /// For the tests: descriptor 2 becomes the writing end of a pipe that is

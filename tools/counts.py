@@ -31,7 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unsafe_reasons as ur
 
-TRUNC_ALLOW_RE = re.compile(r"#!?\[[^\]]*\ballow\s*\([^)]*\bclippy::cast_possible_truncation\b")
+TRUNC_ALLOW_RE = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\([^)]*\bclippy::cast_possible_truncation\b")
 DEBUG_ASSERT_RE = ur.DEBUG_ASSERT
 SILENT_NARROW_RE = re.compile(r"\.\s*to_le_bytes\s*\(\s*\)\s*\[\s*0\s*\]")
 CFG_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")

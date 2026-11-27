@@ -248,32 +248,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let is_apple = os == "macos";
+    let mut asm_includes = String::new();
+    let mut emit_asm = |src: &str, out_name: &str, apple: bool, name: &str| {
+        stage_asm(&out_dir, src, out_name, apple, name);
+        asm_includes.push_str(&format!("core::arch::global_asm!(include_str!(concat!(env!(\"OUT_DIR\"), \"/{out_name}\")), options(raw));\n"));
+    };
 
     if arch == "x86_64" {
-        stage_asm(&out_dir, "c/blake3_sse41_x86-64_unix.S", "blake3_sse41.s", false, "sse41");
-        stage_asm(&out_dir, "c/blake3_avx2_x86-64_unix.S", "blake3_avx2.s", false, "avx2");
-        stage_asm(&out_dir, "c/blake3_partial_x86-64_unix.S", "blake3_partial.s", false, "partial");
-        stage_asm(&out_dir, "c/blake3_chunk_root_x86-64_unix.S", "blake3_chunk_root.s", false, "chunk_root");
-        stage_asm(&out_dir, "c/blake3_avx512_x86-64_unix.S", "blake3_avx512.s", false, "avx512");
-        stage_asm(&out_dir, "c/blake3_avx512_32.S", "blake3_avx512_32.s", false, "avx512_32");
-        stage_asm(&out_dir, "c/blake3_packed_x86-64_unix.S", "blake3_packed_x86.s", false, "packed_x86");
-        stage_asm(&out_dir, "c/blake3_counter_x86-64_unix.S", "blake3_counter_x86.s", false, "counter_x86");
-        stage_asm(&out_dir, "c/blake3_output16.S", "blake3_output16.s", false, "output16");
-        stage_asm(&out_dir, "c/blake3_output8.S", "blake3_output8.s", false, "output8");
+        emit_asm("c/blake3_sse41_x86-64_unix.S", "blake3_sse41.s", false, "sse41");
+        emit_asm("c/blake3_avx2_x86-64_unix.S", "blake3_avx2.s", false, "avx2");
+        emit_asm("c/blake3_partial_x86-64_unix.S", "blake3_partial.s", false, "partial");
+        emit_asm("c/blake3_chunk_root_x86-64_unix.S", "blake3_chunk_root.s", false, "chunk_root");
+        emit_asm("c/blake3_avx512_x86-64_unix.S", "blake3_avx512.s", false, "avx512");
+        emit_asm("c/blake3_avx512_32.S", "blake3_avx512_32.s", false, "avx512_32");
+        emit_asm("c/blake3_packed_x86-64_unix.S", "blake3_packed_x86.s", false, "packed_x86");
+        emit_asm("c/blake3_counter_x86-64_unix.S", "blake3_counter_x86.s", false, "counter_x86");
+        emit_asm("c/blake3_output16.S", "blake3_output16.s", false, "output16");
+        emit_asm("c/blake3_output8.S", "blake3_output8.s", false, "output8");
     }
 
     if arch == "aarch64" {
-        stage_asm(&out_dir, "c/blake3_neon_hybrid_aarch64.S", "blake3_neon_hybrid.s", is_apple, "neon");
-        stage_asm(&out_dir, "c/blake3_packed_neon_aarch64.S", "blake3_packed_neon.s", is_apple, "packed_neon");
-        stage_asm(&out_dir, "c/blake3_counter_neon_aarch64.S", "blake3_counter_neon.s", is_apple, "counter_neon");
-        stage_asm(&out_dir, "c/blake3_sme2_aarch64.S", "blake3_sme2.s", is_apple, "sme2");
-        stage_asm(&out_dir, "c/blake3_packed_sme2_aarch64.S", "blake3_packed_sme2.s", is_apple, "packed_sme2");
-        stage_asm(&out_dir, "c/blake3_counter_sme2_aarch64.S", "blake3_counter_sme2.s", is_apple, "counter_sme2");
-        stage_asm(&out_dir, "c/blake3_sme2_hybrid_aarch64.S", "blake3_sme2_hybrid.s", is_apple, "sme2_hybrid");
-        stage_asm(&out_dir, "c/blake3_output_neon_aarch64.S", "blake3_output_neon.s", is_apple, "output_neon");
-        stage_asm(&out_dir, "c/blake3_output_sme2_aarch64.S", "blake3_output_sme2.s", is_apple, "output_sme2");
+        emit_asm("c/blake3_neon_hybrid_aarch64.S", "blake3_neon_hybrid.s", is_apple, "neon");
+        emit_asm("c/blake3_packed_neon_aarch64.S", "blake3_packed_neon.s", is_apple, "packed_neon");
+        emit_asm("c/blake3_counter_neon_aarch64.S", "blake3_counter_neon.s", is_apple, "counter_neon");
+        emit_asm("c/blake3_sme2_aarch64.S", "blake3_sme2.s", is_apple, "sme2");
+        emit_asm("c/blake3_packed_sme2_aarch64.S", "blake3_packed_sme2.s", is_apple, "packed_sme2");
+        emit_asm("c/blake3_counter_sme2_aarch64.S", "blake3_counter_sme2.s", is_apple, "counter_sme2");
+        emit_asm("c/blake3_sme2_hybrid_aarch64.S", "blake3_sme2_hybrid.s", is_apple, "sme2_hybrid");
+        emit_asm("c/blake3_output_neon_aarch64.S", "blake3_output_neon.s", is_apple, "output_neon");
+        emit_asm("c/blake3_output_sme2_aarch64.S", "blake3_output_sme2.s", is_apple, "output_sme2");
     }
 
+    fs::write(out_dir.join("asm_includes.rs"), asm_includes)?;
     println!("cargo::rerun-if-changed=build.rs");
     Ok(())
 }

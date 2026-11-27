@@ -178,11 +178,12 @@
 //!   A call that needs no more pieces than an earlier one on that thread
 //!   allocates nothing. The pieces follow the cut and not the length
 //!   alone: 1 GiB less one byte is cut into more pieces than 1 GiB.
-//! - **Once per process**: the startup self-test's buffers on the calling
-//!   thread's stack while it runs (plus the one-time 64 KiB SME2 flat-walk
-//!   scratch on 512-bit SME2 CPUs),
-//!   and the threads: by default a worker per CPU beyond the first, each with the
-//!   standard library's stack, started by [`initialize_multithreaded`].
+//! - **Once per process**: the core startup self-test (stack buffers only; see
+//!   `blake3-servil-core`'s memory section for the post-init per-thread 64 KiB
+//!   SME2 flat-walk scratch, which pool preparation may also allocate on the
+//!   SME2 thread), and the pool threads: by default a worker per CPU beyond the
+//!   first, each with the standard library's stack, started by
+//!   [`initialize_multithreaded`].
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] or a Pipeline holds and the chaining values made from

@@ -370,6 +370,7 @@ impl Platform {
     }
 
     pub(crate) fn compress_in_place(&self, cv: &mut CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) {
+        assert!(usize::from(block_len) <= BLOCK_LEN, "block_len <= BLOCK_LEN");
         crate::counted(crate::Counted::CompressInPlace);
         self.compress_in_place_raw(cv, block, block_len, counter, flags);
     }
@@ -400,6 +401,7 @@ impl Platform {
     }
 
     pub(crate) fn compress_xof(&self, cv: &CVWords, block: &[u8; BLOCK_LEN], block_len: u8, counter: u64, flags: u8) -> [u8; 64] {
+        assert!(usize::from(block_len) <= BLOCK_LEN, "block_len <= BLOCK_LEN");
         match self {
             // Sound: `Platform::SSE41`/`AVX2` is constructed only after CPUID verification.
             #[cfg(target_arch = "x86_64")]
@@ -1159,5 +1161,27 @@ mod x86_features_test {
         ] {
             assert_eq!(x86_platform(avx512, avx2, sse41), want, "avx512 {avx512}, avx2 {avx2}, sse41 {sse41}");
         }
+    }
+}
+
+#[cfg(test)]
+mod compress_bounds_test {
+    use super::Platform;
+    use crate::{BLOCK_LEN, IV};
+
+    #[test]
+    fn compress_accepts_zero_and_block_len_and_rejects_above_block_len() {
+        crate::initialize();
+        let p = Platform::detect();
+        let block = [0u8; BLOCK_LEN];
+        for len in [0u8, u8::try_from(BLOCK_LEN).unwrap()] {
+            let mut cv = *IV;
+            p.compress_in_place(&mut cv, &block, len, 0, 0);
+            let _ = p.compress_xof(IV, &block, len, 0, 0);
+        }
+        let bad = u8::try_from(BLOCK_LEN + 1).unwrap();
+        let mut cv = *IV;
+        assert!(std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.compress_in_place(&mut cv, &block, bad, 0, 0))).is_err());
+        assert!(std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| p.compress_xof(IV, &block, bad, 0, 0))).is_err());
     }
 }

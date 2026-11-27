@@ -26,12 +26,16 @@ class CountsControls(unittest.TestCase):
     def test_detects_allow_truncation_and_undocumented_unsafe(self):
         src = (
             '#[allow(clippy::cast_possible_truncation)]\n'
-            'fn bad() {\n'
+            'fn bad_allow() {\n'
             '    let _ = unsafe { 1 };\n'
+            '}\n'
+            '#[expect(clippy::cast_possible_truncation)]\n'
+            'fn bad_expect(x: usize) -> u8 {\n'
+            '    x as u8\n'
             '}\n'
         )
         c = counts.measure_files({"src/x.rs": src})
-        self.assertEqual(c["truncation_allows"], 1)
+        self.assertEqual(c["truncation_allows"], 2)
         self.assertEqual(c["undocumented_unsafe"], 1)
 
     def test_detects_undocumented_debug_assert_and_silent_narrowings(self):

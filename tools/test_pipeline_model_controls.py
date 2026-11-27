@@ -660,6 +660,15 @@ class Controls(unittest.TestCase):
             "shuttle_pipeline: deadlock!_recovery\nerror: test failed (signal: 9, SIGKILL: kill)\n",
             "shuttle_pipeline: thread foo panicked: deadlock!\nerror: test failed (signal: 9, SIGKILL: kill)\n",
             "shuttle_pipeline: s\nthread 'test' panicked at src/foo.rs:1:1:\nfailed to open deadlock! fixture: NotFound\n",
+            # An unrelated first panic followed by Shuttle's deadlock must report
+            # the first panic, NOT be credited as a wake-omission deadlock.
+            (
+                "shuttle_pipeline: s\n"
+                "thread 'worker' (7) panicked at src/foo.rs:1:1:\n"
+                "unrelated first failure\n"
+                "thread 'main' (1) panicked at shuttle/src/runtime/execution.rs:1:1:\n"
+                "deadlock!\n"
+            ),
         ):
             _, how_dl = controls.how_it_failed_parts(spoof_dl)
             self.assertNotEqual(how_dl, "a deadlock", spoof_dl)
@@ -669,6 +678,7 @@ class Controls(unittest.TestCase):
         for unrelated_msg in (
             "failed to read digest fixture: NotFound",
             "expected Hashed digest event, got Aborted",
+            "assertion `left == right` failed",
             "assertion `left == right` failed: expected a digest event, got Aborted",
             "assertion `left == right` failed: failed to read digest fixture",
             "expected PipeStorage used after release panic, got a successful access",

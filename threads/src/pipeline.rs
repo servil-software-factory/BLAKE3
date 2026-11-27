@@ -619,19 +619,7 @@ impl PipeStorage {
             cvs: (0..messages).map(|_| UnsafeCell::new(PieceValues { whole: [Cv::unset(); MAX_SLOT_PIECES], last: None })).collect(),
             slot_done: (0..messages).map(|_| OwnLine(AtomicBool::new(true))).collect(),
             tasks_left: (0..messages).map(|_| OwnLine(AtomicUsize::new(0))).collect(),
-            multi: (0..messages)
-                .map(|_| {
-                    UnsafeCell::new(MultiDesc {
-                        input: core::ptr::null(),
-                        total_len: 0,
-                        piece_level: level_of(TASK_LEN as u64),
-                        pieces: 0,
-                        batch: None,
-                        digests: core::ptr::null_mut(),
-                        loan_epoch: 0,
-                    })
-                })
-                .collect(),
+            multi: (0..messages).map(|_| UnsafeCell::new(MultiDesc::empty())).collect(),
             pieces: (0..pieces)
                 .map(|_| PieceNode {
                     slot: UnsafeCell::new(0),
@@ -798,15 +786,29 @@ struct PieceValues {
     last: Option<LastCv>,
 }
 
+/// Split-work payload kind inside [`MultiDesc`]: keeps batch-only fields
+/// (`message_len`, `slot_len`, `per_part`, `count`, non-null `digests`)
+/// disjoint from multi-piece slice fields (`total_len`, `piece_level`,
+/// `loan_epoch`) so mixed combinations are unrepresentable.
+#[derive(Clone, Copy)]
+enum MultiKind {
+    Batch { message_len: usize, slot_len: usize, per_part: usize, count: usize, digests: core::ptr::NonNull<[u8; OUT_LEN]> },
+    Slice { total_len: usize, piece_level: u32, loan_epoch: u64 },
+}
+
 #[derive(Clone, Copy)]
 struct MultiDesc {
     input: *const u8,
-    total_len: usize,
-    piece_level: u32,
     pieces: usize,
-    batch: Option<(usize, usize, usize)>,
-    digests: *mut [u8; OUT_LEN],
-    loan_epoch: u64,
+    kind: MultiKind,
+}
+
+const _: () = assert!(core::mem::size_of::<MultiDesc>() <= 64);
+
+impl MultiDesc {
+    fn empty() -> Self {
+        Self { input: core::ptr::null(), pieces: 0, kind: MultiKind::Slice { total_len: 0, piece_level: level_of(TASK_LEN as u64), loan_epoch: 0 } }
+    }
 }
 
 /// The last thing a worker does for a task: `publish` stores the task's
@@ -969,41 +971,43 @@ impl PipeStorage {
         let desc = unsafe { *self.multi[slot].get() };
         assert!(piece_idx < desc.pieces, "the action names a piece of its submission");
         let tree = self.tree_for(slot, custom);
-        if let Some((message_len, slot_len, per_part)) = desc.batch {
-            let first = piece_idx * per_part;
-            let count = (desc.total_len - first).min(per_part);
-            // Sound: the batch and its digests stay in the slot (`batches[s]`)
-            // until the slot's event, which waits for `slot_done`; this task's
-            // messages and digests are its own range of them (`first`,
-            // `count`).
-            let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(first * slot_len), count * slot_len) };
-            let digests = unsafe { core::slice::from_raw_parts_mut(desc.digests.add(first), count) };
-            // Sound: `desc.batch` came from a validated `Prepared` batch
-            // (including zero-length messages padded to `BLOCK_LEN`) held alive
-            // in `Pipeline::batches[slot]` until `slot_done`.
-            let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot_len) };
-            tree.hash_many_on(platform, &part, digests);
-            return (core::ptr::addr_of!(self.tasks_left[slot].0), true);
+        match desc.kind {
+            MultiKind::Batch { message_len, slot_len, per_part, count: total_count, digests: digests_ptr } => {
+                let first = piece_idx * per_part;
+                let count = (total_count - first).min(per_part);
+                // Sound: the batch and its digests stay in the slot (`batches[s]`)
+                // until the slot's event, which waits for `slot_done`; this task's
+                // messages and digests are its own range of them (`first`,
+                // `count`).
+                let bytes = unsafe { core::slice::from_raw_parts(desc.input.add(first * slot_len), count * slot_len) };
+                let digests = unsafe { core::slice::from_raw_parts_mut(digests_ptr.as_ptr().add(first), count) };
+                // Sound: `MultiKind::Batch` came from a validated `Prepared` batch
+                // (including zero-length messages padded to `BLOCK_LEN`) held alive
+                // in `Pipeline::batches[slot]` until `slot_done`.
+                let part = unsafe { crate::throughput::Part::from_checked_slots(bytes, message_len, slot_len) };
+                tree.hash_many_on(platform, &part, digests);
+                (core::ptr::addr_of!(self.tasks_left[slot].0), true)
+            }
+            MultiKind::Slice { total_len, piece_level: level, .. } => {
+                // Sound: the owner, or the Lent guard, keeps all the message's
+                // bytes in place until the slot is done. The chunks of this slice
+                // are the same partition the submitter put in the action list.
+                let input = unsafe { core::slice::from_raw_parts(desc.input, total_len) };
+                let bytes = input.chunks(CHUNK_LEN << level).nth(piece_idx).expect("a piece within its message");
+                let values = self.cvs[slot].get();
+                if piece_idx + 1 == desc.pieces {
+                    let value = tree.last_cv_on(platform, (piece_idx as u64) << level, bytes);
+                    // Sound: only the last piece writes this field.
+                    unsafe { (*values).last = Some(value) };
+                } else {
+                    let value = tree.subtree_cv_on(platform, level, piece_idx as u64, bytes);
+                    // Sound: a separate slot for each index (submit_multi_slice
+                    // limits the count); form no borrow of other workers' slots.
+                    unsafe { core::ptr::addr_of_mut!((*values).whole).cast::<Cv>().add(piece_idx).write(value) };
+                }
+                (core::ptr::addr_of!(self.tasks_left[slot].0), false)
+            }
         }
-
-        // Sound: the owner, or the Lent guard, keeps all the message's
-        // bytes in place until the slot is done. The chunks of this slice
-        // are the same partition the submitter put in the action list.
-        let input = unsafe { core::slice::from_raw_parts(desc.input, desc.total_len) };
-        let level = desc.piece_level;
-        let bytes = input.chunks(CHUNK_LEN << level).nth(piece_idx).expect("a piece within its message");
-        let values = self.cvs[slot].get();
-        if piece_idx + 1 == desc.pieces {
-            let value = tree.last_cv_on(platform, (piece_idx as u64) << level, bytes);
-            // Sound: only the last piece writes this field.
-            unsafe { (*values).last = Some(value) };
-        } else {
-            let value = tree.subtree_cv_on(platform, level, piece_idx as u64, bytes);
-            // Sound: a separate slot for each index (submit_multi_slice
-            // limits the count); form no borrow of other workers' slots.
-            unsafe { core::ptr::addr_of_mut!((*values).whole).cast::<Cv>().add(piece_idx).write(value) };
-        }
-        (core::ptr::addr_of!(self.tasks_left[slot].0), false)
     }
 
     fn finish_multi_slot(&self, slot: usize, is_batch: bool, custom: bool) -> (&'static WakerSlot, *const AtomicBool, Option<(&'static AtomicU64, u64)>) {
@@ -1013,12 +1017,16 @@ impl PipeStorage {
             // so every piece's value is written and no one else reads or
             // writes the slot's values or hash until `slot_done` below.
             let desc = unsafe { *self.multi[slot].get() };
+            let MultiKind::Slice { total_len, loan_epoch, .. } = desc.kind else {
+                unreachable!("finish_multi_slot called with !is_batch on a batch descriptor");
+            };
             let values = unsafe { &mut *self.cvs[slot].get() };
             let last = values.last.take().expect("the last piece supplied its value");
-            let hash = fold_multi_cvs(self.tree_for(slot, custom), &values.whole[..desc.pieces - 1], last, desc.total_len as u64);
+            let hash = fold_multi_cvs(self.tree_for(slot, custom), &values.whole[..desc.pieces - 1], last, total_len as u64);
+            // Sound: last task of `slot` holds exclusive write access to `hashes[slot]` until `slot_done` below.
             unsafe { *self.hashes[slot].get() = *hash.as_bytes() };
-            if desc.loan_epoch != 0 {
-                loan_mark = Some((&self.slot.get().loan_completed[slot].0, desc.loan_epoch));
+            if loan_epoch != 0 {
+                loan_mark = Some((&self.slot.get().loan_completed[slot].0, loan_epoch));
             }
         }
         (&self.slot.get().waker, core::ptr::addr_of!(self.slot_done[slot].0), loan_mark)
@@ -1537,18 +1545,12 @@ impl<T, B, P: Prepared + 'static> Pipeline<T, B, P> {
             debug_assert!((1..=MAX_SLOT_PIECES).contains(&pieces));
             self.storage().slot_done[s].store(false, Ordering::Relaxed);
             self.storage().tasks_left[s].store(pieces, Ordering::Relaxed);
+            let digests = core::ptr::NonNull::new(digests_ptr).expect("batch digest buffer is non-null");
             // Sound: no task of this slot is in flight (it was open), so its
             // description is the owner's to write before the dispatch below.
             unsafe {
-                *self.storage().multi[s].get() = MultiDesc {
-                    input: bytes.as_ptr(),
-                    total_len: count,
-                    piece_level: 0,
-                    pieces,
-                    batch: Some((msg_len, slot_len, per_part)),
-                    digests: digests_ptr,
-                    loan_epoch: 0,
-                }
+                *self.storage().multi[s].get() =
+                    MultiDesc { input: bytes.as_ptr(), pieces, kind: MultiKind::Batch { message_len: msg_len, slot_len, per_part, count, digests } }
             };
             let s32 = u32::try_from(s).expect("slot fits u32");
             let custom = self.slots[s].mode != SlotMode::Default;
@@ -2227,15 +2229,8 @@ impl<T, B, P> Pipeline<T, B, P> {
         self.storage().tasks_left[s].store(pieces, Ordering::Relaxed);
         // Sound: as `batch`'s, above.
         unsafe {
-            *self.storage().multi[s].get() = MultiDesc {
-                input: ptr,
-                total_len: len,
-                piece_level: level_of(piece_len as u64),
-                pieces,
-                batch: None,
-                digests: core::ptr::null_mut(),
-                loan_epoch,
-            }
+            *self.storage().multi[s].get() =
+                MultiDesc { input: ptr, pieces, kind: MultiKind::Slice { total_len: len, piece_level: level_of(piece_len as u64), loan_epoch } }
         };
         self.slots[s].kind = SlotKind::WaitMulti { has_owner };
         let s32 = u32::try_from(s).expect("slot fits u32");
@@ -3189,7 +3184,9 @@ mod test {
         let mut p_multi = Pipeline::<usize, Vec<u8>>::with_owners(Mode::Plain, Limits { messages: 2, rooms: 0 });
         let Poll::Ready(mm) = poll_once(p_multi.message(99, None)) else { panic!("multi msg ready") };
         p_multi.owned(mm, vec![0x44; MAX_SLOT_PIECES * TASK_LEN]);
-        assert_eq!(unsafe { (*p_multi.storage().multi[0].get()).piece_level }, level_of(TASK_LEN as u64));
+        assert!(
+            matches!(unsafe { (*p_multi.storage().multi[0].get()).kind }, MultiKind::Slice { piece_level, .. } if piece_level == level_of(TASK_LEN as u64))
+        );
         let src = &p_multi.storage().slot.get().source;
         let sd = &p_multi.storage().slot_done;
         step_until(src, &|| sd[0].load(Ordering::Acquire), "dispatch_many + run_multi_piece");
@@ -3208,7 +3205,7 @@ mod test {
         p_meta.batch(mb, Batch::new(1024, 128), vec![[0u8; 32]; 128].into_boxed_slice());
         assert_eq!(p_meta.open_messages, 0);
         assert!(matches!(p_meta.slots[1].kind, SlotKind::WaitBatch { group: NONE, .. }));
-        assert_eq!(unsafe { (*p_meta.storage().multi[1].get()).batch.unwrap().2 }, 64);
+        assert!(matches!(unsafe { (*p_meta.storage().multi[1].get()).kind }, MultiKind::Batch { per_part: 64, .. }));
         let src = &p_meta.storage().slot.get().source;
         let sd = &p_meta.storage().slot_done;
         step_until(src, &|| sd[1].load(Ordering::Acquire), "batch 128 multi");
@@ -4775,7 +4772,16 @@ mod test {
                     std::thread::spawn(breach).join().unwrap();
                 }
                 // The stop does not wait for its words: stderr is a full
-                // pipe here, and a write to it would never return.
+                // blocking pipe here, and a blocking write would never return.
+                "lent_stderr_full" => {
+                    crate::lanes::fill_stderr_for_test();
+                    let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 0 });
+                    let m = block_on(p.message(1, None));
+                    let data = [1u8; 8];
+                    let guard = unsafe { p.lent(m, &data) };
+                    core::mem::forget(p);
+                    drop(guard);
+                }
                 "worker_start_stderr_full" => {
                     crate::lanes::fill_stderr_for_test();
                     crate::lanes::fail_worker_start_for_test();
@@ -4789,6 +4795,7 @@ mod test {
             ("lent", "Lent guard was dropped before its message finished"),
             ("lent_after_pipeline_drop", "Lent guard was dropped before its message finished"),
             ("lent_stderr_locked", "Lent guard was dropped before its message finished"),
+            ("lent_stderr_full", ""),
             ("waker_panics", "this waker panics"),
             ("pipeline", "Pipeline dropped while worker tasks are still in flight"),
             ("pipeline_multi", "Pipeline dropped while worker tasks are still in flight"),
@@ -4807,10 +4814,9 @@ mod test {
         }
     }
 
-    /// A stop says why where a person reads it: on a terminal. A stop
-    /// writes only where `poll` says descriptor 2 takes words, and what
-    /// `poll` says of a terminal is each system's own (the manual of
-    /// macOS says its `poll` does not support devices).
+    /// A stop says why where a person reads it: on a terminal, using the
+    /// non-blocking write path on both Linux (`/proc/self/fd/2` with
+    /// `O_NONBLOCK | O_NOCTTY`) and macOS (`fcntl` `O_NONBLOCK`).
     #[test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn a_stop_says_why_on_a_terminal() {

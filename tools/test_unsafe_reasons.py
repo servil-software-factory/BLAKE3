@@ -548,6 +548,38 @@ class Reasons(unittest.TestCase):
         )
         self.assertEqual([n for n, _ in ur.debug_assert_without_reason(const_lrm_ws)], [3])
         self.assertEqual([n for n, _ in ur.without_reason(const_lrm_ws)], [4])
+        # A `Sound:` comment inside one function (top-level or method inside
+        # `impl`) must NEVER cross a function boundary to clear an unrelated
+        # `unsafe` in the next function, while adjacent `unsafe impl Send` /
+        # `unsafe impl Sync` lines still share one comment right above.
+        cross_fn = (
+            "fn f(p: *const u8) -> u8 {\n"
+            "    // Sound: p is valid in f.\n"
+            "    unsafe { *p }\n"
+            "}\n"
+            "fn g(q: *const u8) -> u8 {\n"
+            "    unsafe { *q }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(cross_fn)], [6])
+        cross_method = (
+            "impl S {\n"
+            "    fn f(p: *const u8) -> u8 {\n"
+            "        // Sound: p is valid in f.\n"
+            "        unsafe { *p }\n"
+            "    }\n"
+            "    fn g(q: *const u8) -> u8 {\n"
+            "        unsafe { *q }\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(cross_method)], [7])
+        shared_impls = (
+            "// Sound: interior mutability is synchronized.\n"
+            "unsafe impl Send for S {}\n"
+            "unsafe impl Sync for S {}\n"
+        )
+        self.assertEqual(ur.without_reason(shared_impls), [])
 
     def test_cfg_test_fn_items_are_excluded(self):
         src = (

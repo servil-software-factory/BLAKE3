@@ -153,9 +153,10 @@
 //!   `throughput::update_each` allocates and frees nothing beyond the one-time
 //!   per-thread SME2 flat-walk scratch noted above if a fresh thread hashes a
 //!   whole 32 KiB+ piece on a 512-bit SME2 CPU.
-//! - **Once per process**: the startup self-test's buffers on the calling
-//!   thread's stack while it runs (plus the SME2 flat-walk scratch noted above
-//!   on 512-bit SME2 CPUs).
+//! - **Once per process**: the startup self-test uses stack buffers on the
+//!   calling thread while it runs (it does not touch the thread-local SME2
+//!   flat-walk scratch, which is initialized only on a thread's first post-init
+//!   whole 32 KiB+ walk on a 512-bit SME2 CPU).
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] holds and the chaining values made from them stay in the
