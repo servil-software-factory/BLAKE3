@@ -65,52 +65,96 @@ const KIND_MULTI: u64 = 2;
 /// instead of `Shared::tree` without a worker-visible per-slot mode table.
 const MULTI_CUSTOM_BIT: u32 = 1u32 << 31;
 
-/// Fixed-capacity FIFO ring buffer over pre-allocated `VecDeque<X>`;
-/// never reallocates after construction.
-struct Ring<X> {
-    inner: std::collections::VecDeque<X>,
-    cap: usize,
+/// Compact fixed-capacity FIFO ring of `u32` indices over `Box<[u32]>`
+/// (24 B inline on 64-bit, exact capacity, branchless wraparound, no pop write-back, zero `unsafe`).
+struct IndexRing {
+    buf: Box<[u32]>,
+    head: u32,
+    len: u32,
 }
 
-// Moving the `VecDeque` handle never moves its heap buffer and `Ring` exposes
-// no pinned element projection, preserving `Pipeline<T, B, P>: Unpin` even for
-// `!Unpin` tags or owners (matching the previous boxed-slice backing).
-impl<X> Unpin for Ring<X> {}
-
-impl<X> Ring<X> {
+impl IndexRing {
     fn new(cap: usize) -> Self {
-        Ring { inner: std::collections::VecDeque::with_capacity(cap), cap }
-    }
-
-    #[inline(always)]
-    fn len(&self) -> usize {
-        self.inner.len()
+        assert!(cap <= (u32::MAX / 2) as usize, "IndexRing capacity fits u32 half-range");
+        IndexRing { buf: vec![0u32; cap].into_boxed_slice(), head: 0, len: 0 }
     }
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.len == 0
     }
 
     #[inline(always)]
-    fn front(&self) -> Option<&X> {
-        self.inner.front()
+    fn front(&self) -> Option<&u32> {
+        if self.len == 0 { None } else { Some(&self.buf[self.head as usize]) }
+    }
+
+    #[inline(always)]
+    fn push_back(&mut self, item: u32) {
+        let cap = self.buf.len();
+        let len = self.len as usize;
+        assert!(len < cap, "IndexRing capacity exceeded");
+        let mut idx = self.head as usize + len;
+        if idx >= cap {
+            idx -= cap;
+        }
+        self.buf[idx] = item;
+        self.len += 1;
+    }
+
+    #[inline(always)]
+    fn pop_front(&mut self) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        let item = self.buf[self.head as usize];
+        let next = self.head + 1;
+        self.head = if next as usize == self.buf.len() { 0 } else { next };
+        self.len -= 1;
+        Some(item)
+    }
+}
+
+/// Fixed-capacity FIFO event queue over pre-allocated `VecDeque<X>` (32 B inline
+/// on 64-bit, zero `unsafe`); `Pipeline::reap` enforces the logical `limits.messages`
+/// bound while `push_back` asserts backing capacity so `VecDeque::grow` never runs.
+struct EventRing<X>(std::collections::VecDeque<X>);
+
+// Moving the `VecDeque` handle never moves its heap buffer and `EventRing` exposes
+// no pinned element projection, preserving `Pipeline<T, B, P>: Unpin` even for
+// `!Unpin` tags or owners.
+impl<X> Unpin for EventRing<X> {}
+
+impl<X> EventRing<X> {
+    fn new(cap: usize) -> Self {
+        assert!(core::mem::size_of::<X>() > 0, "EventRing requires non-ZST elements");
+        let inner = std::collections::VecDeque::with_capacity(cap);
+        assert!(inner.capacity() >= cap, "EventRing backing capacity");
+        EventRing(inner)
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     #[inline(always)]
     fn push_back(&mut self, item: X) {
-        // In every build: hold callers to the pre-allocated capacity so the
-        // queue never reallocates on the hot path or drops work silently.
-        // Asserting `len != capacity` alongside `len < cap` proves `!is_full()`
-        // to LLVM at inline call sites, eliminating cold `VecDeque::grow` calls.
-        assert!(self.inner.len() < self.cap, "Ring capacity exceeded");
-        assert!(self.inner.len() != self.inner.capacity(), "Ring backing capacity full");
-        self.inner.push_back(item);
+        // In every build: hold callers to the pre-allocated backing buffer so the
+        // queue never reallocates on the hot path; asserting `len != capacity`
+        // proves `!is_full()` to LLVM at inline call sites, eliding `VecDeque::grow`.
+        assert!(self.0.len() != self.0.capacity(), "EventRing backing capacity full");
+        self.0.push_back(item);
     }
 
     #[inline(always)]
     fn pop_front(&mut self) -> Option<X> {
-        self.inner.pop_front()
+        self.0.pop_front()
     }
 }
 
@@ -1197,15 +1241,15 @@ pub struct Pipeline<T, B = (), P = Batch<'static>> {
     batches: RawSlots<(P, Box<[[u8; OUT_LEN]]>)>,
     /// FIFO ring of free message slots: slots cycle around the full ring
     /// before reuse so worker-written cache lines cool before another worker writes them.
-    free_slots: Ring<u32>,
+    free_slots: IndexRing,
     open_messages: usize,
-    end_queue: Ring<u32>,
-    events: Ring<Event<T, B, P>>,
+    end_queue: IndexRing,
+    events: EventRing<Event<T, B, P>>,
     /// FIFO ring of free rooms, refilled by a circular cursor scan over `rooms.refs`.
-    local_free_rooms: Ring<u32>,
+    local_free_rooms: IndexRing,
     room_cursor: usize,
     /// FIFO ring of free `PieceNode`s.
-    free_pieces: Ring<u32>,
+    free_pieces: IndexRing,
     /// Active slots with `room_streams[s].head_piece != NONE` (at most `m.min(p_cap)`),
     /// maintained in O(1) so `alloc_piece_node` drains only piece-bearing slots (#465).
     piece_slots: Vec<u32>,
@@ -1532,15 +1576,15 @@ impl<T, B, P> Pipeline<T, B, P> {
         // BEFORE taking a PipeSlot lease, allocating PipeStorage, registering
         // the source, or bumping `sources::opened()`, so a layout panic in
         // caller-side construction cannot leak process resources.
-        let mut local_free_rooms = Ring::new(limits.rooms);
+        let mut local_free_rooms = IndexRing::new(limits.rooms);
         for i in 0..limits.rooms {
             local_free_rooms.push_back(u32::try_from(i).expect("room index fits u32"));
         }
-        let mut free_slots = Ring::new(m);
+        let mut free_slots = IndexRing::new(m);
         for i in 0..m {
             free_slots.push_back(u32::try_from(i).expect("slot index fits u32"));
         }
-        let mut free_pieces = Ring::new(p_cap);
+        let mut free_pieces = IndexRing::new(p_cap);
         for i in 0..p_cap {
             free_pieces.push_back(u32::try_from(i).expect("piece index fits u32"));
         }
@@ -1549,8 +1593,8 @@ impl<T, B, P> Pipeline<T, B, P> {
         let owners = RawSlots::new(m);
         let batches = RawSlots::new(m);
         let batch_plans = vec![None; m].into_boxed_slice();
-        let end_queue = Ring::new(m);
-        let events = Ring::new(m);
+        let end_queue = IndexRing::new(m);
+        let events = EventRing::new(m);
         let piece_slots = Vec::with_capacity(if limits.rooms == 0 { 0 } else { m });
         let assigned_group_epoch = vec![0u64; g_cap].into_boxed_slice();
         let seen_group_epoch = vec![0u64; g_cap].into_boxed_slice();
@@ -3268,7 +3312,7 @@ mod test {
                 let m = block_on(owned_pipe.message(idx, None));
                 owned_pipe.owned(m, input[..len].to_vec());
             }
-            while owned_pipe.end_queue.len() + owned_pipe.events.len() > 0 {
+            while !owned_pipe.end_queue.is_empty() || !owned_pipe.events.is_empty() {
                 if let Some(Event::Hashed { tag, hash, owner: Some(buf) }) = owned_pipe.next_event() {
                     assert_eq!(buf.len(), lens[tag]);
                     assert_eq!(*hash.as_bytes(), expected[tag]);
@@ -3311,7 +3355,7 @@ mod test {
             let m = block_on(pipe.message(i, None));
             pipe.owned(m, [i as u8; 100]);
         }
-        while pipe.end_queue.len() + pipe.events.len() > 0 {
+        while !pipe.end_queue.is_empty() || !pipe.events.is_empty() {
             if let Some(Event::Hashed { tag, hash, owner: Some(arr) }) = pipe.next_event() {
                 assert_eq!(arr, [tag as u8; 100]);
                 assert_eq!(hash, convenience::hash(&[tag as u8; 100]));
@@ -3535,7 +3579,7 @@ mod test {
         }
         pipe.reap();
         assert_eq!(pipe.events.len(), 2, "events capped at limits.messages");
-        assert_eq!(pipe.end_queue.len(), 2, "wave 2 holds its slots until pulled");
+        assert_eq!(pipe.end_queue.len, 2, "wave 2 holds its slots until pulled");
 
         let all = drain_all(&mut pipe, 4);
         for (i, ev) in all.into_iter().enumerate() {
@@ -3651,29 +3695,51 @@ mod test {
     #[test]
     fn ring_enforces_hard_capacity_limit() {
         for cap in [0usize, 1, 3] {
-            let mut ring = Ring::<u32>::new(cap);
+            let mut ring = IndexRing::new(cap);
             for i in 0..cap {
                 ring.push_back(u32::try_from(i).unwrap());
             }
             let over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ring.push_back(99)));
-            assert!(over.is_err(), "Ring::push_back must panic past logical cap {cap}");
+            assert!(over.is_err(), "IndexRing::push_back must panic past cap {cap}");
             let drained: Vec<u32> = std::iter::from_fn(|| ring.pop_front()).collect();
             let want: Vec<u32> = (0..cap).map(|i| u32::try_from(i).unwrap()).collect();
-            assert_eq!(drained, want, "Ring contents preserved after rejected over-push at cap {cap}");
+            assert_eq!(drained, want, "IndexRing contents preserved after rejected over-push at cap {cap}");
         }
-        // Zero-sized elements distinguish the hard logical limit `self.cap`
-        // from `VecDeque::capacity()` (which is `usize::MAX` for ZSTs).
-        let mut zst_ring = Ring::<()>::new(3);
-        for _ in 0..3 {
-            zst_ring.push_back(());
+        // Wrap-around fill, over-push rejection, and full FIFO drain past `head == cap`.
+        let mut wrap = IndexRing::new(3);
+        wrap.push_back(10);
+        wrap.push_back(20);
+        assert_eq!(wrap.pop_front(), Some(10));
+        wrap.push_back(30);
+        wrap.push_back(40);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wrap.push_back(50))).is_err(), "wrapped IndexRing must reject over-push");
+        assert_eq!(wrap.front(), Some(&20));
+        let wrap_drained: Vec<u32> = std::iter::from_fn(|| wrap.pop_front()).collect();
+        assert_eq!(wrap_drained, vec![20, 30, 40]);
+        assert!(wrap.is_empty() && wrap.front().is_none() && wrap.pop_front().is_none());
+        // Capacity above u32::MAX / 2 must be refused so `head + len` cannot overflow.
+        let cap_too_big = std::panic::catch_unwind(|| IndexRing::new((u32::MAX / 2) as usize + 1));
+        assert!(cap_too_big.is_err(), "IndexRing::new must reject cap > u32::MAX / 2");
+        assert_eq!(IndexRing::new(257).buf.len(), 257);
+
+        // EventRing rejects ZSTs, enforces non-reallocation at backing capacity,
+        // and never over-reserves past `VecDeque::with_capacity`.
+        assert!(std::panic::catch_unwind(|| EventRing::<()>::new(3)).is_err(), "EventRing::new must reject ZSTs");
+        for cap in [0usize, 1, 3] {
+            let mut ev_ring = EventRing::<u32>::new(cap);
+            let backing = ev_ring.0.capacity();
+            for i in 0..backing {
+                ev_ring.push_back(u32::try_from(i).unwrap());
+            }
+            let over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ev_ring.push_back(99)));
+            assert!(over.is_err(), "EventRing::push_back must panic past backing cap {backing}");
+            let drained: Vec<u32> = std::iter::from_fn(|| ev_ring.pop_front()).collect();
+            let want: Vec<u32> = (0..backing).map(|i| u32::try_from(i).unwrap()).collect();
+            assert_eq!(drained, want, "EventRing contents preserved after rejected over-push");
         }
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| zst_ring.push_back(()))).is_err(),
-            "Ring<()>::push_back must enforce logical cap, not VecDeque::capacity()"
-        );
-        assert_eq!(zst_ring.len(), 3);
-        // Non-empty Rings must not over-reserve past `VecDeque::with_capacity`.
-        assert_eq!(Ring::<u32>::new(257).inner.capacity(), std::collections::VecDeque::<u32>::with_capacity(257).capacity());
+        assert_eq!(EventRing::<u32>::new(257).0.capacity(), std::collections::VecDeque::<u32>::with_capacity(257).capacity());
+        assert_eq!(core::mem::size_of::<IndexRing>(), 2 * core::mem::size_of::<usize>() + 8);
+        assert_eq!(core::mem::size_of::<EventRing<Event<usize, (), Batch<'static>>>>(), 4 * core::mem::size_of::<usize>());
     }
 
     #[test]
@@ -4710,19 +4776,18 @@ mod test {
     fn unit_ring_pack_rooms_and_thread_park_primitives() {
         let arc = Arc::new(());
         {
-            let mut ring = Ring::new(3);
-            assert!(ring.is_empty() && ring.len() == 0 && ring.front().is_none() && ring.pop_front().is_none());
+            let mut ring = EventRing::new(3);
+            assert!(ring.is_empty() && ring.len() == 0 && ring.pop_front().is_none());
             ring.push_back((10, Arc::clone(&arc)));
             ring.push_back((20, Arc::clone(&arc)));
             assert_eq!(ring.len(), 2);
-            assert_eq!(ring.front().unwrap().0, 10);
             assert_eq!(ring.pop_front().unwrap().0, 10);
             ring.push_back((30, Arc::clone(&arc)));
             ring.push_back((40, Arc::clone(&arc)));
             assert_eq!(ring.pop_front().unwrap().0, 20);
             assert_eq!(Arc::strong_count(&arc), 3);
         }
-        assert_eq!(Arc::strong_count(&arc), 1, "Ring::drop must drop remaining elements");
+        assert_eq!(Arc::strong_count(&arc), 1, "EventRing::drop must drop remaining elements");
 
         for kind in [KIND_GROUP, KIND_ROOM_PIECE, KIND_MULTI] {
             for sme2 in [false, true] {
@@ -4759,7 +4824,7 @@ mod test {
 
         let live_before = LIVE_STORAGES.load(Ordering::Relaxed);
         let p_small = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 2, rooms: 1 });
-        assert_eq!(p_small.free_pieces.cap, 1 + 2 + 1);
+        assert_eq!(p_small.free_pieces.buf.len(), 1 + 2 + 1);
         assert_eq!(p_small.group_count, 4);
         assert_eq!(slot_tier(1024), 0);
         assert_eq!(slot_tier(2048), 1);
@@ -4774,10 +4839,8 @@ mod test {
         // tiers (2,048 and 16,384): distinguishes `min` from `max`/first-fit
         // and proves fallback picks the smallest larger free tier.
         let p_mid = Pipeline::<usize>::new(Mode::Plain, Limits { messages: 17, rooms: 0 });
-        assert_eq!(p_mid.free_pieces.cap, 0, "roomless Pipeline allocates zero PieceNodes");
-        assert_eq!(p_mid.free_pieces.inner.capacity(), 0, "roomless free_pieces allocates zero backing buffer");
-        assert_eq!(p_mid.local_free_rooms.cap, 0, "roomless Pipeline allocates zero local_free_rooms");
-        assert_eq!(p_mid.local_free_rooms.inner.capacity(), 0, "roomless local_free_rooms allocates zero backing buffer");
+        assert_eq!(p_mid.free_pieces.buf.len(), 0, "roomless Pipeline allocates zero PieceNodes");
+        assert_eq!(p_mid.local_free_rooms.buf.len(), 0, "roomless Pipeline allocates zero local_free_rooms");
         assert!(p_mid.storage().pieces.is_empty(), "roomless PipeStorage has zero PieceNodes");
         assert_eq!(p_mid.storage().slot.get().source.actions_len(), 2048);
         let slot_mid = p_mid.storage().slot.get() as *const PipeSlot as usize;
@@ -5989,7 +6052,7 @@ mod test {
             assert!(err.is_err(), "repolling completed fast-path RoomFut must panic");
             r
         };
-        assert_eq!(pipe.local_free_rooms.len(), 1, "repoll must not lease a second room");
+        assert_eq!(pipe.local_free_rooms.len, 1, "repoll must not lease a second room");
 
         // 2. Slow path (`poll_room` -> Pending -> Ready): exhaust both rooms,
         // poll once to Pending, drop `r0`, poll to Ready, then verify repoll panics.
