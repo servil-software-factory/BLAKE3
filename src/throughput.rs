@@ -820,7 +820,7 @@ impl TreeHasher {
         {
             if input.len() <= crate::BLOCK_LEN {
                 let _ = crate::platform::Platform::detect();
-                return crate::hash_one_block_root(input, self.domain.key(), self.domain.flags());
+                return crate::hash_one_chunk_root(input, self.domain.key(), self.domain.flags());
             }
             self.hash_long(input)
         }
@@ -834,6 +834,8 @@ impl TreeHasher {
     #[cfg(target_arch = "aarch64")]
     #[inline(never)]
     fn hash_long(&self, input: &[u8]) -> Hash {
+        #[cfg(test)]
+        TREE_HASH_LONG_CALLS.with(|c| c.set(c.get() + 1));
         let turn = self.turn(input.len());
         self.hash_on(turn.platform(), input)
     }
@@ -1751,16 +1753,30 @@ mod tree_test {
                 assert_eq!(*local.hash(slice).as_bytes(), want, "TreeHasher::on_this_core().hash len={len}");
             }
         }
-        // Pin the AArch64 <= 64 B fast path: runs only the single-chunk scalar
-        // kernel (`c1`) without taking an SME2 turn.
+        // Pin the AArch64 <= 64 B fast path: bypasses `hash_long` and runs the
+        // exact single-chunk scalar kernel (`c1`), while > 64 B enters `hash_long`.
         #[cfg(target_arch = "aarch64")]
         {
+            let c1_entry = crate::neon_hybrid::entries()
+                .into_iter()
+                .find_map(|(name, addr)| (name == "c1").then_some(addr as usize))
+                .expect("neon_hybrid::entries must list c1");
             let tree = TreeHasher::new(Mode::Keyed(&key));
-            crate::RAN.with(|r| r.set(0));
+            TREE_HASH_LONG_CALLS.with(|c| c.set(0));
             crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
             let _ = tree.hash(&buf[..48]);
-            assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "<= 64 B must not take an SME2 turn");
-            assert_eq!(crate::RAN_ENTRIES.with(|r| r.borrow().len()), 1, "<= 64 B must run a single root kernel");
+            assert_eq!(TREE_HASH_LONG_CALLS.with(|c| c.get()), 0, "<= 64 B must bypass hash_long");
+            let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+            assert_eq!(ran.len(), 1, "<= 64 B must run a single root kernel: {ran:?}");
+            assert!(ran.contains(&c1_entry), "<= 64 B must dispatch directly to c1");
+
+            let _ = tree.hash(&buf[..65]);
+            assert_eq!(TREE_HASH_LONG_CALLS.with(|c| c.get()), 1, "> 64 B must enter hash_long");
         }
     }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+std::thread_local! {
+    static TREE_HASH_LONG_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
