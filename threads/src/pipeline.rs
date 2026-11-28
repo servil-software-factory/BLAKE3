@@ -366,7 +366,10 @@ struct Rooms {
 // runs (after `PipeStorage`'s final holder drops and every worker task has
 // published completion); what may touch which bytes is governed by `refs`.
 unsafe impl Send for Rooms {}
-// Sound: shared `&Rooms` accesses are partitioned by atomic `refs` counts
+// Sound: shared `&Rooms` accesses are disjoint because `Room::bytes_mut`
+// requires `&mut` on the unwritten suffix while `Pipeline::commit` advances
+// the writable offset, and atomic `refs` counts prevent room reuse until all
+// worker reads finish.
 // and live until `PipeStorage` has zero holders and zero in-flight tasks.
 unsafe impl Sync for Rooms {}
 
@@ -4687,45 +4690,6 @@ mod test {
         let _m = block_on(p.message(1, None));
     }
 
-    /// Private 0o700 temporary directory with exclusive file creation and RAII
-    /// cleanup, shared by subprocess tests that redirect child stdout/stderr.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    struct PrivateTempDir(std::path::PathBuf);
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    impl PrivateTempDir {
-        fn new(tag: &str) -> Self {
-            use std::os::unix::fs::DirBuilderExt as _;
-            static SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            let pid = std::process::id();
-            let base = std::env::temp_dir();
-            for attempt in 0..1024u64 {
-                let n = SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-                let path = base.join(std::format!("blake3-{tag}-{pid}-{n}-{nanos}-{attempt}"));
-                match std::fs::DirBuilder::new().mode(0o700).create(&path) {
-                    Ok(()) => return Self(path),
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(e) => panic!("create private tempdir {path:?}: {e}"),
-                }
-            }
-            panic!("could not create unique private tempdir for {tag}");
-        }
-
-        fn create_exclusive(&self, name: &str) -> (std::path::PathBuf, std::fs::File) {
-            let path = self.0.join(name);
-            let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
-            (path, file)
-        }
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    impl Drop for PrivateTempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn active_loan_drop_and_active_pipeline_drop_abort_the_process() {
         use std::os::unix::process::ExitStatusExt as _;
@@ -4898,8 +4862,8 @@ mod test {
         // mid-file seek offset), a broken anonymous pipe under default unblocked
         // SIGPIPE, and a Unix socketpair, using a private 0o700 temporary
         // directory with exclusively created files and RAII cleanup.
-        let tmp = PrivateTempDir::new("stop");
-        let tmp_dir_path = tmp.0.clone();
+        let tmp = crate::lanes::TempDir::new("stop");
+        let tmp_dir_path = tmp.path().to_path_buf();
         {
             use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
             let (append_path, mut init) = tmp.create_exclusive("append.log");
@@ -4957,7 +4921,7 @@ mod test {
             assert!(mid_body.ends_with("XXXX"), "mid-offset stop truncated or appended past suffix: {mid_body:?}");
         }
         drop(tmp);
-        assert!(!tmp_dir_path.exists(), "PrivateTempDir::drop must remove {tmp_dir_path:?}");
+        assert!(!tmp_dir_path.exists(), "TempDir::drop must remove {tmp_dir_path:?}");
 
         // Broken anonymous pipe with default SIGPIPE must exit with SIGABRT (6),
         // never SIGPIPE (13).
@@ -5995,7 +5959,7 @@ mod test {
             return;
         }
         let exe = std::env::current_exe().unwrap();
-        let tmp = PrivateTempDir::new("fork-wait");
+        let tmp = crate::lanes::TempDir::new("fork-wait");
         for case in ["group", "piece"] {
             // Redirect stdout and stderr to exclusively created temporary files
             // inside a private 0o700 directory so verbose child output (e.g.
@@ -6005,14 +5969,18 @@ mod test {
             let (err_path, err_file) = tmp.create_exclusive(&std::format!("{case}.err"));
             let mut child = std::process::Command::new(&exe)
                 .env(ENV, case)
+                .env("RUST_BACKTRACE", "0")
                 .args(["--exact", "pipeline::test::forked_child_stops_in_acquire_free_group_and_alloc_piece_node", "--nocapture"])
                 .stdout(std::process::Stdio::from(out_file))
                 .stderr(std::process::Stdio::from(err_file))
                 .spawn()
                 .unwrap();
             // Parent-supervised deadline well below nextest's 15 s mutants timeout
-            // so a removed fork guard fails cleanly instead of timing out (#557).
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            // locally so a removed fork guard fails cleanly instead of timing out
+            // (#557), while giving emulated CI jobs (Intel SDE / QEMU) room for
+            // child process startup and self-test translation.
+            let limit_secs = if std::env::var_os("CI").is_some() { 30 } else { 8 };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(limit_secs);
             let mut timed_out = false;
             let status = loop {
                 if let Some(status) = child.try_wait().unwrap() {

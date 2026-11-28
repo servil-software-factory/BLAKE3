@@ -733,59 +733,106 @@ _ITEM_QUAL = r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:default|const|async|unsafe)\s+|
 _ITEM_BOUNDARY_RE = re.compile(
     rf"^\s*{_ATTR_PREFIX}{_ITEM_QUAL}(?:(?:fn|impl|mod|struct|enum|trait|type|static)\b|const\s+(?:r#)?[A-Za-z_]\w*\s*:)"
 )
-_CLOSING_BRACE_RE = re.compile(r"^\s*\}[\s)\],;]*$")
+_CLOSING_BRACE_RE = re.compile(r"^\s*\}(?!\s*else\b)")
+_ENDS_BLOCK_RE = re.compile(r"\}\s*$")
+
+
+def _prefix_has_boundary(prefix):
+    """True iff `prefix` (text before `unsafe` on its line) contains a
+    statement-terminating `;` (outside `[T; N]` / `(...)`) or a `}` that is not
+    part of `} else`."""
+    depth = 0
+    n = len(prefix)
+    for i, ch in enumerate(prefix):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]" and depth > 0:
+            depth -= 1
+        elif depth == 0:
+            if ch == ";":
+                return True
+            if ch == "}" and not re.match(r"\s*else\b", prefix[i + 1:]):
+                return True
+    return False
+
+
+def _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, item_pos):
+    """True iff a `Sound:` comment appears inside `item_pos`'s attached outer
+    attribute stack or on blank/comment lines directly above that attribute
+    stack within `REACH` lines."""
+    attr_start = _preceding_attr_stack_start(masked, item_pos)
+    if _comment_has_reason(comm_text[attr_start:item_pos], SOUND_RE):
+        return True
+    top_ln = bisect.bisect_right(starts, attr_start) - 1
+    # If non-whitespace code precedes `attr_start` on `top_ln`, nothing above
+    # `top_ln` attaches to this item.
+    if masked[starts[top_ln]:attr_start].strip():
+        return False
+    lo = max(0, top_ln - REACH)
+    for above in range(top_ln - 1, lo - 1, -1):
+        if masked_lines[above].strip():
+            return False
+        if above in sound_lines:
+            return True
+    return False
 
 
 def without_reason(text):
     """The lines (numbers from 1, and the line) of `text`'s unsafe blocks and
     `unsafe impl` items that have no non-empty `Sound:` comment within REACH
-    lines above (stopping at function/item and standalone closing-brace
-    boundaries so a rationale in one item or nested helper cannot clear an
-    unrelated unsafe site), skipping test-only `#[cfg(test)]` modules/items."""
+    lines above (stopping at function/item and closing-brace boundaries so a
+    rationale in one item or nested helper cannot clear an unrelated unsafe
+    site), skipping test-only `#[cfg(test)]` modules/items."""
     raw_lines = text.split("\n")
     masked, comm_text = masked_code(text)
     masked_lines = masked.split("\n")
     starts = _line_starts(masked)
     sound_lines = _lines_with_reason(comm_text, starts, SOUND_RE)
+    matches = list(UNSAFE.finditer(masked))
     found = []
-    seen_lines = set()
-    for m in UNSAFE.finditer(masked):
+    for mi, m in enumerate(matches):
         idx = bisect.bisect_right(starts, m.start()) - 1
-        if idx in seen_lines:
-            continue
-        seen_lines.add(idx)
-        cur_line = masked_lines[idx]
-        cur_opens_item = bool(_ITEM_BOUNDARY_RE.match(cur_line))
-        ok = False
-        lo = max(0, idx - REACH)
-        for ln in range(idx, lo - 1, -1):
-            ml = masked_lines[ln]
-            if ln == idx:
-                if ln in sound_lines:
-                    ok = True
-                    break
-                # If the unsafe site sits directly on a fn/const/unsafe-impl
-                # item line (e.g. `fn g() { unsafe { *q } }` or `unsafe impl Sync`),
-                # only a `Sound:` comment directly above that item (skipping
-                # blank lines and attributes only) may clear it.
-                if cur_opens_item:
-                    for above in range(idx - 1, lo - 1, -1):
-                        aml = masked_lines[above].strip()
-                        if aml and not aml.startswith("#["):
-                            break
-                        if above in sound_lines:
-                            ok = True
-                            break
-                    break
-                continue
-            # Check item/closing-brace boundaries BEFORE checking `sound_lines`
-            # so a trailing `// Sound:` on a previous one-line item or closing
-            # brace never leaks downward into the following item or outer scope.
-            if _CLOSING_BRACE_RE.match(ml) or _ITEM_BOUNDARY_RE.match(ml):
-                break
-            if ln in sound_lines:
-                ok = True
-                break
+        line_start = starts[idx]
+        line_end = starts[idx + 1] - 1 if idx + 1 < len(starts) else len(masked)
+        prefix = masked[line_start:m.start()]
+        is_unsafe_impl = masked[m.start():m.end()].rstrip().endswith("impl")
+
+        # 1. Check inline/trailing comment belonging strictly to THIS site on
+        # `idx` (bounded left by any `;`/`}` before `m.start()` and right by
+        # the next unsafe site on the same line, if any).
+        left_bound = line_start
+        for sep in (";", "}"):
+            p = masked.rfind(sep, line_start, m.start())
+            if p != -1:
+                left_bound = max(left_bound, p + 1)
+        right_bound = line_end
+        if mi + 1 < len(matches) and matches[mi + 1].start() < line_end:
+            right_bound = matches[mi + 1].start()
+        ok = _comment_has_reason(comm_text[left_bound:right_bound], SOUND_RE)
+
+        # 2. Check comments above `idx` according to whether this site is an
+        # `unsafe impl` item, sits on a one-line item opener, or is an ordinary
+        # `unsafe {` block.
+        if not ok:
+            if is_unsafe_impl:
+                ok = _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, m.start())
+            elif _ITEM_BOUNDARY_RE.match(prefix):
+                first_tok = line_start + (len(prefix) - len(prefix.lstrip()))
+                ok = _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, first_tok)
+            elif not _prefix_has_boundary(prefix):
+                lo = max(0, idx - REACH)
+                for ln in range(idx - 1, lo - 1, -1):
+                    ml = masked_lines[ln]
+                    # Check boundaries BEFORE `sound_lines` so a trailing
+                    # `// Sound:` on a previous item or closing brace never
+                    # leaks downward.
+                    if _CLOSING_BRACE_RE.match(ml) or _ITEM_BOUNDARY_RE.match(ml):
+                        break
+                    if _ENDS_BLOCK_RE.search(ml) and not re.match(r"^\s*\}\s*else\b", ml):
+                        break
+                    if ln in sound_lines:
+                        ok = True
+                        break
         if not ok:
             found.append((idx + 1, raw_lines[idx].strip()))
     return found

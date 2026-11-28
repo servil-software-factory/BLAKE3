@@ -185,8 +185,10 @@
 //!   worker thread on a 512-bit SME2 CPU), and the pool threads started by
 //!   [`initialize_multithreaded`]: `threads - 1` ordinary workers (plus one
 //!   dedicated SME2 thread when `threads > 1` on a 512-bit SME2 CPU), where
-//!   `None` defaults to the permitted CPU count on the chosen NUMA node (or
-//!   process), each with the standard library's stack.
+//!   `None` picks the [`std::thread::available_parallelism`] estimate capped by
+//!   permitted CPUs on the chosen node or process (see
+//!   [`initialize_multithreaded`] for the exact count and sandbox caveats),
+//!   each with the standard library's stack.
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] or a Pipeline holds and the chaining values made from
@@ -241,7 +243,9 @@
 //! directly to file descriptor 2 (bypassing Rust's stderr lock, arming a
 //! best-effort `alarm(1)` watchdog around `poll(0)` and `write`, skipping
 //! already-full or already-closed pipes, and disarming `alarm(0)` before
-//! aborting) and calls `std::process::abort` when control returns. Other threads that call
+//! aborting — taking over and clearing any pre-existing process real-time alarm
+//! even when the write to fd 2 is skipped) and calls `std::process::abort` when
+//! control returns. Other threads that call
 //! `initialize` meanwhile wait for it (parked via `std::sync::Once`).
 //!
 //! # Build requirements

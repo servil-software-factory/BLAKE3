@@ -1019,6 +1019,9 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
 /// Linux), nothing is set and the workers run where the system puts
 /// them. The workers' CPUs are among those the process may run on, and the
 /// calling threads are left alone.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use self::places::test::TempDir;
+
 pub(crate) mod places {
     use super::*;
     #[cfg(any(target_os = "linux", test))]
@@ -1914,12 +1917,14 @@ pub(crate) mod places {
             assert!(online_nodes(Ok("garbage\n".into())).is_none());
         }
 
-        #[cfg(target_os = "linux")]
-        struct TempDir(std::path::PathBuf);
+        /// Private 0o700 temporary directory with exclusive file creation and
+        /// RAII cleanup, shared across crate test modules.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        pub(crate) struct TempDir(std::path::PathBuf);
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         impl TempDir {
-            fn new(tag: &str) -> Self {
+            pub(crate) fn new(tag: &str) -> Self {
                 use std::os::unix::fs::DirBuilderExt;
                 static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
                 let base = std::env::temp_dir();
@@ -1937,12 +1942,18 @@ pub(crate) mod places {
                 panic!("TempDir::new exhausted unique directory attempts for {tag}");
             }
 
-            fn path(&self) -> &std::path::Path {
+            pub(crate) fn path(&self) -> &std::path::Path {
                 &self.0
+            }
+
+            pub(crate) fn create_exclusive(&self, name: &str) -> (std::path::PathBuf, std::fs::File) {
+                let path = self.0.join(name);
+                let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+                (path, file)
             }
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         impl Drop for TempDir {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(&self.0);

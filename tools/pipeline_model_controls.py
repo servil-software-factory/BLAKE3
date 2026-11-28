@@ -79,9 +79,18 @@ DIGEST_MISMATCH_RE = (
 )
 BATCH_DIGEST_MISMATCH_RE = r"^assertion `left == right` failed: batch \d+'s digest \d+$"
 STORAGE_UAF_RE = r"^PipeStorage used after release$"
-# Allow apostrophes and arbitrary characters inside thread names.
-PANIC_HEADER_RE = re.compile(r"^thread '.+'(?: \(\d+\))? panicked at ")
-SHUTTLE_DEADLOCK_RE = re.compile(r"^deadlock! blocked tasks:\s*\[")
+# Match Rust panic headers including empty thread names, apostrophes, and
+# multiline thread names (lines starting with `thread '` up to `panicked at `).
+PANIC_HEADER_RE = re.compile(r"^thread '.*'(?: \(\d+\))? panicked at ")
+SHUTTLE_SITE_RE = re.compile(r"panicked at [^\n]*\bshuttle(?:-[^/\s]+)?/src/")
+SHUTTLE_DEADLOCK_RE = re.compile(r"^deadlock! blocked tasks:\s*\[.+\]$")
+ALLOCATOR_MSG_RE = re.compile(
+    r"^(?:(?:free|malloc|realloc|munmap_chunk)\(\):|"
+    r"double free or corruption|"
+    r"corrupted (?:size vs\. prev_size|double-linked list|top size)|"
+    r"malloc: \*\*\* error for object)"
+)
+ABORT_SIGNAL_RE = re.compile(r"\(signal:\s*(?:6|11),\s*(?:SIGABRT|SIGSEGV)|\bAborted\b")
 
 EXPECT_DEADLOCK = (Expect("deadlock"),)
 EXPECT_DIGEST_MISMATCH = (Expect("panic", DIGEST_MISMATCH_RE),)
@@ -322,6 +331,24 @@ def model_passes(copy, timeout=None):
     return run.returncode == 0, stdout + stderr
 
 
+def _find_first_panic(lines):
+    """Return `(header_line, payload_line)` for the first Rust panic in `lines`,
+    including empty or multiline thread names, so an unparseable first panic is
+    never skipped in favor of a later Shuttle deadlock."""
+    for i, line in enumerate(lines):
+        if PANIC_HEADER_RE.match(line):
+            payload = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            return line, payload
+        if line.startswith("thread '"):
+            # Multiline thread name: scan forward up to 8 lines for its closing `' panicked at `.
+            for j in range(i + 1, min(len(lines), i + 9)):
+                if re.search(r"'(?: \(\d+\))? panicked at ", lines[j]):
+                    payload = lines[j + 1].strip() if j + 1 < len(lines) else ""
+                    return lines[j], payload
+            return line, ""
+    return None, None
+
+
 def how_it_failed_parts(said):
     """Where and how a run of the model failed: `(scenario, Failure(kind, detail))`
     where `scenario` is the last model scenario begun and `Failure.kind`
@@ -330,21 +357,20 @@ def how_it_failed_parts(said):
     (`"allocator"`), and unexplained signals (`"signal"`)."""
     scenarios = [line.split(": ", 1)[1].strip() for line in said.splitlines() if line.startswith("shuttle_pipeline: ")]
     lines = said.splitlines()
-    at = [n for n, line in enumerate(lines) if PANIC_HEADER_RE.match(line)]
-    first = at[0] if at else None
+    panic_header, payload = _find_first_panic(lines)
     stops = [line.strip() for line in lines if line.startswith("blake3-servil: ")]
     # The C library's allocator, stopping a process whose memory it finds
-    # broken (a storage freed twice, or given out while held).
-    allocator = [line.strip() for line in lines if re.match(r"(free|malloc|realloc|munmap_chunk|double free|corrupted)\b.*(\(\)|:)", line.strip())]
-    if first is not None:
-        payload = lines[first + 1].strip() if first + 1 < len(lines) else ""
-        if SHUTTLE_DEADLOCK_RE.match(payload):
+    # broken (a storage freed twice, or given out while held), corroborated by
+    # an abort/segfault termination rather than an arbitrary message + SIGKILL.
+    allocator = [line.strip() for line in lines if ALLOCATOR_MSG_RE.match(line.strip())]
+    if panic_header is not None:
+        if SHUTTLE_SITE_RE.search(panic_header) and SHUTTLE_DEADLOCK_RE.match(payload):
             failure = Failure("deadlock", "a deadlock")
         else:
             failure = Failure("panic", payload)
     elif stops:
         failure = Failure("stop", stops[-1][len("blake3-servil: "):])
-    elif allocator:
+    elif allocator and ABORT_SIGNAL_RE.search(said):
         failure = Failure("allocator", allocator[0])
     else:
         # Cargo's line for a test process that a signal ended.

@@ -686,15 +686,16 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                 let padded = crate::ffi_output::pad_by_blocks_inputs(&mut inputs, platform);
                 let mut lanes = [0u8; GROUP * OUT_LEN];
                 crate::counted(crate::Counted::ByBlocksCall);
-                // Sound: each item holds more than k whole blocks; the
-                // caller selected this platform's block-group path.
+                // Sound: each item has at least `k * 64` readable prefix bytes
+                // (`k = len.saturating_sub(1) / 64`), and the caller selected
+                // this platform's block-group path.
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
                     crate::pair::hash_many_blocks(platform, &inputs, k, key, counter, false, flags, CHUNK_START, 0, &mut lanes[..padded * OUT_LEN])
                 };
-                // Sound: each item holds more than k whole blocks; `inputs`
-                // has `group.len()` readable pointers and `lanes` holds one
-                // 32-byte slot per lane.
+                // Sound: each item has at least `k * 64` readable prefix bytes;
+                // `inputs` holds `group.len()` readable pointers and `lanes`
+                // provides `group.len()` distinct 32-byte output slots.
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     crate::neon_hybrid::hash_messages_raw(

@@ -620,8 +620,10 @@ unsafe fn flat_walk(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u6
             return unsafe { walk_in(input, key, chunk_counter, flags, keep, out, n, base, SCRATCH) };
         }
     }
-    // Sound: caller verified SME2 with 512-bit streaming vectors and valid
-    // `input`/`out` bounds; `walk_on_stack` uses a call-local stack scratch
+    // Sound: `Platform::SME2` was selected at process startup, `input`/`out`
+    // cover `n` chunks and `keep` digests, and every SME2 assembly entry checks
+    // the calling thread's SVL == 16 and `TPIDR2_EL0` before touching ZA (falling
+    // back to NEON otherwise); `walk_on_stack` uses a call-local stack scratch
     // during startup self-test (avoiding heap allocation under Once::call_once)
     // or thread teardown after `SCRATCH_BLOCK` is gone.
     unsafe { walk_on_stack(input, key, chunk_counter, flags, keep, out, n) }

@@ -550,8 +550,8 @@ class Reasons(unittest.TestCase):
         self.assertEqual([n for n, _ in ur.without_reason(const_lrm_ws)], [4])
         # A `Sound:` comment inside one function (top-level or method inside
         # `impl`) must NEVER cross a function boundary to clear an unrelated
-        # `unsafe` in the next function, while adjacent `unsafe impl Send` /
-        # `unsafe impl Sync` lines still share one comment right above.
+        # `unsafe` in the next function, and every `unsafe impl` requires its
+        # own directly attached `// Sound:` comment.
         cross_fn = (
             "fn f(p: *const u8) -> u8 {\n"
             "    // Sound: p is valid in f.\n"
@@ -609,6 +609,47 @@ class Reasons(unittest.TestCase):
             "}\n"
         )
         self.assertEqual([n for n, _ in ur.without_reason(nested_helper)], [6])
+        # Attribute+item on one line must NOT be stepped over as a bare attribute
+        # for a following `unsafe impl`, while a legitimate multiline attribute
+        # stack directly above an `unsafe impl` IS stepped over; two impls on
+        # one line are checked independently; and `}; const B` stops lookback.
+        attr_plus_item = (
+            "struct A; struct B;\n"
+            "// Sound: A owns no non-Send state.\n"
+            "#[cfg(unix)] unsafe impl Send for A {}\n"
+            "unsafe impl Sync for B {}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(attr_plus_item)], [4])
+        multiline_attr_impl = (
+            "// Sound: A owns no non-Send state.\n"
+            "#[cfg(any(\n"
+            "    unix,\n"
+            "    windows,\n"
+            "))]\n"
+            "unsafe impl Send for A {}\n"
+        )
+        self.assertEqual(ur.without_reason(multiline_attr_impl), [])
+        two_impls_one_line = (
+            "// Sound: A owns its allocation.\n"
+            "unsafe impl Send for A {} unsafe impl Sync for B {}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(two_impls_one_line)], [2])
+        closing_brace_with_code = (
+            "const A: u32 = {\n"
+            "    // Sound: A invariant.\n"
+            "    unsafe { 1 }\n"
+            "}; const B: u32 = {\n"
+            "    unsafe { 2 }\n"
+            "};\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(closing_brace_with_code)], [5])
+        trailing_close_comment = (
+            "fn f(p: *const u8, q: *const u8) -> u8 {\n"
+            "    { let _ = p; } // Sound: wrong line.\n"
+            "    unsafe { *q }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(trailing_close_comment)], [3])
         raw_const = (
             "fn outer(q: *const u8) -> u8 {\n"
             "    // Sound: zero is a valid u8.\n"

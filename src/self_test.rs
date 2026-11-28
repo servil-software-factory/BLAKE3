@@ -1342,6 +1342,34 @@ mod stops {
         assert_eq!(out.status.signal(), Some(6), "broken stderr pipe must terminate by SIGABRT (6), not SIGPIPE (13): {:?}", out.status);
     }
 
+    /// `fail_stop_bytes` must disarm its `alarm(1)` watchdog (`alarm(0)`)
+    /// before invoking `abort()`, so a process SIGABRT handler observes zero
+    /// remaining real-time alarm even when a host alarm was previously armed.
+    #[test]
+    fn test_stop_disarms_watchdog_alarm_before_abort() {
+        const CHILD: &str = "BLAKE3_SERVIL_TEST_ALARM_DISARM";
+        if std::env::var_os(CHILD).is_some() {
+            extern "C" fn on_sigabrt(_sig: libc::c_int) {
+                let rem = unsafe { libc::alarm(0) };
+                let code = 100 + (rem.min(100) as libc::c_int);
+                unsafe { libc::_exit(code) };
+            }
+            unsafe {
+                libc::signal(libc::SIGABRT, on_sigabrt as *const () as usize);
+                libc::alarm(45);
+            }
+            fail_stop_bytes(b"blake3-servil: alarm disarm check\n");
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "self_test::stops::test_stop_disarms_watchdog_alarm_before_abort", "--nocapture", "--test-threads", "1"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .expect("spawn child");
+        assert_eq!(out.status.code(), Some(100), "SIGABRT handler must observe 0s remaining alarm (exit 100): {:?}", out.status);
+    }
+
     /// Startup self-test must fit cleanly inside a 128 KiB thread stack in
     /// optimized builds (`[profile.test]` and `--release`) on every platform,
     /// including AArch64 SME2 `chunks_keyed` and 32 KiB `walk_on_stack` (#509).

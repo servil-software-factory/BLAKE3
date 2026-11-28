@@ -370,15 +370,25 @@ class Controls(unittest.TestCase):
         self.assert_untouched()
 
     def test_each_faults_run_is_kept_whole_and_unrelated_allocator_stop_is_no_verdict(self):
-        # An allocator stop is admissible ONLY for storage-lifetime faults,
-        # NOT for wake/digest/epoch faults (which must report NO VERDICT).
+        # An allocator stop is admissible ONLY for the five independent
+        # storage-lifetime faults (asserted by explicit name, not derived from
+        # FAULTS), NOT for wake/digest/epoch faults (which must report NO VERDICT).
+        expected_allocator_faults = {
+            "a storage is freed while a Room still holds it",
+            "a worker reads PipeSlot from storage after publishing completion",
+            "a worker loads a storage atomic after publishing completion",
+            "Room::drop reads storage after releasing its credits",
+            "a non-last multi-piece worker reads storage after tasks_left decrement",
+        }
         run = self.run_script("allocator")
         self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
-        alloc_expected = sum(1 for _, _, _, exp in faults() if any(e.kind == "allocator" for e in exp))
-        other = len(faults()) - alloc_expected
-        self.assertGreater(alloc_expected, 0)
-        self.assertGreater(other, 0)
-        self.assertEqual(run.stdout.count("caught  "), alloc_expected, run.stdout)
+        caught_names = {
+            line[len("caught  "):].split(" (", 1)[0]
+            for line in run.stdout.splitlines()
+            if line.startswith("caught  ")
+        }
+        other = len(faults()) - len(expected_allocator_faults)
+        self.assertEqual(caught_names, expected_allocator_faults, run.stdout)
         self.assertEqual(run.stdout.count("NO VERDICT  "), other, run.stdout)
         self.assertIn(f"no verdict on {other} planted faults (unrelated failure)", run.stderr)
         self.assertIn(
@@ -629,14 +639,22 @@ class Controls(unittest.TestCase):
         self.assertFalse(os.path.exists(self.ran_in))
 
     def test_unrelated_deadlock_or_unexplained_signal_is_no_verdict(self):
-        # Deadlock only matches the two wake-omission faults; every other fault
-        # (including the batch premature-publication control) is NO VERDICT.
+        # Deadlock only matches the two wake-omission faults (asserted by explicit
+        # name); every other fault (including the batch premature-publication
+        # control) is NO VERDICT.
+        expected_deadlock_faults = {
+            "a finished task wakes no one",
+            "a Room's drop wakes no one",
+        }
         run = self.run_script("deadlock")
         self.assertNotEqual(run.returncode, 0)
-        deadlock_expected = sum(1 for _, _, _, exp in faults() if any(e.kind == "deadlock" for e in exp))
-        other = len(faults()) - deadlock_expected
-        self.assertEqual(deadlock_expected, 2)
-        self.assertEqual(run.stdout.count("caught  "), deadlock_expected, run.stdout)
+        caught_dl = {
+            line[len("caught  "):].split(" (", 1)[0]
+            for line in run.stdout.splitlines()
+            if line.startswith("caught  ")
+        }
+        other = len(faults()) - len(expected_deadlock_faults)
+        self.assertEqual(caught_dl, expected_deadlock_faults, run.stdout)
         self.assertEqual(run.stdout.count("NO VERDICT  "), other, run.stdout)
         self.assertIn("NO VERDICT  a batch's tasks are published done before the last has hashed (unrelated failure:", run.stdout)
         self.assertIn(f"no verdict on {other} planted faults (unrelated failure)", run.stderr)
@@ -674,11 +692,51 @@ class Controls(unittest.TestCase):
                 "thread 'main' (1) panicked at shuttle/src/runtime/execution.rs:1:1:\n"
                 "deadlock! blocked tasks: [main-thread (task main-thread(0))]\n"
             ),
+            # Non-Shuttle panic emitting a forged `deadlock! blocked tasks: [...]`
+            # payload, or malformed unclosed bracket from Shuttle, must NOT count.
+            "shuttle_pipeline: s\nthread 'test' panicked at threads/tests/fixture.rs:3:9:\ndeadlock! blocked tasks: [forged]\n",
+            "shuttle_pipeline: s\nthread 'test' panicked at shuttle-0.8.1/src/runtime/execution.rs:203:17:\ndeadlock! blocked tasks:[\n",
+            # Empty or multiline thread name on the first panic must NOT be skipped
+            # in favor of a later Shuttle deadlock.
+            (
+                "shuttle_pipeline: s\n"
+                "thread '' panicked at src/foo.rs:1:1:\n"
+                "first panic on empty-named thread\n"
+                "thread 'main' panicked at shuttle-0.8.1/src/runtime/execution.rs:203:17:\n"
+                "deadlock! blocked tasks: [main-thread]\n"
+            ),
+            (
+                "shuttle_pipeline: s\n"
+                "thread 'line1\nline2' panicked at src/foo.rs:1:1:\n"
+                "first panic on multiline-named thread\n"
+                "thread 'main' panicked at shuttle-0.8.1/src/runtime/execution.rs:203:17:\n"
+                "deadlock! blocked tasks: [main-thread]\n"
+            ),
         ):
             _, fail_dl = controls.how_it_failed_parts(spoof_dl)
             self.assertNotEqual(fail_dl.kind, "deadlock", spoof_dl)
             for name, _, _, expected in controls.FAULTS:
                 self.assertFalse(controls.matches_expected(fail_dl, expected), f"{name} matched spoofed deadlock {spoof_dl!r}")
+
+        # Positive Shuttle registry path (`shuttle-0.8.1/src/...`) with well-formed
+        # blocked-task list MUST classify as a scheduler deadlock.
+        _, real_dl = controls.how_it_failed_parts(
+            "shuttle_pipeline: s\n"
+            "thread 'main' (1) panicked at /cargo/registry/src/shuttle-0.8.1/src/runtime/execution.rs:203:17:\n"
+            "deadlock! blocked tasks: [main-thread (task main-thread(0))]\n"
+        )
+        self.assertEqual(real_dl.kind, "deadlock")
+
+        # Ordinary log message (`free slots: 0`) + SIGKILL, or allocator line
+        # without an abort/segfault signal, must NOT classify as an allocator abort.
+        for bogus_alloc in (
+            "shuttle_pipeline: s\nfree slots: 0\nerror: test failed (signal: 9, SIGKILL: kill)\n",
+            "shuttle_pipeline: s\nfree(): invalid pointer\nerror: test failed (signal: 9, SIGKILL: kill)\n",
+        ):
+            _, fail_a = controls.how_it_failed_parts(bogus_alloc)
+            self.assertNotEqual(fail_a.kind, "allocator", bogus_alloc)
+            for name, _, _, expected in controls.FAULTS:
+                self.assertFalse(controls.matches_expected(fail_a, expected), f"{name} matched bogus allocator {bogus_alloc!r}")
 
         for unrelated_msg in (
             "failed to read digest fixture: NotFound",

@@ -200,8 +200,9 @@
 //! descriptor 2 (bypassing Rust's stderr lock, arming a best-effort `alarm(1)`
 //! watchdog around `poll(0)` and `write`, skipping already-full or
 //! already-closed pipes, and disarming `alarm(0)` before aborting) and calls
-//! `std::process::abort` when control returns (see `self_test::fail_stop_bytes`
-//! for signal/socket edge cases). Other threads that call `initialize` meanwhile wait
+//! `std::process::abort` when control returns. Arming and disarming `alarm`
+//! takes over (and clears) any pre-existing process real-time alarm even when
+//! the write to fd 2 is skipped. Other threads that call `initialize` meanwhile wait
 //! for it (parked via `std::sync::Once`; programs that `fork` should finish
 //! `initialize` before forking).
 //!

@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unsafe_reasons as ur
 
 TRUNC_ALLOW_RE = re.compile(
-    r"#!?\[[^\]]*\b(?:allow|expect|warn)\s*\([^)]*\bclippy\s*::\s*cast_possible_truncation\b"
+    r"#\s*!?\s*\[[^\]]*\b(?:r#)?(?:allow|expect|warn)\s*\([^)]*\b(?:r#)?clippy\s*::\s*(?:r#)?cast_possible_truncation\b"
 )
 DEBUG_ASSERT_RE = ur.DEBUG_ASSERT
 SILENT_NARROW_RE = re.compile(r"\.\s*to_le_bytes\s*\(\s*\)\s*\[\s*0\s*\]")
