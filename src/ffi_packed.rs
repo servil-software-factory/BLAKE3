@@ -4,8 +4,11 @@
 //!
 //! Full SIMD groups read contiguous packed messages directly from `input` into
 //! `outputs` with zero 8 KiB stack expansion and zero zero-word message
-//! additions; on AArch64 NEON, remainders of `8..=10` messages also finish in
-//! one padded 11-lane group via a 528-byte stack buffer (#583).
+//! additions; on AArch64 NEON, `8..=10`-message remainders also finish in one
+//! 11-lane call — in place over the final 11 messages when a prior group
+//! already ran (`done > 0`, zero scratch and zero copies), or via an
+//! out-of-line size-matched `[[u8; N]; 11]` input scratch (`176`/`352`/`528` B)
+//! and `[[u8; 32]; 11]` output scratch for a lone `8..=10`-message batch (#583).
 
 use crate::{CHUNK_END, CHUNK_START, CVWords, OUT_LEN, ROOT, platform::Platform};
 
@@ -24,6 +27,14 @@ use crate::{CHUNK_END, CHUNK_START, CVWords, OUT_LEN, ROOT, platform::Platform};
 /// - `w = 19..=21`: `Packed<16>` `251.2..265.2 -> 244.0..245.1 ns` (-2.9%..-7.6%),
 ///   `Packed<32>` `258.0..275.5 -> 253.4..257.0 ns` (-1.4%..-6.7%),
 ///   `Packed<48>` `265.4..281.0 -> 263.3..264.7 ns` (-0.8%..-5.8%).
+///
+/// Re-measuring the earlier inlined fixed-528-byte scratch (`67bf3eb6`, job
+/// `20261128T034802Z-john-example-blincs586`) showed `+4.3..+8.5 ns` overhead
+/// on tails and `+384 B` on `many::hash_packed`'s common frame. When a prior
+/// group already ran (`done > 0`), at least 11 contiguous messages exist in
+/// place, so the tail re-runs the final 11 slots directly with zero scratch or
+/// copies; only a lone `8..=10` batch uses the out-of-line size-matched
+/// `neon_packed_tail::<N>` (`[[0u8; N]; 11]`) scratch.
 #[cfg(target_arch = "aarch64")]
 const NEON_PACKED_PAD_MIN: usize = 8;
 
@@ -39,21 +50,21 @@ fn neon_packed_kernel(len: usize) -> unsafe extern "C" fn(*const u8, u64, *const
 }
 
 #[cfg(target_arch = "aarch64")]
-#[inline]
-fn neon_packed_tail(input: &[u8], len: usize, key: &CVWords, root_flags: u32, outputs: &mut [[u8; OUT_LEN]]) {
-    assert!(matches!(len, 16 | 32 | 48), "packed messages are 16, 32, or 48 bytes, not {len}");
+#[inline(never)]
+fn neon_packed_tail<const N: usize>(input: &[u8], key: &CVWords, root_flags: u32, outputs: &mut [[u8; OUT_LEN]]) {
+    const { assert!(N == 16 || N == 32 || N == 48, "packed messages are 16, 32, or 48 bytes") };
     assert!((NEON_PACKED_PAD_MIN..11).contains(&outputs.len()), "NEON packed tail count must be in {NEON_PACKED_PAD_MIN}..11");
-    assert_eq!(input.len(), outputs.len() * len, "NEON packed tail input size mismatch");
-    let kernel = neon_packed_kernel(len);
-    let mut pad_in = [0u8; 11 * 48];
-    pad_in[..input.len()].copy_from_slice(input);
+    assert_eq!(input.len(), outputs.len() * N, "NEON packed tail input size mismatch");
+    let kernel = neon_packed_kernel(N);
+    let mut pad_in = [[0u8; N]; 11];
+    pad_in.as_flattened_mut()[..input.len()].copy_from_slice(input);
     let mut pad_out = [[0u8; OUT_LEN]; 11];
     crate::ran_kernel(kernel as *const ());
     // Sound: AArch64 NEON is mandatory on `Platform::NEON`/`SME2`; `kernel`
-    // matches `len <= 48`, so `pad_in` (`11 * 48` initialized bytes) covers
-    // all `11 * len` readable bytes and `pad_out` holds 11 writable 32-byte slots.
+    // matches `N`, so `pad_in` holds `11 * N` initialized readable bytes and
+    // `pad_out` holds 11 writable 32-byte slots.
     unsafe {
-        kernel(pad_in.as_ptr(), 1, key.as_ptr(), root_flags, pad_out.as_mut_ptr().cast());
+        kernel(pad_in.as_ptr().cast(), 1, key.as_ptr(), root_flags, pad_out.as_mut_ptr().cast());
     }
     outputs.copy_from_slice(&pad_out[..outputs.len()]);
 }
@@ -115,7 +126,30 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
         }
         let rem = outputs.len() - done;
         if rem >= NEON_PACKED_PAD_MIN {
-            neon_packed_tail(&input[done * len..], len, key, root_flags, &mut outputs[done..]);
+            if done > 0 {
+                // At least 11 contiguous messages already sit at the end of
+                // `input` / `outputs` (`done >= 11` after NEON or `>= 16` after
+                // SME2): finish the final 11 slots in place with zero scratch
+                // buffer, zero zero-fill, and zero copies (1..=3 overlapping
+                // digests are recomputed to identical bytes).
+                let tail_start = outputs.len() - 11;
+                let kernel = neon_packed_kernel(len);
+                crate::ran_kernel(kernel as *const ());
+                // Sound: AArch64 NEON is mandatory on `Platform::NEON`/`SME2`;
+                // `done > 0` and `rem >= 8` guarantee `outputs.len() >= 11`, so
+                // `input[tail_start * len..]` has `11 * len` readable bytes and
+                // `outputs[tail_start..]` has 11 writable 32-byte slots.
+                unsafe {
+                    kernel(input[tail_start * len..].as_ptr(), 1, key.as_ptr(), root_flags, outputs[tail_start..].as_mut_ptr().cast());
+                }
+            } else {
+                match len {
+                    16 => neon_packed_tail::<16>(input, key, root_flags, outputs),
+                    32 => neon_packed_tail::<32>(input, key, root_flags, outputs),
+                    48 => neon_packed_tail::<48>(input, key, root_flags, outputs),
+                    _ => unreachable!("asserted len in {{16, 32, 48}}"),
+                }
+            }
             done += rem;
         }
         return done;
@@ -432,11 +466,22 @@ mod tests {
     }
 
     #[cfg(target_arch = "aarch64")]
+    fn fill_distinct_packed(buf: &mut [u8], len: usize) {
+        for (msg_idx, msg) in buf.chunks_exact_mut(len).enumerate() {
+            let tag = (msg_idx as u32).to_le_bytes();
+            msg[..4].copy_from_slice(&tag);
+            for (j, b) in msg[4..].iter_mut().enumerate() {
+                *b = ((msg_idx.wrapping_mul(37) ^ j.wrapping_mul(17) ^ 0xa5) & 0xff) as u8;
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn packed_neon_padded_tail_threshold_and_digests() {
         crate::initialize();
         let neon = Platform::own_core();
-        let entries = [
+        let neon_entries = [
             ffi_neon::blake3_servil_neon_p11_packed16 as *const () as usize,
             ffi_neon::blake3_servil_neon_p11_packed32 as *const () as usize,
             ffi_neon::blake3_servil_neon_p11_packed48 as *const () as usize,
@@ -456,18 +501,46 @@ mod tests {
                     (21, 21, true),
                 ] {
                     let mut input = std::vec![0u8; count * len];
-                    for (i, b) in input.iter_mut().enumerate() {
-                        *b = (i.wrapping_mul(37) ^ 0xa5).to_le_bytes()[0];
-                    }
+                    fill_distinct_packed(&mut input, len);
                     let mut out = std::vec![[0u8; OUT_LEN]; count];
                     crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
                     let done = hash_packed_groups(&input, len, &key, flags, &mut out, neon);
                     let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
                     assert_eq!(done, want_done, "NEON packed<{len}> count={count}");
-                    assert_eq!(ran.contains(&entries[idx]), want_ran, "NEON packed<{len}> count={count} ran={ran:?}");
+                    assert_eq!(ran.contains(&neon_entries[idx]), want_ran, "NEON packed<{len}> count={count} ran={ran:?}");
                     for i in 0..done {
                         let want = crate::test::official::hash(mode, &input[i * len..][..len]);
                         assert_eq!(out[i], want, "NEON packed<{len}> count={count} i={i}");
+                    }
+                }
+            }
+        }
+        // When running on a 512-bit SME2 thread, also verify post-SME2 NEON
+        // in-place overlapping tails (16 + 7..=11 and 32 + 8..=10) check both
+        // kernels and distinct per-lane digests.
+        if let Some(sme2) = Platform::sme2() {
+            let sme2_entries = [
+                ffi_sme2::blake3_servil_sme2_packed16 as *const () as usize,
+                ffi_sme2::blake3_servil_sme2_packed32 as *const () as usize,
+                ffi_sme2::blake3_servil_sme2_packed48 as *const () as usize,
+            ];
+            let (key, flags) = Mode::Keyed(&key_bytes).key_and_flags();
+            for (idx, len) in [16usize, 32, 48].into_iter().enumerate() {
+                for (count, want_done, want_neon) in
+                    [(23, 16, false), (24, 24, true), (25, 25, true), (26, 26, true), (27, 27, true), (40, 40, true), (41, 41, true), (42, 42, true)]
+                {
+                    let mut input = std::vec![0u8; count * len];
+                    fill_distinct_packed(&mut input, len);
+                    let mut out = std::vec![[0u8; OUT_LEN]; count];
+                    crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                    let done = hash_packed_groups(&input, len, &key, flags, &mut out, sme2);
+                    let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                    assert_eq!(done, want_done, "SME2+NEON packed<{len}> count={count}");
+                    assert!(ran.contains(&sme2_entries[idx]), "SME2 packed<{len}> count={count} ran={ran:?}");
+                    assert_eq!(ran.contains(&neon_entries[idx]), want_neon, "post-SME2 NEON packed<{len}> count={count} ran={ran:?}");
+                    for i in 0..done {
+                        let want = crate::test::official::hash(Mode::Keyed(&key_bytes), &input[i * len..][..len]);
+                        assert_eq!(out[i], want, "SME2+NEON packed<{len}> count={count} i={i}");
                     }
                 }
             }
@@ -483,11 +556,14 @@ mod tests {
         let platforms: &[Platform] = if own == detected { &[detected] } else { &[detected, own] };
         for &platform in platforms {
             for len in [16usize, 32, 48] {
-                for count in [8usize, 10, 11, 16, 19, 21, 22, 27, 32, 43] {
+                for count in [8usize, 10, 11, 16, 19, 21, 22, 24, 26, 27, 32, 43] {
                     for at_end in [false, true] {
                         let mut input = Guarded::new(count * len, at_end);
-                        for (i, b) in input.bytes().iter_mut().enumerate() {
-                            *b = (i.wrapping_mul(29) ^ 0x71).to_le_bytes()[0];
+                        for (msg_idx, msg) in input.bytes().chunks_exact_mut(len).enumerate() {
+                            msg[..4].copy_from_slice(&(msg_idx as u32).to_le_bytes());
+                            for (j, b) in msg[4..].iter_mut().enumerate() {
+                                *b = ((msg_idx.wrapping_mul(29) ^ j.wrapping_mul(13) ^ 0x71) & 0xff) as u8;
+                            }
                         }
                         let mut out = Guarded::new(count * OUT_LEN, at_end);
                         let out_slice = out.bytes().as_chunks_mut::<OUT_LEN>().0;

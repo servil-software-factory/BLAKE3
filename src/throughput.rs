@@ -656,7 +656,26 @@ impl TreeHasher {
     /// let tree = TreeHasher::new(Mode::DeriveKey("example.com 2026-11-16 session keys"));
     /// assert_eq!(tree.hash(b"material"), convenience::hash_with(Mode::DeriveKey("example.com 2026-11-16 session keys"), b"material"));
     /// ```
+    #[cfg_attr(target_arch = "aarch64", inline)]
     pub fn hash(&self, input: &[u8]) -> Hash {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if input.len() <= crate::BLOCK_LEN {
+                let _ = crate::platform::Platform::detect();
+                return crate::hash_one_block_root(input, self.domain.key(), self.domain.flags());
+            }
+            self.hash_long(input)
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let turn = self.turn(input.len());
+            self.hash_on(turn.platform(), input)
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(never)]
+    fn hash_long(&self, input: &[u8]) -> Hash {
         let turn = self.turn(input.len());
         self.hash_on(turn.platform(), input)
     }
@@ -1432,5 +1451,37 @@ mod tree_test {
         let ran_3x15k = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
         assert!(ran_3x15k.contains(&parents_fn), "3 x 15 KiB (21 parent pairs) should enter SME2 parents when turn is free");
         assert_eq!(got_3, expected_3x15k);
+    }
+
+    #[test]
+    fn tree_hasher_short_and_boundary_inputs_match_official() {
+        crate::initialize();
+        let key = [0x3du8; 32];
+        let ctx = "blake3-servil tree hasher single-block fast path";
+        let mut buf = std::vec![0u8; 1025];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = ((i.wrapping_mul(41) ^ 0x5c) & 0xff) as u8;
+        }
+        for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey(ctx)] {
+            let tree = TreeHasher::new(mode);
+            let local = TreeHasher::new(mode).on_this_core();
+            for len in (0usize..=65).chain([127, 128, 1023, 1024, 1025]) {
+                let slice = &buf[..len];
+                let want = crate::test::official::hash(mode, slice);
+                assert_eq!(*tree.hash(slice).as_bytes(), want, "TreeHasher::hash len={len}");
+                assert_eq!(*local.hash(slice).as_bytes(), want, "TreeHasher::on_this_core().hash len={len}");
+            }
+        }
+        // Pin the AArch64 <= 64 B fast path: runs only the single-chunk scalar
+        // kernel (`c1`) without taking an SME2 turn.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let tree = TreeHasher::new(Mode::Keyed(&key));
+            crate::RAN.with(|r| r.set(0));
+            crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+            let _ = tree.hash(&buf[..48]);
+            assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "<= 64 B must not take an SME2 turn");
+            assert_eq!(crate::RAN_ENTRIES.with(|r| r.borrow().len()), 1, "<= 64 B must run a single root kernel");
+        }
     }
 }
