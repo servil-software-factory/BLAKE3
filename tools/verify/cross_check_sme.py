@@ -157,7 +157,7 @@ def main():
         for _ in range(rounds):
             z = [random.getrandbits(32) for _ in range(4 * L)]
             za = [random.getrandbits(32) for _ in range(4 * L * L)]
-            if "cmphi" in mnem or "cmplo" in mnem:
+            if "cmphi" in mnem or "cmplo" in mnem or "cmpeq" in mnem:
                 z = [random.getrandbits(3) for _ in range(4 * L)]
             x9 = random.getrandbits(32)
             ws = [random.randrange(16) for _ in range(4)]

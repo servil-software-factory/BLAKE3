@@ -43,6 +43,34 @@ figure names its machine.
 
 ## Faster
 
+- **Zero-word-pruned 18-lane SME2/NEON/AVX-512/AVX2 counter-range (`32 B`/`16 B`)
+  and early-exit `find_counter_range` APIs** (`#585`, `blake3-servil-core`
+  `throughput::{hash_counter_range, hash_counter_range_trunc16, find_counter_range}`
+  and `TreeHasher` methods): 28 generator-backed, Z3-proved (`187/187` cases in
+  `prove_counter_{aarch64,x86}.py`) length-specialized kernels — 18-lane
+  (16 SME2 + 2 integer) hybrid `w{4,9,13,16}`, 11-lane NEON 8+3 `w{4,9,16}`,
+  16-lane AVX-512 `w{4,9,13,16}`, and 8-lane AVX2 `w{4,9,16}` — skip additions
+  of zero trailing message words, use full-line 64-byte unmasked `st1w p0`
+  stores on Apple/AArch64 SME2 (8×64 B `za1v` mirror + `ext #32` for 32 B and
+  4×64 B `zip1`/`zip2` for 16 B, eliminating 16 partial-predicate ZA stores),
+  and evaluate `(word0 & mask) == target` in registers with zero output RAM
+  writes and early exit in `find_counter_range`. Measured (`Mode::Keyed`,
+  `n = 4096` steady state):
+  - Apple M6 (`mac-m6-timing`, `20261128T072401Z-john-example-blincs585-v3`,
+    post-250 ms DVFS warmup): 18-lane SME2 `hash_counter_range` =
+    `8.42 / 8.89 / 9.24 / 9.50 ns/hash` (`16 / 36 / 52 / 64 B`, `-20%..-26.5%`
+    over partial-ZA stores, `-13.6%..-20.4%` faster than NEON `10.58..10.99 ns`);
+    `hash_counter_range_trunc16` = `8.39 / 8.86 / 9.20 / 9.46 ns/hash`
+    (`119M/s` on 1 core); `find_counter_range` = `7.84 / 8.32 / 8.67 / 8.92 ns/hash`
+    (`128M/s` on 1 core; 52 B FewSelect 16-bit grind `114.6 us`, `1.34x` faster
+    than new `batch(1024)+scan` at `153.1 us` and `1.60x` faster than prior
+    `183.2 us`).
+  - AMD Threadripper PRO 7975WX AVX-512 (`x86-workhorse`): `find_counter_range`
+    `6.02 ns/hash` (`166M/s` on 1 core) on 16 B, `1.10x` over `batch(1024)+scan`
+    on 52 B 16-bit grind.
+  - AmpereOne NEON (`arm-vm`): `-15.3%` on 16 B (`36.82 → 31.19 ns`), `1.05x` on
+    `find_counter_range`.
+
 - **Fused multi-step 32-byte hash-chain batch APIs across all four SIMD ISAs**
   (`#584`, `blake3-servil-core` `throughput::{hash_chains_32_trunc16, hash_chains_varlen_32_trunc16}`
   and `TreeHasher::{hash_chains_32_trunc16, hash_chains_varlen_32_trunc16}`):

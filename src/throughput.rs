@@ -153,17 +153,127 @@ pub fn hash_counter_range(mode: Mode, template: &[u8], counter_word: usize, star
     hash_counter_range_checked(validated, start, key, flags, out, platform);
 }
 
+/// Hash `out.len()` single-block messages derived from `template` (`4..=64`
+/// bytes) in `mode`, replacing the 4-byte little-endian word at byte offset
+/// `counter_word * 4` with `start.wrapping_add(i)` (modulo 2^32) for
+/// `i in 0..out.len()`, writing the first 16 bytes of each BLAKE3 digest.
+///
+/// Identical to [`hash_counter_range`] truncated to 16 bytes, halving output
+/// memory traffic for 128-bit digest callers (such as WOTS/FORS leaf
+/// generation and hash-based signatures).
+///
+/// Panics if `template.len() > BLOCK_LEN`, `counter_word >= 16`, or
+/// `counter_word * 4 + 4 > template.len()` (checked in every build, even
+/// when `out` is empty).
+///
+/// # Example
+///
+/// ```
+/// # blake3_servil_core::initialize();
+/// use blake3_servil_core::{Mode, convenience, throughput};
+/// let mut template = [0u8; 36];
+/// template[..32].fill(0x5c);
+/// let mut digests = [[0u8; 16]; 18];
+/// throughput::hash_counter_range_trunc16(Mode::Plain, &template, 8, 50, &mut digests);
+/// template[32..36].copy_from_slice(&53u32.to_le_bytes());
+/// assert_eq!(digests[3], convenience::hash(&template).as_bytes()[..16]);
+/// ```
 #[inline(always)]
-fn hash_counter_range_checked(
+pub fn hash_counter_range_trunc16(mode: Mode, template: &[u8], counter_word: usize, start: u32, out: &mut [[u8; 16]]) {
+    let validated = crate::ffi_counter::ValidatedTemplate::new(template, counter_word);
+    let platform = crate::Platform::detect();
+    if out.is_empty() {
+        return;
+    }
+    let mut derived = core::mem::MaybeUninit::uninit();
+    let (key, flags) = mode.key(&mut derived);
+    hash_counter_range_checked(validated, start, key, flags, out, platform);
+}
+
+/// Search `count` consecutive single-block messages derived from `template`
+/// (`4..=64` bytes) in `mode`, replacing the 4-byte little-endian word at
+/// byte offset `counter_word * 4` with `start.wrapping_add(off as u32)` for
+/// `off in 0..count`, for digests whose first little-endian 32-bit word
+/// `word0 = u32::from_le_bytes(digest[..4])` satisfies
+/// `(word0 & mask) == target`.
+///
+/// Matching `(counter, digest)` pairs are written to `matches[..n]` in
+/// ascending search-offset order and the count `n <= matches.len()` is
+/// returned. On AVX-512, AVX2, Apple/AArch64 SME2, and AArch64 NEON, non-matching
+/// groups test the predicate in registers with zero output RAM writes and exit
+/// early as soon as `matches` is filled.
+///
+/// **Timing note:** because this search stops early once `matches` is full, its
+/// runtime depends on which counters satisfy the predicate; use it for public
+/// nonce grinding and proof-of-work predicates rather than secret-dependent
+/// searches.
+///
+/// Panics if `template.len() > BLOCK_LEN`, `counter_word >= 16`, or
+/// `counter_word * 4 + 4 > template.len()` (checked in every build, even
+/// when `count == 0` or `matches` is empty).
+///
+/// # Example
+///
+/// ```
+/// # blake3_servil_core::initialize();
+/// use blake3_servil_core::{Mode, convenience, throughput};
+/// let mut template = [0u8; 52];
+/// template[..48].fill(0x2a);
+/// let mut hits = [(0u32, [0u8; 32]); 1];
+/// let found = throughput::find_counter_range(Mode::Plain, &template, 12, 0, 1024, 0x0000_000f, 0, &mut hits);
+/// assert_eq!(found, 1);
+/// template[48..52].copy_from_slice(&hits[0].0.to_le_bytes());
+/// assert_eq!(hits[0].1, *convenience::hash(&template).as_bytes());
+/// assert_eq!(u32::from_le_bytes(hits[0].1[..4].try_into().unwrap()) & 0xf, 0);
+/// ```
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn find_counter_range(
+    mode: Mode,
+    template: &[u8],
+    counter_word: usize,
+    start: u32,
+    count: u64,
+    mask: u32,
+    target: u32,
+    matches: &mut [(u32, [u8; OUT_LEN])],
+) -> usize {
+    let validated = crate::ffi_counter::ValidatedTemplate::new(template, counter_word);
+    let platform = crate::Platform::detect();
+    if crate::ffi_counter::find_is_noop(count, matches.len(), mask, target) {
+        return 0;
+    }
+    let mut derived = core::mem::MaybeUninit::uninit();
+    let (key, flags) = mode.key(&mut derived);
+    find_counter_range_checked(validated, start, count, mask, target, key, flags, matches, platform)
+}
+
+#[inline(always)]
+fn hash_counter_range_checked<const OUT: usize>(
     template: crate::ffi_counter::ValidatedTemplate<'_>,
     start: u32,
     key: &crate::CVWords,
     flags: u8,
-    out: &mut [[u8; OUT_LEN]],
+    out: &mut [[u8; OUT]],
     platform: crate::platform::Platform,
 ) {
-    let turn = crate::platform::Sme2Turn::take(platform, out.len() >= 16);
-    crate::ffi_counter::hash_counter_range_on(template, start, key, flags, out, turn.platform());
+    crate::ffi_counter::hash_counter_range_on(template, start, key, flags, out, platform);
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn find_counter_range_checked(
+    template: crate::ffi_counter::ValidatedTemplate<'_>,
+    start: u32,
+    count: u64,
+    mask: u32,
+    target: u32,
+    key: &crate::CVWords,
+    flags: u8,
+    matches: &mut [(u32, [u8; OUT_LEN])],
+    platform: crate::platform::Platform,
+) -> usize {
+    crate::ffi_counter::find_counter_range_on(template, start, count, mask, target, key, flags, matches, platform)
 }
 
 /// Evaluate `init.len()` independent 32-byte iterated hash chains in `mode`,
@@ -787,6 +897,46 @@ impl TreeHasher {
             return;
         }
         hash_counter_range_checked(validated, start, self.domain.key(), self.domain.flags(), out, platform);
+    }
+
+    /// Hash `out.len()` single-block messages derived from `template`
+    /// (`4..=64` bytes) in this `TreeHasher`'s mode, writing the first 16 bytes
+    /// of each digest. See [`hash_counter_range_trunc16`].
+    ///
+    /// Respects [`Self::on_this_core`] on Apple/AArch64 SME2 hosts.
+    pub fn hash_counter_range_trunc16(&self, template: &[u8], counter_word: usize, start: u32, out: &mut [[u8; 16]]) {
+        let validated = crate::ffi_counter::ValidatedTemplate::new(template, counter_word);
+        let platform = self.platform();
+        if out.is_empty() {
+            return;
+        }
+        hash_counter_range_checked(validated, start, self.domain.key(), self.domain.flags(), out, platform);
+    }
+
+    /// Search `count` consecutive single-block messages derived from `template`
+    /// (`4..=64` bytes) in this `TreeHasher`'s mode for digests whose first
+    /// little-endian 32-bit word satisfies `(word0 & mask) == target`, writing
+    /// up to `matches.len()` pairs in ascending offset order and returning the
+    /// number found. See [`find_counter_range`].
+    ///
+    /// Respects [`Self::on_this_core`] on Apple/AArch64 SME2 hosts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_counter_range(
+        &self,
+        template: &[u8],
+        counter_word: usize,
+        start: u32,
+        count: u64,
+        mask: u32,
+        target: u32,
+        matches: &mut [(u32, [u8; OUT_LEN])],
+    ) -> usize {
+        let validated = crate::ffi_counter::ValidatedTemplate::new(template, counter_word);
+        let platform = self.platform();
+        if crate::ffi_counter::find_is_noop(count, matches.len(), mask, target) {
+            return 0;
+        }
+        find_counter_range_checked(validated, start, count, mask, target, self.domain.key(), self.domain.flags(), matches, platform)
     }
 
     /// Evaluate `init.len()` independent 32-byte iterated hash chains in this
@@ -1458,7 +1608,7 @@ mod tree_test {
         tree.clone().on_this_core().hash_each(&items_16_pairs, &mut expected_16_pairs);
         tree.clone().on_this_core().hash_each(&items_15_pairs, &mut expected_15_pairs);
         let tmpl = [0x5au8; 52];
-        let mut expected_counter = std::vec![[0u8; OUT_LEN]; 16];
+        let mut expected_counter = std::vec![[0u8; OUT_LEN]; 18];
         tree.clone().on_this_core().hash_counter_range(&tmpl, 12, 7, &mut expected_counter);
         let chain_init: [[u8; 32]; 18] = core::array::from_fn(|i| [0x33u8.wrapping_add(i as u8); 32]);
         let mut got_chain = [[0u8; 16]; 18];
@@ -1469,7 +1619,7 @@ mod tree_test {
         let mut expected_chain_large = [[0u8; 16]; 18];
         tree.clone().on_this_core().hash_chains_varlen_32_trunc16(&chain_init, &chain_steps_large, &mut expected_chain_large);
 
-        // Hold the SME2 turn: neither parent_cvs, hash_each, nor hash_counter_range may enter SME2.
+        // Hold the SME2 turn: neither parent_cvs, hash_each, nor counter-range/find may enter SME2.
         let mut held = None;
         for _ in 0..10_000 {
             let t = crate::platform::Sme2Turn::take(crate::platform::Platform::SME2, true);
@@ -1483,11 +1633,13 @@ mod tree_test {
         let parents_fn = crate::sme2::ffi::blake3_servil_sme2_hash16_parents_512 as *const () as usize;
         let messages_fn = crate::sme2::ffi::blake3_servil_sme2_hash16_messages_512 as *const () as usize;
 
-        // Subthreshold calls (30 children = 15 pairs; 15 two-chunk messages; 15 counters) must
+        // Subthreshold calls (30 children = 15 pairs; 15 two-chunk messages; 17 counters) must
         // not even attempt to acquire the held turn (Ran::TurnTaken stays clear).
         let mut got_parents = std::vec![Cv::unset(); 16];
         let mut got_each = std::vec![[0u8; OUT_LEN]; 16];
-        let mut got_counter = std::vec![[0u8; OUT_LEN]; 16];
+        let mut got_counter = std::vec![[0u8; OUT_LEN]; 18];
+        let mut got_counter16 = std::vec![[0u8; 16]; 18];
+        let mut got_find = [(0u32, [0u8; OUT_LEN]); 1];
         crate::RAN.with(|r| r.set(0));
         crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
         tree.parent_cvs(&children[..30], &mut got_parents[..15]);
@@ -1503,11 +1655,19 @@ mod tree_test {
             "3 x 11 KiB + 1 x 2 KiB (15 parent pairs) must not try to take the SME2 turn"
         );
         assert_eq!(got_4, expected_15_pairs);
-        tree.hash_counter_range(&tmpl, 12, 7, &mut got_counter[..15]);
-        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "15 TreeHasher counters must not try to take the SME2 turn");
-        assert_eq!(&got_counter[..15], &expected_counter[..15]);
-        hash_counter_range(Mode::Plain, &tmpl, 12, 7, &mut got_counter[..15]);
-        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "15 free counters must not try to take the SME2 turn");
+        tree.hash_counter_range(&tmpl, 12, 7, &mut got_counter[..17]);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "17 TreeHasher counters must not try to take the SME2 turn");
+        assert_eq!(&got_counter[..17], &expected_counter[..17]);
+        hash_counter_range(Mode::Plain, &tmpl, 12, 7, &mut got_counter[..17]);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "17 free counters must not try to take the SME2 turn");
+        tree.hash_counter_range_trunc16(&tmpl, 12, 7, &mut got_counter16[..17]);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "17 TreeHasher trunc16 counters must not try to take the SME2 turn");
+        hash_counter_range_trunc16(Mode::Plain, &tmpl, 12, 7, &mut got_counter16[..17]);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "17 free trunc16 counters must not try to take the SME2 turn");
+        let _ = tree.find_counter_range(&tmpl, 12, 7, 17, u32::MAX, 0, &mut got_find);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "17 TreeHasher find counters must not try to take the SME2 turn");
+        let _ = find_counter_range(Mode::Plain, &tmpl, 12, 7, 17, u32::MAX, 0, &mut got_find);
+        assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "17 free find counters must not try to take the SME2 turn");
         tree.hash_chains_32_trunc16(&chain_init[..17], 3, &mut got_chain[..17]);
         assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "17 fixed chains must not try to take the SME2 turn");
         tree.hash_chains_32_trunc16(&chain_init, 0, &mut got_chain);
@@ -1516,9 +1676,9 @@ mod tree_test {
         assert_eq!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "subthreshold varlen chains must not try to take the SME2 turn");
         assert_eq!(&got_parents[..15], &expected_parents[..15]);
         assert_eq!(&got_each[..15], &expected_each[..15]);
-        assert_eq!(&got_counter[..15], &expected_counter[..15]);
+        assert_eq!(&got_counter[..17], &expected_counter[..17]);
 
-        // Eligible calls (32 children = 16 pairs; 16 two-chunk messages; 16 counters) DO consult
+        // Eligible calls (32 children = 16 pairs; 16 two-chunk messages; 18 counters) DO consult
         // the held turn (recording Ran::TurnTaken) and fall back off SME2.
         crate::RAN.with(|r| r.set(0));
         crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
@@ -1537,7 +1697,7 @@ mod tree_test {
         assert_eq!(got_3, expected_3x15k);
         crate::RAN.with(|r| r.set(0));
         tree.hash_counter_range(&tmpl, 12, 7, &mut got_counter);
-        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "16 TreeHasher counters must consult the SME2 turn");
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "18 TreeHasher counters must consult the SME2 turn");
         assert_eq!(got_counter, expected_counter);
         crate::RAN.with(|r| r.set(0));
         tree.hash_chains_32_trunc16(&chain_init, 3, &mut got_chain);
@@ -1553,8 +1713,20 @@ mod tree_test {
         assert_eq!(got_chain, expected_chain_large);
         crate::RAN.with(|r| r.set(0));
         hash_counter_range(Mode::Plain, &tmpl, 12, 7, &mut got_counter);
-        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "16 free counters must consult the SME2 turn");
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "18 free counters must consult the SME2 turn");
         assert_eq!(got_counter, expected_counter);
+        crate::RAN.with(|r| r.set(0));
+        tree.hash_counter_range_trunc16(&tmpl, 12, 7, &mut got_counter16);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "18 TreeHasher trunc16 counters must consult the SME2 turn");
+        crate::RAN.with(|r| r.set(0));
+        hash_counter_range_trunc16(Mode::Plain, &tmpl, 12, 7, &mut got_counter16);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "18 free trunc16 counters must consult the SME2 turn");
+        crate::RAN.with(|r| r.set(0));
+        let _ = tree.find_counter_range(&tmpl, 12, 7, 18, u32::MAX, 0, &mut got_find);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "18 TreeHasher find counters must consult the SME2 turn");
+        crate::RAN.with(|r| r.set(0));
+        let _ = find_counter_range(Mode::Plain, &tmpl, 12, 7, 18, u32::MAX, 0, &mut got_find);
+        assert_ne!(crate::RAN.with(|r| r.get()) & crate::Ran::TurnTaken as u32, 0, "18 free find counters must consult the SME2 turn");
         crate::RAN_ENTRIES.with(|r| {
             let ran = r.borrow();
             assert!(!ran.contains(&parents_fn), "parent_cvs bypassed a held SME2 turn");
