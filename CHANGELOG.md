@@ -43,17 +43,32 @@ figure names its machine.
 
 ## Faster
 
+- **Inline `<= 64`-byte single-block fast path for `TreeHasher::hash` and
+  `hash_one_chunk_root`** (`#586`, `blake3-servil-core` `src/throughput.rs`,
+  `src/lib.rs`): `TreeHasher::hash` now checks `input.len() <= 64` inline and
+  dispatches straight to the single-block root kernel (`hash_one_block_root` on
+  AArch64, `chunk_root` on x86-64) without `Sme2Turn::take`, multi-block
+  division, or 64-byte stack realignment (keeping `> 64`-byte inputs out of
+  line). Measured natively on Apple M6 (`mac-m6-timing`, `on_this_core()`,
+  `Mode::Keyed`, job `20261128T034802Z-john-example-blincs586`):
+  - Fixed-size arrays (`&[u8; 32/36/48/64]`): `47.8/47.7/49.6/43.1 → 41.9/42.3/42.4/41.6 ns` (`-11.2%` to `-14.4%` for `32..48 B`, `-3.4%` for `64 B`), closing the gap to `throughput::hash(Block, 48)`.
+  - Dynamic slices (`&[u8]`): `48.1/48.3/49.5/43.2 → 42.3/43.0/43.5/41.7 ns` (`-11.0%` to `-12.3%` for `32..48 B`, beating `throughput::hash(&block, dyn_48)` at `50.2 ns`).
+
 - **AArch64 NEON padded tail for `8..=10`-message `Packed<{16,32,48}>` remainders**
   (`#583`, `blake3-servil-core` `src/ffi_packed.rs`): remainders of `8..=10`
   messages after full 11-lane NEON groups (including `TreeHasher::on_this_core()`
   and post-SME2 remainders) now pad into a single `blake3_servil_neon_p11_packed`
-  call via a 528-byte stack buffer instead of expanding into a 1 KiB block
-  buffer for `p8`/`p9`/`pn10`. Measured on Apple M6 (`mac-m6-timing`,
-  `on_this_core()`, `Mode::Keyed`, `w = 8..=10` and `19..=21`): `Packed<16>`
-  `-6.9%` to `-13.3%` (`139.0..146.1 → 126.0..131.4 ns`), `Packed<32>`
-  `-9.3%` to `-13.2%` (`141.4..149.7 → 128.3..130.0 ns`), `Packed<48>`
-  `-5.7%` to `-12.6%` (`143.8..155.9 → 135.4..136.2 ns`), with `w = 7`/`18`
-  kept unpadded on `p7` (where padding regressed `+5.4%..+8.5%`).
+  call via an out-of-line size-matched `[[u8; N]; 11]` stack scratch (`176`/`352`/`528` B)
+  instead of expanding into a 1 KiB block buffer for `p8`/`p9`/`pn10`. Measured
+  on Apple M6 (`mac-m6-timing`, `on_this_core()`, `Mode::Keyed`, jobs
+  `20261128T002745Z-john-example-blincs583586-{base3,cand3}`):
+  - `w = 8..=10`: `Packed<16>` `139.0..146.1 → 126.0..131.4 ns` (`-6.9%` to `-13.3%`),
+    `Packed<32>` `141.4..149.7 → 128.3..130.0 ns` (`-9.3%` to `-13.2%`),
+    `Packed<48>` `143.8..155.9 → 135.4..136.2 ns` (`-5.7%` to `-12.6%`).
+  - `w = 19..=21`: `Packed<16>` `251.2..265.2 → 244.0..245.1 ns` (`-2.9%` to `-7.6%`),
+    `Packed<32>` `258.0..275.5 → 253.4..257.0 ns` (`-1.4%` to `-6.7%`),
+    `Packed<48>` `265.4..281.0 → 263.3..264.7 ns` (`-0.8%` to `-5.8%`).
+  - `w = 7` and `w = 18` stay unpadded on `p7` (where padding regressed `+5.4%..+8.5%`).
 
 ## Memory and lifecycle
 

@@ -48,4 +48,18 @@ fn every_platform_constructor_before_initialize_panics() {
         let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
         tree.hash_counter_range(&[0u8; 4], 0, 0, &mut []);
     });
+    // `TreeHasher::hash` must enforce initialize() on both its <= 64 B fast
+    // path and its multi-block path (with or without `on_this_core()`).
+    assert_panic_contains("TreeHasher::hash (<= 64 B)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        let _ = tree.hash(b"hello");
+    });
+    assert_panic_contains("TreeHasher::on_this_core().hash (<= 64 B)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain).on_this_core();
+        let _ = tree.hash(&[0u8; 48]);
+    });
+    assert_panic_contains("TreeHasher::hash (> 64 B)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        let _ = tree.hash(&[0u8; 65]);
+    });
 }

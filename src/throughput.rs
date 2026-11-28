@@ -656,7 +656,22 @@ impl TreeHasher {
     /// let tree = TreeHasher::new(Mode::DeriveKey("example.com 2026-11-16 session keys"));
     /// assert_eq!(tree.hash(b"material"), convenience::hash_with(Mode::DeriveKey("example.com 2026-11-16 session keys"), b"material"));
     /// ```
+    #[inline]
     pub fn hash(&self, input: &[u8]) -> Hash {
+        if input.len() <= crate::BLOCK_LEN {
+            #[cfg(target_arch = "aarch64")]
+            {
+                crate::platform::Platform::require_initialized();
+                return crate::hash_one_block_root(input, self.domain.key(), self.domain.flags());
+            }
+            #[cfg(target_arch = "x86_64")]
+            return Hash(crate::chunk_root::chunk_root(crate::platform::Platform::detect(), input, self.domain.key(), self.domain.flags()));
+        }
+        self.hash_long(input)
+    }
+
+    #[inline(never)]
+    fn hash_long(&self, input: &[u8]) -> Hash {
         let turn = self.turn(input.len());
         self.hash_on(turn.platform(), input)
     }
@@ -1432,5 +1447,26 @@ mod tree_test {
         let ran_3x15k = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
         assert!(ran_3x15k.contains(&parents_fn), "3 x 15 KiB (21 parent pairs) should enter SME2 parents when turn is free");
         assert_eq!(got_3, expected_3x15k);
+    }
+
+    #[test]
+    fn tree_hasher_short_and_boundary_inputs_match_official() {
+        crate::initialize();
+        let key = [0x3du8; 32];
+        let ctx = "blake3-servil tree hasher single-block fast path";
+        let mut buf = std::vec![0u8; 1025];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = ((i.wrapping_mul(41) ^ 0x5c) & 0xff) as u8;
+        }
+        for mode in [Mode::Plain, Mode::Keyed(&key), Mode::DeriveKey(ctx)] {
+            let tree = TreeHasher::new(mode);
+            let local = TreeHasher::new(mode).on_this_core();
+            for len in (0usize..=65).chain([127, 128, 1023, 1024, 1025]) {
+                let slice = &buf[..len];
+                let want = crate::test::official::hash(mode, slice);
+                assert_eq!(*tree.hash(slice).as_bytes(), want, "TreeHasher::hash len={len}");
+                assert_eq!(*local.hash(slice).as_bytes(), want, "TreeHasher::on_this_core().hash len={len}");
+            }
+        }
     }
 }

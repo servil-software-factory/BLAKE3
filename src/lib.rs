@@ -1018,6 +1018,39 @@ pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &
     tree::root_children(&kernels, input, ahead, chunk_counter)
 }
 
+// The root hash of a single-block input (`<= 64` bytes), in one kernel call
+// without multi-block length arithmetic or 64-byte stack realignment (#586).
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub(crate) fn hash_one_block_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
+    assert!(input.len() <= BLOCK_LEN, "one block or less");
+    let mut padded = [0u8; BLOCK_LEN];
+    let last: &[u8; BLOCK_LEN] = match input.try_into() {
+        Ok(full) => full,
+        Err(_) => {
+            padded[..input.len()].copy_from_slice(input);
+            &padded
+        }
+    };
+    let mut out = [0u8; OUT_LEN];
+    // Sound: `blocks == 1`, so `hash_chunk` reads only the 64-byte `last` block, `key`, and writes 32 bytes to `out`.
+    unsafe {
+        neon_hybrid::hash_chunk(
+            last.as_ptr(),
+            1,
+            last,
+            u8::try_from(input.len()).expect("block <= 64"),
+            key,
+            0,
+            flags,
+            CHUNK_START,
+            CHUNK_END | ROOT,
+            &mut out,
+        );
+    }
+    Hash(out)
+}
+
 // The root hash of an input of one chunk or less, in one kernel call. The
 // whole blocks are read in place, the final one too when it is full; a
 // short final block (and the empty block for the empty input) is copied
@@ -1028,6 +1061,9 @@ pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &
 #[inline]
 fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
     assert!(input.len() <= CHUNK_LEN, "one chunk or less");
+    if input.len() <= BLOCK_LEN {
+        return hash_one_block_root(input, key, flags);
+    }
     let blocks = cmp::max(1, input.len().div_ceil(BLOCK_LEN));
     let whole = (blocks - 1) * BLOCK_LEN;
     let tail = &input[whole..];

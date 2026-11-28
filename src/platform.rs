@@ -227,10 +227,10 @@ const fn x86_platform(avx512: bool, avx2: bool, sse41: bool) -> Option<Platform>
 }
 
 impl Platform {
-    #[cfg(test)]
+    #[cfg(any(test, target_arch = "aarch64"))]
     #[inline]
-    fn require_initialized() {
-        if !is_initialized() {
+    pub(crate) fn require_initialized() {
+        if crate::low_byte_u16(DETECTED.load(core::sync::atomic::Ordering::Relaxed)) == 0 {
             let _ = not_initialized();
         }
     }
