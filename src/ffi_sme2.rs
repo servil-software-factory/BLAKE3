@@ -1376,6 +1376,22 @@ mod test {
         );
         tmpl_bytes[48..52].copy_from_slice(&7u32.to_le_bytes());
         assert_eq!(out_18[0], *blake3::hash(&tmpl_bytes[..52]).as_bytes());
+        tmpl_bytes[48..52].copy_from_slice(&24u32.to_le_bytes());
+        assert_eq!(out_18[17], *blake3::hash(&tmpl_bytes[..52]).as_bytes());
+        let w0_lane17 = u32::from_le_bytes([out_18[17][0], out_18[17][1], out_18[17][2], out_18[17][3]]);
+        let find_mt = u64::from(u32::MAX) | (u64::from(w0_lane17) << 32);
+        assert_eq!(
+            run_with_dormant_za([0, 0, 1, 0, 0, 0], false, &mut || unsafe {
+                crate::ffi_counter::call_sme2_find(tmpl_words.as_ptr(), crate::IV.as_ptr(), base_and_word, counter_flags_len, find_mt, 1)
+            }),
+            u64::MAX
+        );
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                crate::ffi_counter::call_sme2_find(tmpl_words.as_ptr(), crate::IV.as_ptr(), base_and_word, counter_flags_len, find_mt, 1)
+            }),
+            1u64 << 17
+        );
 
         // Fused 18-lane (16 SME2 + 2 integer) hash-chain kernel (#584).
         let mut chain_in = [[0u8; 32]; 18];

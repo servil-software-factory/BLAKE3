@@ -109,11 +109,23 @@ def step(m, pc, mnem, ops):
             raise Unproved("whilelo on data")
         m.p[preg(ops[0].split(".")[0])] = [a + i < b for i in range(LANES)]
         return True
-    if mnem in ("cmphi", "cmplo", "cmphs", "cmpls") and ops[0].endswith(".s"):
+    if mnem in ("cmphi", "cmplo", "cmphs", "cmpls", "cmpeq") and ops[0].endswith(".s"):
         g = m.p[preg(ops[1].split("/")[0])]
         a, b = m.v[zreg(ops[2])[0]], m.v[zreg(ops[3])[0]]
-        f = {"cmphi": lambda x, y: UGT(x, y), "cmplo": lambda x, y: ULT(x, y)}[mnem]
-        m.p[preg(ops[0].split(".")[0])] = [f(x, y) if concrete_bool(gi) else False for gi, x, y in zip(g, a, b)]
+        f = {
+            "cmphi": lambda x, y: UGT(x, y),
+            "cmplo": lambda x, y: ULT(x, y),
+            "cmpeq": lambda x, y: x == y,
+        }[mnem]
+        res = [f(x, y) if concrete_bool(gi) else False for gi, x, y in zip(g, a, b)]
+        m.p[preg(ops[0].split(".")[0])] = res
+        # SVE compares set NZCV via PredTest(Pg, Pd): N=first, Z=!any, C=!last, V=0.
+        from z3 import Not, Or
+        active = [r for gi, r in zip(g, res) if concrete_bool(gi)]
+        if active:
+            m.nzcv = (active[0], Not(Or(*active)), Not(active[-1]), False)
+        else:
+            m.nzcv = (False, True, True, False)
         return True
     if mnem == "index" and size == "s":
         base = m.reg(ops[1])
@@ -148,6 +160,25 @@ def step(m, pc, mnem, ops):
     if mnem == "eor" and size == "d" and len(ops) == 3:
         a, b = m.v[zreg(ops[1])[0]], m.v[zreg(ops[2])[0]]
         m.v[d] = [x ^ y for x, y in zip(a, b)]
+        return True
+    if mnem == "and" and size == "d" and len(ops) == 3:
+        a, b = m.v[zreg(ops[1])[0]], m.v[zreg(ops[2])[0]]
+        m.v[d] = [x & y for x, y in zip(a, b)]
+        return True
+    if mnem == "ext" and size == "b" and len(ops) == 4:
+        k = aarch64.imm(ops[3])
+        assert zreg(ops[1])[0] == d and k % 4 == 0 and 0 <= k < 4 * LANES
+        shift = k // 4
+        a, b = m.v[d], m.v[zreg(ops[2])[0]]
+        m.v[d] = [a[shift + i] if shift + i < LANES else b[shift + i - LANES] for i in range(LANES)]
+        return True
+    if mnem in ("zip1", "zip2") and size in ("s", "d") and len(ops) == 3:
+        a, b = m.v[zreg(ops[1])[0]], m.v[zreg(ops[2])[0]]
+        half = 0 if mnem == "zip1" else LANES // 2
+        if size == "s":
+            m.v[d] = [a[half + i // 2] if i % 2 == 0 else b[half + i // 2] for i in range(LANES)]
+        else:
+            m.v[d] = [a[half + 2 * (i // 4) + (i % 2)] if (i // 2) % 2 == 0 else b[half + 2 * (i // 4) + (i % 2)] for i in range(LANES)]
         return True
     if mnem == "mov" and len(ops) == 3 and ops[0].startswith("za"):
         if not m.streaming:
@@ -199,5 +230,17 @@ def step(m, pc, mnem, ops):
                 m.za[t][row][i] = m.load(addr + 4 * i, 4) if active else ZERO
             elif active:
                 m.store(addr + 4 * i, m.za[t][row][i], 4)
+        return True
+    if mnem == "st1w" and not ops[0].lstrip("{ ").startswith("za"):
+        if not m.streaming:
+            raise Unproved("streaming st1w outside streaming mode")
+        zs = zlist(ops[0])
+        assert len(zs) == 1
+        g = m.p[preg(ops[1].split("/")[0])]
+        addr, wb, new = aarch64.mem_operand(m, ops, 2)
+        assert wb is None
+        for i in range(LANES):
+            if concrete_bool(g[i]):
+                m.store(addr + 4 * i, m.v[zs[0]][i], 4)
         return True
     return False

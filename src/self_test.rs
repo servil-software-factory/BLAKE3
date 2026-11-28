@@ -1281,6 +1281,35 @@ mod stops {
         assert!(stderr.contains("hash_chains_32_trunc16"), "stderr missing hash_chains_32_trunc16: {stderr}");
     }
 
+    /// Planted corruptions in the counter-range 32-byte fold, 16-byte
+    /// truncation check, and `find_counter_range` check each abort startup.
+    #[test]
+    fn test_counter_self_test_mismatch_stops_the_process() {
+        use std::os::unix::process::ExitStatusExt as _;
+        const CHILD: &str = "BLAKE3_SERVIL_TEST_COUNTER_SELF_TEST";
+        if let Ok(which) = std::env::var(CHILD) {
+            let mode = match which.as_str() {
+                "counter-32" => 1u8,
+                "counter-16" => 2u8,
+                "counter-find" => 3u8,
+                _ => unreachable!(),
+            };
+            crate::ffi_counter::PLANTED_WRONG_COUNTER.store(mode, core::sync::atomic::Ordering::Relaxed);
+            crate::ffi_counter::self_test(Platform::detect_unchecked());
+            std::process::exit(0);
+        }
+        for (which, needle) in [("counter-32", "expected 0x"), ("counter-16", "hash_counter_range_trunc16"), ("counter-find", "find_counter_range")] {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "self_test::stops::test_counter_self_test_mismatch_stops_the_process", "--nocapture", "--test-threads", "1"])
+                .env(CHILD, which)
+                .output()
+                .expect("spawn child");
+            let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.signal(), Some(6), "{which}: child must stop: {:?}\n{stderr}", out.status);
+            assert!(stderr.contains(needle), "{which}: stderr missing {needle:?}: {stderr}");
+        }
+    }
+
     /// On a broken stderr pipe (no reader) with default `SIGPIPE` disposition
     /// (as in C hosts and `b3sum`), `stop()` must skip writing and terminate
     /// with `SIGABRT` (6) rather than `SIGPIPE` (13).

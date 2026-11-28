@@ -103,7 +103,12 @@ inputs, pointers are (region, offset) pairs. The run checks:
   table index that depends on symbols outside the harness's declared
   public parameters stops the proof. Input bytes and keys stay secret in
   these checks. Some induction harnesses also declare counters and counter
-  steps public, so their trace claim includes that assumption.
+  steps public, so their trace claim includes that assumption. The
+  early-exit `find_counter_range` proofs (`prove_counter_{x86,aarch64}.py`)
+  install an explicit `decide_hook` that proves the exact data-dependent
+  exit-branch predicate matches the BLAKE3 specification before choosing
+  the miss/hit path, matching `find_counter_range`'s documented public
+  early-exit timing contract.
 - **The calling convention**: callee-saved registers (x19-x29, d8-d15),
   macOS's reserved x18 and sp come back unchanged, and the kernel returns
   through x30.

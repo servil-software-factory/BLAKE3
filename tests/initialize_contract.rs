@@ -87,4 +87,21 @@ fn every_platform_constructor_before_initialize_panics() {
         let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
         tree.hash_chains_varlen_32_trunc16(&[], &[], &mut []);
     });
+    assert_panic_contains("empty hash_counter_range_trunc16 (valid)", "initialize()", || {
+        blake3_servil_core::throughput::hash_counter_range_trunc16(blake3_servil_core::Mode::Plain, &[0u8; 4], 0, 0, &mut []);
+    });
+    assert_panic_contains("empty TreeHasher::hash_counter_range_trunc16 (valid)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        tree.hash_counter_range_trunc16(&[0u8; 4], 0, 0, &mut []);
+    });
+    assert_panic_contains("empty find_counter_range (invalid template)", "fit in one block", || {
+        let _ = blake3_servil_core::throughput::find_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 65], 0, 0, 0, 0, 0, &mut []);
+    });
+    assert_panic_contains("empty find_counter_range (valid)", "initialize()", || {
+        let _ = blake3_servil_core::throughput::find_counter_range(blake3_servil_core::Mode::Plain, &[0u8; 4], 0, 0, 0, 0, 0, &mut []);
+    });
+    assert_panic_contains("empty TreeHasher::find_counter_range (valid)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        let _ = tree.find_counter_range(&[0u8; 4], 0, 0, 0, 0, 0, &mut []);
+    });
 }

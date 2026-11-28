@@ -51,6 +51,12 @@ def decide(m, cond):
     (on data)."""
     if isinstance(cond, bool):
         return cond
+    if not lengths_only(m, cond):
+        hook = getattr(m, "decide_hook", None)
+        if hook is not None:
+            ans = hook(m, cond)
+            if ans is not None:
+                return ans
     c = simplify(cond)
     if is_true(c):
         return True

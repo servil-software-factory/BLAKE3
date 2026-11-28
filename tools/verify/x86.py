@@ -738,14 +738,19 @@ def vector(m, mnem, base, vex, ops, nxt):
             m.gwrite(dst, src[0])
         elif base == "movq":
             m.gwrite(dst, Concat(src[1], src[0]))
+        elif base == "movmskps":
+            w = width(ops[1])
+            bits = [Extract(31, 31, src[i]) for i in range(w)]
+            m.gwrite(dst, ZeroExt(32 - w, Concat(*reversed(bits))))
         else:
             raise Unproved(f"{mnem} to a general register")
         return nxt
     if dst.startswith("k"):
         k = int(dst[1])
-        if base == "pcmpltud":
+        if base in ("pcmpltud", "pcmpeqd"):
             a, b = m.lanes(ops[1])[:width(ops[1])], src_lanes(m, ops[2], width(ops[1]))
-            bits = [If(ULT(x, y), BitVecVal(1, 1), BitVecVal(0, 1)) for x, y in zip(a, b)]
+            cmp = (lambda x, y: ULT(x, y)) if base == "pcmpltud" else (lambda x, y: x == y)
+            bits = [If(cmp(x, y), BitVecVal(1, 1), BitVecVal(0, 1)) for x, y in zip(a, b)]
             m.k[k] = simplify(ZeroExt(16 - len(bits), Concat(*reversed(bits))))
             return nxt
         raise Unproved(f"{mnem} to a mask register")
@@ -792,10 +797,18 @@ def vector(m, mnem, base, vex, ops, nxt):
         # lanes above it; the VEX forms zero those too.
         m.vwrite(dst, new, vex)
         return nxt
-    elif base in ("paddd", "psubd", "pxor", "pxord", "por", "pand"):
+    elif base in ("paddd", "psubd", "pxor", "pxord", "por", "pand", "pandd", "pcmpeqd"):
         a, b = A(), B()
-        op = {"paddd": lambda x, y: x + y, "psubd": lambda x, y: x - y, "pxor": lambda x, y: x ^ y,
-              "pxord": lambda x, y: x ^ y, "por": orr, "pand": lambda x, y: x & y}[base]
+        op = {
+            "paddd": lambda x, y: x + y,
+            "psubd": lambda x, y: x - y,
+            "pxor": lambda x, y: x ^ y,
+            "pxord": lambda x, y: x ^ y,
+            "por": orr,
+            "pand": lambda x, y: x & y,
+            "pandd": lambda x, y: x & y,
+            "pcmpeqd": lambda x, y: If(x == y, BitVecVal(0xFFFFFFFF, 32), BitVecVal(0, 32)),
+        }[base]
         new = [op(x, y) for x, y in zip(a, b)]
     elif base in ("pslld", "psrld", "prord"):
         a, k = A(), imm(rest[-1])
