@@ -166,6 +166,78 @@ fn hash_counter_range_checked(
     crate::ffi_counter::hash_counter_range_on(template, start, key, flags, out, turn.platform());
 }
 
+/// Evaluate `init.len()` independent 32-byte iterated hash chains in `mode`,
+/// advancing each chain by `steps` iterations and writing its final 16-byte
+/// state to `out[i]` (#584).
+///
+/// Each 32-byte input slot holds `[prefix12 || start_step_u32_le || state16]`.
+/// For each step `s in 0..steps`, `state_{s+1} = H_mode(prefix12 || (start_step + s) || state_s)[..16]`
+/// (modulo `2^32` on the step word). When `steps == 0`, `out[i]` receives
+/// `init[i][16..32]` unchanged.
+///
+/// Keeps chains resident in SIMD/integer registers across all `steps`
+/// iterations (18-lane SME2 + 2-integer hybrid on Apple Silicon, 11-lane NEON
+/// `8+3`, 16-lane AVX-512, 8-lane AVX2), eliminating per-step RAM round-trips,
+/// caller copies, and `smstart`/`smstop` overhead. Work depends only on
+/// `init.len()` and `steps`, never on keys or chain values.
+///
+/// Panics if `init.len() != out.len()` (checked in every build, even when
+/// `steps == 0`).
+#[inline(always)]
+pub fn hash_chains_32_trunc16(mode: Mode, init: &[[u8; 32]], steps: u32, out: &mut [[u8; 16]]) {
+    assert_eq!(init.len(), out.len(), "one 16-byte output per chain");
+    let platform = crate::Platform::detect();
+    if init.is_empty() {
+        return;
+    }
+    let mut derived = core::mem::MaybeUninit::uninit();
+    let (key, flags) = mode.key(&mut derived);
+    hash_chains_32_trunc16_checked(init, steps, key, flags, out, platform);
+}
+
+#[inline(always)]
+fn hash_chains_32_trunc16_checked(init: &[[u8; 32]], steps: u32, key: &crate::CVWords, flags: u8, out: &mut [[u8; 16]], platform: crate::platform::Platform) {
+    let turn = crate::platform::Sme2Turn::take(platform, steps > 0 && init.len() >= crate::ffi_chain::SME2_CHAIN_MIN);
+    crate::ffi_chain::hash_chains_32_trunc16_on(init, steps, key, flags, out, turn.platform());
+}
+
+/// Variable-step counterpart to [`hash_chains_32_trunc16`] that advances chain
+/// `i` by `steps[i]` iterations in `mode` and writes its final 16-byte state
+/// to `out[i]` (#584).
+///
+/// Internally schedules a longest-processing-time-first (LPT) continuous
+/// lane-refilling work queue over fused multi-step SIMD bursts at the
+/// platform's native width, keeping SIMD lanes busy across heterogeneous
+/// verification chains without exposing ISA lane widths to callers. Work
+/// depends only on `init.len()` and `steps`, never on keys or chain values.
+///
+/// Panics if `init.len() != steps.len()` or `init.len() != out.len()`.
+#[inline(always)]
+pub fn hash_chains_varlen_32_trunc16(mode: Mode, init: &[[u8; 32]], steps: &[u32], out: &mut [[u8; 16]]) {
+    assert_eq!(init.len(), steps.len(), "one step count per chain");
+    assert_eq!(init.len(), out.len(), "one 16-byte output per chain");
+    let platform = crate::Platform::detect();
+    if init.is_empty() {
+        return;
+    }
+    let mut derived = core::mem::MaybeUninit::uninit();
+    let (key, flags) = mode.key(&mut derived);
+    hash_chains_varlen_32_trunc16_checked(init, steps, key, flags, out, platform);
+}
+
+#[inline(always)]
+fn hash_chains_varlen_32_trunc16_checked(
+    init: &[[u8; 32]],
+    steps: &[u32],
+    key: &crate::CVWords,
+    flags: u8,
+    out: &mut [[u8; 16]],
+    platform: crate::platform::Platform,
+) {
+    let turn = crate::platform::Sme2Turn::take(platform, crate::ffi_chain::varlen_sme2_sized(steps));
+    crate::ffi_chain::hash_chains_varlen_32_trunc16_on(init, steps, key, flags, out, turn.platform());
+}
+
 /// Hash a key-derivation context string and return a [`ContextKey`].
 ///
 /// This has the same security requirement as key derivation. **The context
@@ -712,6 +784,39 @@ impl TreeHasher {
             return;
         }
         hash_counter_range_checked(validated, start, self.domain.key(), self.domain.flags(), out, platform);
+    }
+
+    /// Evaluate `init.len()` independent 32-byte iterated hash chains in this
+    /// `TreeHasher`'s mode, advancing each chain by `steps` iterations and
+    /// writing its final 16-byte state to `out[i]` (#584).
+    ///
+    /// See [`hash_chains_32_trunc16`] for the 32-byte `[prefix12 || step_u32_le || state16]`
+    /// layout. Respects [`Self::on_this_core`] on Apple/AArch64 SME2 hosts.
+    /// Panics if `init.len() != out.len()` (checked in every build).
+    pub fn hash_chains_32_trunc16(&self, init: &[[u8; 32]], steps: u32, out: &mut [[u8; 16]]) {
+        assert_eq!(init.len(), out.len(), "one 16-byte output per chain");
+        let platform = self.platform();
+        if init.is_empty() {
+            return;
+        }
+        hash_chains_32_trunc16_checked(init, steps, self.domain.key(), self.domain.flags(), out, platform);
+    }
+
+    /// Variable-step counterpart to [`Self::hash_chains_32_trunc16`]: advances
+    /// chain `i` by `steps[i]` iterations in this `TreeHasher`'s mode and
+    /// writes its final 16-byte state to `out[i]` (#584).
+    ///
+    /// Uses an LPT continuous lane-refilling scheduler over fused multi-step
+    /// SIMD bursts; respects [`Self::on_this_core`]. Panics if
+    /// `init.len() != steps.len()` or `init.len() != out.len()`.
+    pub fn hash_chains_varlen_32_trunc16(&self, init: &[[u8; 32]], steps: &[u32], out: &mut [[u8; 16]]) {
+        assert_eq!(init.len(), steps.len(), "one step count per chain");
+        assert_eq!(init.len(), out.len(), "one 16-byte output per chain");
+        let platform = self.platform();
+        if init.is_empty() {
+            return;
+        }
+        hash_chains_varlen_32_trunc16_checked(init, steps, self.domain.key(), self.domain.flags(), out, platform);
     }
 
     /// A worker's checked slice of a [`Prepared`] batch, on `platform`'s

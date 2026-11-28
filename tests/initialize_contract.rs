@@ -66,4 +66,25 @@ fn every_platform_constructor_before_initialize_panics() {
         let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain).on_this_core();
         let _ = tree.hash(&[0u8; 65]);
     });
+    // Chain APIs must validate lengths first, then enforce initialize() even on empty inputs.
+    assert_panic_contains("empty hash_chains_32_trunc16 (mismatched)", "one 16-byte output", || {
+        blake3_servil_core::throughput::hash_chains_32_trunc16(blake3_servil_core::Mode::Plain, &[[0u8; 32]], 0, &mut []);
+    });
+    assert_panic_contains("empty hash_chains_32_trunc16 (valid)", "initialize()", || {
+        blake3_servil_core::throughput::hash_chains_32_trunc16(blake3_servil_core::Mode::Plain, &[], 0, &mut []);
+    });
+    assert_panic_contains("empty TreeHasher::hash_chains_32_trunc16 (valid)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        tree.hash_chains_32_trunc16(&[], 0, &mut []);
+    });
+    assert_panic_contains("empty hash_chains_varlen_32_trunc16 (mismatched)", "one step count", || {
+        blake3_servil_core::throughput::hash_chains_varlen_32_trunc16(blake3_servil_core::Mode::Plain, &[[0u8; 32]], &[], &mut [[0u8; 16]]);
+    });
+    assert_panic_contains("empty hash_chains_varlen_32_trunc16 (valid)", "initialize()", || {
+        blake3_servil_core::throughput::hash_chains_varlen_32_trunc16(blake3_servil_core::Mode::Plain, &[], &[], &mut []);
+    });
+    assert_panic_contains("empty TreeHasher::hash_chains_varlen_32_trunc16 (valid)", "initialize()", || {
+        let tree = blake3_servil_core::throughput::TreeHasher::new(blake3_servil_core::Mode::Plain);
+        tree.hash_chains_varlen_32_trunc16(&[], &[], &mut []);
+    });
 }

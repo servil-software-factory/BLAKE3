@@ -43,6 +43,31 @@ figure names its machine.
 
 ## Faster
 
+- **Fused multi-step 32-byte hash-chain batch APIs across all four SIMD ISAs**
+  (`#584`, `blake3-servil-core` `throughput::{hash_chains_32_trunc16, hash_chains_varlen_32_trunc16}`
+  and `TreeHasher::{hash_chains_32_trunc16, hash_chains_varlen_32_trunc16}`):
+  four generator-backed, Z3-proved (`prove_chain_{aarch64,x86}.py`, 24/24 cases)
+  fused chain kernels — 18-lane SME2 + 2-integer hybrid (`c/blake3_chain_sme2_aarch64.S`),
+  11-lane NEON 8+3 (`c/blake3_chain_neon_aarch64.S`), 16-lane AVX-512 and
+  8-lane AVX2 (`c/blake3_chain_x86-64_unix.S`) — keep the 16-byte hash state
+  in registers across steps, hold constant `words[4..8]` in registers/L1, prune
+  zero message words `8..15`, and feed variable-length verification chains via
+  an allocation-free (<= 128 chains) LPT continuous lane-refilling scheduler.
+  Measured vs per-step `Packed<32>` loops (`Mode::Keyed`):
+  - Apple M6 (`mac-m6-timing`, `20261128T053806Z-john-example-blincs584-v2` on
+    `8313fa7c`, before raising `SME2_VARLEN_MIN_WORK` to `18 * 64` so WOTS+C 21
+    and U-PORS 27 stay on the measured NEON path): fixed 59-step chains
+    `18 / 126 / 1024 / 15840` = `20.9 → 6.9 us` (`3.02x`, `6.52 ns/comp`),
+    `115.6 → 48.5 us` (`2.38x`), `564.7 → 401.9 us` (`1.41x`),
+    `7.97 → 6.10 ms` (`1.31x`, `6.53 ns/comp`); varlen verification
+    `WOTS+C 21` `21.5 → 6.6 us` (`3.26x` on NEON), `U-PORS 27`
+    `30.9 → 8.8 us` (`3.51x` on NEON), `Batch 126` `82.5 → 36.3 us` (`2.27x` on SME2).
+  - AMD Threadripper PRO 7975WX AVX-512 (`x86-workhorse`): fixed 59-step chains
+    `18..15840` = `1.28x` to `1.52x` (`15840`: `6.98 → 5.10 ms`, `5.46 ns/comp`);
+    varlen verification `WOTS+C 21 / U-PORS 27 / Batch 126` = `2.09x / 2.45x / 2.17x`.
+  - AmpereOne NEON VM (`arm-vm`, best-effort): fixed `15840×59` = `1.13x`,
+    varlen `WOTS+C 21 / U-PORS 27 / Batch 126` = `1.62x / 1.49x / 1.34x`.
+
 - **AArch64 inline `<= 64`-byte single-block fast path for `TreeHasher::hash`**
   (`#586`, `blake3-servil-core` `src/throughput.rs`, `src/lib.rs`): on AArch64,
   `TreeHasher::hash` now checks `input.len() <= 64` inline and dispatches

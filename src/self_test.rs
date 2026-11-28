@@ -474,6 +474,7 @@ fn run_checks() -> (Platform, usize) {
         }
     }
     checked += crate::ffi_counter::self_test(platform);
+    checked += crate::ffi_chain::self_test(platform);
     let _ = previous;
     (platform, checked)
 }
@@ -740,6 +741,9 @@ mod test {
             for (name, entry) in crate::ffi_counter::entries_avx512() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
+            for (name, entry) in crate::ffi_chain::entries_avx512() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+            }
             assert_ne!(crate::ROUNDED_WIDTH.with(|w| w.get()) & 8, 0, "startup left out hash_many_avx512 8-lane loop");
             expected + 2
         } else {
@@ -751,6 +755,9 @@ mod test {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
             for (name, entry) in crate::ffi_counter::entries_avx2() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+            }
+            for (name, entry) in crate::ffi_chain::entries_avx2() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
         }
@@ -770,7 +777,7 @@ mod test {
             }
             expected
         };
-        let expected = expected + 4;
+        let expected = expected + 5;
         assert_eq!(checked, expected);
     }
 
@@ -863,6 +870,7 @@ mod test {
         want.extend(crate::neon_hybrid::entries());
         want.extend(crate::ffi_packed::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_counter::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
+        want.extend(crate::ffi_chain::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_output::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         #[cfg(target_arch = "aarch64")]
         if crate::platform::sme2_detected() {
@@ -870,6 +878,7 @@ mod test {
             want.extend(crate::sme2::entries().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_packed::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_counter::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
+            want.extend(crate::ffi_chain::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_output::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
         }
         RAN.with(|r| r.set(0));

@@ -247,6 +247,7 @@ mod avx512_32;
 #[cfg(target_arch = "x86_64")]
 #[path = "ffi_chunk_root.rs"]
 mod chunk_root;
+mod ffi_chain;
 mod ffi_counter;
 #[cfg(target_arch = "x86_64")]
 mod ffi_output;
