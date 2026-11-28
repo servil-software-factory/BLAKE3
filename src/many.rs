@@ -144,10 +144,10 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
 }
 
 /// Packed messages (`len` bytes each, at a stride of `len`): full SIMD
-/// groups run directly on the zero-padding-free packed kernels in
-/// `ffi_packed` (#501) across SME2, AVX-512, AVX2, and NEON `8+3`; any
-/// short remainder (or SSE4.1 fallback) expands up to 16 messages at a
-/// time into a 1 KiB zero-padded stack buffer.
+/// groups (and on AArch64 NEON, padded `8..=10`-message remainders; #583) run
+/// on the packed kernels in `ffi_packed` (#501) across SME2, AVX-512, AVX2,
+/// and NEON `8+3`; any smaller remainder (or SSE4.1 fallback) expands up to
+/// 16 messages at a time into a 1 KiB zero-padded stack buffer.
 #[inline(never)]
 fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     // Packed's three lengths, in every build: a block-length message sent

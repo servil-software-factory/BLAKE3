@@ -41,6 +41,20 @@ figure names its machine.
   out of `std`; programs that must not link `std` should use official
   `blake3` with `default-features = false`.
 
+## Faster
+
+- **AArch64 NEON padded tail for `8..=10`-message `Packed<{16,32,48}>` remainders**
+  (`#583`, `blake3-servil-core` `src/ffi_packed.rs`): remainders of `8..=10`
+  messages after full 11-lane NEON groups (including `TreeHasher::on_this_core()`
+  and post-SME2 remainders) now pad into a single `blake3_servil_neon_p11_packed`
+  call via a 528-byte stack buffer instead of expanding into a 1 KiB block
+  buffer for `p8`/`p9`/`pn10`. Measured on Apple M6 (`mac-m6-timing`,
+  `on_this_core()`, `Mode::Keyed`, `w = 8..=10` and `19..=21`): `Packed<16>`
+  `-6.9%` to `-13.3%` (`139.0..146.1 → 126.0..131.4 ns`), `Packed<32>`
+  `-9.3%` to `-13.2%` (`141.4..149.7 → 128.3..130.0 ns`), `Packed<48>`
+  `-5.7%` to `-12.6%` (`143.8..155.9 → 135.4..136.2 ns`), with `w = 7`/`18`
+  kept unpadded on `p7` (where padding regressed `+5.4%..+8.5%`).
+
 ## Memory and lifecycle
 
 - **`Pipeline` frees per-pipeline storage on drop** (`#465`): dropping a
