@@ -45,10 +45,9 @@ L_blake3_servil_sme2_packed16_za_clr:
 L_blake3_servil_sme2_packed16_za_ok:
     smstart sm
     smstart za
+    ptrue p0.s
     mov x8, #4
     whilelo p1.s, xzr, x8
-    mov x8, #8
-    whilelo p2.s, xzr, x8
     mov w12, #0
     mov w13, #4
     mov w14, #8
@@ -1123,37 +1122,35 @@ L_blake3_servil_sme2_packed16_ff:
     eor z7.d, z7.d, z15.d
     mov za1v.s[w12, 0:3], { z0.s - z3.s }
     mov za1v.s[w13, 0:3], { z4.s - z7.s }
-    st1w { za1h.s[w12, 0] }, p2, [x3]
-    add x8, x3, #32
-    st1w { za1h.s[w12, 1] }, p2, [x8]
+    mov za1v.s[w14, 0:3], { z0.s - z3.s }
+    mov za1v.s[w15, 0:3], { z4.s - z7.s }
+    mov { z0.s - z3.s }, za1h.s[w12, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
+    st1w { z0.s }, p0, [x3]
     add x8, x3, #64
-    st1w { za1h.s[w12, 2] }, p2, [x8]
-    add x8, x3, #96
-    st1w { za1h.s[w12, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w13, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #128
-    st1w { za1h.s[w13, 0] }, p2, [x8]
-    add x8, x3, #160
-    st1w { za1h.s[w13, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #192
-    st1w { za1h.s[w13, 2] }, p2, [x8]
-    add x8, x3, #224
-    st1w { za1h.s[w13, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w14, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #256
-    st1w { za1h.s[w14, 0] }, p2, [x8]
-    add x8, x3, #288
-    st1w { za1h.s[w14, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #320
-    st1w { za1h.s[w14, 2] }, p2, [x8]
-    add x8, x3, #352
-    st1w { za1h.s[w14, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w15, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #384
-    st1w { za1h.s[w15, 0] }, p2, [x8]
-    add x8, x3, #416
-    st1w { za1h.s[w15, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #448
-    st1w { za1h.s[w15, 2] }, p2, [x8]
-    add x8, x3, #480
-    st1w { za1h.s[w15, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
     add x3, x3, #512
     subs x4, x4, #1
     b.ne L_blake3_servil_sme2_packed16_loop
@@ -1216,10 +1213,9 @@ L_blake3_servil_sme2_packed32_za_clr:
 L_blake3_servil_sme2_packed32_za_ok:
     smstart sm
     smstart za
+    ptrue p0.s
     mov x8, #8
     whilelo p1.s, xzr, x8
-    mov x8, #8
-    whilelo p2.s, xzr, x8
     mov w12, #0
     mov w13, #4
     mov w14, #8
@@ -2351,37 +2347,35 @@ L_blake3_servil_sme2_packed32_ff:
     eor z7.d, z7.d, z15.d
     mov za1v.s[w12, 0:3], { z0.s - z3.s }
     mov za1v.s[w13, 0:3], { z4.s - z7.s }
-    st1w { za1h.s[w12, 0] }, p2, [x3]
-    add x8, x3, #32
-    st1w { za1h.s[w12, 1] }, p2, [x8]
+    mov za1v.s[w14, 0:3], { z0.s - z3.s }
+    mov za1v.s[w15, 0:3], { z4.s - z7.s }
+    mov { z0.s - z3.s }, za1h.s[w12, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
+    st1w { z0.s }, p0, [x3]
     add x8, x3, #64
-    st1w { za1h.s[w12, 2] }, p2, [x8]
-    add x8, x3, #96
-    st1w { za1h.s[w12, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w13, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #128
-    st1w { za1h.s[w13, 0] }, p2, [x8]
-    add x8, x3, #160
-    st1w { za1h.s[w13, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #192
-    st1w { za1h.s[w13, 2] }, p2, [x8]
-    add x8, x3, #224
-    st1w { za1h.s[w13, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w14, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #256
-    st1w { za1h.s[w14, 0] }, p2, [x8]
-    add x8, x3, #288
-    st1w { za1h.s[w14, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #320
-    st1w { za1h.s[w14, 2] }, p2, [x8]
-    add x8, x3, #352
-    st1w { za1h.s[w14, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w15, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #384
-    st1w { za1h.s[w15, 0] }, p2, [x8]
-    add x8, x3, #416
-    st1w { za1h.s[w15, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #448
-    st1w { za1h.s[w15, 2] }, p2, [x8]
-    add x8, x3, #480
-    st1w { za1h.s[w15, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
     add x3, x3, #512
     subs x4, x4, #1
     b.ne L_blake3_servil_sme2_packed32_loop
@@ -2444,10 +2438,9 @@ L_blake3_servil_sme2_packed48_za_clr:
 L_blake3_servil_sme2_packed48_za_ok:
     smstart sm
     smstart za
+    ptrue p0.s
     mov x8, #12
     whilelo p1.s, xzr, x8
-    mov x8, #8
-    whilelo p2.s, xzr, x8
     mov w12, #0
     mov w13, #4
     mov w14, #8
@@ -3636,37 +3629,35 @@ L_blake3_servil_sme2_packed48_ff:
     eor z7.d, z7.d, z15.d
     mov za1v.s[w12, 0:3], { z0.s - z3.s }
     mov za1v.s[w13, 0:3], { z4.s - z7.s }
-    st1w { za1h.s[w12, 0] }, p2, [x3]
-    add x8, x3, #32
-    st1w { za1h.s[w12, 1] }, p2, [x8]
+    mov za1v.s[w14, 0:3], { z0.s - z3.s }
+    mov za1v.s[w15, 0:3], { z4.s - z7.s }
+    mov { z0.s - z3.s }, za1h.s[w12, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
+    st1w { z0.s }, p0, [x3]
     add x8, x3, #64
-    st1w { za1h.s[w12, 2] }, p2, [x8]
-    add x8, x3, #96
-    st1w { za1h.s[w12, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w13, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #128
-    st1w { za1h.s[w13, 0] }, p2, [x8]
-    add x8, x3, #160
-    st1w { za1h.s[w13, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #192
-    st1w { za1h.s[w13, 2] }, p2, [x8]
-    add x8, x3, #224
-    st1w { za1h.s[w13, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w14, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #256
-    st1w { za1h.s[w14, 0] }, p2, [x8]
-    add x8, x3, #288
-    st1w { za1h.s[w14, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #320
-    st1w { za1h.s[w14, 2] }, p2, [x8]
-    add x8, x3, #352
-    st1w { za1h.s[w14, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w15, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x3, #384
-    st1w { za1h.s[w15, 0] }, p2, [x8]
-    add x8, x3, #416
-    st1w { za1h.s[w15, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x3, #448
-    st1w { za1h.s[w15, 2] }, p2, [x8]
-    add x8, x3, #480
-    st1w { za1h.s[w15, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
     add x3, x3, #512
     subs x4, x4, #1
     b.ne L_blake3_servil_sme2_packed48_loop

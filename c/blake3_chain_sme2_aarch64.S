@@ -62,8 +62,6 @@ L_blake3_servil_sme2_chain32_trunc16_za_ok:
     ptrue p0.s
     mov x8, #8
     whilelo p1.s, xzr, x8
-    mov x8, #4
-    whilelo p2.s, xzr, x8
     mov w12, #0
     mov w13, #4
     mov w14, #8
@@ -2285,38 +2283,21 @@ L_blake3_servil_sme2_chain32_trunc16_step:
     subs w27, w27, #1
     b.ne L_blake3_servil_sme2_chain32_trunc16_step
     ldr x4, [sp, #168]
-    mov za1v.s[w12, 0:3], { z20.s - z23.s }
-    st1w { za1h.s[w12, 0] }, p2, [x4]
-    add x8, x4, #16
-    st1w { za1h.s[w12, 1] }, p2, [x8]
-    add x8, x4, #32
-    st1w { za1h.s[w12, 2] }, p2, [x8]
-    add x8, x4, #48
-    st1w { za1h.s[w12, 3] }, p2, [x8]
+    zip1 z4.s, z20.s, z21.s
+    zip2 z5.s, z20.s, z21.s
+    zip1 z6.s, z22.s, z23.s
+    zip2 z7.s, z22.s, z23.s
+    zip1 z0.d, z4.d, z6.d
+    zip2 z1.d, z4.d, z6.d
+    zip1 z2.d, z5.d, z7.d
+    zip2 z3.d, z5.d, z7.d
+    st1w { z0.s }, p0, [x4]
     add x8, x4, #64
-    st1w { za1h.s[w13, 0] }, p2, [x8]
-    add x8, x4, #80
-    st1w { za1h.s[w13, 1] }, p2, [x8]
-    add x8, x4, #96
-    st1w { za1h.s[w13, 2] }, p2, [x8]
-    add x8, x4, #112
-    st1w { za1h.s[w13, 3] }, p2, [x8]
+    st1w { z1.s }, p0, [x8]
     add x8, x4, #128
-    st1w { za1h.s[w14, 0] }, p2, [x8]
-    add x8, x4, #144
-    st1w { za1h.s[w14, 1] }, p2, [x8]
-    add x8, x4, #160
-    st1w { za1h.s[w14, 2] }, p2, [x8]
-    add x8, x4, #176
-    st1w { za1h.s[w14, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
     add x8, x4, #192
-    st1w { za1h.s[w15, 0] }, p2, [x8]
-    add x8, x4, #208
-    st1w { za1h.s[w15, 1] }, p2, [x8]
-    add x8, x4, #224
-    st1w { za1h.s[w15, 2] }, p2, [x8]
-    add x8, x4, #240
-    st1w { za1h.s[w15, 3] }, p2, [x8]
+    st1w { z3.s }, p0, [x8]
     ldp x1, x2, [sp, #208]
     stp x1, x2, [x4, #256]
     ldp x1, x2, [sp, #240]

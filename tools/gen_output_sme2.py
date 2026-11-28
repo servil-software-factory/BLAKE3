@@ -123,8 +123,6 @@ def emit_chunks_keyed(name):
     e("smstart za")
 
     e("ptrue p0.s")
-    e("mov x8, #8")
-    e("whilelo p2.s, xzr, x8")
     e("mov w12, #0")
     e("mov w13, #4")
     e("mov w14, #8")
@@ -225,17 +223,25 @@ def emit_chunks_keyed(name):
     for i in range(8):
         e(f"eor z{i}.d, z{i}.d, z{8 + i}.d")
 
+    # Mirror z0..z7 into both halves of ZA1 (cols 0..7 and 8..15), pack
+    # adjacent 32-byte lanes with `ext #32`, and emit 8 full-line 64-byte
+    # unmasked `st1w p0` stores (eliminating 16 partial `st1w za1h, p2` stores).
     e("mov za1v.s[w12, 0:3], { z0.s - z3.s }")
     e("mov za1v.s[w13, 0:3], { z4.s - z7.s }")
-    for i in range(16):
-        sel = ZA_SELS[i // 4]
-        sl = i % 4
-        off = 32 * i
-        if off == 0:
-            e(f"st1w {{ za1h.s[{sel}, {sl}] }}, p2, [x4]")
+    e("mov za1v.s[w14, 0:3], { z0.s - z3.s }")
+    e("mov za1v.s[w15, 0:3], { z4.s - z7.s }")
+    for q, sel in enumerate(ZA_SELS):
+        e(f"mov {{ z0.s - z3.s }}, za1h.s[{sel}, 0:3]")
+        e("ext z0.b, z0.b, z1.b, #32")
+        e("ext z2.b, z2.b, z3.b, #32")
+        off0 = 128 * q
+        if off0 == 0:
+            e("st1w { z0.s }, p0, [x4]")
         else:
-            e(f"add x8, x4, #{off}")
-            e(f"st1w {{ za1h.s[{sel}, {sl}] }}, p2, [x8]")
+            e(f"add x8, x4, #{off0}")
+            e("st1w { z0.s }, p0, [x8]")
+        e(f"add x8, x4, #{off0 + 64}")
+        e("st1w { z2.s }, p0, [x8]")
 
     e("add x0, x0, #128")
     e("add x2, x2, #32")

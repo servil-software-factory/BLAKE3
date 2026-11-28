@@ -241,8 +241,6 @@ def emit_kernel(name):
     e("ptrue p0.s")
     e("mov x8, #8")
     e("whilelo p1.s, xzr, x8")
-    e("mov x8, #4")
-    e("whilelo p2.s, xzr, x8")
 
     e("mov w12, #0")
     e("mov w13, #4")
@@ -306,18 +304,26 @@ def emit_kernel(name):
     e(f"subs {STEP_REG}, {STEP_REG}, #1")
     e(f"b.ne {step_lbl}")
 
-    # Transpose and store 16-byte final states for all 18 chains (288 B).
+    # Transpose and store 16-byte final states for all 18 chains (288 B):
+    # transpose z20..z23 in registers into 4 full 64-byte vectors (4 lanes x
+    # 16 B each) and emit 4 full-line unmasked `st1w p0` stores (eliminating
+    # 16 partial 16-byte ZA-tile `st1w p2` stores).
     e(f"ldr x4, [sp, #{F_OUT}]")
-    e("mov za1v.s[w12, 0:3], { z20.s - z23.s }")
-    for r_idx in range(16):
-        sel = ZA_SELS[r_idx // 4]
-        sl = r_idx % 4
-        off = 16 * r_idx
-        if off == 0:
-            e(f"st1w {{ za1h.s[{sel}, {sl}] }}, p2, [x4]")
-        else:
-            e(f"add x8, x4, #{off}")
-            e(f"st1w {{ za1h.s[{sel}, {sl}] }}, p2, [x8]")
+    e("zip1 z4.s, z20.s, z21.s")
+    e("zip2 z5.s, z20.s, z21.s")
+    e("zip1 z6.s, z22.s, z23.s")
+    e("zip2 z7.s, z22.s, z23.s")
+    e("zip1 z0.d, z4.d, z6.d")
+    e("zip2 z1.d, z4.d, z6.d")
+    e("zip1 z2.d, z5.d, z7.d")
+    e("zip2 z3.d, z5.d, z7.d")
+    e("st1w { z0.s }, p0, [x4]")
+    e("add x8, x4, #64")
+    e("st1w { z1.s }, p0, [x8]")
+    e("add x8, x4, #128")
+    e("st1w { z2.s }, p0, [x8]")
+    e("add x8, x4, #192")
+    e("st1w { z3.s }, p0, [x8]")
     e(f"ldp x1, x2, [sp, #{F_INT0 + 16}]")
     e("stp x1, x2, [x4, #256]")
     e(f"ldp x1, x2, [sp, #{F_INT1 + 16}]")

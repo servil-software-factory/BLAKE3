@@ -451,11 +451,41 @@
 .endm
 
 /*
- * Store one output row from ZA1.
+ * Store all sixteen 32-byte CVs from ZA1 (whose rows already hold
+ * [L_r || L_r] in cols 0..7 and 8..15) using `ext #32` and 8 full-line
+ * 64-byte unmasked `st1w p0` stores (eliminating 16 partial `st1w za1h, p2`).
  */
-.macro STORE_OUTPUT out_off, selector, slice
-    add     x8, x4, #\out_off
-    st1w    { za1h.s[\selector, \slice] }, p2, [x8]
+.macro STORE_ALL_16_CVS_FROM_ZA1
+    mov     { z0.s - z3.s }, za1h.s[w12, 0:3]
+    ext     z0.b, z0.b, z1.b, #32
+    ext     z2.b, z2.b, z3.b, #32
+    st1w    { z0.s }, p0, [x4]
+    add     x8, x4, #64
+    st1w    { z2.s }, p0, [x8]
+
+    mov     { z0.s - z3.s }, za1h.s[w13, 0:3]
+    ext     z0.b, z0.b, z1.b, #32
+    ext     z2.b, z2.b, z3.b, #32
+    add     x8, x4, #128
+    st1w    { z0.s }, p0, [x8]
+    add     x8, x4, #192
+    st1w    { z2.s }, p0, [x8]
+
+    mov     { z0.s - z3.s }, za1h.s[w14, 0:3]
+    ext     z0.b, z0.b, z1.b, #32
+    ext     z2.b, z2.b, z3.b, #32
+    add     x8, x4, #256
+    st1w    { z0.s }, p0, [x8]
+    add     x8, x4, #320
+    st1w    { z2.s }, p0, [x8]
+
+    mov     { z0.s - z3.s }, za1h.s[w15, 0:3]
+    ext     z0.b, z0.b, z1.b, #32
+    ext     z2.b, z2.b, z3.b, #32
+    add     x8, x4, #384
+    st1w    { z0.s }, p0, [x8]
+    add     x8, x4, #448
+    st1w    { z2.s }, p0, [x8]
 .endm
 
 /*
@@ -746,25 +776,9 @@ blake3_servil_sme2_hash16_messages_512:
     b       .Lstored
 
 .Lstore_all:
-    STORE_OUTPUT   0, w12, 0
-    STORE_OUTPUT  32, w12, 1
-    STORE_OUTPUT  64, w12, 2
-    STORE_OUTPUT  96, w12, 3
-
-    STORE_OUTPUT 128, w13, 0
-    STORE_OUTPUT 160, w13, 1
-    STORE_OUTPUT 192, w13, 2
-    STORE_OUTPUT 224, w13, 3
-
-    STORE_OUTPUT 256, w14, 0
-    STORE_OUTPUT 288, w14, 1
-    STORE_OUTPUT 320, w14, 2
-    STORE_OUTPUT 352, w14, 3
-
-    STORE_OUTPUT 384, w15, 0
-    STORE_OUTPUT 416, w15, 1
-    STORE_OUTPUT 448, w15, 2
-    STORE_OUTPUT 480, w15, 3
+    mov     za1v.s[w14, 0:3], { z0.s - z3.s }
+    mov     za1v.s[w15, 0:3], { z4.s - z7.s }
+    STORE_ALL_16_CVS_FROM_ZA1
 
 .Lstored:
     /*
@@ -840,8 +854,6 @@ blake3_servil_sme2_hash16_parents_512:
 
 .Lparents_vector_length_ok:
     ptrue   p0.s
-    mov     x8, #8
-    whilelo p2.s, xzr, x8
 
     mov     w12, #0
     mov     w13, #4
@@ -918,23 +930,9 @@ blake3_servil_sme2_hash16_parents_512:
 
     mov     za1v.s[w12, 0:3], { z0.s - z3.s }
     mov     za1v.s[w13, 0:3], { z4.s - z7.s }
-
-    STORE_OUTPUT   0, w12, 0
-    STORE_OUTPUT  32, w12, 1
-    STORE_OUTPUT  64, w12, 2
-    STORE_OUTPUT  96, w12, 3
-    STORE_OUTPUT 128, w13, 0
-    STORE_OUTPUT 160, w13, 1
-    STORE_OUTPUT 192, w13, 2
-    STORE_OUTPUT 224, w13, 3
-    STORE_OUTPUT 256, w14, 0
-    STORE_OUTPUT 288, w14, 1
-    STORE_OUTPUT 320, w14, 2
-    STORE_OUTPUT 352, w14, 3
-    STORE_OUTPUT 384, w15, 0
-    STORE_OUTPUT 416, w15, 1
-    STORE_OUTPUT 448, w15, 2
-    STORE_OUTPUT 480, w15, 3
+    mov     za1v.s[w14, 0:3], { z0.s - z3.s }
+    mov     za1v.s[w15, 0:3], { z4.s - z7.s }
+    STORE_ALL_16_CVS_FROM_ZA1
 
     add     x4, x4, #512
     subs    x5, x5, #1

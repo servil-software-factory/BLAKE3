@@ -46,8 +46,6 @@ L_blake3_servil_sme2_chunks_keyed_za_ok:
     smstart sm
     smstart za
     ptrue p0.s
-    mov x8, #8
-    whilelo p2.s, xzr, x8
     mov w12, #0
     mov w13, #4
     mov w14, #8
@@ -1356,37 +1354,35 @@ L_blake3_servil_sme2_chunks_keyed_not_first:
     eor z7.d, z7.d, z15.d
     mov za1v.s[w12, 0:3], { z0.s - z3.s }
     mov za1v.s[w13, 0:3], { z4.s - z7.s }
-    st1w { za1h.s[w12, 0] }, p2, [x4]
-    add x8, x4, #32
-    st1w { za1h.s[w12, 1] }, p2, [x8]
+    mov za1v.s[w14, 0:3], { z0.s - z3.s }
+    mov za1v.s[w15, 0:3], { z4.s - z7.s }
+    mov { z0.s - z3.s }, za1h.s[w12, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
+    st1w { z0.s }, p0, [x4]
     add x8, x4, #64
-    st1w { za1h.s[w12, 2] }, p2, [x8]
-    add x8, x4, #96
-    st1w { za1h.s[w12, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w13, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x4, #128
-    st1w { za1h.s[w13, 0] }, p2, [x8]
-    add x8, x4, #160
-    st1w { za1h.s[w13, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x4, #192
-    st1w { za1h.s[w13, 2] }, p2, [x8]
-    add x8, x4, #224
-    st1w { za1h.s[w13, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w14, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x4, #256
-    st1w { za1h.s[w14, 0] }, p2, [x8]
-    add x8, x4, #288
-    st1w { za1h.s[w14, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x4, #320
-    st1w { za1h.s[w14, 2] }, p2, [x8]
-    add x8, x4, #352
-    st1w { za1h.s[w14, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
+    mov { z0.s - z3.s }, za1h.s[w15, 0:3]
+    ext z0.b, z0.b, z1.b, #32
+    ext z2.b, z2.b, z3.b, #32
     add x8, x4, #384
-    st1w { za1h.s[w15, 0] }, p2, [x8]
-    add x8, x4, #416
-    st1w { za1h.s[w15, 1] }, p2, [x8]
+    st1w { z0.s }, p0, [x8]
     add x8, x4, #448
-    st1w { za1h.s[w15, 2] }, p2, [x8]
-    add x8, x4, #480
-    st1w { za1h.s[w15, 3] }, p2, [x8]
+    st1w { z2.s }, p0, [x8]
     add x0, x0, #128
     add x2, x2, #32
     add x4, x4, #512

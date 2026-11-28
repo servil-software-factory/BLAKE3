@@ -246,8 +246,6 @@ def kernel(k):
     e("smstart za")
     e(f"{name}_vl_ok:")
     e("ptrue p0.s")
-    e("mov x8, #8")
-    e("whilelo p2.s, xzr, x8")
     e("mov w12, #0")
     e("mov w13, #4")
     e("mov w14, #8")
@@ -340,13 +338,26 @@ def kernel(k):
     e("cmp x7, #15")
     e(f"b.lo {name}_block")
     L.extend(iteration(True))
-    # SME2 outputs, as the plain kernel.
+    # SME2 outputs: mirror z0..z7 into both halves of ZA1 (cols 0..7 and
+    # 8..15), pack adjacent 32-byte lanes with `ext #32`, and emit 8 full-line
+    # 64-byte unmasked `st1w p0` stores.
     e("mov za1v.s[w12, 0:3], { z0.s - z3.s }")
     e("mov za1v.s[w13, 0:3], { z4.s - z7.s }")
+    e("mov za1v.s[w14, 0:3], { z0.s - z3.s }")
+    e("mov za1v.s[w15, 0:3], { z4.s - z7.s }")
     e(f"ldr x4, [sp, #{F_OUT}]")
-    for n, (sel, sl) in enumerate([(s, t) for s in ("w12", "w13", "w14", "w15") for t in range(4)]):
-        e(f"add x8, x4, #{32 * n}")
-        e(f"st1w {{ za1h.s[{sel}, {sl}] }}, p2, [x8]")
+    for q, sel in enumerate(("w12", "w13", "w14", "w15")):
+        e(f"mov {{ z0.s - z3.s }}, za1h.s[{sel}, 0:3]")
+        e("ext z0.b, z0.b, z1.b, #32")
+        e("ext z2.b, z2.b, z3.b, #32")
+        off0 = 128 * q
+        if off0 == 0:
+            e("st1w { z0.s }, p0, [x4]")
+        else:
+            e(f"add x8, x4, #{off0}")
+            e("st1w { z0.s }, p0, [x8]")
+        e(f"add x8, x4, #{off0 + 64}")
+        e("st1w { z2.s }, p0, [x8]")
     # Next group.
     e(f"add x0, x0, #{8 * lanes}")
     e(f"add x4, x4, #{32 * lanes}")
