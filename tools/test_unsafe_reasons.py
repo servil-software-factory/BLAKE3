@@ -763,6 +763,56 @@ class Reasons(unittest.TestCase):
         self.assertEqual([n for n, _ in ur.debug_assert_without_reason(src)], [7])
         self.assertEqual(ur.without_reason(src), [])
 
+    def test_nonoverlapping_windows_branches_masked_siblings_and_punctuation(self):
+        # Comment between two `unsafe impl`s on one line belongs ONLY to the second.
+        self.assertEqual(
+            [n for n, _ in ur.without_reason("unsafe impl Send for A {} /* Sound: B is immutable. */ unsafe impl Sync for B {}\n")],
+            [1],
+        )
+        # Two functions on one line: comment above `fn a` must not certify `fn b`.
+        self.assertEqual(
+            [n for n, _ in ur.without_reason("// Sound: a\nfn a() {} fn b() { unsafe { 1 } }\n")],
+            [2],
+        )
+        # Comment inside the `if` branch must not certify the `else` branch.
+        branch_src = (
+            "fn f(c: bool) -> u8 {\n"
+            "    if c {\n"
+            "        // Sound: arm 1 only.\n"
+            "        0\n"
+            "    } else {\n"
+            "        unsafe { 1 }\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(branch_src)], [6])
+        # Comment above a masked `#[cfg(test)]` item must not leak into a shipped sibling.
+        masked_sibling = (
+            "// Sound: TestToken is a ZST.\n"
+            "#[cfg(test)]\n"
+            "unsafe impl Send for TestToken {}\n"
+            "unsafe impl Sync for ProdToken {}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(masked_sibling)], [4])
+        # Valid rationales must not be falsely rejected by `[T; N]`, inline `} else`,
+        # adjacent semicolon-free `unsafe { ... }`, or spaced `# [cfg(...)]`.
+        self.assertEqual(
+            ur.without_reason("fn f(x: *const u8) -> [u8; 1] { /* Sound: points to x. */ let r: [u8; 1] = unsafe { [*x] }; r }\n"),
+            [],
+        )
+        self.assertEqual(
+            ur.without_reason("fn f(flag: bool, x: *const u8) -> u8 { /* Sound: valid. */ if flag { 0 } else { unsafe { *x } } }\n"),
+            [],
+        )
+        self.assertEqual(
+            ur.without_reason("fn f(p: *mut u8) {\n    // Sound: p is valid.\n    unsafe { *p = 1 }\n    unsafe { *p = 2 }\n}\n"),
+            [],
+        )
+        self.assertEqual(
+            ur.without_reason("// Sound: safe.\n# [cfg(unix)]\nunsafe impl Send for X {}\n"),
+            [],
+        )
+
     def test_all_shipped_files_pass(self):
         files = ur.shipped_files()
         self.assertGreaterEqual(len(files), 40)

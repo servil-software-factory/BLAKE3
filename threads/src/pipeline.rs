@@ -368,9 +368,9 @@ struct Rooms {
 unsafe impl Send for Rooms {}
 // Sound: shared `&Rooms` accesses are disjoint because `Room::bytes_mut`
 // requires `&mut` on the unwritten suffix while `Pipeline::commit` advances
-// the writable offset, and atomic `refs` counts prevent room reuse until all
-// worker reads finish.
-// and live until `PipeStorage` has zero holders and zero in-flight tasks.
+// the writable offset, atomic `refs` counts prevent room reuse until all
+// worker reads finish, and the backing allocation stays live until
+// `PipeStorage` has zero holders and zero in-flight tasks.
 unsafe impl Sync for Rooms {}
 
 impl Drop for Rooms {
@@ -5976,10 +5976,25 @@ mod test {
                 .spawn()
                 .unwrap();
             // Parent-supervised deadline well below nextest's 15 s mutants timeout
-            // locally so a removed fork guard fails cleanly instead of timing out
-            // (#557), while giving emulated CI jobs (Intel SDE / QEMU) room for
-            // child process startup and self-test translation.
-            let limit_secs = if std::env::var_os("CI").is_some() { 30 } else { 8 };
+            // natively so a removed fork guard fails cleanly instead of timing out
+            // (#557), while giving emulated runs (Intel SDE / QEMU, detected via
+            // `BLAKE3_EMULATED` or Cargo's target runner) room for child startup.
+            let emulated = std::env::var_os("BLAKE3_EMULATED").is_some() || {
+                let var = if cfg!(target_arch = "x86_64") {
+                    Some("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER")
+                } else if cfg!(target_arch = "aarch64") {
+                    Some("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER")
+                } else {
+                    None
+                };
+                var.and_then(std::env::var_os).is_some_and(|v| {
+                    let s = v.to_string_lossy();
+                    let exe = s.split_whitespace().next().unwrap_or("");
+                    let name = std::path::Path::new(exe).file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    matches!(name, "sde" | "sde64") || name.starts_with("qemu-")
+                })
+            };
+            let limit_secs = if emulated { 30 } else { 8 };
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(limit_secs);
             let mut timed_out = false;
             let status = loop {

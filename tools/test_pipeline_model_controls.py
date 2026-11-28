@@ -774,6 +774,32 @@ class Controls(unittest.TestCase):
         )
         self.assertFalse(controls.matches_expected(fail_msg, batch_fault_expected))
 
+        # Tighter deadlock & allocator checks (#591): reject non-scheduler paths,
+        # empty task lists, fake panic path inside a thread name, truncated first
+        # headers, and incidental "Aborted" paired with SIGKILL.
+        for fake_deadlock in (
+            "thread 't' panicked at /example/toy-shuttle-model/src/foo.rs:2:2:\ndeadlock! blocked tasks: [ ]\n",
+            "thread 'panicked at /shuttle-0.8.1/src/runtime/execution.rs:1' panicked at src/fixture.rs:9:1:\n"
+            "deadlock! blocked tasks: [main (task 0)]\n",
+            "thread 'truncated\nthread 'real' panicked at /shuttle-0.8.1/src/runtime/execution.rs:203:17:\n"
+            "deadlock! blocked tasks: [main (task 0)]\n",
+            "thread 't' panicked at /shuttle-0.8.1/src/runtime/execution.rs:203:17:\ndeadlock! blocked tasks: [ ]\n",
+        ):
+            _, f_bad = controls.how_it_failed_parts(fake_deadlock)
+            self.assertNotEqual(f_bad.kind, "deadlock", fake_deadlock)
+
+        _, f_real = controls.how_it_failed_parts(
+            "thread 't' panicked at /home/u/.cargo/registry/src/index/shuttle-0.8.1/src/runtime/execution.rs:203:17:\n"
+            "deadlock! blocked tasks: [main (task 0), worker (task 1)]\n"
+        )
+        self.assertEqual(f_real.kind, "deadlock")
+
+        _, f_kill = controls.how_it_failed_parts(
+            "last event: Aborted\nfree(): invalid pointer\n"
+            "error: process didn't exit successfully: `model` (signal: 9, SIGKILL: kill)\n"
+        )
+        self.assertEqual(f_kill.kind, "signal")
+
 
 if __name__ == "__main__":
     unittest.main()

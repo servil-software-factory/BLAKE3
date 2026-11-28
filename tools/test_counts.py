@@ -53,9 +53,22 @@ class CountsControls(unittest.TestCase):
             'fn bad_raw_ident(x: usize) -> u8 {\n'
             '    x as u8\n'
             '}\n'
+            '#[cfg_attr(unix, doc = stringify![local], allow(clippy::cast_possible_truncation))]\n'
+            'fn bad_nested_bracket(x: usize) -> u8 {\n'
+            '    x as u8\n'
+            '}\n'
+            '#[allow(clippy\u200e::cast_possible_truncation)]\n'
+            'fn bad_unicode_ws(x: usize) -> u8 {\n'
+            '    x as u8\n'
+            '}\n'
+            '# [cfg(test)]\n'
+            '# [warn(clippy::cast_possible_truncation)]\n'
+            'fn test_only_spaced(x: usize) -> u8 {\n'
+            '    x as u8\n'
+            '}\n'
         )
         c = counts.measure_files({"src/x.rs": src})
-        self.assertEqual(c["truncation_allows"], 7)
+        self.assertEqual(c["truncation_allows"], 9)
         self.assertEqual(c["undocumented_unsafe"], 1)
 
     def test_detects_undocumented_debug_assert_and_silent_narrowings(self):

@@ -1000,6 +1000,9 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
     threads
 }
 
+#[cfg(all(test, not(shuttle), any(target_os = "linux", target_os = "macos")))]
+pub(crate) use self::places::test::TempDir;
+
 /// The workers' places. On a machine with more than one last-level cache
 /// (several sockets, or an EPYC's cores in groups of six or eight), each
 /// worker runs on the CPUs under one of them, its place, and a waker wakes
@@ -1019,9 +1022,6 @@ pub(crate) fn initialize(requested: Option<core::num::NonZeroUsize>) -> usize {
 /// Linux), nothing is set and the workers run where the system puts
 /// them. The workers' CPUs are among those the process may run on, and the
 /// calling threads are left alone.
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(crate) use self::places::test::TempDir;
-
 pub(crate) mod places {
     use super::*;
     #[cfg(any(target_os = "linux", test))]
@@ -1946,6 +1946,7 @@ pub(crate) mod places {
                 &self.0
             }
 
+            #[cfg(not(shuttle))]
             pub(crate) fn create_exclusive(&self, name: &str) -> (std::path::PathBuf, std::fs::File) {
                 let path = self.0.join(name);
                 let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();

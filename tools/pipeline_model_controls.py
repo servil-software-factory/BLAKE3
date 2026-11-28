@@ -80,17 +80,22 @@ DIGEST_MISMATCH_RE = (
 BATCH_DIGEST_MISMATCH_RE = r"^assertion `left == right` failed: batch \d+'s digest \d+$"
 STORAGE_UAF_RE = r"^PipeStorage used after release$"
 # Match Rust panic headers including empty thread names, apostrophes, and
-# multiline thread names (lines starting with `thread '` up to `panicked at `).
-PANIC_HEADER_RE = re.compile(r"^thread '.*'(?: \(\d+\))? panicked at ")
-SHUTTLE_SITE_RE = re.compile(r"panicked at [^\n]*\bshuttle(?:-[^/\s]+)?/src/")
-SHUTTLE_DEADLOCK_RE = re.compile(r"^deadlock! blocked tasks:\s*\[.+\]$")
+# multiline thread names, separating the thread name from the panic location.
+PANIC_HEADER_RE = re.compile(r"^thread '.*'(?: \(\d+\))? panicked at (.+)$")
+PANIC_CONTINUATION_RE = re.compile(r"'(?: \(\d+\))? panicked at (.+)$")
+SHUTTLE_LOC_RE = re.compile(r"(?:^|[/\\])shuttle(?:-[^/\\\s]+)?[/\\]src[/\\]runtime[/\\]")
+SHUTTLE_DEADLOCK_RE = re.compile(r"^deadlock! blocked tasks:\s*\[[^\]]*\S[^\]]*\]$")
 ALLOCATOR_MSG_RE = re.compile(
     r"^(?:(?:free|malloc|realloc|munmap_chunk)\(\):|"
     r"double free or corruption|"
     r"corrupted (?:size vs\. prev_size|double-linked list|top size)|"
     r"malloc: \*\*\* error for object)"
 )
-ABORT_SIGNAL_RE = re.compile(r"\(signal:\s*(?:6|11),\s*(?:SIGABRT|SIGSEGV)|\bAborted\b")
+# Match paired Cargo termination signal records `(signal: 6, SIGABRT...` or
+# `(signal: 11, SIGSEGV...` (never an incidental stdout word like "Aborted"
+# or an explicit SIGKILL).
+ABORT_SIGNAL_RE = re.compile(r"\(signal:\s*(?:6,\s*SIGABRT|11,\s*SIGSEGV)\b")
+ANY_SIGNAL_RE = re.compile(r"\(signal:\s*[^)]*\)")
 
 EXPECT_DEADLOCK = (Expect("deadlock"),)
 EXPECT_DIGEST_MISMATCH = (Expect("panic", DIGEST_MISMATCH_RE),)
@@ -332,20 +337,26 @@ def model_passes(copy, timeout=None):
 
 
 def _find_first_panic(lines):
-    """Return `(header_line, payload_line)` for the first Rust panic in `lines`,
-    including empty or multiline thread names, so an unparseable first panic is
-    never skipped in favor of a later Shuttle deadlock."""
+    """Return `(location, payload_line)` for the first Rust panic in `lines`,
+    including empty or multiline thread names, without ever crossing a second
+    `thread '` header or crediting text inside the thread name as the panic
+    location."""
     for i, line in enumerate(lines):
-        if PANIC_HEADER_RE.match(line):
+        m = PANIC_HEADER_RE.match(line)
+        if m:
             payload = lines[i + 1].strip() if i + 1 < len(lines) else ""
-            return line, payload
+            return m.group(1), payload
         if line.startswith("thread '"):
-            # Multiline thread name: scan forward up to 8 lines for its closing `' panicked at `.
-            for j in range(i + 1, min(len(lines), i + 9)):
-                if re.search(r"'(?: \(\d+\))? panicked at ", lines[j]):
+            # Multiline thread name: scan forward until its closing `' panicked at `,
+            # stopping immediately if another `thread '` header starts first.
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith("thread '"):
+                    return "", ""
+                mc = PANIC_CONTINUATION_RE.search(lines[j])
+                if mc:
                     payload = lines[j + 1].strip() if j + 1 < len(lines) else ""
-                    return lines[j], payload
-            return line, ""
+                    return mc.group(1), payload
+            return "", ""
     return None, None
 
 
@@ -357,20 +368,20 @@ def how_it_failed_parts(said):
     (`"allocator"`), and unexplained signals (`"signal"`)."""
     scenarios = [line.split(": ", 1)[1].strip() for line in said.splitlines() if line.startswith("shuttle_pipeline: ")]
     lines = said.splitlines()
-    panic_header, payload = _find_first_panic(lines)
+    panic_loc, payload = _find_first_panic(lines)
     stops = [line.strip() for line in lines if line.startswith("blake3-servil: ")]
     # The C library's allocator, stopping a process whose memory it finds
     # broken (a storage freed twice, or given out while held), corroborated by
-    # an abort/segfault termination rather than an arbitrary message + SIGKILL.
+    # Cargo's paired SIGABRT/SIGSEGV termination record.
     allocator = [line.strip() for line in lines if ALLOCATOR_MSG_RE.match(line.strip())]
-    if panic_header is not None:
-        if SHUTTLE_SITE_RE.search(panic_header) and SHUTTLE_DEADLOCK_RE.match(payload):
+    if panic_loc is not None:
+        if SHUTTLE_LOC_RE.search(panic_loc) and SHUTTLE_DEADLOCK_RE.match(payload):
             failure = Failure("deadlock", "a deadlock")
         else:
             failure = Failure("panic", payload)
     elif stops:
         failure = Failure("stop", stops[-1][len("blake3-servil: "):])
-    elif allocator and ABORT_SIGNAL_RE.search(said):
+    elif allocator and ABORT_SIGNAL_RE.search(said) and all(ABORT_SIGNAL_RE.match(m.group(0)) for m in ANY_SIGNAL_RE.finditer(said)):
         failure = Failure("allocator", allocator[0])
     else:
         # Cargo's line for a test process that a signal ended.

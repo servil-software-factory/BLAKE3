@@ -52,8 +52,8 @@ UNSAFE = re.compile(r"\bunsafe\s*\{|\bunsafe\s+impl\b")
 DEBUG_ASSERT = re.compile(r"\bdebug_assert(?:_eq|_ne)?\s*!")
 SOUND_RE = re.compile(r"Sound:(?:(?!/\*|\*/)[\W_])*[^\W_]")
 DEBUG_ONLY_RE = re.compile(r"Debug-only:(?:(?!/\*|\*/)[\W_])*[^\W_]")
-_OUTER_CFG_RE = re.compile(r"^#\[\s*cfg\s*\(")
-_CFG_CALL_RE = re.compile(r"\bcfg\s*\(")
+_OUTER_CFG_RE = re.compile(r"^#[\s\u200e\u200f]*\[[\s\u200e\u200f]*cfg[\s\u200e\u200f]*\(")
+_CFG_CALL_RE = re.compile(r"\bcfg[\s\u200e\u200f]*\(")
 _PUB_PREFIX_RE = re.compile(r"pub(?:\s*\([^)]*\))?\s+")
 _ITEM_OR_STMT_KW_RE = re.compile(r"(?:fn|impl|struct|enum|trait|type|use|static|const|let|mod|unsafe|async|extern|if|match|for|while|loop)\b")
 _ELSE_RE = re.compile(r"\s*else\b")
@@ -333,11 +333,36 @@ def _line_starts(text):
     return starts
 
 
-def _find_attr_end(code, start):
-    """Given `code[start:start+2] == '#['`, return index immediately after its
+def _is_rust_ws(ch):
+    # Rust Pattern_White_Space includes Unicode whitespace plus U+200E / U+200F.
+    return ch.isspace() or ch in ("\u200e", "\u200f")
+
+
+def _attr_bracket_at(code, pos, allow_inner=False):
+    """If `code[pos]` is `#` starting an attribute (`#[...]` or `# [...]`, or
+    `#![...]` when `allow_inner=True`), return the index of its opening `[`;
+    otherwise return -1."""
+    n = len(code)
+    if pos >= n or code[pos] != "#":
+        return -1
+    j = pos + 1
+    while j < n and _is_rust_ws(code[j]):
+        j += 1
+    if allow_inner and j < n and code[j] == "!":
+        j += 1
+        while j < n and _is_rust_ws(code[j]):
+            j += 1
+    return j if (j < n and code[j] == "[") else -1
+
+
+def _find_attr_end(code, start, allow_inner=False):
+    """Given `code[start]` starting an attribute (`#[...]`, `# [...]`, or
+    `#![...]` when `allow_inner=True`), return index immediately after its
     matching `]`, or `len(code)` if unterminated."""
     n = len(code)
-    j = start + 1
+    j = _attr_bracket_at(code, start, allow_inner=allow_inner)
+    if j == -1:
+        return start + 1
     depth = 0
     while j < n:
         ch = code[j]
@@ -351,15 +376,34 @@ def _find_attr_end(code, start):
     return n
 
 
+def iter_attributes(code, allow_inner=True):
+    """Yield `(start, end, text)` for every balanced outer (and optionally
+    inner) attribute in comment/string-stripped `code`, allowing Rust
+    whitespace between `#`, `!`, and `[` and balanced nested `[...]` inside
+    attribute token trees (such as `stringify![...]`)."""
+    n = len(code)
+    i = 0
+    while i < n:
+        pos = code.find("#", i)
+        if pos == -1:
+            break
+        if _attr_bracket_at(code, pos, allow_inner=allow_inner) == -1:
+            i = pos + 1
+            continue
+        end = _find_attr_end(code, pos, allow_inner=allow_inner)
+        yield pos, end, code[pos:end]
+        i = end
+
+
 def _preceding_attr_stack_start(code, pos):
-    """Walk backward from outer attribute at `pos` across any immediately
-    preceding outer `#[...]` attributes (separated only by whitespace) so
-    stacked attributes such as `#[allow(...)] #[cfg(test)] fn f()` are masked
-    together."""
+    """Walk backward from outer attribute or item at `pos` across any
+    immediately preceding outer `#[...]` / `# [...]` attributes (separated only
+    by Rust whitespace) so stacked attributes such as
+    `#[allow(...)] #[cfg(test)] fn f()` stay attached together."""
     cur = pos
     while True:
         k = cur - 1
-        while k >= 0 and code[k].isspace():
+        while k >= 0 and _is_rust_ws(code[k]):
             k -= 1
         if k < 0 or code[k] != "]":
             return cur
@@ -373,8 +417,13 @@ def _preceding_attr_stack_start(code, pos):
                 if depth == 0:
                     break
             j -= 1
-        if j >= 1 and code[j - 1] == "#" and (j < 2 or code[j - 2] != "!"):
-            cur = j - 1
+        if j < 0 or code[j] != "[":
+            return cur
+        h = j - 1
+        while h >= 0 and _is_rust_ws(code[h]):
+            h -= 1
+        if h >= 0 and code[h] == "#":
+            cur = h
             continue
         return cur
 
@@ -446,23 +495,22 @@ def _in_generic_param_list(code, pos):
     return False
 
 
-def _is_rust_ws(ch):
-    # Rust Pattern_White_Space includes Unicode whitespace plus U+200E / U+200F.
-    return ch.isspace() or ch in ("\u200e", "\u200f")
-
-
 def _test_item_spans(code):
-    """Return sorted `(start, end)` spans of every outer `#[cfg(...)]` requiring
-    `test` together with its stacked attributes and attached item, block,
-    statement, field, or parameter in comment/string-stripped `code`."""
+    """Return sorted `(start, end)` spans of every outer `#[cfg(...)]` (or
+    spaced `# [cfg(...)]`) requiring `test` together with its stacked
+    attributes and attached item, block, statement, field, or parameter in
+    comment/string-stripped `code`."""
     n = len(code)
     spans = []
     i = 0
     while i < n:
-        pos = code.find("#[", i)
+        pos = code.find("#", i)
         if pos == -1:
             break
-        attr_end = _find_attr_end(code, pos)
+        if _attr_bracket_at(code, pos, allow_inner=False) == -1:
+            i = pos + 1
+            continue
+        attr_end = _find_attr_end(code, pos, allow_inner=False)
         attr_text = code[pos:attr_end]
         if not _attr_requires_test(attr_text):
             i = attr_end
@@ -473,8 +521,8 @@ def _test_item_spans(code):
         while j < n:
             while j < n and _is_rust_ws(code[j]):
                 j += 1
-            if j + 1 < n and code[j] == "#" and code[j + 1] == "[":
-                j = _find_attr_end(code, j)
+            if _attr_bracket_at(code, j, allow_inner=False) != -1:
+                j = _find_attr_end(code, j, allow_inner=False)
                 continue
             break
         # Strip optional `pub` / `pub(...)` before checking whether the
@@ -737,12 +785,27 @@ _CLOSING_BRACE_RE = re.compile(r"^\s*\}(?!\s*else\b)")
 _ENDS_BLOCK_RE = re.compile(r"\}\s*$")
 
 
-def _prefix_has_boundary(prefix):
-    """True iff `prefix` (text before `unsafe` on its line) contains a
-    statement-terminating `;` (outside `[T; N]` / `(...)`) or a `}` that is not
-    part of `} else`."""
+def _has_unmatched_close_brace(line):
+    """True iff `line` contains a `}` closing a block opened on an earlier
+    line (including `} else {`), distinguishing multi-line block/branch closes
+    from self-contained single-line `{ ... }` expressions."""
     depth = 0
-    n = len(prefix)
+    for ch in line:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return True
+    return False
+
+
+def _last_inline_boundary(prefix):
+    """Return the index right after the last statement/block boundary in
+    `prefix` (`;` outside `[T; N]` / `(...)`, or `}` not followed by `else`),
+    or -1 if `prefix` has no boundary."""
+    depth = 0
+    last = -1
     for i, ch in enumerate(prefix):
         if ch in "([":
             depth += 1
@@ -750,16 +813,51 @@ def _prefix_has_boundary(prefix):
             depth -= 1
         elif depth == 0:
             if ch == ";":
-                return True
-            if ch == "}" and not re.match(r"\s*else\b", prefix[i + 1:]):
-                return True
-    return False
+                last = i + 1
+            elif ch == "}" and not re.match(r"\s*else\b", prefix[i + 1:]):
+                last = i + 1
+    return last
 
 
-def _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, item_pos):
+def _prefix_has_boundary(prefix):
+    """True iff `prefix` (text before `unsafe` on its line) contains a
+    statement-terminating `;` (outside `[T; N]` / `(...)`) or a `}` that is not
+    part of `} else`."""
+    return _last_inline_boundary(prefix) != -1
+
+
+def _unsafe_site_end(masked, match, line_end):
+    """Return the end of the inline comment window on `match`'s line: stops at
+    the closing `}` of THIS `unsafe { ... }` / `unsafe impl ... { ... }` if it
+    closes on the same line and another code token follows it (so an inline
+    `/* Sound: B */` before a second site on the same line never certifies A),
+    otherwise `line_end`."""
+    brace = masked.find("{", match.end(), line_end)
+    if brace == -1:
+        return line_end
+    depth = 0
+    for j in range(brace, line_end):
+        ch = masked[j]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                # If non-whitespace code remains after this closed site on the
+                # same line, stop right at `}` (so any comment between this
+                # site and the following code belongs to the following site,
+                # never to this one).
+                if masked[j + 1:line_end].strip():
+                    return j + 1
+                return line_end
+    return line_end
+
+
+def _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, test_lines, item_pos):
     """True iff a `Sound:` comment appears inside `item_pos`'s attached outer
     attribute stack or on blank/comment lines directly above that attribute
-    stack within `REACH` lines."""
+    stack within `REACH` lines (stopping at any masked `#[cfg(test)]` line so
+    a test-only rationale never leaks downward into a shipped sibling)."""
     attr_start = _preceding_attr_stack_start(masked, item_pos)
     if _comment_has_reason(comm_text[attr_start:item_pos], SOUND_RE):
         return True
@@ -770,7 +868,7 @@ def _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines,
         return False
     lo = max(0, top_ln - REACH)
     for above in range(top_ln - 1, lo - 1, -1):
-        if masked_lines[above].strip():
+        if above in test_lines or masked_lines[above].strip():
             return False
         if above in sound_lines:
             return True
@@ -780,13 +878,14 @@ def _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines,
 def without_reason(text):
     """The lines (numbers from 1, and the line) of `text`'s unsafe blocks and
     `unsafe impl` items that have no non-empty `Sound:` comment within REACH
-    lines above (stopping at function/item and closing-brace boundaries so a
-    rationale in one item or nested helper cannot clear an unrelated unsafe
-    site), skipping test-only `#[cfg(test)]` modules/items."""
+    lines above (stopping at function/item, masked `#[cfg(test)]`, and
+    closing-brace boundaries so a rationale in one item, branch, or test block
+    cannot clear an unrelated unsafe site)."""
     raw_lines = text.split("\n")
-    masked, comm_text = masked_code(text)
+    masked, comm_text, test_spans = _masked_code_and_spans(text)
     masked_lines = masked.split("\n")
     starts = _line_starts(masked)
+    test_lines = _span_lines(test_spans, starts)
     sound_lines = _lines_with_reason(comm_text, starts, SOUND_RE)
     matches = list(UNSAFE.finditer(masked))
     found = []
@@ -798,40 +897,55 @@ def without_reason(text):
         is_unsafe_impl = masked[m.start():m.end()].rstrip().endswith("impl")
 
         # 1. Check inline/trailing comment belonging strictly to THIS site on
-        # `idx` (bounded left by any `;`/`}` before `m.start()` and right by
-        # the next unsafe site on the same line, if any).
-        left_bound = line_start
-        for sep in (";", "}"):
-            p = masked.rfind(sep, line_start, m.start())
-            if p != -1:
-                left_bound = max(left_bound, p + 1)
-        right_bound = line_end
-        if mi + 1 < len(matches) and matches[mi + 1].start() < line_end:
+        # `idx` (bounded left by delimiter-aware `;`/`}` and right by this
+        # site's end or the next unsafe site on the same line).
+        rel_left = _last_inline_boundary(prefix)
+        left_bound = line_start + rel_left if rel_left != -1 else line_start
+        right_bound = _unsafe_site_end(masked, m, line_end)
+        if mi + 1 < len(matches) and matches[mi + 1].start() < right_bound:
             right_bound = matches[mi + 1].start()
         ok = _comment_has_reason(comm_text[left_bound:right_bound], SOUND_RE)
 
         # 2. Check comments above `idx` according to whether this site is an
-        # `unsafe impl` item, sits on a one-line item opener, or is an ordinary
-        # `unsafe {` block.
+        # `unsafe impl` item, sits on a one-line item opener with no preceding
+        # boundary, or is an ordinary `unsafe {` block.
         if not ok:
             if is_unsafe_impl:
-                ok = _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, m.start())
-            elif _ITEM_BOUNDARY_RE.match(prefix):
+                ok = _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, test_lines, m.start())
+            elif _ITEM_BOUNDARY_RE.match(prefix) and not _prefix_has_boundary(prefix):
                 first_tok = line_start + (len(prefix) - len(prefix.lstrip()))
-                ok = _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, first_tok)
+                ok = _has_reason_above_item(masked, masked_lines, starts, comm_text, sound_lines, test_lines, first_tok)
             elif not _prefix_has_boundary(prefix):
                 lo = max(0, idx - REACH)
+                skip_depth = 0
                 for ln in range(idx - 1, lo - 1, -1):
+                    if ln in test_lines:
+                        break
                     ml = masked_lines[ln]
-                    # Check boundaries BEFORE `sound_lines` so a trailing
-                    # `// Sound:` on a previous item or closing brace never
-                    # leaks downward.
-                    if _CLOSING_BRACE_RE.match(ml) or _ITEM_BOUNDARY_RE.match(ml):
-                        break
-                    if _ENDS_BLOCK_RE.search(ml) and not re.match(r"^\s*\}\s*else\b", ml):
-                        break
-                    if ln in sound_lines:
-                        ok = True
+                    if skip_depth == 0:
+                        if not ml.strip():
+                            if ln in sound_lines:
+                                ok = True
+                                break
+                            continue
+                        if _CLOSING_BRACE_RE.match(ml) or _ITEM_BOUNDARY_RE.match(ml):
+                            break
+                        if _ENDS_BLOCK_RE.search(ml) and not re.match(r"^\s*\}\s*else\b", ml):
+                            # Trailing `}` that is not part of a balanced inline
+                            # `unsafe { ... }` expression or `} else` closes an
+                            # unrelated block above.
+                            if _has_unmatched_close_brace(ml) or not UNSAFE.search(ml):
+                                break
+                    # Walk braces right-to-left: entering a preceding `{ ... }`
+                    # branch (e.g. `} else {`) increments `skip_depth` so any
+                    # `// Sound:` comment inside that closed sibling branch is
+                    # ignored until we exit back above its opening `{`.
+                    for ch in reversed(ml):
+                        if ch == "}":
+                            skip_depth += 1
+                        elif ch == "{" and skip_depth > 0:
+                            skip_depth -= 1
+                    if skip_depth == 0 and _ITEM_BOUNDARY_RE.match(ml):
                         break
         if not ok:
             found.append((idx + 1, raw_lines[idx].strip()))

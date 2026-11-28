@@ -31,12 +31,23 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unsafe_reasons as ur
 
-TRUNC_ALLOW_RE = re.compile(
-    r"#\s*!?\s*\[[^\]]*\b(?:r#)?(?:allow|expect|warn)\s*\([^)]*\b(?:r#)?clippy\s*::\s*(?:r#)?cast_possible_truncation\b"
+_RUST_WS = r"[\s\u200e\u200f]"
+TRUNC_ALLOW_INNER_RE = re.compile(
+    rf"\b(?:r#)?(?:allow|expect|warn){_RUST_WS}*\([^)]*\b(?:r#)?clippy{_RUST_WS}*::{_RUST_WS}*(?:r#)?cast_possible_truncation\b"
 )
 DEBUG_ASSERT_RE = ur.DEBUG_ASSERT
 SILENT_NARROW_RE = re.compile(r"\.\s*to_le_bytes\s*\(\s*\)\s*\[\s*0\s*\]")
 CFG_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
+
+
+def count_truncation_allows(body):
+    """Count `allow`/`expect`/`warn` attributes suppressing
+    `clippy::cast_possible_truncation` across balanced attributes in `body`
+    (handling nested `[...]` like `stringify![...]` and Rust whitespace)."""
+    total = 0
+    for _start, _end, attr in ur.iter_attributes(body, allow_inner=True):
+        total += len(TRUNC_ALLOW_INNER_RE.findall(attr))
+    return total
 
 RATCHETED = ("undocumented_unsafe", "undocumented_debug_asserts", "truncation_allows", "silent_narrowings", "debug_asserts")
 
@@ -70,7 +81,7 @@ def measure_files(files):
         counts["undocumented_debug_asserts"] += len(ur.debug_assert_without_reason(text))
         body, _ = ur.masked_code(text)
         counts["shipped_code_lines"] += sum(1 for line in body.split("\n") if line.strip())
-        counts["truncation_allows"] += len(TRUNC_ALLOW_RE.findall(body))
+        counts["truncation_allows"] += count_truncation_allows(body)
         counts["silent_narrowings"] += len(SILENT_NARROW_RE.findall(body))
         counts["debug_asserts"] += len(DEBUG_ASSERT_RE.findall(body))
         counts["cfg_conditions"] += len(CFG_RE.findall(body))

@@ -321,10 +321,10 @@ jobs:
     # runner's dynamic loader (chosen for the real CPU) ran an AVX
     # instruction before any test did.
     - if: matrix.cpu.suite != 'threads'
-      run: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$RUNNER_TEMP/sde/sde64 -${{ matrix.cpu.flag }} -chip_check_exe_only -- " sh tools/ci-locked.sh nextest run -p blake3-servil-core -P emulated --release --lib --tests
+      run: BLAKE3_EMULATED=1 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$RUNNER_TEMP/sde/sde64 -${{ matrix.cpu.flag }} -chip_check_exe_only -- " sh tools/ci-locked.sh nextest run -p blake3-servil-core -P emulated --release --lib --tests
     - name: threads, emulated
       if: matrix.cpu.suite != 'core'
-      run: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$RUNNER_TEMP/sde/sde64 -${{ matrix.cpu.flag }} -chip_check_exe_only -- " sh tools/ci-locked.sh nextest run -p blake3-servil -P emulated --release --lib --tests
+      run: BLAKE3_EMULATED=1 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$RUNNER_TEMP/sde/sde64 -${{ matrix.cpu.flag }} -chip_check_exe_only -- " sh tools/ci-locked.sh nextest run -p blake3-servil -P emulated --release --lib --tests
 
   x86_model:
     name: "the x86-64 proofs' model against the CPU"
