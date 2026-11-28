@@ -43,6 +43,21 @@ figure names its machine.
 
 ## Faster
 
+- **Apple/AArch64 SME2 full-vector 64-byte output stores across the five SME2
+  kernel files updated in `#590`** (`c/blake3_{packed,output,chain}_sme2_aarch64.S`,
+  `c/blake3_sme2_aarch64.S`, `c/blake3_sme2_hybrid_aarch64.S`):
+  replaced full-group partial-predicate ZA tile stores
+  (`st1w { za1h.s[...] }, p2`) with full-vector 64-byte unmasked `st1w { z.s }, p0`
+  stores (mirrored `za1v` + `ext #32` for 32-byte outputs; 8-`zip` + 4×64 B
+  `st1w p0` for 16-byte chain outputs; `-9` net lines including generators,
+  94/94 full-run Z3 proofs across `prove_sme2` 41 + `prove_packed_aarch64` 18 +
+  `prove_output_aarch64` 23 + `prove_chain_aarch64` 12).
+  Measured natively on Apple M6 (`mac-m6-timing`, job
+  `20261128T093101Z-john-check-issue590-b0acf15`, 64-pair confirmation):
+  - `blake3-servil-st|solo|ContinuousBatches|16`: `-11.7%` (`-10.8%` cycles, `-0.3%` instructions).
+  - `blake3-servil-st|solo|LentBatches|16`: `-11.7%` (`-10.8%` cycles, `-0.3%` instructions).
+  - `blake3-servil-mt|solo|LentBatches|16`: `-10.9%` (`-10.8%` cycles, `-0.4%` instructions).
+
 - **Zero-word-pruned 18-lane SME2/NEON/AVX-512/AVX2 counter-range (`32 B`/`16 B`)
   and early-exit `find_counter_range` APIs** (`#585`, `blake3-servil-core`
   `throughput::{hash_counter_range, hash_counter_range_trunc16, find_counter_range}`
@@ -103,26 +118,31 @@ figure names its machine.
     fixed `15840×59` = `1.13x`, varlen `21 / 27 / 126` = `1.62x / 1.49x / 1.34x`.
 
 - **AArch64 inline `<= 64`-byte single-block fast path for `TreeHasher::hash`**
-  (`#586`, `blake3-servil-core` `src/throughput.rs`, `src/lib.rs`): on AArch64,
-  `TreeHasher::hash` now checks `input.len() <= 64` inline and dispatches
-  straight to `hash_one_block_root` without `Sme2Turn::take`, multi-block
-  division, or 64-byte stack realignment (keeping `> 64`-byte inputs out of
-  line; x86-64 already dispatches directly through `chunk_root` and is
-  unchanged). Measured natively on Apple M6 (`mac-m6-timing`, `on_this_core()`,
-  `Mode::Keyed`, job `20261128T034802Z-john-example-blincs586`):
-  - Fixed-size arrays (`&[u8; 32/36/48/64]`): `47.8/47.7/49.6/43.1 → 41.9/42.3/42.4/41.6 ns` (`-11.3%` to `-14.5%` for `32..48 B`, `-3.5%` for `64 B`), closing the gap to `throughput::hash(Block, 48)`.
+  (`#586`, `#589`, `blake3-servil-core` `src/throughput.rs`, `src/lib.rs`): on
+  AArch64, `TreeHasher::hash` checks `input.len() <= 64` inline, verifies
+  `Platform::detect()`, and dispatches straight to `hash_one_block_root` (with
+  lazy zero-padding only on short tails, keeping `> 64`-byte inputs out of line
+  and avoiding `Sme2Turn::take` and 64-byte stack realignment; x86-64 already
+  dispatches directly through `chunk_root` and is unchanged). Prototype probe
+  on Apple M6 (`mac-m6-timing`, `on_this_core()`, `Mode::Keyed`, job
+  `20261128T034802Z-john-example-blincs586`, comparing old `hash` against the
+  unchecked prototype before adding the `Platform::detect()` check):
+  - Fixed-size arrays (`&[u8; 32/36/48/64]`): `47.8/47.7/49.6/43.1 → 41.9/42.3/42.4/41.6 ns` (`-11.3%` to `-14.5%` for `32..48 B`, `-3.5%` for `64 B`).
   - Dynamic slices (`&[u8]`): `48.1/48.3/49.5/43.2 → 42.3/43.0/43.5/41.7 ns` (`-11.0%` to `-12.1%` for `32..48 B`, `-3.5%` for `64 B`).
 
 - **AArch64 NEON padded/in-place tail for `8..=10`-message `Packed<{16,32,48}>` remainders**
-  (`#583`, `blake3-servil-core` `src/ffi_packed.rs`): remainders of `8..=10`
-  messages on AArch64 NEON now finish in one 11-lane `blake3_servil_neon_p11_packed`
-  call instead of expanding into a 1 KiB block buffer for `p8`/`p9`/`pn10` —
-  running in place over the final 11 messages with zero scratch or copies when
-  a prior group already ran (`w = 19..=21` and post-SME2 remainders), and via
-  an out-of-line size-matched `[[u8; N]; 11]` stack scratch (`176`/`352`/`528` B)
-  for a lone `8..=10`-message batch (removing `+384 B` from `many::hash_packed`'s
-  common frame). Measured on Apple M6 (`mac-m6-timing`, `on_this_core()`,
-  `Mode::Keyed`, jobs `20261128T002745Z-john-example-blincs583586-{base3,cand3}`):
+  (`#583`, `#589`, `blake3-servil-core` `src/ffi_packed.rs`, `src/many.rs`):
+  remainders of `8..=10` messages on AArch64 NEON finish in one 11-lane
+  `blake3_servil_neon_p11_packed` call instead of expanding into a 1 KiB block
+  buffer for `p8`/`p9`/`pn10` — running in place over the final 11 messages
+  without tail scratch when a prior group already ran (`w = 19..=21` and
+  post-SME2 remainders), and via an out-of-line size-matched `[[u8; N]; 11]`
+  stack scratch (`176`/`352`/`528` B) for a lone `8..=10`-message batch; the
+  1 KiB expansion fallback in `many::hash_packed` is also outlined into
+  `hash_packed_expand` so direct-packed calls keep a small frame with no
+  dynamic 64-byte realignment. Historical expansion-vs-padding probe on Apple M6
+  (`mac-m6-timing`, `on_this_core()`, `Mode::Keyed`, jobs
+  `20261128T002745Z-john-example-blincs583586-{base3,cand3}`):
   - `w = 8..=10`: `Packed<16>` `139.0..146.1 → 126.0..131.4 ns` (`-6.9%` to `-13.3%`),
     `Packed<32>` `141.4..149.7 → 128.3..130.0 ns` (`-9.3%` to `-13.2%`),
     `Packed<48>` `143.8..155.9 → 135.4..136.2 ns` (`-5.7%` to `-12.6%`).

@@ -49,6 +49,38 @@ fn neon_packed_kernel(len: usize) -> unsafe extern "C" fn(*const u8, u64, *const
     }
 }
 
+#[cfg(all(test, target_arch = "aarch64"))]
+std::thread_local! {
+    /// When `Some`, records `(inputs_ptr, outputs_ptr, groups)` for each NEON
+    /// packed FFI invocation on this thread, letting tests distinguish in-place
+    /// tails from stack-scratch tails without growing during unrelated tests.
+    static NEON_PACKED_CALLS: core::cell::RefCell<Option<std::vec::Vec<(usize, usize, u64)>>> = const { core::cell::RefCell::new(None) };
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn call_neon_packed(
+    kernel: unsafe extern "C" fn(*const u8, u64, *const u32, u32, *mut u8),
+    inputs: *const u8,
+    groups: u64,
+    key: *const u32,
+    root_flags: u32,
+    outputs: *mut u8,
+) {
+    crate::ran_kernel(kernel as *const ());
+    #[cfg(test)]
+    let _ = NEON_PACKED_CALLS.try_with(|c| {
+        if let Some(log) = c.borrow_mut().as_mut() {
+            log.push((inputs as usize, outputs as usize, groups));
+        }
+    });
+    // Sound: forwarded from caller's `unsafe fn` contract (`11 * groups * len`
+    // readable input bytes and `11 * groups` writable 32-byte output slots).
+    unsafe {
+        kernel(inputs, groups, key, root_flags, outputs);
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn neon_packed_tail<const N: usize>(input: &[u8], key: &CVWords, root_flags: u32, outputs: &mut [[u8; OUT_LEN]]) {
@@ -59,12 +91,11 @@ fn neon_packed_tail<const N: usize>(input: &[u8], key: &CVWords, root_flags: u32
     let mut pad_in = [[0u8; N]; 11];
     pad_in.as_flattened_mut()[..input.len()].copy_from_slice(input);
     let mut pad_out = [[0u8; OUT_LEN]; 11];
-    crate::ran_kernel(kernel as *const ());
     // Sound: AArch64 NEON is mandatory on `Platform::NEON`/`SME2`; `kernel`
     // matches `N`, so `pad_in` holds `11 * N` initialized readable bytes and
     // `pad_out` holds 11 writable 32-byte slots.
     unsafe {
-        kernel(pad_in.as_ptr().cast(), 1, key.as_ptr(), root_flags, pad_out.as_mut_ptr().cast());
+        call_neon_packed(kernel, pad_in.as_ptr().cast(), 1, key.as_ptr(), root_flags, pad_out.as_mut_ptr().cast());
     }
     outputs.copy_from_slice(&pad_out[..outputs.len()]);
 }
@@ -114,13 +145,12 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
         let groups = rem / 11;
         if groups > 0 {
             let kernel = neon_packed_kernel(len);
-            crate::ran_kernel(kernel as *const ());
             // Sound: AArch64 NEON is mandatory on `Platform::NEON`/`SME2`;
             // `input[done * len..]` has at least `11 * groups * len` readable
             // bytes and `outputs[done..]` has at least `11 * groups` writable
             // 32-byte slots.
             unsafe {
-                kernel(input[done * len..].as_ptr(), groups as u64, key.as_ptr(), root_flags, outputs[done..].as_mut_ptr().cast());
+                call_neon_packed(kernel, input[done * len..].as_ptr(), groups as u64, key.as_ptr(), root_flags, outputs[done..].as_mut_ptr().cast());
             }
             done += groups * 11;
         }
@@ -134,13 +164,12 @@ pub(crate) fn hash_packed_groups(input: &[u8], len: usize, key: &CVWords, flags:
                 // digests are recomputed to identical bytes).
                 let tail_start = outputs.len() - 11;
                 let kernel = neon_packed_kernel(len);
-                crate::ran_kernel(kernel as *const ());
                 // Sound: AArch64 NEON is mandatory on `Platform::NEON`/`SME2`;
                 // `done > 0` and `rem >= 8` guarantee `outputs.len() >= 11`, so
                 // `input[tail_start * len..]` has `11 * len` readable bytes and
                 // `outputs[tail_start..]` has 11 writable 32-byte slots.
                 unsafe {
-                    kernel(input[tail_start * len..].as_ptr(), 1, key.as_ptr(), root_flags, outputs[tail_start..].as_mut_ptr().cast());
+                    call_neon_packed(kernel, input[tail_start * len..].as_ptr(), 1, key.as_ptr(), root_flags, outputs[tail_start..].as_mut_ptr().cast());
                 }
             } else {
                 match len {
@@ -498,16 +527,40 @@ mod tests {
                     (10, 10, true),
                     (18, 11, true),
                     (19, 19, true),
+                    (20, 20, true),
                     (21, 21, true),
                 ] {
                     let mut input = std::vec![0u8; count * len];
                     fill_distinct_packed(&mut input, len);
                     let mut out = std::vec![[0u8; OUT_LEN]; count];
                     crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                    NEON_PACKED_CALLS.with(|c| *c.borrow_mut() = Some(std::vec::Vec::new()));
                     let done = hash_packed_groups(&input, len, &key, flags, &mut out, neon);
+                    let calls = NEON_PACKED_CALLS.with(|c| c.borrow_mut().take()).unwrap();
                     let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                    let in_base = input.as_ptr() as usize;
+                    let out_base = out.as_ptr() as usize;
                     assert_eq!(done, want_done, "NEON packed<{len}> count={count}");
                     assert_eq!(ran.contains(&neon_entries[idx]), want_ran, "NEON packed<{len}> count={count} ran={ran:?}");
+                    if !want_ran {
+                        assert!(calls.is_empty(), "NEON packed<{len}> count={count} unexpected calls={calls:?}");
+                    } else if count < 11 {
+                        // Lone 8..=10-message batch runs through stack scratch.
+                        assert_eq!(calls.len(), 1, "NEON lone tail packed<{len}> count={count}");
+                        assert_eq!(calls[0].2, 1);
+                        assert_ne!(calls[0].0, in_base, "NEON lone tail must use input scratch");
+                        assert_ne!(calls[0].1, out_base, "NEON lone tail must use output scratch");
+                    } else if count == 18 {
+                        assert_eq!(calls, std::vec![(in_base, out_base, 1)], "NEON packed<{len}> count={count}");
+                    } else {
+                        // 19..=21: 1 full group at 0 + 1 in-place overlapping tail at count - 11.
+                        let tail = count - 11;
+                        assert_eq!(
+                            calls,
+                            std::vec![(in_base, out_base, 1), (in_base + tail * len, out_base + tail * OUT_LEN, 1)],
+                            "NEON overlapping tail packed<{len}> count={count}"
+                        );
+                    }
                     for i in 0..done {
                         let want = crate::test::official::hash(mode, &input[i * len..][..len]);
                         assert_eq!(out[i], want, "NEON packed<{len}> count={count} i={i}");
@@ -517,7 +570,7 @@ mod tests {
         }
         // When running on a 512-bit SME2 thread, also verify post-SME2 NEON
         // in-place overlapping tails (16 + 7..=11 and 32 + 8..=10) check both
-        // kernels and distinct per-lane digests.
+        // kernels, exact in-place pointer offsets, and distinct per-lane digests.
         if let Some(sme2) = Platform::sme2() {
             let sme2_entries = [
                 ffi_sme2::blake3_servil_sme2_packed16 as *const () as usize,
@@ -533,11 +586,25 @@ mod tests {
                     fill_distinct_packed(&mut input, len);
                     let mut out = std::vec![[0u8; OUT_LEN]; count];
                     crate::RAN_ENTRIES.with(|r| r.borrow_mut().clear());
+                    NEON_PACKED_CALLS.with(|c| *c.borrow_mut() = Some(std::vec::Vec::new()));
                     let done = hash_packed_groups(&input, len, &key, flags, &mut out, sme2);
+                    let calls = NEON_PACKED_CALLS.with(|c| c.borrow_mut().take()).unwrap();
                     let ran = crate::RAN_ENTRIES.with(|r| r.borrow().clone());
+                    let in_base = input.as_ptr() as usize;
+                    let out_base = out.as_ptr() as usize;
                     assert_eq!(done, want_done, "SME2+NEON packed<{len}> count={count}");
                     assert!(ran.contains(&sme2_entries[idx]), "SME2 packed<{len}> count={count} ran={ran:?}");
                     assert_eq!(ran.contains(&neon_entries[idx]), want_neon, "post-SME2 NEON packed<{len}> count={count} ran={ran:?}");
+                    if !want_neon {
+                        assert!(calls.is_empty(), "post-SME2 packed<{len}> count={count} unexpected NEON calls={calls:?}");
+                    } else {
+                        let tail = count - 11;
+                        assert_eq!(
+                            calls,
+                            std::vec![(in_base + tail * len, out_base + tail * OUT_LEN, 1)],
+                            "post-SME2 in-place NEON tail packed<{len}> count={count}"
+                        );
+                    }
                     for i in 0..done {
                         let want = crate::test::official::hash(Mode::Keyed(&key_bytes), &input[i * len..][..len]);
                         assert_eq!(out[i], want, "SME2+NEON packed<{len}> count={count} i={i}");
