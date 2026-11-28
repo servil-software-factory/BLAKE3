@@ -474,6 +474,7 @@ fn run_checks() -> (Platform, usize) {
         }
     }
     checked += crate::ffi_counter::self_test(platform);
+    checked += crate::ffi_chain::self_test(platform);
     let _ = previous;
     (platform, checked)
 }
@@ -740,6 +741,9 @@ mod test {
             for (name, entry) in crate::ffi_counter::entries_avx512() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
+            for (name, entry) in crate::ffi_chain::entries_avx512() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+            }
             assert_ne!(crate::ROUNDED_WIDTH.with(|w| w.get()) & 8, 0, "startup left out hash_many_avx512 8-lane loop");
             expected + 2
         } else {
@@ -751,6 +755,9 @@ mod test {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
             for (name, entry) in crate::ffi_counter::entries_avx2() {
+                assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
+            }
+            for (name, entry) in crate::ffi_chain::entries_avx2() {
                 assert!(crate::RAN_ENTRIES.with(|r| r.borrow().contains(&(entry as usize))), "startup left out {name}");
             }
         }
@@ -770,7 +777,7 @@ mod test {
             }
             expected
         };
-        let expected = expected + 4;
+        let expected = expected + 5;
         assert_eq!(checked, expected);
     }
 
@@ -863,6 +870,7 @@ mod test {
         want.extend(crate::neon_hybrid::entries());
         want.extend(crate::ffi_packed::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_counter::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
+        want.extend(crate::ffi_chain::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         want.extend(crate::ffi_output::entries_neon().into_iter().map(|(n, e)| (n.into(), e)));
         #[cfg(target_arch = "aarch64")]
         if crate::platform::sme2_detected() {
@@ -870,6 +878,7 @@ mod test {
             want.extend(crate::sme2::entries().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_packed::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_counter::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
+            want.extend(crate::ffi_chain::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
             want.extend(crate::ffi_output::entries_sme2().into_iter().map(|(n, e)| (n.into(), e)));
         }
         RAN.with(|r| r.set(0));
@@ -1246,6 +1255,30 @@ mod stops {
             assert_eq!(out.status.signal(), Some(6), "{which}: child must stop: {:?}\n{stderr}", out.status);
             assert!(stderr.contains(needle), "{which}: stderr missing {needle:?}: {stderr}");
         }
+    }
+
+    /// A corrupted digest in `ffi_chain::self_test` must stop the process via
+    /// the non-unwinding fatal stop (SIGABRT) with `"hash_chains_32_trunc16"`
+    /// on stderr, even inside `catch_unwind` (#584).
+    #[test]
+    fn test_chain_self_test_mismatch_stops_the_process() {
+        use std::os::unix::process::ExitStatusExt as _;
+        const CHILD: &str = "BLAKE3_SERVIL_TEST_CHAIN_FAIL";
+        if std::env::var_os(CHILD).is_some() {
+            let _ = std::panic::catch_unwind(|| {
+                crate::ffi_chain::PLANTED_WRONG_CHAIN.store(true, core::sync::atomic::Ordering::Relaxed);
+                crate::ffi_chain::self_test(Platform::detect_unchecked());
+            });
+            std::process::exit(0);
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "self_test::stops::test_chain_self_test_mismatch_stops_the_process", "--nocapture", "--test-threads", "1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("spawn child");
+        let stderr = std::string::String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.signal(), Some(6), "chain mismatch must stop with SIGABRT: {:?}\n{stderr}", out.status);
+        assert!(stderr.contains("hash_chains_32_trunc16"), "stderr missing hash_chains_32_trunc16: {stderr}");
     }
 
     /// On a broken stderr pipe (no reader) with default `SIGPIPE` disposition

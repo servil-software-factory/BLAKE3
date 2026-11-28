@@ -43,6 +43,37 @@ figure names its machine.
 
 ## Faster
 
+- **Fused multi-step 32-byte hash-chain batch APIs across all four SIMD ISAs**
+  (`#584`, `blake3-servil-core` `throughput::{hash_chains_32_trunc16, hash_chains_varlen_32_trunc16}`
+  and `TreeHasher::{hash_chains_32_trunc16, hash_chains_varlen_32_trunc16}`):
+  four generator-backed kernels with bounded Z3 proofs (`prove_chain_{aarch64,x86}.py`,
+  24/24 cases including dirty upper-32-bit `u32` ABI arguments) — 18-lane
+  (16 SME2 + 2 integer) hybrid (`c/blake3_chain_sme2_aarch64.S`), 11-lane NEON
+  8+3 (`c/blake3_chain_neon_aarch64.S`), 16-lane AVX-512 and 8-lane AVX2
+  (`c/blake3_chain_x86-64_unix.S`) — advance 16-byte chain state across steps
+  inside one kernel call (in registers on AVX-512 and SME2 vector lanes, or L1
+  stack slots on AVX2, NEON, and scalar lanes), prune zero message words
+  `8..15`, and schedule variable-step chains via an LPT continuous
+  lane-refilling queue (stack storage for <= 128 nonzero chains; call-local
+  `Vec<usize>` above 128). Measured (`Mode::Keyed`, `steps = 59` fixed;
+  `steps[i] = (i*23+7) % 60` varlen):
+  - Apple M6 (`mac-m6-timing`, `20261128T053806Z-john-example-blincs584-v2` on
+    probe `8313fa7c`, vs per-call allocating `Packed<32>` loop; shipped
+    `SME2_VARLEN_MIN_WORK = 18 * 64` routes WOTS+C 21 / U-PORS 27 to the
+    measured NEON path): fixed 59-step chains `18 / 126 / 1024 / 15840` =
+    `20.9 → 6.9 us` (`3.02x`, `6.52 ns/comp`), `115.6 → 48.5 us` (`2.38x`),
+    `564.7 → 401.9 us` (`1.41x`), `7.97 → 6.10 ms` (`1.31x`, `6.53 ns/comp`);
+    varlen `21 / 27` chains (`597 / 762` comps) = `21.5 → 6.6 us` (`3.26x`
+    NEON), `30.9 → 8.8 us` (`3.51x` NEON), `126` chains (`3,687` comps) =
+    `82.5 → 36.3 us` (`2.27x` SME2).
+  - AMD Threadripper PRO 7975WX AVX-512 (`x86-workhorse`): vs allocation-free
+    per-step `Packed<32>` loop, fixed `18..15840` = `1.20x..1.27x` (`15840`:
+    `5.10 ms`, `5.46 ns/comp`), varlen `21 / 27 / 126` = `1.70x / 1.84x / 1.38x`
+    (and `1.28x..1.52x` fixed, `2.09x..2.45x` varlen vs the allocating probe
+    baseline); `PAD_SIMD_MIN = 2` removes the 2/3-chain serial cliff (`6.37/8.57 → 4.49 us`).
+  - AmpereOne NEON VM (`arm-vm`, best-effort, allocating probe baseline):
+    fixed `15840×59` = `1.13x`, varlen `21 / 27 / 126` = `1.62x / 1.49x / 1.34x`.
+
 - **AArch64 inline `<= 64`-byte single-block fast path for `TreeHasher::hash`**
   (`#586`, `blake3-servil-core` `src/throughput.rs`, `src/lib.rs`): on AArch64,
   `TreeHasher::hash` now checks `input.len() <= 64` inline and dispatches

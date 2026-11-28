@@ -137,8 +137,13 @@
 //!   thread-local teardown after that block is destroyed, a bounded stack
 //!   scratch is used instead — 8 KiB up to 64 KiB inputs, 64 KiB above):
 //!   [`convenience::hash`], [`throughput::hash`], [`throughput::hash_many`],
+//!   [`throughput::hash_counter_range`], [`throughput::hash_chains_32_trunc16`],
 //!   [`Hasher::update`](convenience::Hasher::update) and
 //!   [`Hasher::finalize`](convenience::Hasher::finalize), and [`OutputReader`].
+//!   [`throughput::hash_chains_varlen_32_trunc16`] uses stack storage when at
+//!   most 128 chains have nonzero step counts, and allocates a call-local
+//!   `Vec<usize>` (freed on return) when more than 128 chains have nonzero
+//!   steps.
 //!   `Hasher::update_reader` uses a 64 KiB stack buffer for the first read
 //!   (even on immediate EOF), and promotes to a 1 MiB heap buffer once
 //!   65,536 bytes or more are read before EOF, freed when it returns.
@@ -247,6 +252,7 @@ mod avx512_32;
 #[cfg(target_arch = "x86_64")]
 #[path = "ffi_chunk_root.rs"]
 mod chunk_root;
+mod ffi_chain;
 mod ffi_counter;
 #[cfg(target_arch = "x86_64")]
 mod ffi_output;

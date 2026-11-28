@@ -265,15 +265,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit_asm("c/blake3_output8.S", "blake3_output8.s", false, "output8");
         emit_asm("c/blake3_packed_x86-64_unix.S", "blake3_packed_x86.s", false, "packed_x86");
         emit_asm("c/blake3_counter_x86-64_unix.S", "blake3_counter_x86.s", false, "counter_x86");
+        emit_asm("c/blake3_chain_x86-64_unix.S", "blake3_chain_x86.s", false, "chain_x86");
     }
 
     if arch == "aarch64" {
         emit_asm("c/blake3_neon_hybrid_aarch64.S", "blake3_neon_hybrid.s", is_apple, "neon");
         emit_asm("c/blake3_packed_neon_aarch64.S", "blake3_packed_neon.s", is_apple, "packed_neon");
         emit_asm("c/blake3_counter_neon_aarch64.S", "blake3_counter_neon.s", is_apple, "counter_neon");
+        emit_asm("c/blake3_chain_neon_aarch64.S", "blake3_chain_neon.s", is_apple, "chain_neon");
         emit_asm("c/blake3_sme2_aarch64.S", "blake3_sme2.s", is_apple, "sme2");
         emit_asm("c/blake3_packed_sme2_aarch64.S", "blake3_packed_sme2.s", is_apple, "packed_sme2");
         emit_asm("c/blake3_counter_sme2_aarch64.S", "blake3_counter_sme2.s", is_apple, "counter_sme2");
+        emit_asm("c/blake3_chain_sme2_aarch64.S", "blake3_chain_sme2.s", is_apple, "chain_sme2");
         emit_asm("c/blake3_sme2_hybrid_aarch64.S", "blake3_sme2_hybrid.s", is_apple, "sme2_hybrid");
         emit_asm("c/blake3_output_neon_aarch64.S", "blake3_output_neon.s", is_apple, "output_neon");
         emit_asm("c/blake3_output_sme2_aarch64.S", "blake3_output_sme2.s", is_apple, "output_sme2");

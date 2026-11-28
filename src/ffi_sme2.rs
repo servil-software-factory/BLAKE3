@@ -1377,6 +1377,46 @@ mod test {
         tmpl_bytes[48..52].copy_from_slice(&7u32.to_le_bytes());
         assert_eq!(out_18[0], *blake3::hash(&tmpl_bytes[..52]).as_bytes());
 
+        // Fused 18-lane (16 SME2 + 2 integer) hash-chain kernel (#584).
+        let mut chain_in = [[0u8; 32]; 18];
+        for (i, slot) in chain_in.iter_mut().enumerate() {
+            slot[..32].copy_from_slice(&chunks_buf[i * 32..(i + 1) * 32]);
+        }
+        let mut chain_out = [[0u8; 16]; 18];
+        assert_eq!(
+            run_with_dormant_za([0, 0, 0, 1, 0, 0], false, &mut || unsafe {
+                crate::ffi_chain::call_sme2_chain(
+                    chain_in.as_flattened().as_ptr(),
+                    crate::IV.as_ptr(),
+                    u32::from(packed_flags),
+                    2,
+                    chain_out.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            0
+        );
+        assert_eq!(
+            run_with_dormant_za([0; 6], true, &mut || unsafe {
+                crate::ffi_chain::call_sme2_chain(
+                    chain_in.as_flattened().as_ptr(),
+                    crate::IV.as_ptr(),
+                    u32::from(packed_flags),
+                    2,
+                    chain_out.as_flattened_mut().as_mut_ptr(),
+                    1,
+                )
+            }),
+            16
+        );
+        let mut ref_slot = chain_in[0];
+        let s0 = u32::from_le_bytes(ref_slot[12..16].try_into().unwrap());
+        let h1 = blake3::hash(&ref_slot);
+        ref_slot[12..16].copy_from_slice(&s0.wrapping_add(1).to_le_bytes());
+        ref_slot[16..32].copy_from_slice(&h1.as_bytes()[..16]);
+        let h2 = blake3::hash(&ref_slot);
+        assert_eq!(chain_out[0], h2.as_bytes()[..16]);
+
         // Multi-group keyed SME2 chunk kernel (#336): blake3_servil_sme2_chunks_keyed.
         let keyed_keys: [[u32; 8]; 1] = [[0x2468_ace0, 0x1357_9bdf, 0xfedc_ba98, 0x7654_3210, 0x89ab_cdef, 0x0123_4567, 0x55aa_33cc, 0xaa55_cc33]];
         let keyed_flags = [crate::KEYED_HASH];
