@@ -17,10 +17,17 @@ Commands:
     python3 tools/verify/isla_check.py                  # the NEON and integer models against Arm's specification (needs Isla)
     python3 tools/verify/prove_x86.py [CASE...]         # the x86-64 kernels: compressions, hash_many at fixed counts, xof_many, the chunk root, the partial pass and the wide kernels (390 cases; --representative: 203 of them)
     python3 tools/verify/prove_x86_loop.py              # hash_many at every input count, by induction (51 cases)
-    python3 tools/verify/prove_output.py                # 16 independent CV/root outputs; four fault controls
+    python3 tools/verify/prove_output.py                # 16 independent AVX-512 CV/root outputs; four fault controls
     python3 tools/verify/prove_output8.py               # 8 independent AVX2 CV/root outputs; four fault controls
+    python3 tools/verify/prove_output_aarch64.py        # independent NEON (8+3) & SME2 (16-lane) CV/root outputs + induction (23 cases)
+    python3 tools/verify/prove_packed_x86.py            # direct-load Packed<16/32/48> kernels on AVX2/AVX-512
+    python3 tools/verify/prove_packed_aarch64.py        # direct-load Packed<16/32/48> kernels on NEON/SME2 (18 cases)
+    python3 tools/verify/prove_counter_x86.py           # zero-word-pruned counter-range (32 B/16 B) & early-exit find on AVX2/AVX-512
+    python3 tools/verify/prove_counter_aarch64.py       # zero-word-pruned counter-range (32 B/16 B) & early-exit find on NEON/SME2
+    python3 tools/verify/prove_chain_x86.py             # fused multi-step 32 B hash-chain kernels on AVX2/AVX-512
+    python3 tools/verify/prove_chain_aarch64.py         # fused multi-step 32 B hash-chain kernels on NEON/SME2 (12 cases)
     python3 tools/verify/cross_check_x86.py             # the x86-64 model against the CPU (needs an x86-64 CPU; AVX-512 forms need one with AVX-512)
-    sh tools/verify/long-proofs.sh [COMMIT]             # the proofs, the Arm CPU cross-check and the controls together (Isla and the x86 CPU check apart); posts the commit's "long proofs" status, from an earlier run when the proofs' inputs (c/, c2sp/, tools/verify/, the checked NEON, SME2-hybrid and x86 generators, and the executing driver's contents) are the same
+    sh tools/verify/long-proofs.sh [COMMIT]             # all proof drivers above, the Arm CPU cross-check and the controls together (Isla and the x86 CPU check apart); posts the commit's "long proofs" status, from an earlier run when the proofs' inputs (c/, c2sp/, tools/verify/, the checked generators, and the executing driver's contents) are the same
 
 Logs are retained in `tmp/long-proofs/COMMIT-INPUTS/`. Distinct drivers can
 check the same target commit without overwriting each other's evidence;
@@ -131,8 +138,8 @@ inputs, pointers are (region, offset) pairs. The run checks:
 - **The instruction models** (`aarch64.py`, `vector.py`, `sme.py`), each
   a few lines following the Arm architecture reference manual.
   `cross_check.py` and `cross_check_sme.py` run every register form the
-  kernels use (83 NEON and integer, 73 streaming, ZA moves, slice loads
-  and stores, and predicates among them), with their own immediates, on
+  kernels use (NEON, integer, and streaming SME2 forms — including ZA
+  moves, slice loads and stores, and predicates), with their own immediates, on
   the CPU and in the model over random states. The SME2 check found one
   model error: a four-register ZA move rounds its slice base down to a
   multiple of four (the kernels use aligned bases, so no proof was

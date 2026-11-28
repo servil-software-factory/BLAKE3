@@ -83,14 +83,16 @@ representative stays out; one where we can't tell may go in.
 
 **How SUPERCOP picks.** On each machine it times every implementation of
 `crypto_hash_blake3`, with each compiler, hashing 1536 bytes, keeps the fastest, and
-measures only that one at every length to 64 KiB, each call waited for (so the crate's
-after-a-pause prefetch never runs). When the crate wins at 1536 bytes, its own choice of
-kernel by length gives every point.
+measures only that one at every length to 64 KiB. When the crate wins at 1536 bytes,
+its own choice of kernel by length gives every point.
 
 **eBASH's Arm machines** (those that ran SUPERCOP in the past year): Neoverse N1, Cortex-A72
-(Pi 4), Cortex-A76 (Pi 5), Cortex-A53 (Pi 3), with no SHA-3 and no SME2. There the crate runs
-upstream's four-lane NEON C kernel for whole chunks and its own scalar kernel for single
-compressions (messages to 1 KiB, partial chunks, parents, roots).
+(Pi 4), Cortex-A76 (Pi 5), Cortex-A53 (Pi 3), with no SHA-3 and no SME2. Current releases
+of the crate embed all assembly kernels directly via `core::arch::global_asm!` (no C
+compiler needed), running its non-SHA3 NEON hybrid kernels (`kn`, `pn`) for whole chunks
+and its scalar kernel (`c1`) for single compressions (messages to 1 KiB, partial chunks,
+parents, roots). (The pinned 0.8-era snapshot tarball beside this file precedes that shift;
+re-run `supercop/make-tarball.sh` when submitting a newer release.)
 
 Tried and set aside: a C `crypto_core` of one 16-chunk subtree under the BLAKE3 team's C
 directories, SUPERCOP tuning it at 16 KiB. It measured a mix no user runs (upstream C below
@@ -101,6 +103,6 @@ Open:
 - Whether the scalar kernel beats upstream's portable C on the Cortex-A72 and A76: it runs
   more instructions (`hash()` of 64 bytes 1178 against 1002, of 1 KiB 17138 against 14612,
   under qemu's models, October 15, 2026), and a Raspberry Pi answers it.
-- SME2 depends on the C compiler: with Debian 12's GCC the crate builds without it, and
-  SUPERCOP may keep that build by its 1536-byte timing. Assembling the kernels with rustc's
-  own assembler would give every build SME2.
+- On current releases, `rustc`'s LLVM assembler embeds every SME2 kernel via `global_asm!`
+  with no C compiler dependency, removing the old Debian 12 GCC limitation once the
+  tarball is refreshed to a current release.

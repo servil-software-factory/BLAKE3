@@ -198,10 +198,3 @@ soundness theorem would justify that checker, including its normalization
 of additions, xors, and rotations. Each kernel certificate would establish
 that the checker accepts its bytes. Neither the instruction lemmas nor
 that soundness theorem exists here yet.
-
-## Validation scope of this change
-
-The parser build, corpus comparison, kernel-reduced examples, and positive
-and negative certificate checks exercise the changed code. The crate's
-Rust suites and performance-regression gate were skipped: this change
-leaves the library's sources, build, and machine code unchanged.
