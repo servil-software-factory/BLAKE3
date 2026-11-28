@@ -404,6 +404,9 @@ std::thread_local! {
     /// The assembly entry points this thread's calls ran since the test
     /// last cleared it, by address.
     pub(crate) static RAN_ENTRIES: core::cell::RefCell<std::collections::BTreeSet<usize>> = const { core::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    /// Number of assembly entry-point invocations recorded by `ran_kernel`
+    /// since the test last reset it.
+    pub(crate) static RAN_KERNEL_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// Note that the assembly entry point at `entry` ran (in the tests'
@@ -412,7 +415,10 @@ std::thread_local! {
 #[allow(dead_code)]
 pub(crate) fn ran_kernel(entry: *const ()) {
     #[cfg(test)]
-    let _ = RAN_ENTRIES.try_with(|r| r.borrow_mut().insert(entry as usize));
+    {
+        let _ = RAN_ENTRIES.try_with(|r| r.borrow_mut().insert(entry as usize));
+        let _ = RAN_KERNEL_CALLS.try_with(|c| c.set(c.get() + 1));
+    }
     let _ = entry;
 }
 
@@ -1025,65 +1031,36 @@ pub(crate) fn compress_subtree_to_parent_node(input: &[u8], ahead: usize, key: &
     tree::root_children(&kernels, input, ahead, chunk_counter)
 }
 
-// The root hash of a single-block input (`<= 64` bytes), in one kernel call
-// without multi-block length arithmetic or 64-byte stack realignment (#586).
-#[cfg(target_arch = "aarch64")]
-#[inline]
-pub(crate) fn hash_one_block_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
-    assert!(input.len() <= BLOCK_LEN, "one block or less");
-    let mut padded = [0u8; BLOCK_LEN];
-    let last: &[u8; BLOCK_LEN] = match input.try_into() {
-        Ok(full) => full,
-        Err(_) => {
-            padded[..input.len()].copy_from_slice(input);
-            &padded
-        }
-    };
-    let mut out = [0u8; OUT_LEN];
-    // Sound: `blocks == 1`, so `hash_chunk` reads only the 64-byte `last` block, `key`, and writes 32 bytes to `out`.
-    unsafe {
-        neon_hybrid::hash_chunk(
-            last.as_ptr(),
-            1,
-            last,
-            u8::try_from(input.len()).expect("block <= 64"),
-            key,
-            0,
-            flags,
-            CHUNK_START,
-            CHUNK_END | ROOT,
-            &mut out,
-        );
-    }
-    Hash(out)
-}
-
 // The root hash of an input of one chunk or less, in one kernel call. The
 // whole blocks are read in place, the final one too when it is full; a
 // short final block (and the empty block for the empty input) is copied
-// into a zero-padded buffer, which is the copy ChunkState::update() makes
-// too. The scalar kernel runs on every AArch64 core, so this path needs no
-// platform check.
+// into a zero-padded stack buffer only on the short-tail arm (so exact
+// 64/128/.../1024-byte dynamic slices avoid unnecessary zero-fill stores).
+// Inlined into `TreeHasher::hash`'s `<= 64`-byte fast path (where the
+// single-block arithmetic folds away cleanly) and wrapped out of line in
+// `hash_one_chunk_root` for general callers so cold `OneMessage` wrappers
+// keep their small frame and I-cache footprint (#586, #589).
 #[cfg(target_arch = "aarch64")]
-#[inline]
-fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
+#[inline(always)]
+pub(crate) fn hash_one_chunk_root_inline(input: &[u8], key: &CVWords, flags: u8) -> Hash {
     assert!(input.len() <= CHUNK_LEN, "one chunk or less");
-    if input.len() <= BLOCK_LEN {
-        return hash_one_block_root(input, key, flags);
-    }
     let blocks = cmp::max(1, input.len().div_ceil(BLOCK_LEN));
     let whole = (blocks - 1) * BLOCK_LEN;
     let tail = &input[whole..];
-    let mut padded = [0u8; BLOCK_LEN];
+    let mut padded;
     let last: &[u8; BLOCK_LEN] = match tail.try_into() {
         Ok(full) => full,
         Err(_) => {
+            padded = [0u8; BLOCK_LEN];
             padded[..tail.len()].copy_from_slice(tail);
             &padded
         }
     };
     let mut out = [0u8; OUT_LEN];
-    // Sound: `input` holds `(blocks - 1) * BLOCK_LEN` readable bytes before `tail`, `blocks` is in 1..=16, and `last` is 64 readable bytes.
+    // Sound: `blocks` is in 1..=16 and `last` is 64 readable bytes; when
+    // `blocks == 1`, `c1` selects `last` before loading and never reads
+    // `input.as_ptr()`; when `blocks >= 2`, `input` holds `(blocks - 1) * BLOCK_LEN`
+    // readable bytes before `tail`.
     unsafe {
         neon_hybrid::hash_chunk(
             input.as_ptr(),
@@ -1099,6 +1076,12 @@ fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
         );
     }
     Hash(out)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+pub(crate) fn hash_one_chunk_root(input: &[u8], key: &CVWords, flags: u8) -> Hash {
+    hash_one_chunk_root_inline(input, key, flags)
 }
 
 /// Run the startup self-test and detect the CPU: every program calls this

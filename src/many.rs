@@ -143,11 +143,26 @@ pub fn hash_many_on(input: &[u8], len: usize, slot: usize, key: &CVWords, flags:
     }
 }
 
+/// Out-of-line 1 KiB block-expansion fallback for packed remainders smaller
+/// than the direct-packed threshold (and SSE4.1), keeping `hash_packed`'s
+/// common direct-packed frame small with no 64-byte stack realignment (#589).
+#[inline(never)]
+fn hash_packed_expand(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
+    let mut blocks = [crate::block::Block::ZERO; 16];
+    for (messages, digests) in input.chunks(len * 16).zip(outputs.chunks_mut(16)) {
+        let bytes = crate::block::Block::bytes_mut(&mut blocks);
+        for (i, message) in messages.chunks_exact(len).enumerate() {
+            bytes[i * BLOCK_LEN..][..len].copy_from_slice(message);
+        }
+        hash_run_short(&bytes[..digests.len() * BLOCK_LEN], key, flags, digests, platform, len);
+    }
+}
+
 /// Packed messages (`len` bytes each, at a stride of `len`): full SIMD
-/// groups (and on AArch64 NEON, padded `8..=10`-message remainders; #583) run
-/// on the packed kernels in `ffi_packed` (#501) across SME2, AVX-512, AVX2,
-/// and NEON `8+3`; any smaller remainder (or SSE4.1 fallback) expands up to
-/// 16 messages at a time into a 1 KiB zero-padded stack buffer.
+/// groups (and on AArch64 NEON, in-place overlapping or size-matched padded
+/// `8..=10`-message remainders; #583) run on the packed kernels in `ffi_packed`
+/// (#501) across SME2, AVX-512, AVX2, and NEON `8+3`; any smaller remainder
+/// (or SSE4.1 fallback) calls `hash_packed_expand` out of line.
 #[inline(never)]
 fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut [[u8; OUT_LEN]], platform: Platform) {
     // Packed's three lengths, in every build: a block-length message sent
@@ -157,14 +172,7 @@ fn hash_packed(input: &[u8], len: usize, key: &CVWords, flags: u8, outputs: &mut
     if done == outputs.len() {
         return;
     }
-    let mut blocks = [crate::block::Block::ZERO; 16];
-    for (messages, digests) in input[done * len..].chunks(len * 16).zip(outputs[done..].chunks_mut(16)) {
-        let bytes = crate::block::Block::bytes_mut(&mut blocks);
-        for (i, message) in messages.chunks_exact(len).enumerate() {
-            bytes[i * BLOCK_LEN..][..len].copy_from_slice(message);
-        }
-        hash_run_short(&bytes[..digests.len() * BLOCK_LEN], key, flags, digests, platform, len);
-    }
+    hash_packed_expand(&input[done * len..], len, key, flags, &mut outputs[done..], platform);
 }
 
 /// Fewest messages of 2 to 16 blocks that go to SME2 as one more group of
