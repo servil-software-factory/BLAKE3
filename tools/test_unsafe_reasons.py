@@ -574,21 +574,51 @@ class Reasons(unittest.TestCase):
             "}\n"
         )
         self.assertEqual([n for n, _ in ur.without_reason(cross_method)], [7])
-        shared_impls = (
+        # Every `unsafe impl` requires its own directly attached `// Sound:` comment;
+        # no sharing across adjacent impls (even for the same target type).
+        adjacent_impls = (
             "// Sound: interior mutability is synchronized.\n"
             "unsafe impl Send for S {}\n"
             "unsafe impl Sync for S {}\n"
+            "unsafe impl Trusted for S {}\n"
         )
-        self.assertEqual(ur.without_reason(shared_impls), [])
-        # Different target types must NOT share a single `Sound:` rationale, and
-        # one-line methods, attribute-prefixed items, `default fn`, and `const`
-        # items must all stop rationale bleed from a prior function.
-        diff_impls = (
-            "// Sound: A is synchronized.\n"
-            "unsafe impl Send for A {}\n"
-            "unsafe impl Send for B {}\n"
+        self.assertEqual([n for n, _ in ur.without_reason(adjacent_impls)], [3, 4])
+        explicit_paired = (
+            "// Sound: S owns its allocation.\n"
+            "unsafe impl Send for S {}\n"
+            "// Sound: S synchronizes shared reads.\n"
+            "unsafe impl Sync for S {}\n"
         )
-        self.assertEqual([n for n, _ in ur.without_reason(diff_impls)], [3])
+        self.assertEqual(ur.without_reason(explicit_paired), [])
+        # Trailing `// Sound:` on a previous one-line item must not clear the next item,
+        # indented nested helper closing `}` stops lookback, and `const r#type:` is a boundary.
+        trailing_prev = (
+            "impl S {\n"
+            "    fn f(p: *const u8) -> u8 { unsafe { *p } } // Sound: p valid in f.\n"
+            "    fn g(q: *const u8) -> u8 { unsafe { *q } }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(trailing_prev)], [3])
+        nested_helper = (
+            "fn outer(p: *const u8, q: *const u8) -> u8 {\n"
+            "    fn helper(p: *const u8) -> u8 {\n"
+            "        // Sound: helper invariant.\n"
+            "        unsafe { *p }\n"
+            "    }\n"
+            "    unsafe { *q }\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(nested_helper)], [6])
+        raw_const = (
+            "impl S {\n"
+            "    fn f(p: *const u8) -> u8 {\n"
+            "        // Sound: p valid in f.\n"
+            "        unsafe { *p }\n"
+            "    }\n"
+            "    const r#type: u8 = unsafe { 0 };\n"
+            "}\n"
+        )
+        self.assertEqual([n for n, _ in ur.without_reason(raw_const)], [6])
         one_line_method = (
             "impl S {\n"
             "    fn f(p: *const u8) -> u8 {\n"

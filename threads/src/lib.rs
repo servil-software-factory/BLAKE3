@@ -180,10 +180,13 @@
 //!   alone: 1 GiB less one byte is cut into more pieces than 1 GiB.
 //! - **Once per process**: the core startup self-test (stack buffers only; see
 //!   `blake3-servil-core`'s memory section for the post-init per-thread 64 KiB
-//!   SME2 flat-walk scratch, which pool preparation may also allocate on the
-//!   SME2 thread), and the pool threads: by default a worker per CPU beyond the
-//!   first, each with the standard library's stack, started by
-//!   [`initialize_multithreaded`].
+//!   SME2 flat-walk scratch, which [`initialize_multithreaded`] also allocates
+//!   on the calling thread — even with `Some(1)` — and on the dedicated SME2
+//!   worker thread on a 512-bit SME2 CPU), and the pool threads started by
+//!   [`initialize_multithreaded`]: `threads - 1` ordinary workers (plus one
+//!   dedicated SME2 thread when `threads > 1` on a 512-bit SME2 CPU), where
+//!   `None` defaults to the permitted CPU count on the chosen NUMA node (or
+//!   process), each with the standard library's stack.
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] or a Pipeline holds and the chaining values made from
@@ -513,8 +516,10 @@ pub(crate) fn ran(kind: Ran) {
 /// the pool's chaining-value vector (note that small-item / single-thread
 /// `hash_each_multithreaded` also uses `blake3-servil-core`'s own per-thread
 /// collection scratch, pre-sized to 144 middle messages / 288 chunk CVs). This
-/// call prepares the calling thread's pool storage for up to 1,024 pieces; a
-/// call from another thread prepares that thread's on first use.
+/// call prepares the calling thread's pool storage for up to 1,024 pieces (and
+/// on a 512-bit SME2 CPU, allocates that thread's 64 KiB SME2 flat-walk
+/// scratch — even when called with `Some(1)` or on later calls from fresh
+/// threads); a call from an unprepared thread prepares its own on first use.
 ///
 /// ```
 /// blake3_servil::initialize_multithreaded(None);

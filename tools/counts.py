@@ -11,7 +11,7 @@ Ratcheted counts (must not rise above BASE; comments, strings, and test-only
 modules/items/files are excluded via `unsafe_reasons.non_test_lines`):
   undocumented_unsafe        `unsafe` blocks / `unsafe impl` without `// Sound:`
   undocumented_debug_asserts `debug_assert*!` without an attached `// Debug-only:`
-  truncation_allows          `#[allow(...clippy::cast_possible_truncation...)]`
+  truncation_allows          `#[allow/expect(...clippy::cast_possible_truncation...)]`
   silent_narrowings          token-level `.to_le_bytes()[0]` low-byte narrowings
                              (only the two named `low_byte`/`low_byte_u16` helpers
                              should hold this spelling)
@@ -31,7 +31,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unsafe_reasons as ur
 
-TRUNC_ALLOW_RE = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\([^)]*\bclippy::cast_possible_truncation\b")
+TRUNC_ALLOW_RE = re.compile(
+    r"#!?\[[^\]]*\b(?:allow|expect)\s*\([^)]*\bclippy\s*::\s*cast_possible_truncation\b"
+)
 DEBUG_ASSERT_RE = ur.DEBUG_ASSERT
 SILENT_NARROW_RE = re.compile(r"\.\s*to_le_bytes\s*\(\s*\)\s*\[\s*0\s*\]")
 CFG_RE = re.compile(r"\bcfg(?:_attr)?!?\s*\(")

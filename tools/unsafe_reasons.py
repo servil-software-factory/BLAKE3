@@ -731,19 +731,17 @@ def _macro_call_end(code, bang_end):
 _ATTR_PREFIX = r"(?:#\[[^\]]*\]\s*)*"
 _ITEM_QUAL = r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:default|const|async|unsafe)\s+|extern\s+(?:\"[^\"]*\"\s+)?)*"
 _ITEM_BOUNDARY_RE = re.compile(
-    rf"^\s*{_ATTR_PREFIX}{_ITEM_QUAL}(?:(?:fn|impl|mod|struct|enum|trait|type|static)\b|const\s+[A-Za-z_]\w*\s*:)"
+    rf"^\s*{_ATTR_PREFIX}{_ITEM_QUAL}(?:(?:fn|impl|mod|struct|enum|trait|type|static)\b|const\s+(?:r#)?[A-Za-z_]\w*\s*:)"
 )
-_UNSAFE_IMPL_FOR_RE = re.compile(
-    rf"^\s*{_ATTR_PREFIX}unsafe\s+impl\b.*?\bfor\s+([A-Za-z_][A-Za-z0-9_:<>,\s'\"]*?)(?:\s+where\b|\s*\{{|$)"
-)
+_CLOSING_BRACE_RE = re.compile(r"^\s*\}\s*;?\s*$")
 
 
 def without_reason(text):
-    """The lines (numbers from 1, and the line) of `text`'s unsafe blocks
-    that have no non-empty `Sound:` comment within REACH lines above (stopping
-    at function/item boundaries so a rationale in one function cannot clear an
-    unrelated unsafe site in the next), skipping test-only `#[cfg(test)]`
-    modules/items."""
+    """The lines (numbers from 1, and the line) of `text`'s unsafe blocks and
+    `unsafe impl` items that have no non-empty `Sound:` comment within REACH
+    lines above (stopping at function/item and standalone closing-brace
+    boundaries so a rationale in one item or nested helper cannot clear an
+    unrelated unsafe site), skipping test-only `#[cfg(test)]` modules/items."""
     raw_lines = text.split("\n")
     masked, comm_text = masked_code(text)
     masked_lines = masked.split("\n")
@@ -757,40 +755,36 @@ def without_reason(text):
             continue
         seen_lines.add(idx)
         cur_line = masked_lines[idx]
-        cur_impl = _UNSAFE_IMPL_FOR_RE.match(cur_line)
-        cur_opens_non_impl_item = bool(_ITEM_BOUNDARY_RE.match(cur_line)) and not cur_impl
+        cur_opens_item = bool(_ITEM_BOUNDARY_RE.match(cur_line))
         ok = False
         lo = max(0, idx - REACH)
         for ln in range(idx, lo - 1, -1):
-            if ln in sound_lines:
-                ok = True
-                break
             ml = masked_lines[ln]
             if ln == idx:
-                # If the unsafe site sits directly on a one-line fn/const/etc.
-                # item line (e.g. `fn g() { unsafe { *q } }`), only a `Sound:`
-                # comment immediately above that item (skipping blank lines and
-                # attributes only) may clear it — never cross preceding code.
-                if cur_opens_non_impl_item:
+                if ln in sound_lines:
+                    ok = True
+                    break
+                # If the unsafe site sits directly on a fn/const/unsafe-impl
+                # item line (e.g. `fn g() { unsafe { *q } }` or `unsafe impl Sync`),
+                # only a `Sound:` comment directly above that item (skipping
+                # blank lines and attributes only) may clear it.
+                if cur_opens_item:
                     for above in range(idx - 1, lo - 1, -1):
-                        if above in sound_lines:
-                            ok = True
-                            break
                         aml = masked_lines[above].strip()
                         if aml and not aml.startswith("#["):
                             break
+                        if above in sound_lines:
+                            ok = True
+                            break
                     break
                 continue
-            if ml.startswith("}"):
+            # Check item/closing-brace boundaries BEFORE checking `sound_lines`
+            # so a trailing `// Sound:` on a previous one-line item or closing
+            # brace never leaks downward into the following item or outer scope.
+            if ml.startswith("}") or _CLOSING_BRACE_RE.match(ml) or _ITEM_BOUNDARY_RE.match(ml):
                 break
-            if _ITEM_BOUNDARY_RE.match(ml):
-                # Adjacent `unsafe impl Send` / `unsafe impl Sync` lines for the
-                # SAME target type share one `// Sound:` comment right above;
-                # every other item/function boundary stops rationale attachment.
-                if cur_impl:
-                    prev_impl = _UNSAFE_IMPL_FOR_RE.match(ml)
-                    if prev_impl and prev_impl.group(1).strip() == cur_impl.group(1).strip():
-                        continue
+            if ln in sound_lines:
+                ok = True
                 break
         if not ok:
             found.append((idx + 1, raw_lines[idx].strip()))

@@ -539,18 +539,22 @@ pub(crate) fn fail(why: core::fmt::Arguments) -> ! {
 ///
 /// Bypasses Rust's stderr mutex, allocates nothing, starts no threads, and
 /// mutates no shared descriptor flags:
+/// - Arming `alarm(1)` before `poll` and `write` provides a best-effort
+///   process-wide watchdog against a stalled `FUSE_POLL`, a blocking stderr
+///   pipe filled by another writer after `poll`, or stalled storage (NFS/FUSE)
+///   when `SIGALRM` is default and unblocked (if the host ignores, catches,
+///   masks, or reschedules `SIGALRM`, `abort` can still wait on fd 2; if
+///   `SIGALRM` fires first, termination is via `SIGALRM` rather than `SIGABRT`).
 /// - `poll(&mut pfd, 1, 0)` with exact `(ready, pfd.revents) == (1, POLLOUT)`
-///   skips already-full pipes (preventing deadlock with a caller waiting on
-///   this thread) and broken/closed pipes (preventing `SIGPIPE` instead of
-///   `SIGABRT` when `SIGPIPE` is at its default, e.g. in C hosts or CLIs).
-/// - Writing directly to fd 2 honors regular-file offsets and `O_APPEND`
+///   skips already-full pipes (avoiding deadlock with a caller waiting on
+///   this thread) and already-closed pipes. It reduces rather than
+///   unconditionally ruling out `SIGPIPE`: if the last pipe reader closes
+///   between `poll` and `write`, or fd 2 is a stream socket whose peer shut
+///   down only its read half, default unblocked `SIGPIPE` can still terminate
+///   the process during `write`.
+/// - Writing directly to fd 2 preserves regular-file offsets and `O_APPEND`
 ///   without reopening `/proc/self/fd/2`, and works in chroots, sandboxes,
 ///   after privilege drops, and at `EMFILE`.
-/// - Arming `alarm(1)` before `write` bounds the rare TOCTOU race where
-///   another writer fills a blocking stderr pipe after `poll` or storage
-///   (NFS/FUSE) stalls `write`, when `SIGALRM` is default and unblocked (a
-///   caller that both blocks `SIGALRM` and stalls fd 2 can delay `abort`,
-///   trading that corner case for a readable failure reason in normal hosts).
 #[cold]
 pub(crate) fn fail_stop_bytes(bytes: &[u8]) -> ! {
     #[repr(C)]
@@ -572,9 +576,9 @@ pub(crate) fn fail_stop_bytes(bytes: &[u8]) -> ! {
     let mut pfd = PollFd { fd: 2, events: POLLOUT, revents: 0 };
     // Sound: valid PollFd pointer and readable byte slice `bytes`.
     unsafe {
+        let _ = alarm(1);
         let ready = poll(&mut pfd, 1, 0);
         if (ready, pfd.revents) == (1, POLLOUT) {
-            let _ = alarm(1);
             let _ = write(2, bytes.as_ptr().cast(), bytes.len());
         }
     }

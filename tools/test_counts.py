@@ -33,9 +33,17 @@ class CountsControls(unittest.TestCase):
             'fn bad_expect(x: usize) -> u8 {\n'
             '    x as u8\n'
             '}\n'
+            '#[expect(clippy :: cast_possible_truncation)]\n'
+            'fn bad_spaced_expect(x: usize) -> u8 {\n'
+            '    x as u8\n'
+            '}\n'
+            '#[cfg_attr(unix, expect(clippy :: cast_possible_truncation))]\n'
+            'fn bad_cfg_attr_expect(x: usize) -> u8 {\n'
+            '    x as u8\n'
+            '}\n'
         )
         c = counts.measure_files({"src/x.rs": src})
-        self.assertEqual(c["truncation_allows"], 2)
+        self.assertEqual(c["truncation_allows"], 4)
         self.assertEqual(c["undocumented_unsafe"], 1)
 
     def test_detects_undocumented_debug_assert_and_silent_narrowings(self):
