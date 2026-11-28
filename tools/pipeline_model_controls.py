@@ -36,6 +36,7 @@ second run waits for the first, and a run ends what an earlier run that
 was killed outright left running (its build, its model).
 """
 
+from dataclasses import dataclass
 import fcntl
 import os
 import re
@@ -50,6 +51,24 @@ SOURCE = os.path.join("threads", "src", "pipeline.rs")
 # Git ignores them, and a build with --locked needs them.
 LOCK_FILES = ("Cargo.lock", os.path.join("threads", "Cargo.lock"))
 
+@dataclass(frozen=True)
+class Failure:
+    """Typed classification of a model failure (`kind` separates scheduler
+    deadlocks from raw panic payloads, Pipeline stops, allocator aborts, and
+    unexplained signals so arbitrary panic text cannot spoof a deadlock)."""
+
+    kind: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class Expect:
+    """Admissible failure kind (and optional anchored regex on `detail`)."""
+
+    kind: str
+    pattern: str | None = None
+
+
 # Anchored regex matching Shuttle's exact labelled digest-comparison assertion
 # failure lines alone (rejecting bare unlabelled `assert_eq!` failures such as
 # batch-shape checks as well as unrelated `assert_eq!` messages).
@@ -60,114 +79,120 @@ DIGEST_MISMATCH_RE = (
 )
 BATCH_DIGEST_MISMATCH_RE = r"^assertion `left == right` failed: batch \d+'s digest \d+$"
 STORAGE_UAF_RE = r"^PipeStorage used after release$"
-PANIC_HEADER_RE = re.compile(r"^thread '[^']+'(?: \(\d+\))? panicked at ")
+# Allow apostrophes and arbitrary characters inside thread names.
+PANIC_HEADER_RE = re.compile(r"^thread '.+'(?: \(\d+\))? panicked at ")
+SHUTTLE_DEADLOCK_RE = re.compile(r"^deadlock! blocked tasks:\s*\[")
 
-# (name, the text to find once, what replaces it, admissible regexes matched against `how` alone)
+EXPECT_DEADLOCK = (Expect("deadlock"),)
+EXPECT_DIGEST_MISMATCH = (Expect("panic", DIGEST_MISMATCH_RE),)
+EXPECT_STORAGE_UAF = (Expect("panic", STORAGE_UAF_RE), Expect("allocator"))
+
+# (name, the text to find once, what replaces it, admissible Expect entries)
 FAULTS = [
     (
         "a group is published done before its members are hashed",
         "        unsafe { task.run_members(tree, platform) };\n",
         "        self.slot.get().group_completed[group_idx].swap(epoch, Ordering::SeqCst);\n        unsafe { task.run_members(tree, platform) };\n",
-        (DIGEST_MISMATCH_RE,),
+        EXPECT_DIGEST_MISMATCH,
     ),
     (
         "a finished task wakes no one",
         "    publish();\n    waker.notify_after_seqcst();\n",
         "    publish();\n",
-        (r"^a deadlock$",),
+        EXPECT_DEADLOCK,
     ),
     (
         "a room piece is published done before it is hashed",
         "        let slot = unsafe { *pnode.slot.get() } as usize;",
         "        pnode.done.swap(true, Ordering::SeqCst);\n        let slot = unsafe { *pnode.slot.get() } as usize;",
-        (r"^a chaining value that was never set$", DIGEST_MISMATCH_RE),
+        (Expect("panic", r"^a chaining value that was never set$"), Expect("panic", DIGEST_MISMATCH_RE)),
     ),
     (
         "a room piece gives its room back before it has read it",
         "        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        let tree = self.tree_for(slot, custom);\n        let value = if index == 0 {\n            RoomValue::First(tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))\n        } else if len == ROOM_LEN {\n            RoomValue::Whole(tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))\n        } else {\n            RoomValue::Last(tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))\n        };\n        // Sound: this piece's output is its worker's alone until `done`.\n        unsafe { *pnode.out.0.get() = value };\n        self.rooms.release_n(room_idx, 1);",
         "        self.rooms.release_n(room_idx, 1);\n        let ptr = unsafe { rooms.room_ptr(room_idx as usize).add(offset) };\n        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };\n        let tree = self.tree_for(slot, custom);\n        let value = if index == 0 {\n            RoomValue::First(tree.subtree_halves_on(platform, ROOM_LEVEL, index, bytes))\n        } else if len == ROOM_LEN {\n            RoomValue::Whole(tree.subtree_cv_on(platform, ROOM_LEVEL, index, bytes))\n        } else {\n            RoomValue::Last(tree.last_cv_on(platform, index << ROOM_LEVEL, bytes))\n        };\n        unsafe { *pnode.out.0.get() = value };",
-        (DIGEST_MISMATCH_RE,),
+        EXPECT_DIGEST_MISMATCH,
     ),
     (
         "a message's pieces are published done before the last is hashed",
         "                if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 1 {",
         "                if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } != 0 {",
-        (r"^the last piece supplied its value$", DIGEST_MISMATCH_RE),
+        (Expect("panic", r"^the last piece supplied its value$"), Expect("panic", DIGEST_MISMATCH_RE)),
     ),
     (
         "a storage is freed while a Room still holds it",
         "        if unsafe { (*st).holders.fetch_sub(n, Ordering::AcqRel) } == n {",
         "        if unsafe { (*st).holders.fetch_sub(n, Ordering::AcqRel) } >= n {",
-        (STORAGE_UAF_RE, r"^the allocator stopped the process:"),
+        EXPECT_STORAGE_UAF,
     ),
     (
         "a Room's drop gives back one credit more than it has",
         "        let unused = ROOM_CREDITS - (self.commits as usize);",
         "        let unused = ROOM_CREDITS - (self.commits as usize) + (self.commits != 0) as usize;",
-        (DIGEST_MISMATCH_RE,),
+        EXPECT_DIGEST_MISMATCH,
     ),
     (
         "a Room's drop wakes no one",
         "        } else if prev == unused {\n            // Even if `Pipeline::drop` raced right after `fetch_sub` and freed\n            // `PipeStorage`, `waker` lives in `&'static PipeSlot` and waking it\n            // is benign.\n            waker.notify_after_seqcst();\n        }",
         "        }",
-        (r"^a deadlock$",),
+        EXPECT_DEADLOCK,
     ),
     (
         "a loan's event comes before the loan is marked complete",
         "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(slot, is_batch, custom);\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }\n                    finished(waker, || {\n                        // Sound: `done_ptr` points to `slot_done[slot]` inside `*st`,\n                        // live until this `SeqCst` swap completes.\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });",
         "                    let (waker, done_ptr, loan_mark) = unsafe { &*st }.finish_multi_slot(slot, is_batch, custom);\n                    finished(waker, || {\n                        unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    });\n                    if let Some((loan_completed, epoch)) = loan_mark {\n                        loan_completed.store(epoch, Ordering::Release);\n                    }",
-        (r"^the Pipeline stopped the process: a Pipeline Lent guard was dropped before its message finished hashing",),
+        (Expect("stop", r"^a Pipeline Lent guard was dropped before its message finished hashing"),),
     ),
     (
         "a batch's tasks are published done before the last has hashed",
         "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(slot, piece as usize, custom, platform);",
         "                let (tasks_left_ptr, is_batch) = unsafe { &*st }.run_multi_piece(slot, piece as usize, custom, platform);\n                if is_batch && unsafe { (&*(&*st).multi[slot].get()).pieces } >= 2 {\n                    if unsafe { (*tasks_left_ptr).fetch_sub(1, Ordering::AcqRel) } == 2 {\n                        let (waker, done_ptr, _) = unsafe { &*st }.finish_multi_slot(slot, true, custom);\n                        finished(waker, || { unsafe { (*done_ptr).swap(true, Ordering::SeqCst) }; });\n                    }\n                    return;\n                }",
-        (BATCH_DIGEST_MISMATCH_RE,),
+        (Expect("panic", BATCH_DIGEST_MISMATCH_RE),),
     ),
     (
         "a storage retirement is omitted when its last holder drops",
         "            crate::pipeline_sync::retire_storage!(st);",
         "            let _ = st;",
-        (r"^assertion `left == right` failed: all allocated PipeStorages retired before run end$",),
+        (Expect("panic", r"^assertion `left == right` failed: all allocated PipeStorages retired before run end$"),),
     ),
     (
         "a worker reads PipeSlot from storage after publishing completion",
         "                let (waker, completed, epoch) = unsafe { &*st }.run_group(group as usize, custom_slot, platform);\n                finished(waker, || {\n                    completed.swap(epoch, Ordering::SeqCst);\n                });",
         "                let (_, completed, epoch) = unsafe { &*st }.run_group(group as usize, custom_slot, platform);\n                completed.swap(epoch, Ordering::SeqCst);\n                unsafe { &*st }.slot.get().waker.notify_after_seqcst();",
-        (STORAGE_UAF_RE, r"^the allocator stopped the process:"),
+        EXPECT_STORAGE_UAF,
     ),
     (
         "a worker loads a storage atomic after publishing completion",
         "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(pnode as usize, custom, platform);\n                finished(waker, || {\n                    // Sound: `done_ptr` points to `pieces[pnode].done` inside `*st`,\n                    // live until this `SeqCst` swap completes.\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                });",
         "                let (waker, done_ptr) = unsafe { &*st }.run_room_piece(pnode as usize, custom, platform);\n                finished(waker, || {\n                    unsafe { (*done_ptr).swap(true, Ordering::SeqCst) };\n                    let _ = unsafe { (*done_ptr).load(Ordering::Acquire) };\n                });",
-        (STORAGE_UAF_RE, r"^the allocator stopped the process:"),
+        EXPECT_STORAGE_UAF,
     ),
     (
         "Room::drop reads storage after releasing its credits",
         "        let (waker, ref_ptr) = {\n            let st = self.storage();\n            (&st.slot.get().waker, core::ptr::addr_of!(st.rooms.refs[self.index as usize]))\n        };\n        // Sound: `ref_ptr` points to `rooms.refs[self.index]` inside `*self.storage`,\n        // which stays live until this `SeqCst` subtraction completes.\n        let prev = unsafe { (*ref_ptr).fetch_sub(unused, Ordering::SeqCst) };",
         "        let ref_ptr = core::ptr::addr_of!(self.storage().rooms.refs[self.index as usize]);\n        let prev = unsafe { (*ref_ptr).fetch_sub(unused, Ordering::SeqCst) };\n        let waker = &self.storage().slot.get().waker;",
-        (STORAGE_UAF_RE, r"^the allocator stopped the process:"),
+        EXPECT_STORAGE_UAF,
     ),
     (
         "a reused PipeSlot drops its saved group epoch",
         "push(FreeSlot { slot, next_group_epoch,",
         "push(FreeSlot { slot, next_group_epoch: 1,",
-        (r"^saved next_group_epoch must exceed completed group epoch$",),
+        (Expect("panic", r"^saved next_group_epoch must exceed completed group epoch$"),),
     ),
     (
         "a reused PipeSlot drops its saved loan epoch",
         "next_loan_epoch });",
         "next_loan_epoch: 1 });",
         (
-            r"^reused PipeSlot must advance loan_completed epoch: prev=\d+ (?:next|got)=\d+$",
-            r"^saved next_loan_epoch must exceed completed loan epoch$",
+            Expect("panic", r"^reused PipeSlot must advance loan_completed epoch: prev=\d+ (?:next|got)=\d+$"),
+            Expect("panic", r"^saved next_loan_epoch must exceed completed loan epoch$"),
         ),
     ),
     (
         "a non-last multi-piece worker reads storage after tasks_left decrement",
         "                    });\n                }\n            }\n        }\n    }",
         "                    });\n                } else {\n                    let _ = unsafe { (*tasks_left_ptr).load(Ordering::Acquire) };\n                }\n            }\n        }\n    }",
-        (STORAGE_UAF_RE, r"^the allocator stopped the process:"),
+        EXPECT_STORAGE_UAF,
     ),
 ]
 
@@ -298,44 +323,56 @@ def model_passes(copy, timeout=None):
 
 
 def how_it_failed_parts(said):
-    """Where and how a run of the model failed: `(scenario, how)` where
-    `scenario` is the last model scenario begun and `how` is the failure
-    kind (matched against each fault's admissible failure patterns so a
-    scenario name cannot accidentally satisfy a failure-kind pattern)."""
+    """Where and how a run of the model failed: `(scenario, Failure(kind, detail))`
+    where `scenario` is the last model scenario begun and `Failure.kind`
+    separates Shuttle scheduler deadlocks (`"deadlock"`) from raw panic
+    payloads (`"panic"`), Pipeline stops (`"stop"`), allocator aborts
+    (`"allocator"`), and unexplained signals (`"signal"`)."""
     scenarios = [line.split(": ", 1)[1].strip() for line in said.splitlines() if line.startswith("shuttle_pipeline: ")]
     lines = said.splitlines()
     at = [n for n, line in enumerate(lines) if PANIC_HEADER_RE.match(line)]
     first = at[0] if at else None
-    deadlock_panic = first is not None and (
-        bool(re.search(r"panicked at 'deadlock!", lines[first]))
-        or (first + 1 < len(lines) and bool(re.match(r"^deadlock!(?:\s|$)", lines[first + 1].strip())))
-    )
     stops = [line.strip() for line in lines if line.startswith("blake3-servil: ")]
     # The C library's allocator, stopping a process whose memory it finds
     # broken (a storage freed twice, or given out while held).
     allocator = [line.strip() for line in lines if re.match(r"(free|malloc|realloc|munmap_chunk|double free|corrupted)\b.*(\(\)|:)", line.strip())]
-    if deadlock_panic:
-        how = "a deadlock"
-    elif at and at[0] + 1 < len(lines):
-        how = lines[at[0] + 1].strip()
+    if first is not None:
+        payload = lines[first + 1].strip() if first + 1 < len(lines) else ""
+        if SHUTTLE_DEADLOCK_RE.match(payload):
+            failure = Failure("deadlock", "a deadlock")
+        else:
+            failure = Failure("panic", payload)
     elif stops:
-        how = "the Pipeline stopped the process: " + stops[-1][len("blake3-servil: "):]
+        failure = Failure("stop", stops[-1][len("blake3-servil: "):])
     elif allocator:
-        how = "the allocator stopped the process: " + allocator[0]
+        failure = Failure("allocator", allocator[0])
     else:
         # Cargo's line for a test process that a signal ended.
         signalled = re.search(r"\(signal: [^)]*\)", said)
-        how = "the process ended with no word of the model's" + (f" {signalled[0]}" if signalled else "")
-    return (scenarios[-1] if scenarios else "no scenario"), how
+        failure = Failure("signal", "the process ended with no word of the model's" + (f" {signalled[0]}" if signalled else ""))
+    return (scenarios[-1] if scenarios else "no scenario"), failure
 
 
-def matches_expected(how, expected):
-    return any(re.search(pat, how) for pat in expected)
+def matches_expected(failure, expected):
+    for exp in expected:
+        if failure.kind != exp.kind:
+            continue
+        if exp.pattern is None or re.search(exp.pattern, failure.detail):
+            return True
+    return False
+
+
+def format_failure(failure):
+    if failure.kind == "stop":
+        return f"the Pipeline stopped the process: {failure.detail}"
+    if failure.kind == "allocator":
+        return f"the allocator stopped the process: {failure.detail}"
+    return failure.detail
 
 
 def how_it_failed(said):
-    scenario, how = how_it_failed_parts(said)
-    return f"in {scenario}: {how[:140]}"
+    scenario, failure = how_it_failed_parts(said)
+    return f"in {scenario}: {format_failure(failure)[:140]}"
 
 
 def tree_files():
@@ -506,9 +543,9 @@ def controls(copy):
             print(f"MISSED  {name}", flush=True)
             missed.append(name)
             continue
-        scenario, how = how_it_failed_parts(said)
-        reason = f"in {scenario}: {how}"
-        if matches_expected(how, expected):
+        scenario, failure = how_it_failed_parts(said)
+        reason = f"in {scenario}: {format_failure(failure)}"
+        if matches_expected(failure, expected):
             print(f"caught  {name} ({reason})", flush=True)
         else:
             print(f"NO VERDICT  {name} (unrelated failure: {reason})", flush=True)

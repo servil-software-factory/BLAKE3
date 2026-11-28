@@ -522,13 +522,9 @@ fn started<T>(spawned: std::io::Result<T>) -> T {
 }
 
 /// Say why, and end the process, from a thread the pool's callers may be
-/// waiting on. Delegates to `blake3_servil_core::thread_support::fail_stop`:
-/// bypasses `std::io::stderr`'s mutex, checks `poll(0)` for exact `POLLOUT`
-/// (skipping already-full pipes and reader-less pipes so `SIGPIPE` cannot
-/// replace `SIGABRT`), arms `alarm(1)` to bound the TOCTOU window where fd 2
-/// fills or storage stalls mid-write under default `SIGALRM`, writes straight
-/// to fd 2 (preserving file offsets and `O_APPEND` without mutating descriptor
-/// flags or reopening `/proc`), and calls `std::process::abort()`.
+/// waiting on. Delegates to `blake3_servil_core::thread_support::fail_stop`
+/// (see `self_test::fail_stop_bytes` for the best-effort `alarm(1)`/`poll(0)`/
+/// `write(2)`/`alarm(0)` + `abort()` sequence and its signal/socket caveats).
 ///
 /// A panic is not this: it goes through the process's panic hook before
 /// anything here runs. The standard hook ordinarily writes its message to

@@ -366,6 +366,8 @@ struct Rooms {
 // runs (after `PipeStorage`'s final holder drops and every worker task has
 // published completion); what may touch which bytes is governed by `refs`.
 unsafe impl Send for Rooms {}
+// Sound: shared `&Rooms` accesses are partitioned by atomic `refs` counts
+// and live until `PipeStorage` has zero holders and zero in-flight tasks.
 unsafe impl Sync for Rooms {}
 
 impl Drop for Rooms {
@@ -570,6 +572,8 @@ pub(crate) struct PipeStorage {
 // owner again after observing it. `PipeStorage` stays live at its heap address
 // until every task has published completion and `holders` reaches 0.
 unsafe impl Send for PipeStorage {}
+// Sound: concurrent worker and owner accesses to `PipeStorage` fields are
+// disjointly synchronized by slot/group/piece atomics and `holders`/`tasks_left`.
 unsafe impl Sync for PipeStorage {}
 
 impl PipeStorage {
@@ -663,6 +667,8 @@ pub struct Room {
 // are plain values; `*storage` stays live until `Room::drop` releases its
 // credits (or its `ROOM_CLOSING_BIT` hold).
 unsafe impl Send for Room {}
+// Sound: `&Room` only exposes immutable room bounds/index and synchronized
+// atomic operations on `*self.storage`.
 unsafe impl Sync for Room {}
 
 #[allow(clippy::len_without_is_empty)]
@@ -1020,6 +1026,7 @@ impl PipeStorage {
             let MultiKind::Slice { total_len, loan_epoch, .. } = desc.kind else {
                 unreachable!("finish_multi_slot called with !is_batch on a batch descriptor");
             };
+            // Sound: last task of `slot` holds exclusive mutable access to `cvs[slot]` until `slot_done` below.
             let values = unsafe { &mut *self.cvs[slot].get() };
             let last = values.last.take().expect("the last piece supplied its value");
             let hash = fold_multi_cvs(self.tree_for(slot, custom), &values.whole[..desc.pieces - 1], last, total_len as u64);
@@ -4680,6 +4687,45 @@ mod test {
         let _m = block_on(p.message(1, None));
     }
 
+    /// Private 0o700 temporary directory with exclusive file creation and RAII
+    /// cleanup, shared by subprocess tests that redirect child stdout/stderr.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct PrivateTempDir(std::path::PathBuf);
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl PrivateTempDir {
+        fn new(tag: &str) -> Self {
+            use std::os::unix::fs::DirBuilderExt as _;
+            static SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            let pid = std::process::id();
+            let base = std::env::temp_dir();
+            for attempt in 0..1024u64 {
+                let n = SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+                let path = base.join(std::format!("blake3-{tag}-{pid}-{n}-{nanos}-{attempt}"));
+                match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                    Ok(()) => return Self(path),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => panic!("create private tempdir {path:?}: {e}"),
+                }
+            }
+            panic!("could not create unique private tempdir for {tag}");
+        }
+
+        fn create_exclusive(&self, name: &str) -> (std::path::PathBuf, std::fs::File) {
+            let path = self.0.join(name);
+            let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+            (path, file)
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Drop for PrivateTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn active_loan_drop_and_active_pipeline_drop_abort_the_process() {
         use std::os::unix::process::ExitStatusExt as _;
@@ -4797,12 +4843,16 @@ mod test {
                     core::mem::forget(p);
                     drop(guard);
                 }
-                // Restore default SIGPIPE (as in a C host or CLI) with stderr
-                // on a pipe whose read end is closed: fail-stop must still end
-                // in SIGABRT (6), never SIGPIPE (13).
+                // Restore default unblocked SIGPIPE (as in a C host or CLI) with
+                // stderr on a pipe whose read end is closed: fail-stop must still
+                // end in SIGABRT (6), never SIGPIPE (13).
                 "lent_stderr_broken_pipe" => {
                     unsafe {
                         let _ = libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                        let mut set: libc::sigset_t = core::mem::zeroed();
+                        let _ = libc::sigemptyset(&mut set);
+                        let _ = libc::sigaddset(&mut set, libc::SIGPIPE);
+                        let _ = libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, core::ptr::null_mut());
                     }
                     let mut p = Pipeline::<u32>::new(Mode::Plain, Limits { messages: 1, rooms: 0 });
                     let m = block_on(p.message(1, None));
@@ -4844,40 +4894,70 @@ mod test {
             assert!(stderr.contains(needle), "case {case} stderr: {stderr}");
         }
 
-        // Verify fail-stop on redirected regular files (2>>log and 2>log), a
-        // broken anonymous pipe under default SIGPIPE, and a Unix socketpair.
-        let pid = std::process::id();
-        let append_path = std::env::temp_dir().join(format!("blake3-stop-append-{pid}.log"));
-        let prior = "PRIOR-RUN-LINE-1\nPRIOR-RUN-LINE-2\n";
-        std::fs::write(&append_path, prior).unwrap();
-        let append_file = std::fs::OpenOptions::new().append(true).open(&append_path).unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
-            .env(ENV, "lent")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::from(append_file))
-            .status()
-            .unwrap();
-        assert_eq!(status.signal(), Some(6), "append-file stop must SIGABRT: {status:?}");
-        let append_body = std::fs::read_to_string(&append_path).unwrap();
-        let _ = std::fs::remove_file(&append_path);
-        assert!(append_body.starts_with(prior), "append-file stop overwrote prior log: {append_body:?}");
-        assert!(append_body.contains("Lent guard was dropped before its message finished"), "append-file stop missing reason: {append_body:?}");
+        // Verify fail-stop on redirected regular files (2>>log, 2>log, and a
+        // mid-file seek offset), a broken anonymous pipe under default unblocked
+        // SIGPIPE, and a Unix socketpair, using a private 0o700 temporary
+        // directory with exclusively created files and RAII cleanup.
+        let tmp = PrivateTempDir::new("stop");
+        let tmp_dir_path = tmp.0.clone();
+        {
+            use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+            let (append_path, mut init) = tmp.create_exclusive("append.log");
+            let prior = "PRIOR-RUN-LINE-1\nPRIOR-RUN-LINE-2\n";
+            init.write_all(prior.as_bytes()).unwrap();
+            drop(init);
+            let append_file = std::fs::OpenOptions::new().append(true).open(&append_path).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
+                .env(ENV, "lent")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(append_file))
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(6), "append-file stop must SIGABRT: {status:?}");
+            let append_body = std::fs::read_to_string(&append_path).unwrap();
+            assert!(append_body.starts_with(prior), "append-file stop overwrote prior log: {append_body:?}");
+            assert!(append_body.contains("Lent guard was dropped before its message finished"), "append-file stop missing reason: {append_body:?}");
 
-        let trunc_path = std::env::temp_dir().join(format!("blake3-stop-trunc-{pid}.log"));
-        let trunc_file = std::fs::File::create(&trunc_path).unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
-            .env(ENV, "lent_stderr_after_line")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::from(trunc_file))
-            .status()
-            .unwrap();
-        assert_eq!(status.signal(), Some(6), "trunc-file stop must SIGABRT: {status:?}");
-        let trunc_body = std::fs::read_to_string(&trunc_path).unwrap();
-        let _ = std::fs::remove_file(&trunc_path);
-        assert!(trunc_body.starts_with("EARLIER-DIAGNOSTIC-LINE\n"), "trunc-file stop overwrote earlier line: {trunc_body:?}");
-        assert!(trunc_body.contains("Lent guard was dropped before its message finished"), "trunc-file stop missing reason: {trunc_body:?}");
+            let (trunc_path, trunc_file) = tmp.create_exclusive("trunc.log");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
+                .env(ENV, "lent_stderr_after_line")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(trunc_file))
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(6), "trunc-file stop must SIGABRT: {status:?}");
+            let trunc_body = std::fs::read_to_string(&trunc_path).unwrap();
+            assert!(trunc_body.starts_with("EARLIER-DIAGNOSTIC-LINE\n"), "trunc-file stop overwrote earlier line: {trunc_body:?}");
+            assert!(trunc_body.contains("Lent guard was dropped before its message finished"), "trunc-file stop missing reason: {trunc_body:?}");
+
+            // Mid-file seek offset on a regular file (NOT at EOF and NOT O_APPEND):
+            // fail-stop must write at the current offset rather than offset 0 or EOF.
+            let (_mid_path, mut mid_file) = tmp.create_exclusive("mid.log");
+            let header = b"HEADER-LINE\n";
+            let padding = vec![b'X'; 256];
+            mid_file.write_all(header).unwrap();
+            mid_file.write_all(&padding).unwrap();
+            mid_file.seek(SeekFrom::Start(header.len() as u64)).unwrap();
+            let mid_child = mid_file.try_clone().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pipeline::test::active_loan_drop_and_active_pipeline_drop_abort_the_process", "--nocapture"])
+                .env(ENV, "lent")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(mid_child))
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(6), "mid-offset stop must SIGABRT: {status:?}");
+            mid_file.seek(SeekFrom::Start(0)).unwrap();
+            let mut mid_body = String::new();
+            mid_file.read_to_string(&mut mid_body).unwrap();
+            assert!(mid_body.starts_with("HEADER-LINE\nblake3-servil: "), "mid-offset stop did not write at seek offset: {mid_body:?}");
+            assert!(mid_body.contains("Lent guard was dropped before its message finished"), "mid-offset stop missing reason: {mid_body:?}");
+            assert!(mid_body.ends_with("XXXX"), "mid-offset stop truncated or appended past suffix: {mid_body:?}");
+        }
+        drop(tmp);
+        assert!(!tmp_dir_path.exists(), "PrivateTempDir::drop must remove {tmp_dir_path:?}");
 
         // Broken anonymous pipe with default SIGPIPE must exit with SIGABRT (6),
         // never SIGPIPE (13).
@@ -4920,7 +5000,7 @@ mod test {
     }
 
     /// A stop says why where a person reads it: on a terminal, via the shared
-    /// `poll(0)` + exact `POLLOUT` + `alarm(1)` + `write(2, ...)` fail-stop path.
+    /// `self_test::fail_stop_bytes` fail-stop path.
     #[test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn a_stop_says_why_on_a_terminal() {
@@ -5915,15 +5995,14 @@ mod test {
             return;
         }
         let exe = std::env::current_exe().unwrap();
-        let pid = std::process::id();
+        let tmp = PrivateTempDir::new("fork-wait");
         for case in ["group", "piece"] {
-            // Redirect stdout and stderr to temporary files rather than pipes so
-            // verbose child output (e.g. `LD_DEBUG=all`) cannot fill a 64 KiB
-            // pipe buffer and stall before the parent stops calling `try_wait`.
-            let out_path = std::env::temp_dir().join(std::format!("blake3-fork-wait-{pid}-{case}.out"));
-            let err_path = std::env::temp_dir().join(std::format!("blake3-fork-wait-{pid}-{case}.err"));
-            let out_file = std::fs::File::create(&out_path).unwrap();
-            let err_file = std::fs::File::create(&err_path).unwrap();
+            // Redirect stdout and stderr to exclusively created temporary files
+            // inside a private 0o700 directory so verbose child output (e.g.
+            // `LD_DEBUG=all`) cannot fill a 64 KiB pipe buffer and stall before
+            // the parent stops calling `try_wait`.
+            let (out_path, out_file) = tmp.create_exclusive(&std::format!("{case}.out"));
+            let (err_path, err_file) = tmp.create_exclusive(&std::format!("{case}.err"));
             let mut child = std::process::Command::new(&exe)
                 .env(ENV, case)
                 .args(["--exact", "pipeline::test::forked_child_stops_in_acquire_free_group_and_alloc_piece_node", "--nocapture"])
@@ -5948,8 +6027,6 @@ mod test {
             };
             let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
             let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
-            let _ = std::fs::remove_file(&out_path);
-            let _ = std::fs::remove_file(&err_path);
             assert!(!timed_out, "fork wait case {case} hung (killed by parent deadline)\nstdout:\n{stdout}\nstderr:\n{stderr}");
             assert!(status.success() && stdout.contains("1 passed"), "fork wait case {case} failed: status={status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}");
         }

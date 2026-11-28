@@ -156,8 +156,9 @@
 //! - **Once per process**: the startup self-test uses stack buffers on the
 //!   calling thread while it runs (it does not touch the thread-local SME2
 //!   flat-walk scratch, which is initialized on a thread's first post-init
-//!   whole 32 KiB+ walk — or when a thread-pool worker prepares it — on a
-//!   512-bit SME2 CPU).
+//!   whole 32 KiB+ walk — or when `blake3-servil`'s `initialize_multithreaded`
+//!   prepares the calling thread, even with `Some(1)`, or starts the SME2
+//!   worker — on a 512-bit SME2 CPU).
 //! - **Nothing is wiped**: this crate does not clear what it held from
 //!   memory, and offers no call that does. A key, the message bytes a
 //!   [`Hasher`] holds and the chaining values made from them stay in the
@@ -191,10 +192,11 @@
 //! values official BLAKE3 generated (on ARM64, all but the kernels for
 //! batches of short messages of unequal lengths). A mismatch stops the process, which no
 //! caller can catch: it attempts a best-effort diagnostic directly to file
-//! descriptor 2 (bypassing Rust's stderr lock, skipping an already-full or
-//! broken pipe, and arming `alarm(1)` so default unblocked `SIGALRM`
-//! terminates if the pipe fills mid-write) and calls `std::process::abort`
-//! when control returns. Other threads that call `initialize` meanwhile wait
+//! descriptor 2 (bypassing Rust's stderr lock, arming a best-effort `alarm(1)`
+//! watchdog around `poll(0)` and `write`, skipping already-full or
+//! already-closed pipes, and disarming `alarm(0)` before aborting) and calls
+//! `std::process::abort` when control returns (see `self_test::fail_stop_bytes`
+//! for signal/socket edge cases). Other threads that call `initialize` meanwhile wait
 //! for it (parked via `std::sync::Once`; programs that `fork` should finish
 //! `initialize` before forking).
 //!
@@ -1088,9 +1090,9 @@ pub mod thread_support {
     #[cfg(target_arch = "aarch64")]
     pub use crate::sme2::prepare_thread_scratch as prepare_sme2_scratch;
 
-    /// Best-effort diagnostic to fd 2 (`poll(0)` + exact `POLLOUT` + `alarm(1)` +
-    /// `write`), then `std::process::abort()`. Shared with `blake3-servil` so
-    /// both crates use one fail-stop implementation.
+    /// Best-effort diagnostic to fd 2 (delegates to `self_test::fail_stop_bytes`),
+    /// then `std::process::abort()`. Shared with `blake3-servil` so both crates
+    /// use one fail-stop implementation.
     #[cold]
     pub fn fail_stop(why: &str) -> ! {
         crate::self_test::fail_stop_bytes(why.as_bytes())

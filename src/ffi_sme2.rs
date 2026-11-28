@@ -620,8 +620,10 @@ unsafe fn flat_walk(input: &[u8], ahead: usize, key: &CVWords, chunk_counter: u6
             return unsafe { walk_in(input, key, chunk_counter, flags, keep, out, n, base, SCRATCH) };
         }
     }
-    // During startup self-test (avoiding heap allocation under Once::call_once),
-    // or in a thread's teardown after its block is gone.
+    // Sound: caller verified SME2 with 512-bit streaming vectors and valid
+    // `input`/`out` bounds; `walk_on_stack` uses a call-local stack scratch
+    // during startup self-test (avoiding heap allocation under Once::call_once)
+    // or thread teardown after `SCRATCH_BLOCK` is gone.
     unsafe { walk_on_stack(input, key, chunk_counter, flags, keep, out, n) }
 }
 

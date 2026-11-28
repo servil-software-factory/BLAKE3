@@ -112,7 +112,7 @@ def emit_expected_failure():
         "a Room's drop wakes no one": (
             "shuttle_pipeline: a_wait_for_a_room_ends_when_another_thread_drops_one\n"
             "thread 'test' panicked at shuttle/src/runtime/execution.rs:1:1:\n"
-            "deadlock!\n"
+            "deadlock! blocked tasks: [main-thread (task main-thread(0))]\n"
         ),
         "a loan's event comes before the loan is marked complete": (
             "shuttle_pipeline: a_pipeline_after_another_reuses_its_slot_and_frees_storage_soundly\n"
@@ -189,7 +189,7 @@ elif mode == "allocator":
     sys.exit(101)
 elif mode == "deadlock":
     print("test batches_are_whole_when_their_events_come ... FAILED", flush=True)
-    sys.stderr.write("thread 'batches_are_whole_when_their_events_come' panicked at shuttle/src/runtime/execution.rs:1:1:\ndeadlock!\n")
+    sys.stderr.write("thread 'batches_are_whole_when_their_events_come' panicked at shuttle/src/runtime/execution.rs:1:1:\ndeadlock! blocked tasks: [main-thread (task main-thread(0))]\n")
     sys.stderr.flush()
     sys.exit(101)
 elif mode == "signal":
@@ -374,7 +374,7 @@ class Controls(unittest.TestCase):
         # NOT for wake/digest/epoch faults (which must report NO VERDICT).
         run = self.run_script("allocator")
         self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
-        alloc_expected = sum(1 for _, _, _, exp in faults() if any("allocator stopped" in p for p in exp))
+        alloc_expected = sum(1 for _, _, _, exp in faults() if any(e.kind == "allocator" for e in exp))
         other = len(faults()) - alloc_expected
         self.assertGreater(alloc_expected, 0)
         self.assertGreater(other, 0)
@@ -633,7 +633,7 @@ class Controls(unittest.TestCase):
         # (including the batch premature-publication control) is NO VERDICT.
         run = self.run_script("deadlock")
         self.assertNotEqual(run.returncode, 0)
-        deadlock_expected = sum(1 for _, _, _, exp in faults() if any("deadlock" in p for p in exp))
+        deadlock_expected = sum(1 for _, _, _, exp in faults() if any(e.kind == "deadlock" for e in exp))
         other = len(faults()) - deadlock_expected
         self.assertEqual(deadlock_expected, 2)
         self.assertEqual(run.stdout.count("caught  "), deadlock_expected, run.stdout)
@@ -651,8 +651,10 @@ class Controls(unittest.TestCase):
         self.assert_untouched()
 
         # Direct captured-transcript attribution checks:
-        # (a) Scenario name mentioning `deadlock!` followed by SIGKILL must NOT
-        #     be misclassified as a Shuttle deadlock.
+        # (a) Scenario name mentioning `deadlock!`, raw `panic!("a deadlock")`,
+        #     `panic!("deadlock! in fixture setup")`, or an earlier panic on a
+        #     thread whose name contains an apostrophe must NOT be misclassified
+        #     as a Shuttle scheduler deadlock.
         # (b) Unrelated I/O panic or wrong-event-variant panic mentioning `digest`
         #     must NOT satisfy any digest-comparison fault.
         controls = script(self.script)
@@ -660,20 +662,23 @@ class Controls(unittest.TestCase):
             "shuttle_pipeline: deadlock!_recovery\nerror: test failed (signal: 9, SIGKILL: kill)\n",
             "shuttle_pipeline: thread foo panicked: deadlock!\nerror: test failed (signal: 9, SIGKILL: kill)\n",
             "shuttle_pipeline: s\nthread 'test' panicked at src/foo.rs:1:1:\nfailed to open deadlock! fixture: NotFound\n",
-            # An unrelated first panic followed by Shuttle's deadlock must report
-            # the first panic, NOT be credited as a wake-omission deadlock.
+            "shuttle_pipeline: s\nthread 'test' panicked at tests/fixture.rs:1:1:\ndeadlock! in fixture setup\n",
+            "shuttle_pipeline: s\nthread 'test' panicked at tests/fixture.rs:1:1:\na deadlock\n",
+            # An unrelated first panic (including a thread name with an
+            # apostrophe) followed by Shuttle's deadlock must report the first
+            # panic, NOT be credited as a wake-omission deadlock.
             (
                 "shuttle_pipeline: s\n"
-                "thread 'worker' (7) panicked at src/foo.rs:1:1:\n"
+                "thread 'worker's helper' (3) panicked at src/foo.rs:1:1:\n"
                 "unrelated first failure\n"
                 "thread 'main' (1) panicked at shuttle/src/runtime/execution.rs:1:1:\n"
-                "deadlock!\n"
+                "deadlock! blocked tasks: [main-thread (task main-thread(0))]\n"
             ),
         ):
-            _, how_dl = controls.how_it_failed_parts(spoof_dl)
-            self.assertNotEqual(how_dl, "a deadlock", spoof_dl)
+            _, fail_dl = controls.how_it_failed_parts(spoof_dl)
+            self.assertNotEqual(fail_dl.kind, "deadlock", spoof_dl)
             for name, _, _, expected in controls.FAULTS:
-                self.assertFalse(controls.matches_expected(how_dl, expected), f"{name} matched spoofed deadlock {spoof_dl!r}")
+                self.assertFalse(controls.matches_expected(fail_dl, expected), f"{name} matched spoofed deadlock {spoof_dl!r}")
 
         for unrelated_msg in (
             "failed to read digest fixture: NotFound",
@@ -687,19 +692,29 @@ class Controls(unittest.TestCase):
                 "shuttle_pipeline: messages_through_rooms_complete_with_their_own_digests\n"
                 f"thread 'test' panicked at threads/tests/shuttle_pipeline.rs:676:9:\n{unrelated_msg}\n"
             )
-            _, how_u = controls.how_it_failed_parts(transcript)
+            _, fail_u = controls.how_it_failed_parts(transcript)
             for name, _, _, expected in controls.FAULTS:
-                self.assertFalse(controls.matches_expected(how_u, expected), f"{name} matched unrelated panic {unrelated_msg!r}")
+                self.assertFalse(controls.matches_expected(fail_u, expected), f"{name} matched unrelated panic {unrelated_msg!r}")
 
+        # Positive check: real `tail message digest` failure satisfies digest faults
+        # (and not the batch-only fault).
+        group_fault_expected = next(exp for n, _, _, exp in controls.FAULTS if "group is published" in n)
+        batch_fault_expected = next(exp for n, _, _, exp in controls.FAULTS if "batch's tasks" in n)
+        _, fail_tail = controls.how_it_failed_parts(
+            "shuttle_pipeline: tail_messages_reap_with_their_own_digests\n"
+            "thread 'test' panicked at threads/tests/shuttle_pipeline.rs:918:13:\n"
+            "assertion `left == right` failed: tail message digest\n"
+        )
+        self.assertTrue(controls.matches_expected(fail_tail, group_fault_expected))
+        self.assertFalse(controls.matches_expected(fail_tail, batch_fault_expected))
 
         # Single-message digest mismatch must NOT satisfy the batch-completion fault.
-        batch_fault_expected = next(exp for n, _, _, exp in controls.FAULTS if "batch's tasks" in n)
-        _, how_msg = controls.how_it_failed_parts(
+        _, fail_msg = controls.how_it_failed_parts(
             "shuttle_pipeline: messages_through_rooms_complete_with_their_own_digests\n"
             "thread 'test' panicked at threads/tests/shuttle_pipeline.rs:673:17:\n"
             "assertion `left == right` failed: message 3's digest\n"
         )
-        self.assertFalse(controls.matches_expected(how_msg, batch_fault_expected))
+        self.assertFalse(controls.matches_expected(fail_msg, batch_fault_expected))
 
 
 if __name__ == "__main__":

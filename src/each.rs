@@ -692,6 +692,9 @@ fn by_blocks_at_once(items: &[&[u8]], key: &CVWords, counter: u64, flags: u8, fl
                 unsafe {
                     crate::pair::hash_many_blocks(platform, &inputs, k, key, counter, false, flags, CHUNK_START, 0, &mut lanes[..padded * OUT_LEN])
                 };
+                // Sound: each item holds more than k whole blocks; `inputs`
+                // has `group.len()` readable pointers and `lanes` holds one
+                // 32-byte slot per lane.
                 #[cfg(target_arch = "aarch64")]
                 unsafe {
                     crate::neon_hybrid::hash_messages_raw(
